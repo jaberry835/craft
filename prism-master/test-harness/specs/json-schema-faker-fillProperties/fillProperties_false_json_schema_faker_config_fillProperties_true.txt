@@ -1,0 +1,54 @@
+====test====
+Given I mock with json-schema-faker-fillProperties false
+And json-schema-faker configuration in the specification, with fillProperties true
+When I send a request to an operation,
+Then the json-schema-faker mock param should influence the response
+And the configuration provided in the spec for fillProperties should be ignored.
+====spec====
+openapi: "3.0.2"
+x-json-schema-faker:
+  minItems: 3
+  maxItems: 3
+  fillProperties: true
+tags:
+  - name: example-tag
+info:
+  version: "0"
+  title: JSON Schema Faker test
+  description: JSON Schema Fafillker test
+  contact:
+    email: support@stoplight.io
+servers:
+  - url: http://api.example.com
+paths:
+  /widget:
+    get:
+      description: widget details
+      operationId: widgetDetails
+      tags: 
+        - example-tag
+      responses:
+        "200":
+          description: widget details response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name:
+                    type: string
+                    default: "Super Widget"
+                  array:
+                    type: array
+                    items:
+                      type: string
+                      default: "Item"
+====server====
+mock -p 4010 -d --json-schema-faker-fillProperties=false ${document}
+====command====
+curl -i http://localhost:4010/widget
+====expect-loose====
+HTTP/1.1 200 OK
+content-type: application/json
+
+{"name":"Super Widget","array":["Item","Item","Item"]}

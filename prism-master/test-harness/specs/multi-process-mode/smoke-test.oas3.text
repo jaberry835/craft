@@ -1,0 +1,15 @@
+====test====
+Prism mocking works with multi-process mode
+====spec====
+openapi: 3.0.2
+paths:
+  /pets:
+    get:
+      responses:
+        204: {}
+====server====
+mock -p 4010 ${document} -m
+====command====
+curl -i http://localhost:4010/pets
+====expect====
+HTTP/1.1 204 No Content

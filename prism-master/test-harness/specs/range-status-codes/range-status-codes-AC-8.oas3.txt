@@ -1,0 +1,30 @@
+====test====
+Scenario: no code is requested and the OAS doc has no 2XX status codes or default
+  Given I have an OAS 3 document with a listTeams operation
+  And the listTeams operation has a range of 4XX response status codes defined
+  And the listTeams operation has a range of 5XX response status codes defined
+  When I send a request to listTeams without specifying a preference for status code
+  Then I should receive a response with the 4XX range example content and a status code of 400
+====spec====
+openapi: 3.0.2
+paths:
+  /todos:
+    get:
+      operationId: listTeams
+      responses:
+        5XX:
+          content:
+            text/plain:
+              example: range service error content
+        4XX:
+          content:
+            text/plain:
+              example: range client error content
+====server====
+mock -p 4010 ${document}
+====command====
+curl -i http://localhost:4010/todos
+====expect====
+HTTP/1.1 500 Internal Server Error
+
+range service error content

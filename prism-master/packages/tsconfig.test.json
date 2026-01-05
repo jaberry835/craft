@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "resolveJsonModule": true,
+    "noEmit": true,
+    "paths": {
+      "@stoplight/prism-core": ["./core/src"],
+      "@stoplight/prism-cli": ["./cli/src"],
+      "@stoplight/prism-http": ["./http/src"],
+      "@stoplight/prism-http-server": ["./http-server/src"]
+    }
+  },
+  "extends": "./tsconfig.json",
+  "exclude": [],
+  "include": ["**/src"]
+}

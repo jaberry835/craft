@@ -1,0 +1,35 @@
+====test====
+Scenario: no code is requested and the OAS doc has an exact 2XX status code
+  Given I have an OAS 3 document with a listTeams operation
+  And the listTeams operation has a 201 response status codes defined
+  And the listTeams operation has a range of 2XX response status codes defined
+  And the listTeams operation has a default defined
+  When I send a request to listTeams without specifying a preference for status code
+  Then I should receive a response with the 2XX example content and a status code of 200 
+====spec====
+openapi: 3.0.2
+paths:
+  /todos:
+    get:
+      operationId: listTeams
+      responses:
+        201:
+          content:
+            text/plain:
+              example: created content
+        2XX:
+          content:
+            text/plain:
+              example: range success content
+        default:
+          content:
+            text/plain:
+              example: default content
+====server====
+mock -p 4010 ${document}
+====command====
+curl -i http://localhost:4010/todos
+====expect====
+HTTP/1.1 201 Created
+
+created content

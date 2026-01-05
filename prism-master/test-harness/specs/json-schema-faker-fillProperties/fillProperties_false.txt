@@ -1,0 +1,43 @@
+====test====
+Given I mock with json-schema-faker-fillProperties false
+When I send a request to an operation,
+Then the json-schema-faker-fillProperties cli param value should influence the response.
+====spec====
+openapi: "3.0.2"
+tags:
+  - name: example-tag
+info:
+  version: "0"
+  title: JSON Schema Faker test
+  description: JSON Schema Fafillker test
+  contact:
+    email: support@stoplight.io
+servers:
+  - url: http://api.example.com
+paths:
+  /widget:
+    get:
+      description: widget details
+      operationId: widgetDetails
+      tags: 
+        - example-tag
+      responses:
+        "200":
+          description: widget details response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name:
+                    type: string
+                    default: "Super Widget"
+====server====
+mock -p 4010 -d --json-schema-faker-fillProperties=false ${document}
+====command====
+curl -i http://localhost:4010/widget
+====expect-loose====
+HTTP/1.1 200 OK
+content-type: application/json
+
+{"name":"Super Widget"}

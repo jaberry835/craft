@@ -1,0 +1,22 @@
+====test====
+When path is encoded, selects the correct response based on decoded path
+====spec====
+openapi: 3.0.2
+paths:
+  /test path > with | unsafe % characters:
+    get:
+      responses:
+        200:
+          content:
+            description: ok
+            application/json:
+              example: "ok"
+====server====
+mock -p 4010 ${document}
+====command====
+curl -i -X GET http://localhost:4010/test%20path%20%3E%20with%20%7C%20unsafe%20%25%20characters
+====expect====
+HTTP/1.1 200 OK
+content-type: application/json
+
+"ok"

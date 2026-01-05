@@ -1,0 +1,62 @@
+====test====
+when validation fails and preferred examples exist for code 422, returns preferred example
+====spec====
+openapi: 3.0.0
+info:
+  title: cats
+  version: '1.0'
+servers:
+  - url: 'http://localhost:3000'
+paths:
+  '/cats':
+    post:
+      summary: "Create New Cat"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: "object"
+              properties:
+                name:
+                  type: "string"
+                  minLength: 2
+                  maxLength: 5
+                  example: "John"
+              required:
+                - name
+      responses:
+        "201":
+          description: Successful cat creation
+        "422":
+          description: Failed to create new cat
+          content:
+            application/json:
+              schema:
+                type: "object"
+                properties:
+                  code:
+                    type: "string"
+                    description: "Internal error code received"
+                  message:
+                    type: "string"
+                    description: "The error string version of the internal error"
+              examples:
+                usernameIsTooShort:
+                  value:
+                    message: "The username is too short"
+                usernameIsTooLong:
+                  value:
+                    message: "The username is too long"
+                usernameIsEmpty:
+                  value:
+                    message: "A username MUST be provided"
+====server====
+mock -p 4010 ${document}
+====command====
+curl -i --location --request POST 'http://127.0.0.1:4010/cats?__example=usernameIsEmpty&__code=422' --header "Content-Type: application/json" --data '{"name":"very_long_name"}'
+====expect====
+HTTP/1.1 422 OK
+content-type: application/json
+
+{"message":"A username MUST be provided"}

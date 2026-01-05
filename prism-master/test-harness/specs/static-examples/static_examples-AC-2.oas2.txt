@@ -1,0 +1,33 @@
+====test====
+When prism is started with the --dynamic flag,
+And I am setting the __dynamic query string value to false
+The responses should have as body the example value provided
+====spec====
+swagger: "2.0"
+paths:
+  /todos:
+    get:
+      produces:
+        - application/json
+      responses:
+        200:
+          description: Get Todo Items
+          schema:
+            type: object
+            properties:
+              title:
+                type: string
+                example: Work
+              description:
+                type: string
+              priority:
+                type: number
+                default: 0
+====server====
+mock --dynamic -p 4010 ${document}
+====command====
+curl -i http://localhost:4010/todos?__dynamic=false
+====expect====
+HTTP/1.1 200 OK
+
+{"title":"Work","description":"string","priority":0}

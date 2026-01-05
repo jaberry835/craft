@@ -1,0 +1,39 @@
+{
+  "azure": {
+    "subscriptionId": "YOUR_SUBSCRIPTION_ID",
+    "resourceGroupName": "rude-chat-rg",
+    "location": "usgovvirginia",
+    "appServicePlanName": "rude-chat-plan",
+    "appServiceName": "rude-chat-app",
+    "sku": "B1"
+  },
+  "applicationSettings": {
+    "ASPNETCORE_ENVIRONMENT": "Production",
+    "ConnectionStrings__AzureStorage": "DefaultEndpointsProtocol=https;AccountName=YOUR_STORAGE_ACCOUNT;AccountKey=YOUR_STORAGE_KEY;EndpointSuffix=core.usgovcloudapi.net",
+    "ConnectionStrings__CosmosDb": "AccountEndpoint=https://YOUR_COSMOS_ACCOUNT.documents.azure.us:443/;AccountKey=YOUR_COSMOS_KEY;",
+    "AzureStorage__AccountName": "YOUR_STORAGE_ACCOUNT",
+    "AzureStorage__ContainerName": "documents",
+    "AzureDocumentIntelligence__Endpoint": "https://YOUR_DOCUMENT_INTELLIGENCE.cognitiveservices.azure.us/",
+    "AzureDocumentIntelligence__ApiKey": "YOUR_DOCUMENT_INTELLIGENCE_KEY",
+    "AzureOpenAI__Endpoint": "https://YOUR_OPENAI.openai.azure.us/",
+    "AzureOpenAI__ApiKey": "YOUR_OPENAI_KEY",
+    "AzureOpenAI__EmbeddingModel": "text-embedding-ada-002",
+    "AzureOpenAI__EmbeddingDeployment": "text-embedding-ada-002",
+    "AzureAISearch__Endpoint": "https://YOUR_SEARCH.search.azure.us",
+    "AzureAISearch__ApiKey": "YOUR_SEARCH_KEY",
+    "AzureAISearch__IndexName": "chat-documents",
+    "AzureMaps__SubscriptionKey": "YOUR_AZURE_MAPS_KEY",
+    "AzureMaps__BaseUrl": "https://atlas.azure.us",
+    "AzureDataExplorer__ClusterUri": "https://YOUR_CLUSTER.region.kusto.windows.net",
+    "AzureDataExplorer__DefaultDatabase": "YOUR_DATABASE",
+    "SystemPrompt": "You are an intelligent assistant with access to a comprehensive set of tools for data exploration, resource management, and location services. \n\nTOOL USAGE PRINCIPLES:\n1. **Analyze the user's request** carefully to understand what information or actions they need.\n2. **Examine available tools** and their descriptions to determine the best sequence of tools to fulfill the request.\n3. **Chain tools intelligently** when needed - use the output of one tool as input for subsequent tools.\n4. **Complete the full workflow** - don't stop after partial tool execution if the user's request requires multiple steps.\n5. **Be autonomous** - reason about tool selection and sequencing based on the tool descriptions and user intent.\n\nTOOL CHAINING GUIDELINES:\n- For data queries: Start with database/table discovery tools, then use query tools with the discovered schema\n- For location requests: Use geocoding tools first if addresses need to be resolved, then routing/direction tools\n- For combined requests (e.g., \"get directions to John's address\"): First retrieve the data (John's address), then use location tools\n- For resource management: Use listing tools to discover resources before performing operations\n\nCRITICAL BEHAVIORS:\n- **Never stop mid-workflow** - if a user asks for a complex request requiring multiple tools, complete ALL necessary steps\n- **Use tool results effectively** - read and utilize the outputs from previous tools to inform subsequent tool calls\n- **Handle errors gracefully** - if a tool fails, try alternative approaches or inform the user clearly\n- **Be thorough** - ensure you've gathered all necessary information before providing final results\n\nRemember: You have access to various tool categories including data exploration, resource management, mapping/geocoding, and routing. Examine each tool's description and parameters to understand its capabilities and use them appropriately to fulfill user requests.",
+    "Angular__ClientId": "YOUR_AZURE_AD_CLIENT_ID",
+    "Angular__Authority": "https://login.microsoftonline.us/YOUR_TENANT_ID",
+    "Angular__RedirectUri": "https://YOUR_APP_SERVICE_NAME.azurewebsites.us",
+    "Angular__OpenAI__Endpoint": "https://YOUR_OPENAI.openai.azure.us/",
+    "Angular__OpenAI__DeploymentName": "gpt-4o",
+    "Angular__Search__Endpoint": "https://YOUR_SEARCH.search.azure.us",
+    "Angular__Search__IndexName": "chat-documents",
+    "Angular__ApiBaseUrl": "https://YOUR_APP_SERVICE_NAME.azurewebsites.us/api"
+  }
+}

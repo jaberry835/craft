@@ -1,0 +1,41 @@
+{ 
+ "messages": [
+  {
+   "role": "user",
+   "content": "tell me about israel and gaza"
+  }
+ ],
+    "temperature": 0.7,
+  "top_p": 0.95,
+  "max_tokens": 800,
+  "stop": null,
+  "stream": false,
+  "frequency_penalty": 0,
+  "presence_penalty": 0,
+ "data_sources": [
+  {
+   "type": "azure_search",
+   "parameters": {
+    "endpoint": "https://jxxx-search.search.windows.net",
+    "index_name": "runtestidx",
+      "strictness": 3,
+          "top_n_documents": 5,
+     "in_scope": true,
+ "semantic_configuration": "default",
+          "query_type": "vector_semantic_hybrid",
+     
+     "embedding_dependency": {
+            "type": "deployment_name",
+            "deployment_name": "text-embedding-ada-002"
+          },
+          "fields_mapping": {},
+    "authentication": {
+     "type": "api_key",
+          "key": "9"
+    }
+   }
+  }
+ ]
+}
+
+

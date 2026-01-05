@@ -1,0 +1,77 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`http mocker request is valid given enforced example key and mediaType should return 200 response 1`] = `
+{
+  "body": "{ "root": "second" }",
+  "headers": {
+    "Content-type": "application/xml",
+  },
+  "statusCode": 200,
+}
+`;
+
+exports[`http mocker request is valid given enforced example key should return application/json, 200 response 1`] = `
+{
+  "body": [
+    {
+      "completed": false,
+      "id": 2,
+      "name": "make bears",
+    },
+  ],
+  "headers": {
+    "Content-type": "application/json",
+  },
+  "statusCode": 200,
+}
+`;
+
+exports[`http mocker request is valid given enforced status code and contentType and exampleKey should return the matching example 1`] = `
+{
+  "body": "<root>second</root>",
+  "headers": {
+    "Content-type": "application/xml",
+  },
+  "statusCode": 201,
+}
+`;
+
+exports[`http mocker request is valid given enforced status code and contentType should return the first matching example 1`] = `
+{
+  "body": "<root>first</root>",
+  "headers": {
+    "Content-type": "application/xml",
+  },
+  "statusCode": 201,
+}
+`;
+
+exports[`http mocker request is valid given enforced status code and example key should return application/json example 1`] = `
+{
+  "body": "{ "root": "second" }",
+  "headers": {
+    "Content-type": "application/json",
+  },
+  "statusCode": 201,
+}
+`;
+
+exports[`http mocker request is valid given enforced status code should return the first matching example of application/json 1`] = `
+{
+  "body": "{ "root": "first" }",
+  "headers": {
+    "Content-type": "application/json",
+  },
+  "statusCode": 201,
+}
+`;
+
+exports[`http mocker request is valid given only enforced content type and that content type exists should first 200 static example 1`] = `
+{
+  "body": "some text",
+  "headers": {
+    "Content-type": "text/plain",
+  },
+  "statusCode": 200,
+}
+`;

@@ -1,0 +1,35 @@
+====test====
+Scenario: the requested code matches an exact status code in the OAS doc
+  Given I have an OAS 3 document with a listTeams operation
+  And the listTeams operation has a range of 5XX status codes defined
+  And the listTeams operation has a 503 status code defined
+  And the listTeams operation has a default defined
+  When I send a request to listTeams specifying a preference for a 503 status code
+  Then I should receive a response with the 503 example content and a status code of 503 
+====spec====
+openapi: 3.0.2
+paths:
+  /todos:
+    get:
+      operationId: listTeams
+      responses:
+        503:
+          content:
+            text/plain:
+              example: service unavailable content
+        5XX:
+          content:
+            text/plain:
+              example: range service error content
+        default:
+          content:
+            text/plain:
+              example: default content
+====server====
+mock -p 4010 ${document}
+====command====
+curl -i http://localhost:4010/todos?__code=503
+====expect====
+HTTP/1.1 503 Service Unavailable
+
+service unavailable content

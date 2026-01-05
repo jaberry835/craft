@@ -1,0 +1,92 @@
+{
+  "items": [
+    {
+      "type": "item",
+      "title": "Overview",
+      "uri": "/README.md"
+    },
+    {
+      "type": "item",
+      "title": "Contribute to Prism",
+      "uri": "CONTRIBUTING.md"
+    },
+    {
+      "type": "divider",
+      "title": "getting-started"
+    },
+    {
+      "type": "item",
+      "title": "Installation",
+      "uri": "/docs/getting-started/01-installation.md"
+    },
+    {
+      "type": "item",
+      "title": "Concepts",
+      "uri": "/docs/getting-started/02-concepts.md"
+    },
+    {
+      "type": "item",
+      "title": "Prism CLI",
+      "uri": "/docs/getting-started/03-cli.md"
+    },
+    {
+      "type": "divider",
+      "title": "guides"
+    },
+    {
+      "type": "item",
+      "title": "HTTP Mocking",
+      "uri": "/docs/guides/01-mocking.md"
+    },
+    {
+      "type": "item",
+      "title": "Request Validation",
+      "uri": "/docs/guides/02-request-validation.md"
+    },
+    {
+      "type": "item",
+      "title": "Dynamic Response Generation with Faker",
+      "uri": "docs/guides/11-dynamic-response-with-faker.md"
+    },
+    {
+      "type": "item",
+      "title": "Validation Proxy",
+      "uri": "/docs/guides/03-validation-proxy.md"
+    },
+    {
+      "type": "item",
+      "title": "Mocking Callbacks with Prism",
+      "uri": "/docs/guides/04-callbacks.md"
+    },
+    {
+      "type": "item",
+      "title": "CORS",
+      "uri": "/docs/guides/05-cors.md"
+    },
+    {
+      "type": "item",
+      "title": "Errors",
+      "uri": "/docs/guides/06-errors.md"
+    },
+    {
+      "type": "item",
+      "title": "Prism Client",
+      "uri": "/docs/guides/07-http-client.md"
+    },
+    {
+      "type": "item",
+      "title": "Serving Multiple OpenAPI Documents",
+      "uri": "/docs/guides/08-multiple-documents.md"
+    },
+    {
+      "type": "item",
+      "title": "Postman Collections support",
+      "uri": "/docs/guides/09-postman-collection.md"
+    },
+    {
+      "type": "item",
+      "title": "Supporting TLS with nginx as a TLS termination",
+      "uri": "/docs/guides/10-nginx-tls-proxy.md"
+    }
+  ]
+}

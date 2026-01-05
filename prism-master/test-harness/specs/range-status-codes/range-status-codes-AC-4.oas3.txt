@@ -1,0 +1,32 @@
+====test====
+Scenario: the requested code has no exact or range matches in the OAS doc and no default
+  Given I have an OAS 3 document with a listTeams operation
+  And the listTeams operation has a range of 5XX response status codes defined
+  And the listTeams operation has a 503 status code defined
+  When I send a request to listTeams specifying a preference for a 401 status code
+  Then I should receive a response with problem details from Prism and a 404 status code
+====spec====
+openapi: 3.0.2
+paths:
+  /todos:
+    get:
+      operationId: listTeams
+      responses:
+        503:
+          content:
+            text/plain:
+              example: service unavailable content
+        5XX:
+          content:
+            text/plain:
+              example: range service error content
+====server====
+mock -p 4010 ${document}
+====command====
+curl -i http://localhost:4010/todos?__code=401
+====expect====
+HTTP/1.1 404 Not Found
+content-type: application/problem+json
+
+{"type":"https://stoplight.io/prism/errors#NOT_FOUND","title":"The server cannot find the requested content","status":404,"detail":"Requested status code 401 is not defined in the document."}
+

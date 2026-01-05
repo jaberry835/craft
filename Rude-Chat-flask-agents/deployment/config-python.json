@@ -1,0 +1,42 @@
+{
+  "azure": {
+    "subscriptionId": "YOUR_SUBSCRIPTION_ID",
+    "resourceGroupName": "YOUR_RESOURCE_GROUP",
+    "location": "YOUR_LOCATION",
+    "appServicePlanName": "YOUR_APP_SERVICE_PLAN",
+    "appServiceName": "YOUR_PYTHON_APP_SERVICE_NAME",
+    "sku": "S1"
+  },
+  "applicationSettings": {
+    "SCM_DO_BUILD_DURING_DEPLOYMENT": "true",
+    "FLASK_ENV": "production",
+    "PYTHONPATH": "/home/site/wwwroot",
+    "AzureOpenAI__Endpoint": "YOUR_AZURE_OPENAI_ENDPOINT",
+    "AzureOpenAI__ApiKey": "YOUR_AZURE_OPENAI_API_KEY",
+    "AzureOpenAI__DeploymentName": "gpt-4o",
+    "AzureOpenAI__EmbeddingModel": "text-embedding-ada-002",
+    "AzureAISearch__Endpoint": "YOUR_AZURE_SEARCH_ENDPOINT",
+    "AzureAISearch__ApiKey": "YOUR_AZURE_SEARCH_API_KEY",
+    "AzureAISearch__IndexName": "chat-documents",
+    "CosmosDB__Endpoint": "YOUR_COSMOS_DB_ENDPOINT",
+    "CosmosDB__Key": "YOUR_COSMOS_DB_KEY",
+    "CosmosDB__DatabaseName": "ChatDatabase",
+    "CosmosDB__ContainerName": "Sessions",
+    "AzureStorage__ConnectionString": "YOUR_AZURE_STORAGE_CONNECTION_STRING",
+    "AzureStorage__ContainerName": "documents",
+    "AzureDocumentIntelligence__Endpoint": "YOUR_DOCUMENT_INTELLIGENCE_ENDPOINT",
+    "AzureDocumentIntelligence__ApiKey": "YOUR_DOCUMENT_INTELLIGENCE_API_KEY",
+    "AzureDataExplorer__ClusterUri": "YOUR_ADX_CLUSTER_URI",
+    "AzureDataExplorer__DefaultDatabase": "YOUR_ADX_DATABASE",
+    "SystemPrompt": "You are an intelligent assistant with access to a comprehensive set of tools for data exploration, resource management, and location services.",
+    "Angular__ClientId": "YOUR_ANGULAR_CLIENT_ID",
+    "Angular__Authority": "YOUR_ANGULAR_AUTHORITY",
+    "Angular__RedirectUri": "YOUR_PYTHON_APP_SERVICE_NAME.azurewebsites.us",
+    "Angular__OpenAI__Endpoint": "YOUR_AZURE_OPENAI_ENDPOINT",
+    "Angular__OpenAI__DeploymentName": "gpt-4o",
+    "Angular__Search__Endpoint": "YOUR_AZURE_SEARCH_ENDPOINT",
+    "Angular__Search__IndexName": "chat-documents",
+    "Angular__ApiBaseUrl": "YOUR_PYTHON_APP_SERVICE_NAME.azurewebsites.us/api",
+    "Angular__MCPApiBaseUrl": "YOUR_PYTHON_APP_SERVICE_NAME.azurewebsites.us"
+  }
+}

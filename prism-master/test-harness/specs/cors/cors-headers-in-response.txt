@@ -1,0 +1,25 @@
+====test====
+If I run Prism with a document
+And the CORS support is enabled
+And I do a request with GET as verb
+I should still get CORS-related headers
+====spec====
+swagger: "2.0"
+paths:
+  /todos:
+    get:
+      responses:
+        200:
+          description: ok
+          schema:
+            type: string
+            example: ok
+====server====
+mock -p 4010 ${document}
+====command====
+curl -i -X GET http://localhost:4010/todos
+====expect====
+HTTP/1.1 200 OK
+access-control-allow-origin: *
+access-control-allow-headers: *
+access-control-allow-credentials: true

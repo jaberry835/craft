@@ -1,0 +1,373 @@
+#!/usr/bin/env python3
+"""
+Code Archive Tool - Pack and unpack code files with .txt extensions
+
+This tool helps create archives of code files by:
+1. Adding .txt extensions to code files (making them viewable as plain text)
+2. Creating a zip archive
+3. Unpacking and restoring original extensions
+
+Only processes files that are tracked by git (checked in).
+"""
+
+import os
+import sys
+import shutil
+import zipfile
+import subprocess
+import argparse
+from pathlib import Path
+from typing import List, Set
+
+# Define code file extensions to process
+CODE_EXTENSIONS = {
+    '.cs', '.py', '.md', '.tsx', '.ts', '.jsx', '.js', 
+    '.css', '.scss', '.sass', '.less',
+    '.json', '.xml', '.yaml', '.yml',
+    '.ps1', '.sh', '.bat', '.cmd',
+    '.html', '.htm', '.svg',
+    '.java', '.cpp', '.c', '.h', '.hpp',
+    '.go', '.rs', '.rb', '.php',
+    '.sql', '.graphql', '.proto',
+    '.conf', '.config', '.ini', '.toml',
+    '.dockerfile', '.gitignore', '.gitattributes',
+    '.txt', '.log', '.env.example'
+}
+
+# Image file extensions (can be optionally included)
+IMAGE_EXTENSIONS = {
+    '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.ico', '.webp', '.tiff', '.tif', '.svg'
+}
+
+# Font file extensions (can be optionally included)
+FONT_EXTENSIONS = {
+    '.ttf', '.woff', '.woff2', '.eot', '.otf'
+}
+
+# File extensions to always exclude (binaries, archives, media)
+EXCLUDE_EXTENSIONS = {
+    # Archives
+    '.pdf', '.zip', '.tar', '.gz', '.7z', '.rar', '.bz2', '.xz',
+    # Executables and binaries
+    '.exe', '.dll', '.so', '.dylib', '.bin', '.o', '.obj', '.lib', '.a',
+    '.app', '.msi', '.dmg', '.deb', '.rpm', '.apk',
+    # Media (video/audio)
+    '.mp4', '.avi', '.mov', '.mp3', '.wav', '.flac', '.ogg', '.webm', '.mkv'
+}
+
+
+def get_git_tracked_files(directory: str) -> Set[str]:
+    """
+    Get all files tracked by git in the given directory.
+    
+    Args:
+        directory: The git repository directory
+        
+    Returns:
+        Set of relative file paths tracked by git
+    """
+    try:
+        result = subprocess.run(
+            ['git', 'ls-files'],
+            cwd=directory,
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        files = set(result.stdout.strip().split('\n'))
+        return {f for f in files if f}  # Remove empty strings
+    except subprocess.CalledProcessError as e:
+        print(f"Error: Failed to get git tracked files: {e}")
+        sys.exit(1)
+    except FileNotFoundError:
+        print("Error: git command not found. Make sure git is installed.")
+        sys.exit(1)
+
+
+def should_process_file(file_path: str, full_path: Path = None, include_images: bool = False, include_fonts: bool = False) -> bool:
+    """
+    Determine if a file should be processed based on its extension.
+    
+    Args:
+        file_path: Path to the file
+        full_path: Optional full path to check if file is executable
+        include_images: Whether to include image files
+        include_fonts: Whether to include font files
+        
+    Returns:
+        True if file should be processed, False otherwise
+    """
+    path = Path(file_path)
+    ext = path.suffix.lower()
+    
+    # Always exclude these extensions (binaries, archives, media)
+    if ext in EXCLUDE_EXTENSIONS:
+        return False
+    
+    # Handle images based on flag
+    if ext in IMAGE_EXTENSIONS:
+        return include_images
+    
+    # Handle fonts based on flag
+    if ext in FONT_EXTENSIONS:
+        return include_fonts
+    
+    # Check if file is executable binary (Unix systems)
+    if full_path and full_path.exists():
+        # If file has no extension and is executable, likely a binary
+        if not ext and os.access(full_path, os.X_OK):
+            # Allow known script files without extensions
+            allowed_no_ext = {'Dockerfile', 'Makefile', 'Jenkinsfile', 'Vagrantfile'}
+            if path.name not in allowed_no_ext:
+                try:
+                    # Check if file starts with a shebang (text script)
+                    with open(full_path, 'rb') as f:
+                        first_bytes = f.read(2)
+                        # If it starts with #! it's a script, not a binary
+                        if first_bytes != b'#!':
+                            # Check for binary markers (null bytes in first 8KB)
+                            f.seek(0)
+                            chunk = f.read(8192)
+                            if b'\x00' in chunk:
+                                return False  # Binary file
+                except:
+                    pass
+    
+    # Include known code extensions
+def pack_directory(source_dir: str, output_zip: str, include_images: bool = False, include_fonts: bool = False):
+    """
+    Pack a directory by adding .txt to code files and creating a zip archive.
+    
+    Args:
+        source_dir: Source directory to pack
+        output_zip: Output zip file path
+        include_images: Whether to include image files in the archive
+        include_fonts: Whether to include font files in the archive
+    """urn False
+
+
+def pack_directory(source_dir: str, output_zip: str):
+    """
+    Pack a directory by adding .txt to code files and creating a zip archive.
+    
+    Args:
+        source_dir: Source directory to pack
+        output_zip: Output zip file path
+    """
+    source_path = Path(source_dir).resolve()
+    
+    if not source_path.exists():
+        print(f"Error: Directory '{source_dir}' does not exist.")
+        sys.exit(1)
+    
+    if not source_path.is_dir():
+        print(f"Error: '{source_dir}' is not a directory.")
+        sys.exit(1)
+    
+    # Check if it's a git repository
+    if not (source_path / '.git').exists():
+        print(f"Error: '{source_dir}' is not a git repository.")
+        sys.exit(1)
+    
+    print(f"Packing directory: {source_path}")
+    print("Getting git-tracked files...")
+    
+    git_files = get_git_tracked_files(str(source_path))
+    print(f"Found {len(git_files)} git-tracked files")
+    
+    # Create temporary directory for modified files
+    temp_dir = source_path.parent / f".temp_pack_{source_path.name}"
+    
+    if temp_dir.exists():
+        shutil.rmtree(temp_dir)
+    
+    processed_count = 0
+    skipped_count = 0
+    excluded_count = 0
+    
+    try:
+        print("Processing files...")
+        if include_images:
+            print("  - Including image files")
+        if include_fonts:
+            print("  - Including font files")
+        
+        for rel_path in git_files:
+            src_file = source_path / rel_path
+            
+            if not src_file.exists() or not src_file.is_file():
+                continue
+            
+            # Check if file should be processed
+            should_process = should_process_file(rel_path, src_file, include_images, include_fonts)
+            
+            if should_process is False and (Path(rel_path).suffix.lower() in EXCLUDE_EXTENSIONS or 
+                                           (Path(rel_path).suffix.lower() in IMAGE_EXTENSIONS and not include_images) or
+                                           (Path(rel_path).suffix.lower() in FONT_EXTENSIONS and not include_fonts)):
+                # File is explicitly excluded, don't include it
+                excluded_count += 1
+                continue
+        print(f"Processed {processed_count} code files (added .txt)")
+        print(f"Included {skipped_count} non-code files (copied as-is)")
+        if excluded_count > 0:
+            print(f"Excluded {excluded_count} binary/media files")
+        
+        # Create zip archive
+        print(f"Creating zip archive: {output_zip}")
+            else:
+                dst_file = temp_dir / rel_path
+                skipped_count += 1
+                dst_file = temp_dir / rel_path
+                skipped_count += 1
+            
+            # Create parent directories
+            dst_file.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Copy file
+            shutil.copy2(src_file, dst_file)
+        
+        print(f"Processed {processed_count} code files (added .txt)")
+        print(f"Skipped {skipped_count} non-code files (copied as-is)")
+        
+        # Create zip archive
+        print(f"Creating zip archive: {output_zip}")
+        
+        with zipfile.ZipFile(output_zip, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for file_path in temp_dir.rglob('*'):
+                if file_path.is_file():
+                    arcname = file_path.relative_to(temp_dir)
+                    zipf.write(file_path, arcname)
+        
+        print(f"✓ Successfully created: {output_zip}")
+        
+    finally:
+        # Clean up temporary directory
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir)
+            print("Cleaned up temporary files")
+
+
+def unpack_archive(zip_file: str, output_dir: str):
+    """
+    Unpack a zip archive and remove .txt extensions from code files.
+    
+    Args:
+        zip_file: Path to zip file
+        output_dir: Output directory to extract to
+    """
+    zip_path = Path(zip_file).resolve()
+    output_path = Path(output_dir).resolve()
+    
+    if not zip_path.exists():
+        print(f"Error: Zip file '{zip_file}' does not exist.")
+        sys.exit(1)
+    
+    if output_path.exists():
+        response = input(f"Directory '{output_dir}' exists. Overwrite? (y/N): ")
+        if response.lower() != 'y':
+            print("Aborted.")
+            sys.exit(0)
+        shutil.rmtree(output_path)
+    
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    print(f"Unpacking archive: {zip_path}")
+    print(f"Output directory: {output_path}")
+    
+    restored_count = 0
+    copied_count = 0
+    
+    with zipfile.ZipFile(zip_path, 'r') as zipf:
+        for file_info in zipf.filelist:
+            if file_info.is_dir():
+                continue
+            
+            archived_name = file_info.filename
+            
+            # Check if file has .txt extension that should be removed
+            if archived_name.endswith('.txt'):
+                # Get the original name without .txt
+                original_name = archived_name[:-4]
+                
+                # Check if the original file would have been processed
+                if should_process_file(original_name):
+                    target_name = original_name
+                    restored_count += 1
+                else:
+                    # It was a .txt file originally, keep it as is
+                    target_name = archived_name
+                    copied_count += 1
+            else:
+                target_name = archived_name
+                copied_count += 1
+            
+            # Extract file
+            target_path = output_path / target_name
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            with zipf.open(file_info) as source, open(target_path, 'wb') as target:
+                shutil.copyfileobj(source, target)
+            
+            # Preserve file permissions
+            external_attr = file_info.external_attr >> 16
+            if external_attr:
+                target_path.chmod(external_attr)
+    
+    print(f"Restored {restored_count} code files (removed .txt)")
+    print(f"Extracted {copied_count} files as-is")
+    print(f"✓ Successfully unpacked to: {output_path}")
+
+    # Pack command
+    pack_parser = subparsers.add_parser('pack', help='Pack a directory into a zip archive')
+    pack_parser.add_argument('directory', help='Directory to pack (must be a git repository)')
+    pack_parser.add_argument('output', help='Output zip file path')
+    pack_parser.add_argument('--include-images', action='store_true', 
+                            help='Include image files (jpg, png, gif, etc.) in the archive')
+    pack_parser.add_argument('--include-fonts', action='store_true',
+                            help='Include font files (ttf, woff, etc.) in the archive')ions',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  Pack a directory:
+    %(prog)s pack /path/to/project output.zip
+  
+  Unpack an archive:
+    %(prog)s unpack archive.zip /path/to/output
+    try:
+        if args.command == 'pack':
+            pack_directory(args.directory, args.output, 
+                          include_images=args.include_images,
+                          include_fonts=args.include_fonts)
+        elif args.command == 'unpack':
+            unpack_archive(args.zipfile, args.output)
+    # Pack command
+    pack_parser = subparsers.add_parser('pack', help='Pack a directory into a zip archive')
+    pack_parser.add_argument('directory', help='Directory to pack (must be a git repository)')
+    pack_parser.add_argument('output', help='Output zip file path')
+    
+    # Unpack command
+    unpack_parser = subparsers.add_parser('unpack', help='Unpack a zip archive')
+    unpack_parser.add_argument('zipfile', help='Zip file to unpack')
+    unpack_parser.add_argument('output', help='Output directory')
+    
+    args = parser.parse_args()
+    
+    if not args.command:
+        parser.print_help()
+        sys.exit(1)
+    
+    try:
+        if args.command == 'pack':
+            pack_directory(args.directory, args.output)
+        elif args.command == 'unpack':
+            unpack_archive(args.zipfile, args.output)
+    except KeyboardInterrupt:
+        print("\n\nOperation cancelled by user.")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\nError: {e}")
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()

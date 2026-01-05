@@ -1,0 +1,90 @@
+<div class="container-fluid mt-3">
+  <div class="row" style="margin-left:10px">
+    <!-- Chat Window (Left) -->
+    <div class="col-md-7 p-0">
+      <div class="card h-100">
+        <div class="card-header">
+          Chat
+        </div>
+        <div class="card-body chat-container" #chatContainer>
+          <div *ngFor="let msg of messages" class="chat-message" 
+               [ngClass]="{'sent': msg.role === 'user', 'received': msg.role === 'assistant'}">
+            <div class="message-content">
+              <markdown  [data]="msg.content"></markdown>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Preview Card (Right) -->
+    <div class="col-md-5">
+      <div class="card">
+        <div class="card-header">
+          Preview
+        </div>
+        <div class="card-body preview-container">
+          <h3>
+            <a [href]="pFile.filepath" target="_blank" rel="noopener noreferrer">{{ pFile.title }}</a>
+          </h3>
+          <p> <markdown  [data]="pFile.preview"></markdown></p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Fixed chat input area with a multiline textarea -->
+<div class="fixed-chat-input">
+  <div class="container">
+    <div class="row justify-content-left">
+      <div class="col-md-10">
+        <!-- Text and Send Button Group -->
+        <div class="input-group mb-3">
+          <textarea
+            class="form-control"
+            placeholder="Type a message..."
+            rows="3"
+            [(ngModel)]="userInput"
+            [disabled]="isLoading"
+            (keydown.enter)="click()"
+          ></textarea>
+          <button
+            class="btn btn-primary"
+            type="button"
+            (click)="click()"
+            [disabled]="isLoading"
+          >
+            Send
+          </button>
+           <!-- Reset and Settings Button Group -->
+         <!-- Reset and Settings Buttons -->
+         <div class="ms-3 d-flex gap-2">
+          <button
+            class="btn btn-warning"
+            type="button"
+            (click)="reset()"
+          >
+            Reset
+          </button>
+          <button
+          class="btn btn-success"
+          type="button"
+          (click)="exportChat()"
+        >
+          Export
+        </button>
+       <!--    <button
+            class="btn btn-secondary"
+            type="button"
+            (click)="openSettings()"
+          >
+            Settings
+          </button>-->
+        </div>
+
+       
+        </div>
+      </div>
+    </div>
+  </div>

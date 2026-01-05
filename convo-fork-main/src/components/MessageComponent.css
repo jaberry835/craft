@@ -1,0 +1,337 @@
+.message {
+  padding: 15px;
+  border-radius: 12px;
+  margin-bottom: 10px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+  transition: all 0.2s ease;
+  text-align: left;
+}
+
+.message:hover {
+  box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+}
+
+.message.buyer {
+  background-color: #e3f2fd;
+  border-left: 4px solid #2196f3;
+  margin-left: 20px;
+}
+
+.message.seller {
+  background-color: #f3e5f5;
+  border-left: 4px solid #9c27b0;
+  margin-right: 20px;
+}
+
+.message-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.message-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.handle {
+  font-weight: bold;
+  color: #333;
+  font-size: 1rem;
+}
+
+.role {
+  background-color: rgba(0,0,0,0.1);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  font-weight: 500;
+}
+
+.timestamp {
+  color: #666;
+  font-size: 0.85rem;
+}
+
+.message-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.stage-badge {
+  color: white;
+  padding: 4px 8px;
+  border-radius: 12px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  text-transform: capitalize;
+}
+
+/* Stage-specific colors */
+.stage-project_initiation {
+  background-color: #007bff;
+}
+
+.stage-financial_query {
+  background-color: #28a745;
+}
+
+.stage-wbs_query {
+  background-color: #ffc107;
+  color: #212529;
+}
+
+.stage-personnel_query {
+  background-color: #17a2b8;
+}
+
+.stage-timeline_query {
+  background-color: #6f42c1;
+}
+
+.stage-general_query {
+  background-color: #6c757d;
+}
+
+.coded-indicator,
+.encrypted-indicator {
+  font-size: 1rem;
+  filter: opacity(0.8);
+}
+
+.message-content {
+  line-height: 1.6;
+  color: #333;
+}
+
+/* Enhanced Markdown Styling */
+.markdown-h1 {
+  font-size: 1.5rem;
+  font-weight: 700;
+  margin: 1.5rem 0 1rem 0;
+  color: #2c3e50;
+  border-bottom: 2px solid #3498db;
+  padding-bottom: 0.5rem;
+}
+
+.markdown-h2 {
+  font-size: 1.3rem;
+  font-weight: 600;
+  margin: 1.3rem 0 0.8rem 0;
+  color: #2c3e50;
+  border-bottom: 1px solid #e0e0e0;
+  padding-bottom: 0.3rem;
+}
+
+.markdown-h3 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin: 1.1rem 0 0.6rem 0;
+  color: #34495e;
+}
+
+.markdown-h4 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 1rem 0 0.5rem 0;
+  color: #34495e;
+}
+
+.markdown-p {
+  margin: 0.8rem 0;
+  line-height: 1.7;
+}
+
+.markdown-ul, .markdown-ol {
+  margin: 0.8rem 0;
+  padding-left: 1.5rem;
+}
+
+.markdown-ul li, .markdown-ol li {
+  margin: 0.3rem 0;
+  line-height: 1.6;
+}
+
+.markdown-blockquote {
+  margin: 1rem 0;
+  padding: 0.8rem 1rem;
+  border-left: 4px solid #3498db;
+  background-color: #f8f9fa;
+  font-style: italic;
+  color: #495057;
+}
+
+.markdown-code-block {
+  background-color: #f8f9fa;
+  border: 1px solid #e9ecef;
+  border-radius: 6px;
+  padding: 1rem;
+  margin: 1rem 0;
+  overflow-x: auto;
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+
+.markdown-code-block code {
+  background: none;
+  padding: 0;
+  border: none;
+  font-size: inherit;
+}
+
+.markdown-inline-code {
+  background-color: #f1f3f4;
+  padding: 0.2rem 0.4rem;
+  border-radius: 4px;
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  font-size: 0.9em;
+  color: #c7254e;
+  border: 1px solid #e1e5e9;
+}
+
+.markdown-table-container {
+  overflow-x: auto;
+  margin: 1rem 0;
+}
+
+.markdown-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.markdown-th, .markdown-td {
+  padding: 0.6rem 0.8rem;
+  text-align: left;
+  border-bottom: 1px solid #dee2e6;
+}
+
+.markdown-th {
+  background-color: #f8f9fa;
+  font-weight: 600;
+  color: #495057;
+  border-bottom: 2px solid #dee2e6;
+}
+
+.markdown-td {
+  color: #212529;
+}
+
+.markdown-strong {
+  font-weight: 600;
+  color: #2c3e50;
+}
+
+.markdown-em {
+  font-style: italic;
+  color: #6c757d;
+}
+
+.markdown-link {
+  color: #007bff;
+  text-decoration: none;
+  border-bottom: 1px dotted #007bff;
+  transition: all 0.2s ease;
+}
+
+.markdown-link:hover {
+  color: #0056b3;
+  border-bottom: 1px solid #0056b3;
+  text-decoration: none;
+}
+
+/* Financial data highlighting */
+.markdown-p:has(strong:contains("Budget")),
+.markdown-p:has(strong:contains("Cost")),
+.markdown-p:has(strong:contains("Expense")) {
+  background-color: #e8f5e8;
+  padding: 0.5rem;
+  border-radius: 4px;
+  border-left: 3px solid #28a745;
+}
+
+/* Project status highlighting */
+.markdown-p:has(strong:contains("Status")),
+.markdown-p:has(strong:contains("Phase")),
+.markdown-p:has(strong:contains("Risk")) {
+  background-color: #fff3cd;
+  padding: 0.5rem;
+  border-radius: 4px;
+  border-left: 3px solid #ffc107;
+}
+
+/* Numeric values highlighting */
+.markdown-p:contains("$") {
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+}
+
+/* Code syntax highlighting improvements */
+.hljs {
+  background: #f8f9fa !important;
+  color: #333 !important;
+}
+
+.hljs-keyword {
+  color: #d73a49 !important;
+  font-weight: 600;
+}
+
+.hljs-string {
+  color: #032f62 !important;
+}
+
+.hljs-comment {
+  color: #6a737d !important;
+  font-style: italic;
+}
+
+.hljs-number {
+  color: #005cc5 !important;
+}
+
+.hljs-function {
+  color: #6f42c1 !important;
+}
+
+.hljs-variable {
+  color: #e36209 !important;
+}
+
+.message-content p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.payment-details {
+  margin-top: 15px;
+  padding: 12px;
+  background-color: rgba(0,0,0,0.05);
+  border-radius: 8px;
+  border: 1px solid rgba(0,0,0,0.1);
+}
+
+.payment-details h4 {
+  margin: 0 0 8px 0;
+  color: #333;
+  font-size: 0.9rem;
+}
+
+.payment-details p {
+  margin: 4px 0;
+  font-size: 0.85rem;
+  color: #555;
+  font-family: 'Courier New', monospace;
+}
+
+.payment-details strong {
+  color: #333;
+  font-family: inherit;
+}

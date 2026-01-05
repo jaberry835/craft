@@ -1,0 +1,31 @@
+{
+  "AzureOpenAI": {
+    "Endpoint": "YOUR_AZURE_OPENAI_ENDPOINT",
+    "ApiKey": "YOUR_AZURE_OPENAI_API_KEY",
+    "DeploymentName": "gpt-4o",
+    "EmbeddingModel": "text-embedding-ada-002"
+  },
+  "AzureSearch": {
+    "Endpoint": "YOUR_AZURE_SEARCH_ENDPOINT",
+    "ApiKey": "YOUR_AZURE_SEARCH_API_KEY",
+    "IndexName": "documents-dev"
+  },
+  "CosmosDB": {
+    "Endpoint": "YOUR_COSMOS_DB_ENDPOINT",
+    "Key": "YOUR_COSMOS_DB_KEY",
+    "DatabaseName": "ChatHistory",
+    "ContainerName": "Sessions"
+  },
+  "AzureStorage": {
+    "ConnectionString": "YOUR_AZURE_STORAGE_CONNECTION_STRING",
+    "ContainerName": "documents"
+  },
+  "AzureDataExplorer": {
+    "ClusterUrl": "YOUR_ADX_CLUSTER_URL",
+    "Database": "YOUR_ADX_DATABASE"
+  },
+  "AzureMaps": {
+    "SubscriptionKey": "YOUR_AZURE_MAPS_KEY"
+  },
+  "SystemPrompt": "You are a helpful AI assistant with access to specialized agents. When users ask questions, you coordinate with specialized agents to provide comprehensive answers. Available agents: ADX Agent (database queries), Maps Agent (location services), Documents Agent (document search), Resources Agent (Azure resources). Always be helpful, accurate, and provide clear explanations."
+}

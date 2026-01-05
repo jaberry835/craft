@@ -1,0 +1,21 @@
+# Azure OpenAI Configuration
+# Set these environment variables or copy this file to .env and update with your values
+
+# Required: Your Azure OpenAI endpoint URL
+# Example: https://your-resource-name.openai.azure.com/
+AZURE_OPENAI_ENDPOINT=https://jb-openaiservice.openai.azure.com/
+
+# Required: Your Azure OpenAI API key
+AZURE_OPENAI_API_KEY=
+
+# Optional: API version (defaults to 2024-02-01)
+AZURE_OPENAI_API_VERSION=2024-02-01
+
+# Optional: Deployment name for GPT-4o (defaults to 'gpt-4o')
+AZURE_OPENAI_DEPLOYMENT_NAME=gpt-4o
+
+# Optional: Output directory for generated PDFs (defaults to 'output')
+OUTPUT_DIRECTORY=output
+
+# Optional: Log level (defaults to INFO)
+LOG_LEVEL=INFO

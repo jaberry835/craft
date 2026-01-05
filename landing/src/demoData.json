@@ -1,0 +1,60 @@
+[
+  {
+    "title": "AI Forensics",
+    "category": "AI",
+    "description": "Investigate digital material collects using AI-driven forensic analysis.",
+    "demoLink": "#",
+    "moreInfoLink": "#"
+  },
+  {
+    "title": "AI Connected Data",
+    "category": "AI",
+    "description": "Integrate disparate datasets with AI to uncover hidden insights.",
+    "demoLink": "#",
+    "moreInfoLink": "#"
+  },
+  {
+    "title": "Intelligence Officer AI Chat",
+    "category": "AI",
+    "description": "An AI-powered conversational assistant for intelligence officers.",
+    "demoLink": "#",
+    "moreInfoLink": "#"
+  },
+  {
+    "title": "AI Purchasing Assistant",
+    "category": "AI",
+    "description": "Automate procurement workflows using an AI assistant.",
+    "demoLink": "#",
+    "moreInfoLink": "#"
+  },
+  {
+    "title": "GitHub Copilot",
+    "category": "AI",
+    "description": "Leverage AI for code suggestions in your development workflow.",
+    "demoLink": "#",
+    "moreInfoLink": "#"
+  },
+  {
+    "title": "Cyber Big Data Sentinel",
+    "category": "Security",
+    "description": "Real-time monitoring and anomaly detection at scale.",
+    "demoLink": "#",
+    "moreInfoLink": "#",
+    "comingSoon": true
+  },
+  {
+    "title": "Container Scale Deployment",
+    "category": "Infrastructure",
+    "description": "Automatic scaling of containerized applications.",
+    "demoLink": "#",
+    "moreInfoLink": "#"
+  },
+  {
+    "title": "Network Isolation",
+    "category": "Infrastructure",
+    "description": "Implement secure micro-segmentation in your network.",
+    "demoLink": "#",
+    "moreInfoLink": "#",
+    "comingSoon": true
+  }
+]

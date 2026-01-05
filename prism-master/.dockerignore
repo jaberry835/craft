@@ -1,0 +1,14 @@
+**/.circleci
+**/.github
+**/dist
+**/docs
+**/examples
+**/node_modules
+**/__tests__
+**/test-harness
+**/.tsbuildinfo
+**/.git
+install
+jest.*
+*.md
+azure-pipelines.yml

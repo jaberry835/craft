@@ -1,0 +1,63 @@
+.App {
+  text-align: center;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.App-header {
+  background-color: #282c34;
+  padding: 10px;
+  color: white;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.App-header h1 {
+  margin: 0;
+  font-size: 1.5rem;
+}
+
+.reset-btn {
+  background-color: #e06c75;
+  color: white;
+  border: none;
+  padding: 6px 12px;
+  border-radius: 4px;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.reset-btn:hover {
+  background-color: #c95b68;
+}
+
+.App-content {
+  flex: 1;
+  overflow: hidden;
+}
+
+/* Override allotment default styles for better appearance */
+.split-view-container .allotment-module_splitViewContainer__MGZ6O {
+  height: 100%;
+}
+
+.conversation-panel,
+.copilot-panel {
+  height: 100%;
+  padding: 20px;
+  box-sizing: border-box;
+  overflow-y: auto;
+}
+
+.conversation-panel {
+  background-color: #f8f9fa;
+  border-right: 1px solid #dee2e6;
+}
+
+.copilot-panel {
+  background-color: #fff;
+}

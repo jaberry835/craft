@@ -1,0 +1,91 @@
+# See https://docs.github.com/get-started/getting-started-with-git/ignoring-files for more about ignoring files.
+
+# Compiled output
+/dist
+/tmp
+/out-tsc
+/bazel-out
+
+# Node
+/node_modules
+npm-debug.log
+yarn-error.log
+
+# IDEs and editors
+.idea/
+.project
+.classpath
+.c9/
+*.launch
+.settings/
+*.sublime-workspace
+
+# Visual Studio Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.history/*
+
+# Miscellaneous
+/.angular/cache
+.sass-cache/
+/connect.lock
+/coverage
+/libpeerconnection.log
+testem.log
+/typings
+
+# System files
+.DS_Store
+Thumbs.db
+
+# .NET Build artifacts
+bin/
+obj/
+*.exe
+*.dll
+*.pdb
+*.cache
+*.tmp
+*.log
+
+# .NET specific
+MCP-Server/MCPServer/appsettings.Development.json
+MCP-Server/MCPServer/bin/
+MCP-Server/MCPServer/obj/
+MCP-Server/MCPServer/publish/
+MCP-Server/MCPServer/wwwroot/
+**/bin/
+**/obj/
+**/publish/
+**/wwwroot/
+
+# Visual Studio / Visual Studio Code
+.vs/
+.vscode/
+*.user
+*.suo
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.opendb
+*.VC.db
+
+# Environment files
+src/environments/environment.ts
+
+# Deployment files
+deployment/my-config.json
+deployment/*.zip
+
+# Azure publish profiles
+Properties/PublishProfiles/
+Python-MCP-Server/config.json
+
+deployment/my-config-python.json
+deployment/temp-deploy
+Python-MCP-Server/__pycache__/

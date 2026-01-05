@@ -1,0 +1,63 @@
+====test====
+If Prism detects an invalid input (422 code), but user requests for other code (200) with an example key then example key and requested code are ignored
+====spec====
+openapi: 3.1.0
+info:
+  title: test
+  version: '1.0'
+servers:
+  - url: 'http://localhost:3000'
+paths:
+  /test:
+    post:
+      summary: ''
+      operationId: post-test
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name:
+                    type: string
+              examples:
+                200-test:
+                  value:
+                    name: 200-test
+        '422':
+          description: Unprocessable Entity (WebDAV)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name:
+                    type: string
+              examples:
+                422-test:
+                  value:
+                    name: 422-test
+                422-test2:
+                  value:
+                    name: 422-test2
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                test:
+                  type: string
+              required:
+                - test
+====server====
+mock -p 4010 ${document} --errors
+====command====
+curl -i --request POST --url http://localhost:4010/test --header 'Content-Type: application/json' --header 'Prefer: code=200, example=200-test' --data '{}'
+====expect====
+HTTP/1.1 422 Unprocessable Entity
+sl-violations: [{"location":["request","body"],"severity":"Error","code":"required","message":"must have required property 'test'"}]
+
+{"name":"422-test"}

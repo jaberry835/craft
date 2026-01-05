@@ -1,0 +1,27 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["src"],
+  "exclude": ["src/**/__tests__/**/*.ts"],
+  "compilerOptions": {
+    "composite": true,
+    "plugins": [
+      {
+        "transform": "ts-transform-import-path-rewrite",
+        "import": "transform",
+        "alias": {
+          "(../)*core/src$": "@stoplight/prism-core"
+        },
+        "after": false,
+        "afterDeclarations": true,
+        "type": "config"
+      }
+    ],
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "references": [
+    {
+      "path": "../core/tsconfig.build.json"
+    }
+  ]
+}

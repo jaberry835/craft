@@ -1,0 +1,17 @@
+====test====
+Prism responds with a 200 OK when the the spec has no content,
+even when the content-type from Accept header cannot be matched.
+====spec====
+swagger: "2.0"
+paths:
+  /path:
+    get:
+      responses:
+        '200':
+          description: OK
+====server====
+mock -p 4010 ${document}
+====command====
+curl -sIXGET http://localhost:4010/path -H "Accept: text/plain"
+====expect====
+HTTP/1.1 200 OK

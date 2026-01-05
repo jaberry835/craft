@@ -1,0 +1,31 @@
+====test====
+If Prism detects an input violation, but not an output violiation, the status code should not be modified to be a 500
+====spec====
+openapi: 3.0.0
+paths:
+  '/pet/{petId}':
+    get:
+      parameters:
+        - name: petId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        default:
+            description: test
+      security:
+        - api_key: []
+components:
+  securitySchemes:
+    api_key:
+      type: apiKey
+      name: api_key
+      in: header
+====server====
+mock -p 4010 ${document} --errors
+====command====
+curl -i "http://localhost:4010/pet/10"
+====expect-loose====
+HTTP/1.1 401 Unauthorized
+sl-violations: [{"location":["request"],"severity":"Error","code":401,"message":"Invalid security scheme used"}]

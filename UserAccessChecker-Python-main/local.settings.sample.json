@@ -1,0 +1,16 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "AZURE_TENANT_ID": "<your-tenant-id>",
+    "AZURE_AUTHORITY_HOST": "https://login.microsoftonline.us",
+    "API_AUDIENCE": "api://<same as mcp audience>",
+    "AZURE_COSMOS_DB_ENDPOINT": "https://chat-db.documents.azure.us:443/",
+    "AZURE_COSMOS_DB_DATABASE": "ChatDatabase",
+    "AZURE_COSMOS_DB_CONTAINER": "UserAccess",
+    "AZURE_COSMOS_DB_KEY": "",
+    "COSMOS_PARTITION_KEY_PATH": "/LoginID",
+    "RESPONSE_FORMAT": "text"
+  }
+}
