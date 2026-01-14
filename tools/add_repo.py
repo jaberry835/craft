@@ -74,9 +74,9 @@ def main():
         shutil.rmtree(git_dir, onerror=handle_remove_readonly)
         print(f"🗑️ Removed {git_dir}")
 
-    # Remove excluded file types (PDFs, videos, large binaries, Docker images, etc.)
-    removed_count = 0
-    removed_by_size = 0
+    # Scan for files to exclude (PDFs, videos, large binaries, Docker images, etc.)
+    files_to_remove = []
+    
     for root, dirs, files in os.walk(target_dir):
         for file in files:
             file_path = Path(root) / file
@@ -99,25 +99,59 @@ def main():
             elif file_path.stat().st_size > MAX_FILE_SIZE:
                 should_remove = True
                 reason = f"size: {file_path.stat().st_size / (1024*1024):.1f}MB"
-                removed_by_size += 1
             
             if should_remove:
-                file_path.unlink()
-                removed_count += 1
-                print(f"🗑️ Removed {file_path.relative_to(target_dir)} ({reason})")
+                files_to_remove.append((file_path, reason))
+    
+    # Display summary
+    if files_to_remove:
+        print(f"\n📋 Found {len(files_to_remove)} file(s) to exclude:")
+        print("=" * 70)
+        
+        # Group by reason
+        by_type = {}
+        for file_path, reason in files_to_remove:
+            if reason not in by_type:
+                by_type[reason] = []
+            by_type[reason].append(file_path.relative_to(target_dir))
+        
+        for reason, paths in sorted(by_type.items()):
+            print(f"\n{reason.upper()}: ({len(paths)} files)")
+            for path in paths[:10]:  # Show first 10 of each type
+                print(f"  - {path}")
+            if len(paths) > 10:
+                print(f"  ... and {len(paths) - 10} more")
+        
+        print("\n" + "=" * 70)
+        print(f"\n⚠️  Total: {len(files_to_remove)} file(s) will be excluded")
+    else:
+        print("\n✨ No files need to be excluded")
+    
+    # Ask for confirmation
+    print(f"\n📁 Repository will be added as: {target_dir}")
+    response = input("\n❓ Proceed with commit and push? (yes/no): ").strip().lower()
+    
+    if response not in ['yes', 'y']:
+        print(f"\n❌ Aborting. Cleaning up {target_dir}...")
+        shutil.rmtree(target_dir, onerror=handle_remove_readonly)
+        print("✅ Cleanup complete. No changes were committed.")
+        sys.exit(0)
+    
+    # User confirmed - now remove the files
+    removed_count = 0
+    for file_path, reason in files_to_remove:
+        file_path.unlink()
+        removed_count += 1
     
     if removed_count > 0:
-        print(f"✨ Removed {removed_count} file(s) total")
-        if removed_by_size > 0:
-            print(f"   ({removed_by_size} removed due to size >10MB)")
-    else:
-        print("✨ No files needed removal")
-
+        print(f"\n🗑️  Removed {removed_count} file(s)")
+    
+    # Proceed with git operations
     subprocess.run(["git", "add", target_dir], check=True)
     subprocess.run(["git", "commit", "-m", f"Add/update {repo_name} ({branch})"], check=True)
     subprocess.run(["git", "push"], check=True)
 
-    print(f"✅ Synced {repo_url} ({branch}) into curated repo as {target_dir}")
+    print(f"\n✅ Successfully synced {repo_url} ({branch}) into curated repo as {target_dir}")
 
 if __name__ == "__main__":
     main()
