@@ -155,10 +155,66 @@ def main():
     if is_update:
         print(f"\n🔄 Syncing changes to {target_dir}...")
         # Use rsync to sync directories (copies new, updates modified, deletes removed)
-        subprocess.run([
-            "rsync", "-a", "--delete",
+        # -i flag provides itemized change output
+        rsync_result = subprocess.run([
+            "rsync", "-a", "--delete", "-i",
             f"{temp_dir}/", f"{target_dir}/"
-        ], check=True)
+        ], check=True, capture_output=True, text=True)
+        
+        # Parse rsync output to count changes
+        new_files = []
+        modified_files = []
+        deleted_files = []
+        
+        for line in rsync_result.stdout.strip().split('\n'):
+            if not line:
+                continue
+            # rsync itemized output format: first char indicates file type, next chars indicate changes
+            # >f++++++++ = new file
+            # >f.st...... = modified file (size or time changed)
+            # *deleting = deleted file
+            if line.startswith('*deleting'):
+                deleted_files.append(line.replace('*deleting ', '').strip())
+            elif line.startswith('>f'):
+                filename = line[12:].strip() if len(line) > 12 else line
+                if '++++++' in line:
+                    new_files.append(filename)
+                else:
+                    modified_files.append(filename)
+        
+        # Display sync summary
+        total_synced = len(new_files) + len(modified_files) + len(deleted_files)
+        
+        if total_synced > 0:
+            print(f"\n📊 Sync Summary:")
+            print("=" * 70)
+            
+            if new_files:
+                print(f"\n✨ NEW FILES ({len(new_files)}):")
+                for f in new_files[:10]:
+                    print(f"  + {f}")
+                if len(new_files) > 10:
+                    print(f"  ... and {len(new_files) - 10} more")
+            
+            if modified_files:
+                print(f"\n📝 MODIFIED FILES ({len(modified_files)}):")
+                for f in modified_files[:10]:
+                    print(f"  ~ {f}")
+                if len(modified_files) > 10:
+                    print(f"  ... and {len(modified_files) - 10} more")
+            
+            if deleted_files:
+                print(f"\n🗑️  DELETED FILES ({len(deleted_files)}):")
+                for f in deleted_files[:10]:
+                    print(f"  - {f}")
+                if len(deleted_files) > 10:
+                    print(f"  ... and {len(deleted_files) - 10} more")
+            
+            print("\n" + "=" * 70)
+            print(f"Total: {total_synced} file(s) synced")
+        else:
+            print(f"✅ No file changes during sync")
+        
         print(f"✅ Synced to {target_dir}")
     else:
         print(f"\n📁 Creating new directory {target_dir}...")
