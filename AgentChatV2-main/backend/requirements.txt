@@ -1,0 +1,44 @@
+# Core dependencies - Agent Framework (preview)
+# Pin to exact versions to ensure FunctionCallContent etc. exports are available
+agent-framework-azure-ai==1.0.0b260114
+agent-framework-a2a==1.0.0b260114
+agent-framework-core==1.0.0b260114
+
+# A2A Protocol SDK (a2a-sdk is the correct package - NOT 'a2a' which is a web scraping tool)
+a2a-sdk>=0.3.5
+
+# Web framework
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.6
+sse-starlette>=1.8.0
+# Pin watchfiles and websockets to versions with prebuilt wheels
+watchfiles>=1.0.0
+websockets>=13.0
+
+# Azure SDKs (use DefaultAzureCredential for managed identity)
+azure-identity>=1.15.0
+azure-cosmos>=4.5.0
+azure-storage-blob>=12.19.0
+azure-search-documents>=11.4.0
+azure-ai-textanalytics>=5.3.0
+
+# Authentication
+msal>=1.26.0
+PyJWT>=2.8.0
+
+# Observability
+azure-monitor-opentelemetry>=1.2.0
+opentelemetry-api>=1.22.0
+opentelemetry-sdk>=1.22.0
+opentelemetry-instrumentation-fastapi>=0.43b0
+
+# Utilities
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+python-dotenv>=1.0.0
+httpx>=0.26.0
+tiktoken>=0.5.2
+
+# MCP client - pin to stable version
+mcp>=1.13.0

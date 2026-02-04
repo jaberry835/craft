@@ -1,0 +1,69 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+.env
+
+# Build outputs
+dist/
+build/
+*.egg-info/
+
+# Angular
+.angular/
+.angular/cache/
+*.ngsw-worker.js
+
+# TypeScript
+*.tsbuildinfo
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*.sublime-workspace
+*.sublime-project
+
+# Azure
+.azure/
+*.log
+local.settings.json
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+coverage/
+.nyc_output/
+
+# OS
+.DS_Store
+Thumbs.db
+*.orig
+
+# Python
+*.egg
+*.whl
+pip-log.txt
+pip-delete-this-directory.txt
+.Python
+*.manifest
+*.spec
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Misc
+*.bak
+*.tmp
+*.temp
+.cache/
