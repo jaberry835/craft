@@ -52,7 +52,10 @@ class EmbeddingService:
                 )
             
             self._initialized = True
-            logger.info("Embedding service initialized")
+            logger.info(f"Embedding service initialized: "
+                        f"endpoint={settings.azure_openai_endpoint}, "
+                        f"deployment={settings.azure_openai_embedding_deployment}, "
+                        f"api_version={settings.azure_openai_api_version}")
         except Exception as e:
             logger.error(f"Embedding service initialization failed: {e}")
             raise
@@ -76,14 +79,28 @@ class EmbeddingService:
     async def generate_embedding(self, text: str) -> list[float]:
         """Generate embedding for a single text with performance tracking."""
         if not self._initialized:
+            logger.warning("Embedding service not initialized - returning empty embedding")
             return []
         
         start_time = time.perf_counter()
         
-        response = self.client.embeddings.create(
-            input=text,
-            model=settings.azure_openai_embedding_deployment
-        )
+        # Log the AOAI call details for debugging 404 errors
+        logger.info(f"[AOAI-EMBEDDING] Calling embedding API: "
+                    f"endpoint={settings.azure_openai_endpoint}, "
+                    f"deployment={settings.azure_openai_embedding_deployment}, "
+                    f"text_length={len(text)}")
+        
+        try:
+            response = self.client.embeddings.create(
+                input=text,
+                model=settings.azure_openai_embedding_deployment
+            )
+        except Exception as e:
+            logger.error(f"[AOAI-EMBEDDING] Embedding API call failed: "
+                         f"endpoint={settings.azure_openai_endpoint}, "
+                         f"deployment={settings.azure_openai_embedding_deployment}, "
+                         f"error={e}")
+            raise
         
         duration_ms = (time.perf_counter() - start_time) * 1000
         tokens_used = getattr(response.usage, 'total_tokens', 0) if hasattr(response, 'usage') else 0

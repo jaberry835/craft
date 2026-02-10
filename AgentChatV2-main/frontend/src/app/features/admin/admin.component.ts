@@ -2,7 +2,7 @@ import { Component, OnInit, OnDestroy } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { Subject, takeUntil } from 'rxjs';
 
-import { AgentService, AgentConfig, MCPToolConfig, A2ADiscoveryResponse } from '../../core/services/agent.service';
+import { AgentService, AgentConfig, MCPToolConfig, A2ADiscoveryResponse, GroundingSource, GroundingStatusResponse } from '../../core/services/agent.service';
 import { environment } from '../../../environments/environment';
 
 @Component({
@@ -70,6 +70,12 @@ import { environment } from '../../../environments/environment';
                   <span class="material-icons">extension</span>
                   {{ agent.mcp_tools?.length || 0 }} Tools
                 </span>
+                @if (agent.grounding_sources && agent.grounding_sources.length > 0) {
+                  <span class="meta-item" title="Document grounding sources for RAG">
+                    <span class="material-icons">library_books</span>
+                    {{ agent.grounding_sources.length }} Doc Sources
+                  </span>
+                }
                 @if (!agent.is_orchestrator) {
                   <span class="meta-item a2a-url" title="Agent-to-Agent (A2A) Protocol URL - Use this endpoint to connect external agents">
                     <span class="material-icons">link</span>
@@ -200,7 +206,11 @@ import { environment } from '../../../environments/environment';
             
             <!-- MCP Server Discovery Section -->
             <div class="form-group">
-              <label>MCP Server Tools</label>
+              <label>
+                MCP Server Tools
+                <span class="material-icons info-tooltip" title="Model Context Protocol (MCP) allows agents to call external tools and APIs. Enter the URL of an MCP server to discover available tools.">info_outline</span>
+              </label>
+              <span class="field-hint">Connect to MCP servers to give this agent access to external tools and APIs.</span>
               
               <!-- Discovery Input -->
               <div class="mcp-discovery">
@@ -209,7 +219,8 @@ import { environment } from '../../../environments/environment';
                     type="text" 
                     class="input" 
                     [(ngModel)]="mcpServerUrl"
-                    placeholder="MCP Server URL (e.g., https://mcp-server.example.com/sse)"
+                    placeholder="MCP Server URL (e.g., https://mcp-server.example.com/mcp)"
+                    title="Enter the HTTP streaming endpoint URL of your MCP server. Examples:\n• https://mcp.example.com/mcp\n• http://localhost:3000/mcp\n• https://api.service.com/mcp"
                   />
                   <button 
                     class="btn btn-secondary" 
@@ -272,16 +283,104 @@ import { environment } from '../../../environments/environment';
                 </div>
               }
             </div>
+            
+            <!-- Document Grounding Section -->
+            @if (groundingAvailable && !editingAgent!.is_orchestrator) {
+              <div class="form-group">
+                <label>
+                  <span class="material-icons" style="vertical-align: middle; font-size: 18px; margin-right: 4px;">library_books</span>
+                  Document Grounding (RAG)
+                  <span class="material-icons info-tooltip" title="Retrieval Augmented Generation (RAG) grounds the agent in your documents. When asked questions, the agent will automatically search indexed documents for relevant context before responding.">info_outline</span>
+                </label>
+                <span class="field-hint">Ground this agent in documents from Azure Blob Storage. The agent will automatically search these documents when answering questions.</span>
+                
+                <!-- Add Grounding Source -->
+                <div class="grounding-input">
+                  <div class="grounding-input-row">
+                    <input 
+                      type="text" 
+                      class="input" 
+                      [(ngModel)]="groundingSourceName"
+                      placeholder="Source name (e.g., HR Policies)"
+                      title="A friendly name to identify this document source"
+                      style="max-width: 200px;"
+                    />
+                    <input 
+                      type="text" 
+                      class="input" 
+                      [(ngModel)]="groundingContainerUrl"
+                      placeholder="Azure Blob container URL"
+                      title="Azure Blob Storage container URL. Format:&#10;https://<storage-account>.blob.core.windows.net/<container>&#10;&#10;Examples:&#10;• https://mycompany.blob.core.windows.net/hr-docs&#10;• https://contoso.blob.core.windows.us/policies&#10;&#10;Supported file types: .txt, .md, .json, .csv, .xml, .html, .py, .js, .ts, .sql, .ps1"
+                      style="flex: 1;"
+                    />
+                    <button 
+                      class="btn btn-secondary" 
+                      (click)="addGroundingSource()"
+                      [disabled]="!groundingContainerUrl || isValidatingGrounding"
+                    >
+                      <span class="material-icons">{{ isValidatingGrounding ? 'hourglass_empty' : 'add' }}</span>
+                      {{ isValidatingGrounding ? 'Validating...' : 'Add Source' }}
+                    </button>
+                  </div>
+                  
+                  @if (groundingError) {
+                    <div class="discovery-error">
+                      <span class="material-icons">error</span>
+                      {{ groundingError }}
+                    </div>
+                  }
+                </div>
+                
+                <!-- Configured Grounding Sources -->
+                @if (editingAgent!.grounding_sources && editingAgent!.grounding_sources.length > 0) {
+                  <div class="grounding-sources">
+                    <label>Configured Sources ({{ editingAgent!.grounding_sources.length }})</label>
+                    <div class="sources-list">
+                      @for (source of editingAgent!.grounding_sources; track source.container_url; let i = $index) {
+                        <div class="source-item">
+                          <div class="source-info">
+                            <span class="material-icons">folder</span>
+                            <div class="source-details">
+                              <strong>{{ source.name || 'Documents' }}</strong>
+                              <span class="source-url">{{ source.container_url }}</span>
+                            </div>
+                          </div>
+                          <button class="btn-chip-remove" (click)="removeGroundingSource(i)" title="Remove source">×</button>
+                        </div>
+                      }
+                    </div>
+                  </div>
+                }
+              </div>
+            }
+            
+            @if (!groundingAvailable && !editingAgent!.is_orchestrator) {
+              <div class="form-group grounding-unavailable">
+                <label>
+                  <span class="material-icons" style="vertical-align: middle; font-size: 18px; margin-right: 4px;">library_books</span>
+                  Document Grounding (RAG)
+                </label>
+                <div class="info-message">
+                  <span class="material-icons">info</span>
+                  <span>Document grounding is not configured. Set AZURE_AI_FOUNDRY_ENDPOINT to enable grounding agents with Azure Blob Storage documents.</span>
+                </div>
+              </div>
+            }
           </div>
           
           <div class="modal-footer">
-            <button class="btn btn-secondary" (click)="closeEditor()">Cancel</button>
+            <button class="btn btn-secondary" (click)="closeEditor()" [disabled]="isSavingAgent">Cancel</button>
             <button 
               class="btn btn-primary" 
               (click)="saveAgent()"
-              [disabled]="!isValidAgent()"
+              [disabled]="!isValidAgent() || isSavingAgent"
             >
-              {{ editingAgent?.id ? 'Update' : 'Create' }} Agent
+              @if (isSavingAgent) {
+                <span class="material-icons spinning">sync</span>
+                {{ editingAgent?.grounding_sources?.length ? 'Indexing Documents...' : 'Saving...' }}
+              } @else {
+                {{ editingAgent?.id ? 'Update' : 'Create' }} Agent
+              }
             </button>
           </div>
         </div>
@@ -853,6 +952,134 @@ import { environment } from '../../../environments/environment';
         }
       }
     }
+    
+    /* Grounding Styles */
+    .grounding-input {
+      background-color: var(--bg-primary);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: var(--spacing-md);
+      margin-top: var(--spacing-sm);
+    }
+    
+    .grounding-input-row {
+      display: flex;
+      gap: var(--spacing-sm);
+      flex-wrap: wrap;
+      
+      input {
+        min-width: 150px;
+      }
+      
+      button {
+        white-space: nowrap;
+      }
+    }
+    
+    .grounding-sources {
+      margin-top: var(--spacing-md);
+      
+      label {
+        font-size: 12px;
+        color: var(--text-muted);
+        margin-bottom: var(--spacing-xs);
+        display: block;
+      }
+    }
+    
+    .sources-list {
+      display: flex;
+      flex-direction: column;
+      gap: var(--spacing-xs);
+    }
+    
+    .source-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: var(--spacing-sm);
+      background-color: var(--bg-tertiary);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      
+      .source-info {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-sm);
+        flex: 1;
+        min-width: 0;
+        
+        .material-icons {
+          color: var(--primary);
+          font-size: 20px;
+        }
+      }
+      
+      .source-details {
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+        
+        strong {
+          font-size: 13px;
+          color: var(--text-primary);
+        }
+        
+        .source-url {
+          font-size: 11px;
+          color: var(--text-muted);
+          font-family: monospace;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+      }
+    }
+    
+    .grounding-unavailable {
+      .info-message {
+        display: flex;
+        align-items: flex-start;
+        gap: var(--spacing-sm);
+        padding: var(--spacing-sm);
+        background-color: var(--bg-tertiary);
+        border: 1px solid var(--border-color);
+        border-radius: 6px;
+        font-size: 12px;
+        color: var(--text-muted);
+        
+        .material-icons {
+          font-size: 16px;
+          color: var(--text-muted);
+          flex-shrink: 0;
+        }
+      }
+    }
+    
+    /* Info tooltip icon in labels */
+    .info-tooltip {
+      font-size: 16px !important;
+      color: var(--text-muted);
+      cursor: help;
+      vertical-align: middle;
+      margin-left: 4px;
+      opacity: 0.7;
+      
+      &:hover {
+        opacity: 1;
+        color: var(--primary);
+      }
+    }
+    
+    /* Spinning animation for loading indicators */
+    .spinning {
+      animation: spin 1s linear infinite;
+    }
+    
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
   `]
 })
 export class AdminComponent implements OnInit, OnDestroy {
@@ -874,12 +1101,23 @@ export class AdminComponent implements OnInit, OnDestroy {
   a2aDiscoveryError = '';
   discoveredA2AAgent: A2ADiscoveryResponse | null = null;
   
+  // Grounding state
+  groundingAvailable = false;
+  groundingContainerUrl = '';
+  groundingSourceName = '';
+  groundingError = '';
+  isValidatingGrounding = false;
+  
+  // Save state
+  isSavingAgent = false;
+  
   private destroy$ = new Subject<void>();
   
   constructor(private agentService: AgentService) {}
   
   ngOnInit(): void {
     this.loadAgents();
+    this.checkGroundingStatus();
   }
   
   ngOnDestroy(): void {
@@ -905,7 +1143,11 @@ export class AdminComponent implements OnInit, OnDestroy {
   }
   
   openEditor(agent?: AgentConfig): void {
-    this.editingAgent = agent ? { ...agent, mcp_tools: [...(agent.mcp_tools || [])] } : {
+    this.editingAgent = agent ? { 
+      ...agent, 
+      mcp_tools: [...(agent.mcp_tools || [])],
+      grounding_sources: [...(agent.grounding_sources || [])]
+    } : {
       name: '',
       description: '',
       system_prompt: '',
@@ -915,12 +1157,17 @@ export class AdminComponent implements OnInit, OnDestroy {
       a2a_enabled: true,
       analysis_prompt: '',
       synthesis_prompt: '',
-      mcp_tools: []
+      mcp_tools: [],
+      grounding_sources: []
     };
     // Reset discovery state when opening editor
     this.mcpServerUrl = '';
     this.discoveredTools = [];
     this.discoveryError = '';
+    // Reset grounding input state
+    this.groundingContainerUrl = '';
+    this.groundingSourceName = '';
+    this.groundingError = '';
     this.showEditor = true;
   }
   
@@ -947,7 +1194,9 @@ export class AdminComponent implements OnInit, OnDestroy {
   }
   
   saveAgent(): void {
-    if (!this.editingAgent || !this.isValidAgent()) return;
+    if (!this.editingAgent || !this.isValidAgent() || this.isSavingAgent) return;
+    
+    this.isSavingAgent = true;
     
     const operation = this.editingAgent.id
       ? this.agentService.updateAgent(this.editingAgent.id, this.editingAgent)
@@ -955,10 +1204,12 @@ export class AdminComponent implements OnInit, OnDestroy {
     
     operation.pipe(takeUntil(this.destroy$)).subscribe({
       next: () => {
+        this.isSavingAgent = false;
         this.closeEditor();
         this.loadAgents();
       },
       error: (err) => {
+        this.isSavingAgent = false;
         console.error('Failed to save agent:', err);
       }
     });
@@ -1146,5 +1397,82 @@ export class AdminComponent implements OnInit, OnDestroy {
           console.error('Failed to add A2A agent:', err);
         }
       });
+  }
+  
+  // =========================================================================
+  // Grounding (Document RAG) Methods
+  // =========================================================================
+  
+  checkGroundingStatus(): void {
+    this.agentService.getGroundingStatus()
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (response) => {
+          this.groundingAvailable = response.available;
+        },
+        error: (err) => {
+          console.error('Failed to check grounding status:', err);
+          this.groundingAvailable = false;
+        }
+      });
+  }
+  
+  addGroundingSource(): void {
+    if (!this.groundingContainerUrl || !this.editingAgent) return;
+    
+    this.isValidatingGrounding = true;
+    this.groundingError = '';
+    
+    // Validate the URL first
+    this.agentService.validateGroundingSource(this.groundingContainerUrl)
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (response) => {
+          this.isValidatingGrounding = false;
+          if (!response.is_available) {
+            this.groundingError = response.message;
+            return;
+          }
+          if (!response.valid) {
+            this.groundingError = response.message;
+            return;
+          }
+          
+          // Add the grounding source
+          if (!this.editingAgent!.grounding_sources) {
+            this.editingAgent!.grounding_sources = [];
+          }
+          
+          this.editingAgent!.grounding_sources.push({
+            container_url: this.groundingContainerUrl,
+            name: this.groundingSourceName || this.extractContainerName(this.groundingContainerUrl),
+            description: ''
+          });
+          
+          // Reset input fields
+          this.groundingContainerUrl = '';
+          this.groundingSourceName = '';
+        },
+        error: (err) => {
+          this.isValidatingGrounding = false;
+          this.groundingError = err.error?.detail || err.message || 'Failed to validate grounding source';
+          console.error('Grounding validation error:', err);
+        }
+      });
+  }
+  
+  removeGroundingSource(index: number): void {
+    if (!this.editingAgent?.grounding_sources) return;
+    this.editingAgent.grounding_sources.splice(index, 1);
+  }
+  
+  private extractContainerName(url: string): string {
+    // Extract container name from URL like https://account.blob.core.windows.net/container
+    try {
+      const parts = url.split('/');
+      return parts[parts.length - 1] || 'documents';
+    } catch {
+      return 'documents';
+    }
   }
 }

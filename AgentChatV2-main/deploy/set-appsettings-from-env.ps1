@@ -65,11 +65,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# Settings to always exclude - client secrets should not be uploaded; use managed identity instead
-# Note: AZURE_TENANT_ID and AZURE_CLIENT_ID are still needed for token validation
-$alwaysExclude = @(
-    "AZURE_CLIENT_SECRET"
-)
+# Note: AZURE_TENANT_ID and AZURE_CLIENT_ID are needed for token validation
+# Authentication uses managed identity in production, Azure CLI locally
+$alwaysExclude = @()
 
 # Default .env file path
 $scriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path

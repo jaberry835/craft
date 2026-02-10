@@ -78,6 +78,33 @@ class MCPDiscoveryResponse(BaseModel):
     error: Optional[str] = None
 
 
+class GroundingSource(BaseModel):
+    """Configuration for grounding an agent with documents from Azure Blob Storage.
+    
+    Agents can be grounded in organizational documents by pointing to Azure Blob
+    Storage containers. The documents are indexed into a vector store and the agent
+    uses file search to find relevant information when answering questions.
+    """
+    container_url: str = Field(
+        ..., 
+        min_length=1,
+        description="Azure Blob Storage container URL (e.g., https://account.blob.core.windows.net/container)"
+    )
+    name: Optional[str] = Field(
+        default=None,
+        description="Friendly name for this grounding source (e.g., 'HR Policies')"
+    )
+    description: Optional[str] = Field(
+        default=None,
+        description="Description of what documents are in this source"
+    )
+    # Optional: filter to specific blobs within the container
+    blob_prefix: Optional[str] = Field(
+        default=None,
+        description="Optional prefix to filter blobs (e.g., 'policies/' to only include blobs in that folder)"
+    )
+
+
 class A2AAgentSkill(BaseModel):
     """A2A agent skill from agent card."""
     id: str
@@ -114,6 +141,18 @@ class AgentConfig(BaseModel):
     max_tokens: Optional[int] = Field(default=None, ge=1, le=128000)
     mcp_tools: list[MCPToolConfig | str] = Field(default_factory=list)  # Selected tools for this agent
     mcp_servers: list[str] = Field(default_factory=list)  # MCP server IDs this agent can use
+    
+    # Grounding sources - Azure Blob Storage containers with documents for RAG
+    # When configured, the agent uses file search to find relevant information
+    grounding_sources: list[GroundingSource] = Field(
+        default_factory=list,
+        description="Azure Blob Storage containers with documents to ground the agent's knowledge"
+    )
+    # Grounding index name is managed by the system (created when grounding sources are configured)
+    grounding_index_name: Optional[str] = Field(
+        default=None,
+        description="System-managed Azure AI Search index name for grounding (do not set manually)"
+    )
     
     # For A2A agents only
     a2a_url: Optional[str] = None  # External A2A agent endpoint URL

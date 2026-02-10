@@ -23,6 +23,7 @@ from observability import (
 from services.cosmos_service import cosmos_service
 from services.mcp_client import mcp_client
 from services.a2a_client import a2a_client, A2A_AVAILABLE
+from services.grounding_service import grounding_service
 
 settings = get_settings()
 logger = get_logger(__name__)
@@ -272,6 +273,11 @@ class AgentManager:
         if should_log_agent():
             logger.info(f"Using {type(self._credential).__name__} for Azure OpenAI ({env_mode} mode)")
         
+        # Initialize grounding service for document file search
+        await grounding_service.initialize()
+        if grounding_service.is_available:
+            logger.info("Grounding service available for document search")
+        
         await self.refresh_agents()
         if should_log_agent():
             logger.info("Agent Manager initialized")
@@ -308,15 +314,23 @@ class AgentManager:
         """
         # Model/deployment is required for each agent - no global default
         deployment_name = agent_config.get("model")
+        agent_name = agent_config.get("name", "Unknown")
+        
         if not deployment_name:
-            agent_name = agent_config.get("name", "Unknown")
             raise ValueError(
                 f"Agent '{agent_name}' does not have a model/deployment configured. "
                 f"Please configure the Azure OpenAI deployment name in the Admin UI."
             )
         
+        # Log AOAI configuration for debugging
+        logger.info(f"[AOAI-CONFIG] Creating chat client for agent '{agent_name}': "
+                    f"endpoint={settings.azure_openai_endpoint}, "
+                    f"deployment={deployment_name}, "
+                    f"api_version={settings.azure_openai_api_version}")
+        
         # Use API key if available, otherwise use token provider
         if settings.azure_openai_key:
+            logger.debug(f"[AOAI-CONFIG] Using API key authentication for agent '{agent_name}'")
             return AzureOpenAIChatClient(
                 endpoint=settings.azure_openai_endpoint,
                 deployment_name=deployment_name,
@@ -324,6 +338,7 @@ class AgentManager:
             )
         else:
             # Use token provider with Azure Government scope
+            logger.debug(f"[AOAI-CONFIG] Using token provider authentication for agent '{agent_name}'")
             return AzureOpenAIChatClient(
                 endpoint=settings.azure_openai_endpoint,
                 deployment_name=deployment_name,
@@ -335,9 +350,25 @@ class AgentManager:
         agent_config: dict,
         user_token: Optional[str] = None
     ) -> ChatAgent:
-        """Create a specialist ChatAgent with MCP tools."""
+        """Create a specialist ChatAgent with MCP tools and optional grounding."""
         # Specialist agents get MCP tools
         tools = await mcp_client.get_tools_for_agent(agent_config, user_token)
+        if tools is None:
+            tools = []
+        
+        # Add knowledge base search tool if grounding sources are configured
+        grounding_sources = agent_config.get("grounding_sources", [])
+        grounding_index = agent_config.get("grounding_index_name")
+        if grounding_sources and grounding_index and grounding_service.is_available:
+            # Create a search tool that queries the agent's grounded documents
+            search_tool = grounding_service.create_search_tool(
+                agent_id=agent_config.get("id", ""),
+                agent_name=agent_config.get("name", "Agent")
+            )
+            tools.append(search_tool)
+            if should_log_agent():
+                source_names = [s.get("name") or s.get("container_url") for s in grounding_sources]
+                logger.info(f"Added knowledge base search tool for agent '{agent_config.get('name')}' with sources: {source_names}")
         
         # Create chat client
         chat_client = self._create_chat_client(agent_config)

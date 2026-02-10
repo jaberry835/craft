@@ -31,10 +31,9 @@ class Settings(BaseSettings):
     )
     
     # Entra ID - optional when using managed identity in production
-    # Required for local dev with client credentials or for token validation
+    # Required for token validation of incoming user tokens
     azure_tenant_id: str = Field(default="", alias="AZURE_TENANT_ID")
     azure_client_id: str = Field(default="", alias="AZURE_CLIENT_ID")
-    azure_client_secret: str = Field(default="", alias="AZURE_CLIENT_SECRET")
     
     # Azure OpenAI
     azure_openai_endpoint: str = Field(default="", alias="AZURE_OPENAI_ENDPOINT")

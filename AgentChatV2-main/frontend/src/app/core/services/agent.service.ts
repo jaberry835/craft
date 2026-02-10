@@ -85,6 +85,25 @@ export interface A2ATestResponse {
   error?: string;
 }
 
+// Grounding configuration for document RAG
+export interface GroundingSource {
+  container_url: string;  // Azure Blob Storage container URL
+  name?: string;          // Friendly name for the source
+  description?: string;   // Description of what documents are in this source
+  blob_prefix?: string;   // Optional prefix to filter blobs
+}
+
+export interface GroundingValidationResponse {
+  valid: boolean;
+  message: string;
+  is_available: boolean;
+}
+
+export interface GroundingStatusResponse {
+  available: boolean;
+  message: string;
+}
+
 export interface AgentConfig {
   id?: string;
   name: string;
@@ -98,6 +117,10 @@ export interface AgentConfig {
   max_tokens?: number;
   mcp_tools?: MCPToolConfig[];
   mcp_servers?: string[];
+  
+  // Grounding sources for document RAG
+  grounding_sources?: GroundingSource[];
+  grounding_index_name?: string;  // System-managed, do not set manually
   
   // For A2A agents
   a2a_url?: string;
@@ -283,6 +306,29 @@ export class AgentService {
   addA2AAgent(request: A2ADiscoveryRequest): Observable<AgentConfig> {
     return this.http.post<AgentConfig>(`${this.a2aApiUrl}/add`, request).pipe(
       tap(() => this.loadAgents().subscribe())
+    );
+  }
+  
+  // =========================================================================
+  // Grounding Operations (Document RAG)
+  // =========================================================================
+  
+  private readonly groundingApiUrl = environment.apiUrl + '/admin/grounding';
+  
+  /**
+   * Check if grounding service is available.
+   */
+  getGroundingStatus(): Observable<GroundingStatusResponse> {
+    return this.http.get<GroundingStatusResponse>(`${this.groundingApiUrl}/status`);
+  }
+  
+  /**
+   * Validate a grounding source container URL.
+   */
+  validateGroundingSource(containerUrl: string): Observable<GroundingValidationResponse> {
+    return this.http.post<GroundingValidationResponse>(
+      `${this.groundingApiUrl}/validate`,
+      { container_url: containerUrl }
     );
   }
 }

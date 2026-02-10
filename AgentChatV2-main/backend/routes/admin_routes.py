@@ -9,12 +9,13 @@ from pydantic import BaseModel, Field
 from models import (
     AgentConfig, AgentListResponse, SystemStats,
     MCPServerConfig, MCPServerListResponse, MCPDiscoveryRequest, MCPDiscoveryResponse,
-    AgentType, A2AAgentCard
+    AgentType, A2AAgentCard, GroundingSource
 )
 from services.cosmos_service import cosmos_service
 from services.agent_manager import agent_manager
 from services.mcp_discovery import mcp_discovery
 from services.a2a_client import a2a_client
+from services.grounding_service import grounding_service
 from config import get_settings
 from observability import get_logger
 
@@ -76,7 +77,30 @@ async def create_agent(
             for t in agent_dict["mcp_tools"]
         ]
     
+    # Convert grounding_sources to serializable format
+    if "grounding_sources" in agent_dict:
+        agent_dict["grounding_sources"] = [
+            s.model_dump() if hasattr(s, "model_dump") else s
+            for s in agent_dict["grounding_sources"]
+        ]
+    
+    # First save to get the agent ID
     saved = await cosmos_service.save_agent(agent_dict)
+    
+    # Create grounding index if grounding sources are configured
+    grounding_sources = saved.get("grounding_sources", [])
+    logger.info(f"Agent create: grounding_sources={len(grounding_sources)}, is_available={grounding_service.is_available}")
+    if grounding_sources and grounding_service.is_available:
+        grounding_index = await grounding_service.create_or_update_grounding_index(
+            agent_id=saved["id"],
+            agent_name=saved.get("name", "Agent"),
+            grounding_sources=grounding_sources
+        )
+        if grounding_index:
+            saved["grounding_index_name"] = grounding_index
+            # Save again with grounding_index_name
+            await cosmos_service.save_agent(saved)
+            logger.info(f"Created grounding index {grounding_index} for agent {saved['id']}")
     
     # Refresh agent cache
     await agent_manager.refresh_agents()
@@ -109,6 +133,50 @@ async def update_agent(
         for tool in agent_dict["mcp_tools"]:
             logger.debug(f"  Tool: {tool.get('name')} -> {tool.get('server_url')}")
     
+    # Convert grounding_sources to serializable format
+    if "grounding_sources" in agent_dict:
+        agent_dict["grounding_sources"] = [
+            s.model_dump() if hasattr(s, "model_dump") else s
+            for s in agent_dict["grounding_sources"]
+        ]
+    
+    # Check if grounding sources changed and update grounding index
+    new_grounding = agent_dict.get("grounding_sources", [])
+    old_grounding = existing.get("grounding_sources", [])
+    existing_grounding_index = existing.get("grounding_index_name")
+    
+    logger.info(f"Agent update: new_grounding={len(new_grounding)}, old_grounding={len(old_grounding)}, existing_index={existing_grounding_index}, is_available={grounding_service.is_available}")
+    
+    # Compare grounding sources to see if we need to update
+    grounding_changed = (
+        len(new_grounding) != len(old_grounding) or
+        any(
+            n.get("container_url") != o.get("container_url") or
+            n.get("blob_prefix") != o.get("blob_prefix")
+            for n, o in zip(new_grounding, old_grounding)
+        )
+    )
+    
+    if grounding_changed and grounding_service.is_available:
+        if new_grounding:
+            # Create or update grounding index
+            grounding_index = await grounding_service.create_or_update_grounding_index(
+                agent_id=agent_id,
+                agent_name=agent_dict.get("name", existing.get("name", "Agent")),
+                grounding_sources=new_grounding
+            )
+            agent_dict["grounding_index_name"] = grounding_index
+            logger.info(f"Updated grounding index for agent {agent_id}: {grounding_index}")
+        else:
+            # No grounding sources - delete grounding index
+            if existing_grounding_index:
+                await grounding_service.delete_grounding_index(agent_id)
+            agent_dict["grounding_index_name"] = None
+            logger.info(f"Removed grounding index from agent {agent_id}")
+    else:
+        # Preserve existing grounding_index_name
+        agent_dict["grounding_index_name"] = existing_grounding_index
+    
     saved = await cosmos_service.save_agent(agent_dict)
     await agent_manager.refresh_agents()
     
@@ -123,14 +191,75 @@ async def delete_agent(
     admin=Depends(require_admin)
 ):
     """Delete an agent."""
+    # Get agent to check for grounding index
+    agent = await cosmos_service.get_agent(agent_id)
+    
     success = await cosmos_service.delete_agent(agent_id)
     if not success:
         raise HTTPException(status_code=404, detail="Agent not found")
+    
+    # Clean up grounding index if exists
+    if agent and agent.get("grounding_sources") and grounding_service.is_available:
+        await grounding_service.delete_grounding_index(agent_id)
+        logger.info(f"Deleted grounding index for agent {agent_id}")
     
     await agent_manager.refresh_agents()
     
     logger.info(f"Deleted agent: {agent_id} by {admin.user_id}")
     return {"message": "Agent deleted"}
+
+
+# =============================================================================
+# Grounding Source Validation
+# =============================================================================
+
+class GroundingValidationRequest(BaseModel):
+    """Request to validate a grounding source URL."""
+    container_url: str = Field(..., min_length=1)
+
+
+class GroundingValidationResponse(BaseModel):
+    """Response from grounding source validation."""
+    valid: bool
+    message: str
+    is_available: bool = True  # Whether grounding service is available
+
+
+@router.post("/grounding/validate", response_model=GroundingValidationResponse)
+async def validate_grounding_source(
+    request: Request,
+    validation_request: GroundingValidationRequest,
+    admin=Depends(require_admin)
+):
+    """Validate that a grounding source container URL is accessible."""
+    if not grounding_service.is_available:
+        return GroundingValidationResponse(
+            valid=False,
+            message="Grounding service is not configured. Set AZURE_AI_FOUNDRY_ENDPOINT to enable document grounding.",
+            is_available=False
+        )
+    
+    is_valid, message = await grounding_service.validate_container_access(
+        validation_request.container_url
+    )
+    return GroundingValidationResponse(
+        valid=is_valid,
+        message=message,
+        is_available=True
+    )
+
+
+@router.get("/grounding/status")
+async def get_grounding_status(
+    request: Request,
+    admin=Depends(require_admin)
+):
+    """Get grounding service status."""
+    return {
+        "available": grounding_service.is_available,
+        "message": "Grounding service is configured and ready" if grounding_service.is_available 
+                   else "Grounding service is not configured. Set AZURE_AI_FOUNDRY_ENDPOINT to enable."
+    }
 
 
 # =============================================================================
