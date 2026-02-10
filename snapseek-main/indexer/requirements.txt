@@ -1,0 +1,32 @@
+# Indexer Dependencies
+azure-ai-vision-imageanalysis>=1.0.0
+azure-ai-formrecognizer>=3.3.0
+azure-cognitiveservices-vision-face>=0.6.0
+azure-search-documents>=11.4.0
+azure-storage-blob>=12.19.0
+azure-identity>=1.15.0
+openai>=1.12.0
+
+# Image Processing
+Pillow>=10.2.0
+imgbeddings>=0.1.0
+
+# Data & Utils
+pydantic>=2.6.0
+pydantic-settings>=2.1.0
+python-dotenv>=1.0.0
+aiohttp>=3.9.0
+aiofiles>=23.2.0
+tenacity>=8.2.0
+structlog>=24.1.0
+
+# CLI
+typer>=0.9.0
+rich>=13.7.0
+
+# Development
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+black>=24.1.0
+ruff>=0.2.0
+mypy>=1.8.0
