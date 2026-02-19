@@ -18,7 +18,7 @@ export const environment = {
       // TODO: Move these to environment variables or config service
       // Azure Government: login.microsoftonline.us
       // Azure Commercial: login.microsoftonline.com
-      clientId: '5e9822c5-f870-4acb-b2e6-1852254d9cbb',
+      clientId: '6349498a-a2f9-4081-8b82-d2119ac8f23c',
       authority: 'https://login.microsoftonline.us/03f141f3-496d-4319-bbea-a3e9286cab10',
       redirectUri: typeof window !== 'undefined' ? window.location.origin : '',
       postLogoutRedirectUri: typeof window !== 'undefined' ? window.location.origin : '',
@@ -38,5 +38,5 @@ export const environment = {
   // Standard OIDC scopes for login
   loginScopes: ['openid', 'profile', 'email'],
   // API scope from app registration - use your exposed API scope
-  apiScopes: ['api://5e9822c5-f870-4acb-b2e6-1852254d9cbb/mcp-access']
+  apiScopes: ['api://6349498a-a2f9-4081-8b82-d2119ac8f23c/MCPaccess']
 };

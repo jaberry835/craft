@@ -3,7 +3,7 @@ Pydantic models for request/response validation.
 """
 from typing import Optional, Any
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from enum import Enum
 
 
@@ -137,6 +137,10 @@ class AgentConfig(BaseModel):
     # For LOCAL agents only
     system_prompt: Optional[str] = Field(default=None)  # Required for local, optional for A2A
     model: Optional[str] = Field(default=None)  # Required for local agents - Azure OpenAI deployment name
+    aoai_endpoint_id: Optional[str] = Field(
+        default=None,
+        description="Reference to an AOAI endpoint configuration. If not set, uses the default endpoint from environment."
+    )
     temperature: float = Field(default=0.7, ge=0, le=2)
     max_tokens: Optional[int] = Field(default=None, ge=1, le=128000)
     mcp_tools: list[MCPToolConfig | str] = Field(default_factory=list)  # Selected tools for this agent
@@ -377,3 +381,70 @@ class CostWarning(BaseModel):
     token_limit: int
     estimated_cost: float
     warning_level: str  # "info", "warning", "critical"
+
+
+# =============================================================================
+# Azure OpenAI Endpoint Models
+# =============================================================================
+
+class ModelDeployment(BaseModel):
+    """Azure OpenAI model deployment information."""
+    deployment_name: str
+    model_name: str
+    model_version: Optional[str] = None
+    capacity: Optional[int] = None
+    sku: Optional[str] = None
+
+
+class AOAIEndpointConfig(BaseModel):
+    """Azure OpenAI endpoint configuration."""
+    id: Optional[str] = None
+    name: str = Field(..., min_length=1, max_length=100)
+    endpoint: str = Field(..., min_length=1, description="Azure OpenAI endpoint URL")
+    # Azure cloud environment: AzureGovernment, AzureCommercial, AzureChina
+    cloud: str = Field(default="AzureCommercial", description="Azure cloud environment")
+    api_version: str = Field(default="2024-02-15-preview", description="API version to use")
+    # Note: Authentication uses managed identity or Azure CLI credential
+    # API key is optional for backward compatibility or specific scenarios
+    api_key: Optional[str] = Field(default=None, description="Optional API key (uses managed identity if not provided)")
+
+    @field_validator("endpoint")
+    @classmethod
+    def validate_endpoint_url(cls, v: str) -> str:
+        """Ensure endpoint URL is valid and starts with https://."""
+        v = v.strip()
+        # Fix common typo: missing 'h' from https
+        if v.startswith("ttps://"):
+            v = "h" + v
+        # Add https:// if no scheme provided
+        if not v.startswith("http://") and not v.startswith("https://"):
+            v = "https://" + v
+        # Enforce https
+        if not v.startswith("https://"):
+            raise ValueError("Endpoint URL must use https://")
+        # Ensure trailing slash for consistency
+        if not v.endswith("/"):
+            v += "/"
+        return v
+    # ARM API info for deployment discovery (required for auto-discovery)
+    subscription_id: Optional[str] = Field(default=None, description="Azure subscription ID for deployment discovery")
+    resource_group: Optional[str] = Field(default=None, description="Resource group name for deployment discovery")
+    is_active: bool = True
+    description: Optional[str] = None
+    # Cached deployments from discovery
+    deployments: list[ModelDeployment] = Field(default_factory=list)
+    last_discovered_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class AOAIEndpointListResponse(BaseModel):
+    """Response for listing AOAI endpoints."""
+    endpoints: list[AOAIEndpointConfig]
+    count: int
+
+
+class AOAIDeploymentListResponse(BaseModel):
+    """Response for listing all available deployments across endpoints."""
+    deployments: list[dict]  # {endpoint_id, endpoint_name, deployment_name, model_name}
+    count: int

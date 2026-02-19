@@ -104,6 +104,51 @@ export interface GroundingStatusResponse {
   message: string;
 }
 
+// Azure OpenAI Endpoint Types
+export interface ModelDeployment {
+  deployment_name: string;
+  model_name: string;
+  model_version?: string;
+  capacity?: number;
+  sku?: string;
+}
+
+export interface AOAIEndpointConfig {
+  id?: string;
+  name: string;
+  endpoint: string;
+  cloud?: string;  // AzureCommercial, AzureGovernment, AzureChina
+  api_version?: string;
+  api_key?: string;  // Optional - uses managed identity if not provided
+  // ARM API info for deployment discovery (required for auto-discovery)
+  subscription_id?: string;
+  resource_group?: string;
+  is_active?: boolean;
+  description?: string;
+  deployments?: ModelDeployment[];
+  last_discovered_at?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface AOAIEndpointListResponse {
+  endpoints: AOAIEndpointConfig[];
+  count: number;
+}
+
+export interface AOAIDeploymentOption {
+  endpoint_id: string;
+  endpoint_name: string;
+  deployment_name: string;
+  model_name: string;
+  model_version?: string;
+}
+
+export interface AOAIDeploymentListResponse {
+  deployments: AOAIDeploymentOption[];
+  count: number;
+}
+
 export interface AgentConfig {
   id?: string;
   name: string;
@@ -113,6 +158,7 @@ export interface AgentConfig {
   // For local agents (model is required for local agents)
   system_prompt?: string;  // Required for local, optional for A2A
   model?: string;  // Required for local agents - Azure OpenAI deployment name
+  aoai_endpoint_id?: string;  // Reference to an AOAI endpoint configuration
   temperature?: number;
   max_tokens?: number;
   mcp_tools?: MCPToolConfig[];
@@ -329,6 +375,93 @@ export class AgentService {
     return this.http.post<GroundingValidationResponse>(
       `${this.groundingApiUrl}/validate`,
       { container_url: containerUrl }
+    );
+  }
+  
+  // =========================================================================
+  // Azure OpenAI Endpoint Operations
+  // =========================================================================
+  
+  private readonly aoaiApiUrl = environment.apiUrl + '/admin/aoai-endpoints';
+  
+  private aoaiEndpointsSubject = new BehaviorSubject<AOAIEndpointConfig[]>([]);
+  aoaiEndpoints$ = this.aoaiEndpointsSubject.asObservable();
+  
+  private deploymentsSubject = new BehaviorSubject<AOAIDeploymentOption[]>([]);
+  deployments$ = this.deploymentsSubject.asObservable();
+  
+  /**
+   * Load all registered Azure OpenAI endpoints.
+   */
+  loadAoaiEndpoints(): Observable<AOAIEndpointListResponse> {
+    return this.http.get<AOAIEndpointListResponse>(this.aoaiApiUrl).pipe(
+      tap(response => this.aoaiEndpointsSubject.next(response.endpoints))
+    );
+  }
+  
+  /**
+   * Get all available model deployments across all endpoints.
+   * Used to populate the model dropdown when creating/editing agents.
+   */
+  loadDeployments(): Observable<AOAIDeploymentListResponse> {
+    return this.http.get<AOAIDeploymentListResponse>(`${this.aoaiApiUrl}/deployments`).pipe(
+      tap(response => this.deploymentsSubject.next(response.deployments))
+    );
+  }
+  
+  /**
+   * Get a specific Azure OpenAI endpoint.
+   */
+  getAoaiEndpoint(endpointId: string): Observable<AOAIEndpointConfig> {
+    return this.http.get<AOAIEndpointConfig>(`${this.aoaiApiUrl}/${endpointId}`);
+  }
+  
+  /**
+   * Create a new Azure OpenAI endpoint.
+   * Automatically discovers available model deployments.
+   */
+  createAoaiEndpoint(endpoint: AOAIEndpointConfig): Observable<AOAIEndpointConfig> {
+    return this.http.post<AOAIEndpointConfig>(this.aoaiApiUrl, endpoint).pipe(
+      tap(() => {
+        this.loadAoaiEndpoints().subscribe();
+        this.loadDeployments().subscribe();
+      })
+    );
+  }
+  
+  /**
+   * Update an existing Azure OpenAI endpoint.
+   */
+  updateAoaiEndpoint(endpointId: string, endpoint: AOAIEndpointConfig): Observable<AOAIEndpointConfig> {
+    return this.http.put<AOAIEndpointConfig>(`${this.aoaiApiUrl}/${endpointId}`, endpoint).pipe(
+      tap(() => {
+        this.loadAoaiEndpoints().subscribe();
+        this.loadDeployments().subscribe();
+      })
+    );
+  }
+  
+  /**
+   * Delete an Azure OpenAI endpoint.
+   */
+  deleteAoaiEndpoint(endpointId: string): Observable<void> {
+    return this.http.delete<void>(`${this.aoaiApiUrl}/${endpointId}`).pipe(
+      tap(() => {
+        this.loadAoaiEndpoints().subscribe();
+        this.loadDeployments().subscribe();
+      })
+    );
+  }
+  
+  /**
+   * Refresh/re-discover deployments from an existing Azure OpenAI endpoint.
+   */
+  refreshAoaiEndpoint(endpointId: string): Observable<AOAIEndpointConfig> {
+    return this.http.post<AOAIEndpointConfig>(`${this.aoaiApiUrl}/${endpointId}/refresh`, {}).pipe(
+      tap(() => {
+        this.loadAoaiEndpoints().subscribe();
+        this.loadDeployments().subscribe();
+      })
     );
   }
 }

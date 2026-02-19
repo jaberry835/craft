@@ -194,6 +194,47 @@ class CosmosDBService:
             return False
     
     # =========================================================================
+    # AOAI Endpoints (Azure OpenAI)
+    # =========================================================================
+    
+    async def list_aoai_endpoints(self) -> list[dict]:
+        """Get all registered Azure OpenAI endpoints."""
+        query = "SELECT * FROM c WHERE c.type = 'aoai_endpoint' ORDER BY c.name"
+        items = list(self.agents_container.query_items(query, enable_cross_partition_query=True))
+        return items
+    
+    async def get_aoai_endpoint(self, endpoint_id: str) -> Optional[dict]:
+        """Get a single AOAI endpoint configuration."""
+        try:
+            item = self.agents_container.read_item(item=endpoint_id, partition_key=endpoint_id)
+            if item.get("type") == "aoai_endpoint":
+                return item
+            return None
+        except CosmosResourceNotFoundError:
+            return None
+    
+    async def save_aoai_endpoint(self, endpoint_config: dict) -> dict:
+        """Create or update an Azure OpenAI endpoint configuration."""
+        if "id" not in endpoint_config:
+            endpoint_config["id"] = str(uuid.uuid4())
+        
+        endpoint_config["type"] = "aoai_endpoint"
+        endpoint_config["updatedAt"] = datetime.now(timezone.utc).isoformat()
+        
+        if "createdAt" not in endpoint_config:
+            endpoint_config["createdAt"] = endpoint_config["updatedAt"]
+        
+        return self.agents_container.upsert_item(endpoint_config)
+    
+    async def delete_aoai_endpoint(self, endpoint_id: str) -> bool:
+        """Delete an Azure OpenAI endpoint registration."""
+        try:
+            self.agents_container.delete_item(item=endpoint_id, partition_key=endpoint_id)
+            return True
+        except CosmosResourceNotFoundError:
+            return False
+    
+    # =========================================================================
     # Sessions
     # =========================================================================
     

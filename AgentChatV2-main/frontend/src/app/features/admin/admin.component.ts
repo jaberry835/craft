@@ -2,7 +2,7 @@ import { Component, OnInit, OnDestroy } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { Subject, takeUntil } from 'rxjs';
 
-import { AgentService, AgentConfig, MCPToolConfig, A2ADiscoveryResponse, GroundingSource, GroundingStatusResponse } from '../../core/services/agent.service';
+import { AgentService, AgentConfig, MCPToolConfig, A2ADiscoveryResponse, GroundingSource, GroundingStatusResponse, AOAIEndpointConfig, AOAIDeploymentOption } from '../../core/services/agent.service';
 import { environment } from '../../../environments/environment';
 
 @Component({
@@ -99,6 +99,273 @@ import { environment } from '../../../environments/environment';
         }
       </div>
       
+      <!-- Azure OpenAI Endpoints Section -->
+      <div class="aoai-section">
+        <div class="section-header">
+          <h2>
+            <span class="material-icons">cloud</span>
+            Azure OpenAI Endpoints
+          </h2>
+          <button class="btn btn-primary btn-sm" (click)="openAoaiEditor()">
+            <span class="material-icons">add</span>
+            Add Endpoint
+          </button>
+        </div>
+        
+        <div class="endpoints-list">
+          @for (endpoint of aoaiEndpoints; track endpoint.id) {
+            <div class="endpoint-card">
+              <div class="endpoint-info">
+                <div class="endpoint-name">
+                  <strong>{{ endpoint.name }}</strong>
+                  @if (!endpoint.is_active) {
+                    <span class="badge inactive">Inactive</span>
+                  }
+                </div>
+                <div class="endpoint-url">{{ endpoint.endpoint }}</div>
+                <div class="endpoint-meta">
+                  <span class="meta-item">
+                    <span class="material-icons">cloud</span>
+                    {{ getCloudLabel(endpoint.endpoint) }}
+                  </span>
+                  <span class="meta-item">
+                    <span class="material-icons">memory</span>
+                    {{ endpoint.deployments?.length || 0 }} Deployments
+                  </span>
+                  @if (endpoint.last_discovered_at) {
+                    <span class="meta-item">
+                      <span class="material-icons">schedule</span>
+                      Last refreshed: {{ formatDate(endpoint.last_discovered_at) }}
+                    </span>
+                  }
+                </div>
+              </div>
+              <div class="endpoint-actions">
+                <button class="btn btn-icon" (click)="refreshAoaiEndpoint(endpoint)" title="Refresh Deployments">
+                  <span class="material-icons">refresh</span>
+                </button>
+                <button class="btn btn-icon" (click)="editAoaiEndpoint(endpoint)" title="Edit">
+                  <span class="material-icons">edit</span>
+                </button>
+                <button class="btn btn-icon" (click)="deleteAoaiEndpoint(endpoint.id!)" title="Delete">
+                  <span class="material-icons">delete</span>
+                </button>
+              </div>
+            </div>
+          }
+          
+          @if (aoaiEndpoints.length === 0) {
+            <div class="empty-state small">
+              <span class="material-icons">cloud_off</span>
+              <p>No Azure OpenAI endpoints configured. Add an endpoint to enable model deployment selection.</p>
+            </div>
+          }
+        </div>
+      </div>
+      
+      <!-- AOAI Endpoint Editor Modal -->
+      @if (showAoaiEditor) {
+        <div class="modal-overlay" (click)="closeAoaiEditor()">
+          <div class="modal" (click)="$event.stopPropagation()">
+            <div class="modal-header">
+              <h2>{{ editingAoaiEndpoint?.id ? 'Edit' : 'Add' }} Azure OpenAI Endpoint</h2>
+              <button class="btn btn-icon" (click)="closeAoaiEditor()">
+                <span class="material-icons">close</span>
+              </button>
+            </div>
+            
+            <div class="modal-body">
+              <div class="form-group">
+                <label>Name *</label>
+                <input 
+                  type="text" 
+                  class="input" 
+                  [(ngModel)]="editingAoaiEndpoint!.name"
+                  placeholder="e.g., Production AOAI, Dev Endpoint"
+                />
+              </div>
+              
+              <div class="form-group">
+                <label>Endpoint URL *</label>
+                <input 
+                  type="url" 
+                  class="input" 
+                  [(ngModel)]="editingAoaiEndpoint!.endpoint"
+                  placeholder="https://your-aoai.openai.azure.com"
+                />
+                <span class="field-hint">Azure OpenAI endpoint URL from Azure Portal</span>
+              </div>
+              
+              <div class="form-row">
+                <div class="form-group">
+                  <label>API Version</label>
+                  <input 
+                    type="text" 
+                    class="input" 
+                    [(ngModel)]="editingAoaiEndpoint!.api_version"
+                    placeholder="2024-02-15-preview"
+                  />
+                </div>
+              </div>
+              
+              <div class="form-row">
+                <div class="form-group">
+                  <label>API Key (Optional)</label>
+                  <input 
+                    type="password" 
+                    class="input" 
+                    [(ngModel)]="editingAoaiEndpoint!.api_key"
+                    placeholder="Uses managed identity if blank"
+                  />
+                </div>
+              </div>
+              
+              <!-- ARM API info for deployment discovery (optional - for auto-discovery) -->
+              <div class="form-row">
+                <div class="form-group">
+                  <label>Subscription ID</label>
+                  <input 
+                    type="text" 
+                    class="input" 
+                    [(ngModel)]="editingAoaiEndpoint!.subscription_id"
+                    placeholder="e.g., 12345678-1234-1234-1234-123456789abc"
+                  />
+                  <span class="field-hint">Optional — needed for auto-discovery</span>
+                </div>
+                
+                <div class="form-group">
+                  <label>Resource Group</label>
+                  <input 
+                    type="text" 
+                    class="input" 
+                    [(ngModel)]="editingAoaiEndpoint!.resource_group"
+                    placeholder="e.g., my-resource-group"
+                  />
+                  <span class="field-hint">Optional — needed for auto-discovery</span>
+                </div>
+              </div>
+              
+              <div class="form-group">
+                <label>Description</label>
+                <input 
+                  type="text" 
+                  class="input" 
+                  [(ngModel)]="editingAoaiEndpoint!.description"
+                  placeholder="Optional description"
+                />
+              </div>
+              
+              <div class="form-group checkbox-group">
+                <label>
+                  <input 
+                    type="checkbox" 
+                    [(ngModel)]="editingAoaiEndpoint!.is_active"
+                  />
+                  Active
+                </label>
+              </div>
+              
+              <!-- Model Deployments Section -->
+              <div class="form-group deployments-section">
+                <label>
+                  <span class="material-icons" style="vertical-align: middle; font-size: 18px; margin-right: 4px;">memory</span>
+                  Model Deployments
+                </label>
+                <span class="field-hint">
+                  Auto-discover with Subscription ID + Resource Group, or add deployments manually below.
+                </span>
+                
+                <div class="discover-row">
+                  <button 
+                    class="btn btn-secondary" 
+                    (click)="discoverDeployments()"
+                    [disabled]="!editingAoaiEndpoint?.endpoint || !editingAoaiEndpoint?.subscription_id || !editingAoaiEndpoint?.resource_group || isDiscoveringDeployments"
+                    [title]="!editingAoaiEndpoint?.subscription_id || !editingAoaiEndpoint?.resource_group ? 'Requires Subscription ID and Resource Group' : 'Discover deployments via Azure ARM API (requires identity auth)'"
+                  >
+                    @if (isDiscoveringDeployments) {
+                      <span class="material-icons spinning">sync</span>
+                      Discovering...
+                    } @else {
+                      <span class="material-icons">search</span>
+                      Discover Deployments
+                    }
+                  </button>
+                  @if (aoaiDiscoveryError) {
+                    <span class="discovery-error">
+                      <span class="material-icons">warning</span>
+                      {{ aoaiDiscoveryError }}
+                    </span>
+                  }
+                  @if (aoaiDiscoverySuccess) {
+                    <span class="discovery-success">
+                      <span class="material-icons">check_circle</span>
+                      Found {{ editingAoaiEndpoint?.deployments?.length || 0 }} deployments
+                    </span>
+                  }
+                </div>
+                
+                <div class="deployment-input">
+                  <input 
+                    type="text" 
+                    class="input" 
+                    [(ngModel)]="newDeploymentName"
+                    placeholder="Deployment name (e.g., gpt-4o)"
+                    (keyup.enter)="addDeployment()"
+                  />
+                  <input 
+                    type="text" 
+                    class="input model-name-input" 
+                    [(ngModel)]="newDeploymentModelName"
+                    placeholder="Model name (e.g., gpt-4o)"
+                  />
+                  <button 
+                    class="btn btn-secondary btn-sm" 
+                    (click)="addDeployment()"
+                    [disabled]="!newDeploymentName"
+                  >
+                    <span class="material-icons">add</span>
+                    Add
+                  </button>
+                </div>
+                
+                @if (editingAoaiEndpoint!.deployments && editingAoaiEndpoint!.deployments.length > 0) {
+                  <div class="deployments-list">
+                    @for (deployment of editingAoaiEndpoint!.deployments; track deployment.deployment_name; let i = $index) {
+                      <div class="deployment-item">
+                        <span class="deployment-name">{{ deployment.deployment_name }}</span>
+                        <span class="deployment-model">{{ deployment.model_name || 'Unknown model' }}</span>
+                        <button class="btn-chip-remove" (click)="removeDeployment(i)" title="Remove">×</button>
+                      </div>
+                    }
+                  </div>
+                } @else {
+                  <div class="no-deployments">
+                    <span class="material-icons">info</span>
+                    No deployments yet. Use Discover (requires identity auth) or add manually above.
+                  </div>
+                }
+              </div>
+            </div>
+            
+            <div class="modal-footer">
+              <button class="btn btn-secondary" (click)="closeAoaiEditor()" [disabled]="isSavingAoaiEndpoint">Cancel</button>
+              <button 
+                class="btn btn-primary" 
+                (click)="saveAoaiEndpoint()"
+                [disabled]="!isValidAoaiEndpoint() || isSavingAoaiEndpoint"
+              >
+                @if (isSavingAoaiEndpoint) {
+                  <span class="material-icons spinning">sync</span>
+                  Saving...
+                } @else {
+                  {{ editingAoaiEndpoint?.id ? 'Update' : 'Add' }} Endpoint
+                }
+              </button>
+            </div>
+          </div>
+        </div>
+      }
+      
       <!-- Agent Editor Modal -->
       @if (showEditor) {
         <div class="modal-overlay" (click)="closeEditor()">
@@ -143,15 +410,32 @@ import { environment } from '../../../environments/environment';
             
             <div class="form-row">
               <div class="form-group">
-                <label>Model (Deployment Name) *</label>
-                <input 
-                  type="text" 
-                  class="input" 
-                  [(ngModel)]="editingAgent!.model"
-                  placeholder="e.g., gpt-4o, gpt-35-turbo"
-                  required
-                />
-                <span class="field-hint">Azure OpenAI deployment name configured in your Azure portal</span>
+                <label>Model Deployment *</label>
+                @if (availableDeployments.length > 0) {
+                  <select 
+                    class="input"
+                    [(ngModel)]="selectedDeploymentKey"
+                    (ngModelChange)="onDeploymentSelect($event)"
+                    required
+                  >
+                    <option value="">Select a model deployment...</option>
+                    @for (deployment of availableDeployments; track deployment.deployment_name + deployment.endpoint_id) {
+                      <option [value]="deployment.endpoint_id + '|' + deployment.deployment_name">
+                        {{ deployment.deployment_name }} ({{ deployment.model_name }}) - {{ deployment.endpoint_name }}
+                      </option>
+                    }
+                  </select>
+                  <span class="field-hint">Select an Azure OpenAI model deployment. Configure AOAI endpoints below to add more options.</span>
+                } @else {
+                  <input 
+                    type="text" 
+                    class="input" 
+                    [(ngModel)]="editingAgent!.model"
+                    placeholder="e.g., gpt-4o, gpt-35-turbo"
+                    required
+                  />
+                  <span class="field-hint">No AOAI endpoints configured. Add endpoints below or enter deployment name manually.</span>
+                }
               </div>
               
               <div class="form-group">
@@ -1080,6 +1364,243 @@ import { environment } from '../../../environments/environment';
       from { transform: rotate(0deg); }
       to { transform: rotate(360deg); }
     }
+    
+    /* Azure OpenAI Endpoints Section */
+    .aoai-section {
+      margin-top: var(--spacing-xl);
+      padding-top: var(--spacing-lg);
+      border-top: 1px solid var(--border-color);
+    }
+    
+    .section-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: var(--spacing-md);
+      
+      h2 {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-sm);
+        font-size: 18px;
+        font-weight: 600;
+        
+        .material-icons {
+          font-size: 24px;
+          color: var(--primary);
+        }
+      }
+      
+      .btn-sm {
+        padding: 6px 12px;
+        font-size: 13px;
+      }
+    }
+    
+    .endpoints-list {
+      display: flex;
+      flex-direction: column;
+      gap: var(--spacing-sm);
+    }
+    
+    .endpoint-card {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: var(--spacing-md);
+      background-color: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      
+      &:hover {
+        border-color: var(--primary);
+      }
+    }
+    
+    .endpoint-info {
+      flex: 1;
+      min-width: 0;
+    }
+    
+    .endpoint-name {
+      display: flex;
+      align-items: center;
+      gap: var(--spacing-sm);
+      margin-bottom: 4px;
+      
+      strong {
+        font-size: 14px;
+      }
+      
+      .badge {
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 10px;
+        text-transform: uppercase;
+        
+        &.inactive {
+          background-color: var(--warning);
+          color: white;
+        }
+      }
+    }
+    
+    .endpoint-url {
+      font-size: 12px;
+      color: var(--text-muted);
+      font-family: monospace;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      margin-bottom: 4px;
+    }
+    
+    .endpoint-meta {
+      display: flex;
+      gap: var(--spacing-md);
+      
+      .meta-item {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 11px;
+        color: var(--text-muted);
+        
+        .material-icons {
+          font-size: 14px;
+        }
+      }
+    }
+    
+    .endpoint-actions {
+      display: flex;
+      gap: var(--spacing-xs);
+    }
+    
+    .empty-state.small {
+      padding: var(--spacing-lg);
+      
+      .material-icons {
+        font-size: 48px;
+        margin-bottom: var(--spacing-sm);
+      }
+      
+      p {
+        font-size: 13px;
+        margin: 0;
+      }
+    }
+    
+    .modal-sm {
+      max-width: 500px;
+    }
+    
+    /* Deployment management styles */
+    .deployments-section {
+      margin-top: var(--spacing-md);
+      padding-top: var(--spacing-md);
+      border-top: 1px solid var(--border-color);
+    }
+    
+    .deployment-input {
+      display: flex;
+      gap: var(--spacing-sm);
+      margin-top: var(--spacing-sm);
+      
+      .model-name-input {
+        max-width: 180px;
+      }
+      
+      .btn-sm {
+        padding: 6px 12px;
+        white-space: nowrap;
+      }
+    }
+    
+    .deployments-list {
+      display: flex;
+      flex-direction: column;
+      gap: var(--spacing-xs);
+      margin-top: var(--spacing-sm);
+    }
+    
+    .deployment-item {
+      display: flex;
+      align-items: center;
+      gap: var(--spacing-sm);
+      padding: 8px 12px;
+      background-color: var(--bg-tertiary);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      
+      .deployment-name {
+        font-weight: 500;
+        font-size: 13px;
+      }
+      
+      .deployment-model {
+        font-size: 12px;
+        color: var(--text-muted);
+        flex: 1;
+      }
+    }
+    
+    .no-deployments {
+      display: flex;
+      align-items: center;
+      gap: var(--spacing-sm);
+      padding: var(--spacing-sm);
+      margin-top: var(--spacing-sm);
+      background-color: var(--bg-tertiary);
+      border-radius: 6px;
+      font-size: 12px;
+      color: var(--text-muted);
+      
+      .material-icons {
+        font-size: 16px;
+      }
+    }
+    
+    .discover-row {
+      display: flex;
+      align-items: center;
+      gap: var(--spacing-md);
+      margin-bottom: var(--spacing-md);
+      flex-wrap: wrap;
+    }
+    
+    .discovery-error {
+      display: flex;
+      align-items: center;
+      gap: var(--spacing-xs);
+      color: var(--color-error);
+      font-size: 12px;
+      
+      .material-icons {
+        font-size: 16px;
+      }
+    }
+    
+    .discovery-success {
+      display: flex;
+      align-items: center;
+      gap: var(--spacing-xs);
+      color: var(--color-success);
+      font-size: 12px;
+      
+      .material-icons {
+        font-size: 16px;
+      }
+    }
+    
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+    
+    .spinning {
+      animation: spin 1s linear infinite;
+    }
   `]
 })
 export class AdminComponent implements OnInit, OnDestroy {
@@ -1108,6 +1629,19 @@ export class AdminComponent implements OnInit, OnDestroy {
   groundingError = '';
   isValidatingGrounding = false;
   
+  // AOAI Endpoints state
+  aoaiEndpoints: AOAIEndpointConfig[] = [];
+  availableDeployments: AOAIDeploymentOption[] = [];
+  showAoaiEditor = false;
+  editingAoaiEndpoint: AOAIEndpointConfig | null = null;
+  selectedDeploymentKey = '';  // "endpointId|deploymentName"
+  newDeploymentName = '';  // For manual deployment entry
+  newDeploymentModelName = '';  // For manual deployment entry
+  isDiscoveringDeployments = false;
+  aoaiDiscoveryError = '';
+  aoaiDiscoverySuccess = false;
+  isSavingAoaiEndpoint = false;
+  
   // Save state
   isSavingAgent = false;
   
@@ -1118,6 +1652,7 @@ export class AdminComponent implements OnInit, OnDestroy {
   ngOnInit(): void {
     this.loadAgents();
     this.checkGroundingStatus();
+    this.loadAoaiEndpoints();
   }
   
   ngOnDestroy(): void {
@@ -1152,6 +1687,7 @@ export class AdminComponent implements OnInit, OnDestroy {
       description: '',
       system_prompt: '',
       model: '',
+      aoai_endpoint_id: undefined,
       temperature: 0.7,
       is_orchestrator: false,
       a2a_enabled: true,
@@ -1168,6 +1704,8 @@ export class AdminComponent implements OnInit, OnDestroy {
     this.groundingContainerUrl = '';
     this.groundingSourceName = '';
     this.groundingError = '';
+    // Initialize deployment selection
+    this.initSelectedDeploymentKey();
     this.showEditor = true;
   }
   
@@ -1177,6 +1715,7 @@ export class AdminComponent implements OnInit, OnDestroy {
     this.discoveredTools = [];
     this.mcpServerUrl = '';
     this.discoveryError = '';
+    this.selectedDeploymentKey = '';
   }
   
   editAgent(agent: AgentConfig): void {
@@ -1473,6 +2012,263 @@ export class AdminComponent implements OnInit, OnDestroy {
       return parts[parts.length - 1] || 'documents';
     } catch {
       return 'documents';
+    }
+  }
+  
+  // =========================================================================
+  // Azure OpenAI Endpoint Methods
+  // =========================================================================
+  
+  loadAoaiEndpoints(): void {
+    this.agentService.loadAoaiEndpoints()
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (response) => {
+          this.aoaiEndpoints = response.endpoints;
+        },
+        error: (err) => {
+          console.error('Failed to load AOAI endpoints:', err);
+        }
+      });
+    
+    // Also load available deployments
+    this.agentService.loadDeployments()
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (response) => {
+          this.availableDeployments = response.deployments;
+        },
+        error: (err) => {
+          console.error('Failed to load deployments:', err);
+        }
+      });
+  }
+  
+  openAoaiEditor(endpoint?: AOAIEndpointConfig): void {
+    this.editingAoaiEndpoint = endpoint ? { 
+      ...endpoint,
+      deployments: [...(endpoint.deployments || [])]
+    } : {
+      name: '',
+      endpoint: '',
+      api_version: '2024-02-15-preview',
+      subscription_id: '',
+      resource_group: '',
+      is_active: true,
+      description: '',
+      deployments: []
+    };
+    // Reset deployment input fields
+    this.newDeploymentName = '';
+    this.newDeploymentModelName = '';
+    // Reset discovery state
+    this.isDiscoveringDeployments = false;
+    this.aoaiDiscoveryError = '';
+    this.aoaiDiscoverySuccess = false;
+    this.showAoaiEditor = true;
+  }
+  
+  closeAoaiEditor(): void {
+    this.showAoaiEditor = false;
+    this.editingAoaiEndpoint = null;
+    this.newDeploymentName = '';
+    this.newDeploymentModelName = '';
+  }
+
+  getCloudLabel(endpoint: string): string {
+    const ep = (endpoint || '').toLowerCase();
+    if (ep.includes('.azure.us')) return 'Gov';
+    if (ep.includes('.azure.cn')) return 'China';
+    return 'Commercial';
+  }
+
+  editAoaiEndpoint(endpoint: AOAIEndpointConfig): void {
+    this.openAoaiEditor(endpoint);
+  }
+  
+  // Add a deployment to the current endpoint being edited
+  addDeployment(): void {
+    if (!this.editingAoaiEndpoint || !this.newDeploymentName.trim()) return;
+    
+    if (!this.editingAoaiEndpoint.deployments) {
+      this.editingAoaiEndpoint.deployments = [];
+    }
+    
+    // Check for duplicate
+    const exists = this.editingAoaiEndpoint.deployments.some(
+      d => d.deployment_name === this.newDeploymentName.trim()
+    );
+    if (exists) {
+      return; // Don't add duplicate
+    }
+    
+    this.editingAoaiEndpoint.deployments.push({
+      deployment_name: this.newDeploymentName.trim(),
+      model_name: this.newDeploymentModelName.trim() || this.newDeploymentName.trim()
+    });
+    
+    // Reset input fields
+    this.newDeploymentName = '';
+    this.newDeploymentModelName = '';
+  }
+  
+  // Remove a deployment from the current endpoint being edited
+  removeDeployment(index: number): void {
+    if (!this.editingAoaiEndpoint?.deployments) return;
+    this.editingAoaiEndpoint.deployments.splice(index, 1);
+  }
+  
+  // Discover deployments from the Azure OpenAI endpoint
+  discoverDeployments(): void {
+    if (!this.editingAoaiEndpoint?.endpoint) return;
+    
+    this.isDiscoveringDeployments = true;
+    this.aoaiDiscoveryError = '';
+    this.aoaiDiscoverySuccess = false;
+    
+    // If endpoint already has an ID, use refresh. Otherwise, we need to save first and then refresh.
+    // For new endpoints, we'll create a temporary save to trigger discovery.
+    if (this.editingAoaiEndpoint.id) {
+      // Existing endpoint - use refresh
+      this.agentService.refreshAoaiEndpoint(this.editingAoaiEndpoint.id)
+        .pipe(takeUntil(this.destroy$))
+        .subscribe({
+          next: (updated: AOAIEndpointConfig) => {
+            this.editingAoaiEndpoint = updated;
+            this.isDiscoveringDeployments = false;
+            this.aoaiDiscoverySuccess = true;
+            setTimeout(() => this.aoaiDiscoverySuccess = false, 3000);
+          },
+          error: (err: { error?: { detail?: string }; message?: string }) => {
+            console.error('Discovery failed:', err);
+            this.isDiscoveringDeployments = false;
+            this.aoaiDiscoveryError = err.error?.detail || 'Discovery failed. Add deployments manually.';
+            setTimeout(() => this.aoaiDiscoveryError = '', 5000);
+          }
+        });
+    } else {
+      // New endpoint - save it temporarily to discover, then fetch back
+      const tempEndpoint = { ...this.editingAoaiEndpoint };
+      this.agentService.createAoaiEndpoint(tempEndpoint)
+        .pipe(takeUntil(this.destroy$))
+        .subscribe({
+          next: (saved: AOAIEndpointConfig) => {
+            // Endpoint was saved with auto-discovery
+            this.editingAoaiEndpoint = saved;
+            this.isDiscoveringDeployments = false;
+            if (saved.deployments && saved.deployments.length > 0) {
+              this.aoaiDiscoverySuccess = true;
+              setTimeout(() => this.aoaiDiscoverySuccess = false, 3000);
+            } else {
+              this.aoaiDiscoveryError = 'No deployments found. Add them manually.';
+              setTimeout(() => this.aoaiDiscoveryError = '', 5000);
+            }
+            this.loadAoaiEndpoints();
+          },
+          error: (err: { error?: { detail?: string }; message?: string }) => {
+            console.error('Discovery failed:', err);
+            this.isDiscoveringDeployments = false;
+            this.aoaiDiscoveryError = err.error?.detail || 'Discovery failed. Add deployments manually.';
+            setTimeout(() => this.aoaiDiscoveryError = '', 5000);
+          }
+        });
+    }
+  }
+
+  saveAoaiEndpoint(): void {
+    if (!this.editingAoaiEndpoint || !this.isValidAoaiEndpoint() || this.isSavingAoaiEndpoint) return;
+    
+    this.isSavingAoaiEndpoint = true;
+    
+    const operation = this.editingAoaiEndpoint.id
+      ? this.agentService.updateAoaiEndpoint(this.editingAoaiEndpoint.id, this.editingAoaiEndpoint)
+      : this.agentService.createAoaiEndpoint(this.editingAoaiEndpoint);
+    
+    operation.pipe(takeUntil(this.destroy$)).subscribe({
+      next: () => {
+        this.isSavingAoaiEndpoint = false;
+        this.closeAoaiEditor();
+        this.loadAoaiEndpoints();
+      },
+      error: (err: { error?: { detail?: string }; message?: string }) => {
+        this.isSavingAoaiEndpoint = false;
+        console.error('Failed to save AOAI endpoint:', err);
+      }
+    });
+  }
+  
+  deleteAoaiEndpoint(endpointId: string): void {
+    if (confirm('Are you sure you want to delete this Azure OpenAI endpoint?')) {
+      this.agentService.deleteAoaiEndpoint(endpointId)
+        .pipe(takeUntil(this.destroy$))
+        .subscribe({
+          next: () => {
+            this.loadAoaiEndpoints();
+          },
+          error: (err) => {
+            console.error('Failed to delete AOAI endpoint:', err);
+          }
+        });
+    }
+  }
+  
+  refreshAoaiEndpoint(endpoint: AOAIEndpointConfig): void {
+    if (!endpoint.id) return;
+    
+    this.agentService.refreshAoaiEndpoint(endpoint.id)
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: () => {
+          this.loadAoaiEndpoints();
+        },
+        error: (err) => {
+          console.error('Failed to refresh AOAI endpoint:', err);
+        }
+      });
+  }
+  
+  isValidAoaiEndpoint(): boolean {
+    return !!(
+      this.editingAoaiEndpoint?.name?.trim() &&
+      this.editingAoaiEndpoint?.endpoint?.trim()
+    );
+  }
+  
+  formatDate(dateStr: string): string {
+    try {
+      const date = new Date(dateStr);
+      return date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
+    } catch {
+      return dateStr;
+    }
+  }
+  
+  // Handle deployment selection from dropdown
+  onDeploymentSelect(key: string): void {
+    if (!key || !this.editingAgent) return;
+    
+    const [endpointId, deploymentName] = key.split('|');
+    this.editingAgent.model = deploymentName;
+    this.editingAgent.aoai_endpoint_id = endpointId;
+  }
+  
+  // Initialize selected deployment key when editing an agent
+  initSelectedDeploymentKey(): void {
+    if (!this.editingAgent) return;
+    
+    if (this.editingAgent.aoai_endpoint_id && this.editingAgent.model) {
+      this.selectedDeploymentKey = `${this.editingAgent.aoai_endpoint_id}|${this.editingAgent.model}`;
+    } else if (this.editingAgent.model) {
+      // Try to find a matching deployment
+      const match = this.availableDeployments.find(d => d.deployment_name === this.editingAgent?.model);
+      if (match) {
+        this.selectedDeploymentKey = `${match.endpoint_id}|${match.deployment_name}`;
+        this.editingAgent.aoai_endpoint_id = match.endpoint_id;
+      } else {
+        this.selectedDeploymentKey = '';
+      }
+    } else {
+      this.selectedDeploymentKey = '';
     }
   }
 }

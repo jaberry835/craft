@@ -7,6 +7,7 @@ A production-ready, ChatGPT-style interface for multi-agent orchestration using 
 - **Multi-Agent Orchestration**: Magentic pattern with A2A protocol for agent-to-agent communication
 - **A2A Protocol**: JSON-RPC over HTTP for inter-agent communication with chatter events
 - **Dynamic Agent Configuration**: Admin UI to configure agents, prompts, and MCP tools
+- **Multiple AOAI Endpoints**: Configure multiple Azure OpenAI endpoints with model deployment discovery
 - **MCP Integration**: Connect agents to external tools via Model Context Protocol
 - **Agent Chatter**: Real-time visibility into specialist agent activity (tool calls, results, tokens)
 - **Chat History**: CosmosDB-backed with continuation token pagination
@@ -144,6 +145,73 @@ Open http://localhost:4200 to access the application.
 ### Environment Variables
 
 See `backend/.env.example` for required configuration.
+
+### CosmosDB Setup
+
+The application requires a Cosmos DB account with the **NoSQL (SQL) API**. Create the database and three containers with the following partition keys:
+
+| Container | Default Name | Partition Key | Purpose |
+|-----------|-------------|---------------|---------|
+| Agents | `Agents` | `/id` | Agent configurations, AOAI endpoints, MCP server settings |
+| Sessions | `Sessions` | `/userId` | Chat sessions per user |
+| Messages | `Messages` | `/sessionId` | Chat messages grouped by session |
+
+**Database name** defaults to `AgentChatV2` (configurable via `AZURE_COSMOS_DB_DATABASE`).
+
+> **Note:** The backend calls `create_container_if_not_exists` on startup, so containers are created automatically if the identity has sufficient permissions. If you prefer to pre-create them (e.g., with custom throughput or indexing policies), use the steps below.
+
+#### Azure Portal
+
+1. Navigate to your Cosmos DB account → **Data Explorer**
+2. Click **New Database** → name it `AgentChatV2`
+3. For each container above, click **New Container**:
+   - Select the `AgentChatV2` database
+   - Enter the container name and partition key exactly as shown
+
+#### Azure CLI
+
+```bash
+COSMOS_ACCOUNT="your-cosmos-account"
+RG="your-resource-group"
+DB="AgentChatV2"
+
+# Create database
+az cosmosdb sql database create \
+  --account-name $COSMOS_ACCOUNT \
+  --resource-group $RG \
+  --name $DB
+
+# Create containers
+az cosmosdb sql container create \
+  --account-name $COSMOS_ACCOUNT \
+  --resource-group $RG \
+  --database-name $DB \
+  --name Agents \
+  --partition-key-path "/id"
+
+az cosmosdb sql container create \
+  --account-name $COSMOS_ACCOUNT \
+  --resource-group $RG \
+  --database-name $DB \
+  --name Sessions \
+  --partition-key-path "/userId"
+
+az cosmosdb sql container create \
+  --account-name $COSMOS_ACCOUNT \
+  --resource-group $RG \
+  --database-name $DB \
+  --name Messages \
+  --partition-key-path "/sessionId"
+```
+
+Container names are configurable via environment variables:
+
+| Variable | Default |
+|----------|---------|
+| `AZURE_COSMOS_DB_DATABASE` | `AgentChatV2` |
+| `AZURE_COSMOS_DB_AGENTS_CONTAINER` | `Agents` |
+| `AZURE_COSMOS_DB_SESSIONS_CONTAINER` | `Sessions` |
+| `AZURE_COSMOS_DB_MESSAGES_CONTAINER` | `Messages` |
 
 ## Microsoft Entra ID Configuration
 
@@ -404,11 +472,40 @@ AgentChatV2/
 | `/api/chat/send` | POST | Send message (SSE stream with chatter) |
 | `/api/admin/agents` | GET/POST | List/create agents |
 | `/api/admin/agents/{id}` | PUT/DELETE | Update/delete agent |
+| `/api/admin/aoai-endpoints` | GET/POST | List/create Azure OpenAI endpoints |
+| `/api/admin/aoai-endpoints/{id}` | PUT/DELETE | Update/delete AOAI endpoint |
+| `/api/admin/aoai-endpoints/{id}/refresh` | POST | Re-discover model deployments |
+| `/api/admin/aoai-endpoints/deployments` | GET | List all available model deployments |
 | `/api/documents/upload` | POST | Upload document |
 | `/api/documents/search` | GET | Search documents |
 | `/api/health` | GET | Health check |
 | `/a2a/agents` | GET | List available A2A agent cards |
 | `/a2a/{agent_id}` | POST | A2A JSON-RPC endpoint (with chatter metadata) |
+
+## Azure OpenAI Endpoints
+
+The Admin UI allows you to configure multiple Azure OpenAI endpoints. This is useful when:
+- You have different AOAI resources for different environments (dev, prod)
+- You want to use different models from different AOAI deployments
+- You need to spread load across multiple AOAI resources
+
+### How It Works
+
+1. **Add AOAI Endpoints**: In the Admin UI, scroll to "Azure OpenAI Endpoints" and click "Add Endpoint"
+2. **Discover Deployments**: When you add an endpoint, the system automatically discovers all model deployments
+3. **Select Models**: When creating/editing an agent, select from a dropdown of all available deployments across all endpoints
+4. **Per-Agent Configuration**: Each agent can use a different AOAI endpoint and model deployment
+
+### Authentication
+
+AOAI endpoints support two authentication methods:
+- **Managed Identity** (recommended): Leave API Key blank to use managed identity/Azure CLI credentials
+- **API Key**: Provide an API key for direct authentication
+
+### Notes
+
+- If no AOAI endpoints are configured, you can still enter deployment names manually (uses the global `AZURE_OPENAI_ENDPOINT` from environment)
+- The `AZURE_OPENAI_ENDPOINT` environment variable serves as the default fallback
 
 ## Logging Configuration
 

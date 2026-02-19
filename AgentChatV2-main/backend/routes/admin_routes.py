@@ -9,13 +9,15 @@ from pydantic import BaseModel, Field
 from models import (
     AgentConfig, AgentListResponse, SystemStats,
     MCPServerConfig, MCPServerListResponse, MCPDiscoveryRequest, MCPDiscoveryResponse,
-    AgentType, A2AAgentCard, GroundingSource
+    AgentType, A2AAgentCard, GroundingSource,
+    AOAIEndpointConfig, AOAIEndpointListResponse, AOAIDeploymentListResponse, ModelDeployment
 )
 from services.cosmos_service import cosmos_service
 from services.agent_manager import agent_manager
 from services.mcp_discovery import mcp_discovery
 from services.a2a_client import a2a_client
 from services.grounding_service import grounding_service
+from services.aoai_discovery import aoai_discovery
 from config import get_settings
 from observability import get_logger
 
@@ -554,6 +556,198 @@ async def refresh_mcp_server(
     saved = await cosmos_service.save_mcp_server(server_dict)
     logger.info(f"Refreshed MCP server {server_id}: found {len(result.tools)} tools")
     return saved
+
+
+# =============================================================================
+# Azure OpenAI Endpoint Management
+# =============================================================================
+
+@router.get("/aoai-endpoints", response_model=AOAIEndpointListResponse)
+async def list_aoai_endpoints(request: Request, admin=Depends(require_admin)):
+    """List all registered Azure OpenAI endpoints."""
+    endpoints = await cosmos_service.list_aoai_endpoints()
+    return AOAIEndpointListResponse(endpoints=endpoints, count=len(endpoints))
+
+
+@router.get("/aoai-endpoints/deployments", response_model=AOAIDeploymentListResponse)
+async def list_all_deployments(request: Request, admin=Depends(require_admin)):
+    """
+    List all available model deployments across all registered AOAI endpoints.
+    This is used to populate the model dropdown when creating/editing agents.
+    """
+    endpoints = await cosmos_service.list_aoai_endpoints()
+    all_deployments = []
+    
+    for endpoint in endpoints:
+        if not endpoint.get("is_active", True):
+            continue
+        
+        endpoint_deployments = endpoint.get("deployments", [])
+        for deployment in endpoint_deployments:
+            all_deployments.append({
+                "endpoint_id": endpoint.get("id"),
+                "endpoint_name": endpoint.get("name", "Unknown"),
+                "deployment_name": deployment.get("deployment_name"),
+                "model_name": deployment.get("model_name", ""),
+                "model_version": deployment.get("model_version"),
+            })
+    
+    return AOAIDeploymentListResponse(deployments=all_deployments, count=len(all_deployments))
+
+
+@router.get("/aoai-endpoints/{endpoint_id}", response_model=AOAIEndpointConfig)
+async def get_aoai_endpoint(
+    request: Request,
+    endpoint_id: str,
+    admin=Depends(require_admin)
+):
+    """Get a specific Azure OpenAI endpoint configuration."""
+    endpoint = await cosmos_service.get_aoai_endpoint(endpoint_id)
+    if not endpoint:
+        raise HTTPException(status_code=404, detail="AOAI endpoint not found")
+    return endpoint
+
+
+@router.post("/aoai-endpoints", response_model=AOAIEndpointConfig)
+async def create_aoai_endpoint(
+    request: Request,
+    endpoint_config: AOAIEndpointConfig,
+    admin=Depends(require_admin)
+):
+    """
+    Register a new Azure OpenAI endpoint.
+    Attempts auto-discovery of deployments, falls back to manually provided deployments.
+    """
+    logger.info(f"Creating AOAI endpoint: {endpoint_config.name} by {admin.user_id}")
+    
+    endpoint_dict = endpoint_config.model_dump(exclude_unset=True)
+    
+    # Try to auto-discover deployments (requires subscription_id and resource_group)
+    discovered_deployments = []
+    discovery_error = None
+    if endpoint_config.subscription_id and endpoint_config.resource_group:
+        try:
+            discovered = await aoai_discovery.discover_deployments(
+                endpoint=endpoint_config.endpoint,
+                subscription_id=endpoint_config.subscription_id,
+                resource_group=endpoint_config.resource_group,
+                cloud=endpoint_config.cloud
+            )
+            discovered_deployments = [d.model_dump() for d in discovered]
+            logger.info(f"Auto-discovered {len(discovered_deployments)} deployments")
+        except Exception as e:
+            discovery_error = str(e)
+            logger.warning(f"Auto-discovery failed: {e}")
+    else:
+        logger.info("Subscription ID or Resource Group not provided - skipping auto-discovery")
+    
+    # Use discovered deployments if we got any, otherwise use manually provided
+    if discovered_deployments:
+        endpoint_dict["deployments"] = discovered_deployments
+    elif "deployments" in endpoint_dict and endpoint_dict["deployments"]:
+        endpoint_dict["deployments"] = [
+            d.model_dump() if hasattr(d, "model_dump") else d
+            for d in endpoint_dict["deployments"]
+        ]
+        logger.info(f"Using {len(endpoint_dict['deployments'])} manually provided deployments")
+    else:
+        endpoint_dict["deployments"] = []
+    
+    saved = await cosmos_service.save_aoai_endpoint(endpoint_dict)
+    logger.info(f"Created AOAI endpoint: {saved['id']} with {len(endpoint_dict.get('deployments', []))} deployments")
+    return saved
+
+
+@router.put("/aoai-endpoints/{endpoint_id}", response_model=AOAIEndpointConfig)
+async def update_aoai_endpoint(
+    request: Request,
+    endpoint_id: str,
+    endpoint_config: AOAIEndpointConfig,
+    admin=Depends(require_admin)
+):
+    """Update an existing Azure OpenAI endpoint configuration."""
+    existing = await cosmos_service.get_aoai_endpoint(endpoint_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="AOAI endpoint not found")
+    
+    endpoint_dict = endpoint_config.model_dump(exclude_unset=True)
+    endpoint_dict["id"] = endpoint_id
+    
+    # Convert deployments to serializable format
+    if "deployments" in endpoint_dict and endpoint_dict["deployments"]:
+        endpoint_dict["deployments"] = [
+            d.model_dump() if hasattr(d, "model_dump") else d
+            for d in endpoint_dict["deployments"]
+        ]
+    
+    saved = await cosmos_service.save_aoai_endpoint(endpoint_dict)
+    logger.info(f"Updated AOAI endpoint: {endpoint_id} by {admin.user_id}")
+    return saved
+
+
+@router.delete("/aoai-endpoints/{endpoint_id}")
+async def delete_aoai_endpoint(
+    request: Request,
+    endpoint_id: str,
+    admin=Depends(require_admin)
+):
+    """Delete an Azure OpenAI endpoint registration."""
+    success = await cosmos_service.delete_aoai_endpoint(endpoint_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="AOAI endpoint not found")
+    
+    logger.info(f"Deleted AOAI endpoint: {endpoint_id} by {admin.user_id}")
+    return {"message": "AOAI endpoint deleted"}
+
+
+@router.post("/aoai-endpoints/{endpoint_id}/refresh", response_model=AOAIEndpointConfig)
+async def refresh_aoai_deployments(
+    request: Request,
+    endpoint_id: str,
+    admin=Depends(require_admin)
+):
+    """
+    Re-discover model deployments from an existing Azure OpenAI endpoint.
+    Uses the Azure Resource Manager API to list deployments.
+    Requires subscription_id and resource_group to be set on the endpoint.
+    """
+    existing = await cosmos_service.get_aoai_endpoint(endpoint_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="AOAI endpoint not found")
+    
+    subscription_id = existing.get("subscription_id")
+    resource_group = existing.get("resource_group")
+    
+    if not subscription_id or not resource_group:
+        raise HTTPException(
+            status_code=400,
+            detail="Subscription ID and Resource Group are required for deployment discovery. "
+                   "Please edit the endpoint and provide these values."
+        )
+    
+    try:
+        discovered = await aoai_discovery.discover_deployments(
+            endpoint=existing.get("endpoint"),
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cloud=existing.get("cloud", "AzureCommercial")
+        )
+        
+        # Update endpoint with discovered deployments
+        existing["deployments"] = [d.model_dump() for d in discovered]
+        saved = await cosmos_service.save_aoai_endpoint(existing)
+        
+        logger.info(f"Refreshed AOAI endpoint {endpoint_id}: found {len(discovered)} deployments")
+        return saved
+        
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error refreshing AOAI deployments: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to discover deployments: {str(e)}"
+        )
 
 
 # =============================================================================
