@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-import sys, subprocess, os, shutil, stat
+import sys, subprocess, os, shutil, stat, tempfile
 from pathlib import Path
+from urllib.parse import urlparse
 
 # File extensions to exclude (images are allowed)
 EXCLUDE_EXTENSIONS = {
@@ -49,24 +50,72 @@ def handle_remove_readonly(func, path, exc):
         os.chmod(path, stat.S_IWRITE)
         func(path)
 
+
+def derive_repo_name(source: str) -> str:
+    if os.path.exists(source):
+        source_path = Path(source)
+        if source_path.is_file():
+            return source_path.stem
+        return source_path.name
+
+    parsed = urlparse(source)
+    source_tail = os.path.basename((parsed.path or source).rstrip("/"))
+    if source_tail.endswith('.git'):
+        source_tail = source_tail[:-4]
+
+    repo_name = os.path.splitext(source_tail)[0]
+    return repo_name or "imported-repo"
+
+
+def copy_local_source(source: str, target_dir: str) -> None:
+    source_path = Path(source)
+    if source_path.is_dir():
+        shutil.copytree(source_path, target_dir, symlinks=True)
+        return
+
+    if source_path.is_file() and source_path.suffix.lower() == ".zip":
+        with tempfile.TemporaryDirectory(prefix="add_repo_extract_") as extract_dir:
+            shutil.unpack_archive(str(source_path), extract_dir)
+            root_entries = [
+                Path(extract_dir) / entry
+                for entry in os.listdir(extract_dir)
+                if entry != "__MACOSX"
+            ]
+
+            if len(root_entries) == 1 and root_entries[0].is_dir():
+                source_root = root_entries[0]
+            else:
+                source_root = Path(extract_dir)
+
+            shutil.copytree(source_root, target_dir, symlinks=True)
+        return
+
+    raise ValueError(
+        f"Unsupported local source: {source}. Expected a directory or .zip file."
+    )
+
 def main():
     if len(sys.argv) < 3:
-        print("Usage: python add_repo.py <repo_url> <branch>")
+        print("Usage: python add_repo.py <repo_url|local_path|archive.zip> <branch>")
         sys.exit(1)
 
-    repo_url, branch = sys.argv[1], sys.argv[2]
-    repo_name = os.path.splitext(os.path.basename(repo_url))[0]
+    source, branch = sys.argv[1], sys.argv[2]
+    repo_name = derive_repo_name(source)
     target_dir = f"{repo_name}-{branch}"
 
     if os.path.exists(target_dir):
         print(f"⚠️ Removing existing {target_dir}...")
         shutil.rmtree(target_dir, onerror=handle_remove_readonly)
 
-    subprocess.run([
-        "git", "clone", "--depth", "1",
-        "--branch", branch, "--single-branch",
-        repo_url, target_dir
-    ], check=True)
+    if os.path.exists(source):
+        print(f"📦 Importing local source {source} into {target_dir}...")
+        copy_local_source(source, target_dir)
+    else:
+        subprocess.run([
+            "git", "clone", "--depth", "1",
+            "--branch", branch, "--single-branch",
+            source, target_dir
+        ], check=True)
 
     # Remove .git folder safely
     git_dir = os.path.join(target_dir, ".git")
@@ -117,7 +166,7 @@ def main():
     subprocess.run(["git", "commit", "-m", f"Add/update {repo_name} ({branch})"], check=True)
     subprocess.run(["git", "push"], check=True)
 
-    print(f"✅ Synced {repo_url} ({branch}) into curated repo as {target_dir}")
+    print(f"✅ Synced {source} ({branch}) into curated repo as {target_dir}")
 
 if __name__ == "__main__":
     main()
