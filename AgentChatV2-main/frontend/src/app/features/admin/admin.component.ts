@@ -3,6 +3,7 @@ import { FormsModule } from '@angular/forms';
 import { Subject, takeUntil } from 'rxjs';
 
 import { AgentService, AgentConfig, MCPToolConfig, A2ADiscoveryResponse, GroundingSource, GroundingStatusResponse, AOAIEndpointConfig, AOAIDeploymentOption } from '../../core/services/agent.service';
+import { SettingsService, UISettings, ClassificationBanner } from '../../core/services/settings.service';
 import { environment } from '../../../environments/environment';
 
 @Component({
@@ -160,6 +161,229 @@ import { environment } from '../../../environments/environment';
               <p>No Azure OpenAI endpoints configured. Add an endpoint to enable model deployment selection.</p>
             </div>
           }
+        </div>
+      </div>
+      
+      <!-- UI Settings Section -->
+      <div class="ui-settings-section">
+        <div class="section-header">
+          <h2>
+            <span class="material-icons">palette</span>
+            UI Settings
+          </h2>
+        </div>
+        
+        <div class="settings-card">
+          <!-- Classification Banner -->
+          <div class="settings-group">
+            <h3>
+              <span class="material-icons">security</span>
+              Classification Banner
+            </h3>
+            <p class="settings-description">Display a classification banner at the top of the application.</p>
+            
+            <div class="form-group checkbox-group">
+              <label>
+                <input 
+                  type="checkbox" 
+                  [(ngModel)]="uiSettings.classification_banner.enabled"
+                  (ngModelChange)="onSettingsChanged()"
+                />
+                Enable Classification Banner
+              </label>
+            </div>
+            
+            @if (uiSettings.classification_banner.enabled) {
+              <div class="form-group">
+                <label>Banner Text</label>
+                <input 
+                  type="text" 
+                  class="input" 
+                  [(ngModel)]="uiSettings.classification_banner.text"
+                  (ngModelChange)="onSettingsChanged()"
+                  placeholder="e.g., UNCLASSIFIED, CUI, SECRET"
+                  maxlength="200"
+                />
+              </div>
+              
+              <div class="form-row">
+                <div class="form-group">
+                  <label>Background Color</label>
+                  <div class="color-picker-row">
+                    <input 
+                      type="color" 
+                      [(ngModel)]="uiSettings.classification_banner.background_color"
+                      (ngModelChange)="onSettingsChanged()"
+                      class="color-input"
+                    />
+                    <input 
+                      type="text" 
+                      class="input color-text-input" 
+                      [(ngModel)]="uiSettings.classification_banner.background_color"
+                      (ngModelChange)="onSettingsChanged()"
+                      placeholder="#007a33"
+                    />
+                  </div>
+                </div>
+                
+                <div class="form-group">
+                  <label>Text Color</label>
+                  <div class="color-picker-row">
+                    <input 
+                      type="color" 
+                      [(ngModel)]="uiSettings.classification_banner.foreground_color"
+                      (ngModelChange)="onSettingsChanged()"
+                      class="color-input"
+                    />
+                    <input 
+                      type="text" 
+                      class="input color-text-input" 
+                      [(ngModel)]="uiSettings.classification_banner.foreground_color"
+                      (ngModelChange)="onSettingsChanged()"
+                      placeholder="#ffffff"
+                    />
+                  </div>
+                </div>
+              </div>
+              
+              <!-- Banner Preview -->
+              <div class="banner-preview-container">
+                <label>Preview</label>
+                <div 
+                  class="banner-preview"
+                  [style.backgroundColor]="uiSettings.classification_banner.background_color"
+                  [style.color]="uiSettings.classification_banner.foreground_color"
+                >
+                  {{ uiSettings.classification_banner.text || 'UNCLASSIFIED' }}
+                </div>
+              </div>
+            }
+          </div>
+          
+          <!-- Application Branding -->
+          <div class="settings-group">
+            <h3>
+              <span class="material-icons">brush</span>
+              Application Branding
+            </h3>
+            <p class="settings-description">Customize the look of your application with a logo and title.</p>
+            
+            <div class="form-group">
+              <label>Application Title</label>
+              <input 
+                type="text" 
+                class="input" 
+                [(ngModel)]="uiSettings.app_title"
+                (ngModelChange)="onSettingsChanged()"
+                placeholder="Agent Chat (default)"
+                maxlength="100"
+              />
+              <span class="field-hint">Shown in the sidebar header. Leave blank to use default.</span>
+            </div>
+            
+            <div class="form-group">
+              <label>Branding Logo</label>
+              <div class="image-upload-area"
+                (dragover)="onDragOver($event)"
+                (dragleave)="onDragLeave($event)"
+                (drop)="onDrop($event)"
+              >
+                @if (brandingImagePreview) {
+                  <div class="image-preview">
+                    <img [src]="brandingImagePreview" alt="Branding preview" />
+                    <button class="btn btn-icon remove-image" (click)="removeBrandingImage()" title="Remove image">
+                      <span class="material-icons">close</span>
+                    </button>
+                  </div>
+                } @else {
+                  <div class="upload-placeholder" [class.drag-over]="isDragging" (click)="brandingFileInput.click()">
+                    <span class="material-icons">cloud_upload</span>
+                    <p>{{ isDragging ? 'Drop image here' : 'Click or drag & drop a logo image' }}</p>
+                    <span class="upload-hint">PNG, JPG, SVG — max 500KB</span>
+                  </div>
+                }
+                <input 
+                  type="file" 
+                  #brandingFileInput
+                  accept="image/png,image/jpeg,image/svg+xml,image/gif,image/webp"
+                  (change)="onBrandingImageSelected($event)"
+                  style="display: none"
+                />
+                @if (brandingImagePreview) {
+                  <button class="btn btn-secondary btn-sm" (click)="brandingFileInput.click()">
+                    <span class="material-icons">swap_horiz</span>
+                    Change Image
+                  </button>
+                }
+              </div>
+              @if (brandingImageError) {
+                <span class="field-error">{{ brandingImageError }}</span>
+              }
+              @if (uiSettings.branding_image_filename) {
+                <span class="field-hint">Current file: {{ uiSettings.branding_image_filename }}</span>
+              }
+            </div>
+
+            <div class="form-group">
+              <label>Logo Position</label>
+              <div class="logo-position-options">
+                <label class="radio-card" [class.selected]="uiSettings.branding_image_position === 'sidebar'">
+                  <input 
+                    type="radio" 
+                    name="logoPosition" 
+                    value="sidebar"
+                    [checked]="uiSettings.branding_image_position === 'sidebar'"
+                    (change)="uiSettings.branding_image_position = 'sidebar'; onSettingsChanged()"
+                  />
+                  <span class="material-icons">vertical_split</span>
+                  <span class="radio-label">Sidebar</span>
+                  <span class="radio-description">Top-left in the sidebar</span>
+                </label>
+                <label class="radio-card" [class.selected]="uiSettings.branding_image_position === 'header'">
+                  <input 
+                    type="radio" 
+                    name="logoPosition" 
+                    value="header"
+                    [checked]="uiSettings.branding_image_position === 'header'"
+                    (change)="uiSettings.branding_image_position = 'header'; onSettingsChanged()"
+                  />
+                  <span class="material-icons">web_asset</span>
+                  <span class="radio-label">Header</span>
+                  <span class="radio-description">Top-center in the header bar</span>
+                </label>
+              </div>
+              <span class="field-hint">Choose where the branding logo appears in the app.</span>
+            </div>
+          </div>
+          
+          <!-- Save Button -->
+          <div class="settings-actions">
+            <button 
+              class="btn btn-primary" 
+              (click)="saveUISettings()"
+              [disabled]="isSavingSettings || !settingsChanged"
+            >
+              @if (isSavingSettings) {
+                <span class="material-icons spinning">sync</span>
+                Saving...
+              } @else {
+                <span class="material-icons">save</span>
+                Save UI Settings
+              }
+            </button>
+            @if (settingsSaveSuccess) {
+              <span class="save-success">
+                <span class="material-icons">check_circle</span>
+                Settings saved successfully
+              </span>
+            }
+            @if (settingsSaveError) {
+              <span class="save-error">
+                <span class="material-icons">error</span>
+                {{ settingsSaveError }}
+              </span>
+            }
+          </div>
         </div>
       </div>
       
@@ -1601,6 +1825,253 @@ import { environment } from '../../../environments/environment';
     .spinning {
       animation: spin 1s linear infinite;
     }
+    
+    /* UI Settings Section */
+    .ui-settings-section {
+      margin-top: var(--spacing-lg);
+    }
+    
+    .settings-card {
+      background-color: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: var(--spacing-lg);
+    }
+    
+    .settings-group {
+      margin-bottom: var(--spacing-lg);
+      padding-bottom: var(--spacing-lg);
+      border-bottom: 1px solid var(--border-color);
+      
+      &:last-of-type {
+        margin-bottom: var(--spacing-md);
+        padding-bottom: 0;
+        border-bottom: none;
+      }
+      
+      h3 {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-sm);
+        font-size: 16px;
+        font-weight: 600;
+        margin-bottom: var(--spacing-xs);
+        
+        .material-icons {
+          font-size: 20px;
+          color: var(--primary);
+        }
+      }
+    }
+    
+    .settings-description {
+      font-size: 13px;
+      color: var(--text-muted);
+      margin-bottom: var(--spacing-md);
+    }
+    
+    .color-picker-row {
+      display: flex;
+      align-items: center;
+      gap: var(--spacing-sm);
+    }
+    
+    .color-input {
+      width: 40px;
+      height: 40px;
+      border: 2px solid var(--border-color);
+      border-radius: 6px;
+      cursor: pointer;
+      padding: 2px;
+      background: none;
+    }
+    
+    .color-text-input {
+      max-width: 120px;
+      font-family: monospace;
+    }
+    
+    .banner-preview-container {
+      margin-top: var(--spacing-md);
+      
+      label {
+        display: block;
+        font-size: 13px;
+        font-weight: 500;
+        margin-bottom: var(--spacing-xs);
+      }
+    }
+    
+    .banner-preview {
+      width: 100%;
+      text-align: center;
+      padding: 4px 16px;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      border-radius: 4px;
+    }
+    
+    .image-upload-area {
+      display: flex;
+      flex-direction: column;
+      gap: var(--spacing-sm);
+      align-items: flex-start;
+    }
+    
+    .upload-placeholder {
+      width: 100%;
+      max-width: 400px;
+      padding: var(--spacing-lg);
+      border: 2px dashed var(--border-color);
+      border-radius: 8px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color var(--transition-fast), background-color var(--transition-fast);
+      
+      &:hover, &.drag-over {
+        border-color: var(--primary);
+        background-color: var(--bg-hover);
+      }
+      
+      .material-icons {
+        font-size: 40px;
+        color: var(--text-muted);
+        margin-bottom: var(--spacing-sm);
+      }
+      
+      p {
+        font-size: 14px;
+        color: var(--text-secondary);
+        margin-bottom: var(--spacing-xs);
+      }
+      
+      .upload-hint {
+        font-size: 12px;
+        color: var(--text-muted);
+      }
+    }
+    
+    .image-preview {
+      position: relative;
+      display: inline-block;
+      max-width: 300px;
+      
+      img {
+        max-width: 100%;
+        max-height: 100px;
+        border-radius: 6px;
+        border: 1px solid var(--border-color);
+      }
+      
+      .remove-image {
+        position: absolute;
+        top: -8px;
+        right: -8px;
+        width: 24px;
+        height: 24px;
+        border-radius: 50%;
+        background-color: var(--color-error);
+        color: white;
+        padding: 0;
+        
+        .material-icons {
+          font-size: 14px;
+        }
+      }
+    }
+    
+    .field-error {
+      display: block;
+      color: var(--color-error);
+      font-size: 12px;
+      margin-top: var(--spacing-xs);
+    }
+
+    .logo-position-options {
+      display: flex;
+      gap: var(--spacing-md);
+    }
+
+    .radio-card {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      padding: var(--spacing-md);
+      border: 2px solid var(--border-color);
+      border-radius: 8px;
+      cursor: pointer;
+      transition: border-color var(--transition-fast), background-color var(--transition-fast);
+      min-width: 120px;
+      text-align: center;
+
+      input[type="radio"] {
+        display: none;
+      }
+
+      .material-icons {
+        font-size: 28px;
+        color: var(--text-muted);
+      }
+
+      .radio-label {
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--text-primary);
+      }
+
+      .radio-description {
+        font-size: 11px;
+        color: var(--text-muted);
+      }
+
+      &:hover {
+        border-color: var(--primary);
+        background-color: var(--bg-hover);
+      }
+
+      &.selected {
+        border-color: var(--primary);
+        background-color: rgba(99, 102, 241, 0.08);
+
+        .material-icons {
+          color: var(--primary);
+        }
+      }
+    }
+
+    .settings-actions {
+      display: flex;
+      align-items: center;
+      gap: var(--spacing-md);
+      margin-top: var(--spacing-md);
+    }
+    
+    .save-success {
+      display: flex;
+      align-items: center;
+      gap: var(--spacing-xs);
+      color: var(--color-success);
+      font-size: 13px;
+      
+      .material-icons {
+        font-size: 18px;
+      }
+    }
+    
+    .save-error {
+      display: flex;
+      align-items: center;
+      gap: var(--spacing-xs);
+      color: var(--color-error);
+      font-size: 13px;
+      
+      .material-icons {
+        font-size: 18px;
+      }
+    }
   `]
 })
 export class AdminComponent implements OnInit, OnDestroy {
@@ -1645,14 +2116,39 @@ export class AdminComponent implements OnInit, OnDestroy {
   // Save state
   isSavingAgent = false;
   
+  // UI Settings state
+  uiSettings: UISettings = {
+    classification_banner: {
+      enabled: false,
+      text: 'UNCLASSIFIED',
+      background_color: '#007a33',
+      foreground_color: '#ffffff'
+    },
+    branding_image: null,
+    branding_image_filename: null,
+    branding_image_position: 'sidebar',
+    app_title: null
+  };
+  brandingImagePreview: string | null = null;
+  brandingImageError = '';
+  isDragging = false;
+  isSavingSettings = false;
+  settingsChanged = false;
+  settingsSaveSuccess = false;
+  settingsSaveError = '';
+  
   private destroy$ = new Subject<void>();
   
-  constructor(private agentService: AgentService) {}
+  constructor(
+    private agentService: AgentService,
+    private settingsService: SettingsService
+  ) {}
   
   ngOnInit(): void {
     this.loadAgents();
     this.checkGroundingStatus();
     this.loadAoaiEndpoints();
+    this.loadUISettings();
   }
   
   ngOnDestroy(): void {
@@ -2270,5 +2766,130 @@ export class AdminComponent implements OnInit, OnDestroy {
     } else {
       this.selectedDeploymentKey = '';
     }
+  }
+
+  // =========================================================================
+  // UI Settings
+  // =========================================================================
+
+  loadUISettings(): void {
+    this.settingsService.getSettingsAdmin()
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (settings) => {
+          this.uiSettings = {
+            ...settings,
+            classification_banner: {
+              ...settings.classification_banner
+            }
+          };
+          // Set image preview from existing base64 data
+          if (settings.branding_image) {
+            this.brandingImagePreview = settings.branding_image;
+          }
+          this.settingsChanged = false;
+        },
+        error: (err) => {
+          console.error('Failed to load UI settings:', err);
+        }
+      });
+  }
+
+  onSettingsChanged(): void {
+    this.settingsChanged = true;
+    this.settingsSaveSuccess = false;
+    this.settingsSaveError = '';
+  }
+
+  onBrandingImageSelected(event: Event): void {
+    const input = event.target as HTMLInputElement;
+    if (!input.files || input.files.length === 0) return;
+    this.processBrandingFile(input.files[0]);
+  }
+
+  onDragOver(event: DragEvent): void {
+    event.preventDefault();
+    event.stopPropagation();
+    this.isDragging = true;
+  }
+
+  onDragLeave(event: DragEvent): void {
+    event.preventDefault();
+    event.stopPropagation();
+    this.isDragging = false;
+  }
+
+  onDrop(event: DragEvent): void {
+    event.preventDefault();
+    event.stopPropagation();
+    this.isDragging = false;
+
+    const files = event.dataTransfer?.files;
+    if (!files || files.length === 0) return;
+    this.processBrandingFile(files[0]);
+  }
+
+  private processBrandingFile(file: File): void {
+    this.brandingImageError = '';
+
+    // Validate file size (500KB max)
+    const maxSize = 500 * 1024;
+    if (file.size > maxSize) {
+      this.brandingImageError = `Image too large (${(file.size / 1024).toFixed(0)}KB). Max is 500KB.`;
+      return;
+    }
+
+    // Validate file type
+    const validTypes = ['image/png', 'image/jpeg', 'image/svg+xml', 'image/gif', 'image/webp'];
+    if (!validTypes.includes(file.type)) {
+      this.brandingImageError = 'Invalid file type. Use PNG, JPG, SVG, GIF, or WebP.';
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const base64 = reader.result as string;
+      this.brandingImagePreview = base64;
+      this.uiSettings.branding_image = base64;
+      this.uiSettings.branding_image_filename = file.name;
+      this.onSettingsChanged();
+    };
+    reader.readAsDataURL(file);
+  }
+
+  removeBrandingImage(): void {
+    this.brandingImagePreview = null;
+    this.uiSettings.branding_image = null;
+    this.uiSettings.branding_image_filename = null;
+    this.brandingImageError = '';
+    this.onSettingsChanged();
+  }
+
+  saveUISettings(): void {
+    this.isSavingSettings = true;
+    this.settingsSaveSuccess = false;
+    this.settingsSaveError = '';
+
+    this.settingsService.updateSettings(this.uiSettings)
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (saved) => {
+          this.uiSettings = {
+            ...saved,
+            classification_banner: { ...saved.classification_banner }
+          };
+          this.isSavingSettings = false;
+          this.settingsChanged = false;
+          this.settingsSaveSuccess = true;
+
+          // Auto-hide success after 3s
+          setTimeout(() => this.settingsSaveSuccess = false, 3000);
+        },
+        error: (err) => {
+          console.error('Failed to save UI settings:', err);
+          this.isSavingSettings = false;
+          this.settingsSaveError = err.error?.detail || 'Failed to save settings';
+        }
+      });
   }
 }

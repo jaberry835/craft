@@ -235,6 +235,45 @@ class CosmosDBService:
             return False
     
     # =========================================================================
+    # UI Settings (singleton document in Agents container)
+    # =========================================================================
+    
+    async def get_ui_settings(self) -> Optional[dict]:
+        """Get UI settings (classification banner, branding, etc.)."""
+        try:
+            start_time = time.perf_counter()
+            result = self.agents_container.read_item(item="ui_settings", partition_key="ui_settings")
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            
+            if should_log_performance():
+                log_performance_summary(logger, "cosmos_get_ui_settings", {
+                    "duration_ms": round(duration_ms, 2),
+                    "operation": "read"
+                })
+            
+            return result
+        except CosmosResourceNotFoundError:
+            return None
+    
+    async def save_ui_settings(self, settings_data: dict) -> dict:
+        """Create or update UI settings."""
+        settings_data["id"] = "ui_settings"
+        settings_data["type"] = "ui_settings"
+        settings_data["updatedAt"] = datetime.now(timezone.utc).isoformat()
+        
+        start_time = time.perf_counter()
+        result = self.agents_container.upsert_item(settings_data)
+        duration_ms = (time.perf_counter() - start_time) * 1000
+        
+        if should_log_performance():
+            log_performance_summary(logger, "cosmos_save_ui_settings", {
+                "duration_ms": round(duration_ms, 2),
+                "operation": "upsert"
+            })
+        
+        return result
+    
+    # =========================================================================
     # Sessions
     # =========================================================================
     

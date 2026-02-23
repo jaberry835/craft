@@ -6,13 +6,16 @@ import { Subject, filter, takeUntil } from 'rxjs';
 
 import { SidebarComponent } from './shared/components/sidebar/sidebar.component';
 import { HeaderComponent } from './shared/components/header/header.component';
+import { ClassificationBannerComponent } from './shared/components/classification-banner/classification-banner.component';
+import { SettingsService } from './core/services/settings.service';
 
 @Component({
   selector: 'app-root',
   standalone: true,
-  imports: [RouterOutlet, SidebarComponent, HeaderComponent],
+  imports: [RouterOutlet, SidebarComponent, HeaderComponent, ClassificationBannerComponent],
   template: `
     @if (!isLoading) {
+      <app-classification-banner></app-classification-banner>
       <div class="app-container">
         <app-sidebar></app-sidebar>
         <div class="main-content">
@@ -29,9 +32,16 @@ import { HeaderComponent } from './shared/components/header/header.component';
     }
   `,
   styles: [`
+    :host {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+    
     .app-container {
       display: flex;
-      height: 100vh;
+      flex: 1;
       overflow: hidden;
     }
     
@@ -71,10 +81,14 @@ export class AppComponent implements OnInit, OnDestroy {
 
   constructor(
     private authService: MsalService,
-    private broadcastService: MsalBroadcastService
+    private broadcastService: MsalBroadcastService,
+    private settingsService: SettingsService
   ) {}
 
   ngOnInit(): void {
+    // Load UI settings (classification banner, branding) early
+    this.settingsService.loadSettings().subscribe();
+
     // Handle the redirect callback from Azure AD login
     this.authService.handleRedirectObservable().subscribe({
       next: (result) => {

@@ -1,5 +1,7 @@
-import { Component } from '@angular/core';
+import { Component, OnInit, OnDestroy } from '@angular/core';
 import { MsalService } from '@azure/msal-angular';
+import { Subject, takeUntil } from 'rxjs';
+import { SettingsService } from '../../../core/services/settings.service';
 
 @Component({
   selector: 'app-header',
@@ -9,6 +11,12 @@ import { MsalService } from '@azure/msal-angular';
     <header class="header">
       <div class="header-left">
         <!-- Agent info now shown in chat component -->
+      </div>
+
+      <div class="header-center">
+        @if (brandingImage) {
+          <img [src]="brandingImage" alt="App branding" class="header-branding-image" />
+        }
       </div>
       
       <div class="header-right">
@@ -39,12 +47,28 @@ import { MsalService } from '@azure/msal-angular';
       display: flex;
       align-items: center;
       gap: var(--spacing-md);
+      flex: 1;
+    }
+
+    .header-center {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex: 1;
+    }
+
+    .header-branding-image {
+      max-height: 38px;
+      max-width: 200px;
+      object-fit: contain;
     }
     
     .header-right {
       display: flex;
       align-items: center;
       gap: var(--spacing-md);
+      flex: 1;
+      justify-content: flex-end;
     }
     
     .user-info {
@@ -71,7 +95,10 @@ import { MsalService } from '@azure/msal-angular';
     }
   `]
 })
-export class HeaderComponent {
+export class HeaderComponent implements OnInit, OnDestroy {
+  brandingImage?: string | null;
+  private destroy$ = new Subject<void>();
+
   get userName(): string | undefined {
     const account = this.authService.instance.getActiveAccount();
     return account?.name;
@@ -86,9 +113,27 @@ export class HeaderComponent {
       .slice(0, 2);
   }
   
-  constructor(private authService: MsalService) {}
+  constructor(
+    private authService: MsalService,
+    private settingsService: SettingsService
+  ) {}
+
+  ngOnInit(): void {
+    this.settingsService.settings$
+      .pipe(takeUntil(this.destroy$))
+      .subscribe(settings => {
+        this.brandingImage = (settings.branding_image && settings.branding_image_position === 'header')
+          ? settings.branding_image
+          : null;
+      });
+  }
   
   logout(): void {
     this.authService.logout();
+  }
+
+  ngOnDestroy(): void {
+    this.destroy$.next();
+    this.destroy$.complete();
   }
 }

@@ -6,6 +6,7 @@ import { AsyncPipe } from '@angular/common';
 import { ChatService, Session, SessionListResponse } from '../../../core/services/chat.service';
 import { SessionStateService } from '../../../core/services/session-state.service';
 import { AuthService } from '../../../core/services/auth.service';
+import { SettingsService } from '../../../core/services/settings.service';
 
 @Component({
   selector: 'app-sidebar',
@@ -14,7 +15,10 @@ import { AuthService } from '../../../core/services/auth.service';
   template: `
     <aside class="sidebar">
       <div class="sidebar-header">
-        <h1 class="logo">Agent Chat</h1>
+        @if (brandingImage) {
+          <img [src]="brandingImage" alt="App branding" class="branding-image" />
+        }
+        <h1 class="logo">{{ appTitle || 'Agent Chat' }}</h1>
         <button class="btn btn-primary new-chat-btn" (click)="createNewSession()">
           <span class="material-icons">add</span>
           New Chat
@@ -75,11 +79,12 @@ import { AuthService } from '../../../core/services/auth.service';
   styles: [`
     .sidebar {
       width: 280px;
-      height: 100vh;
+      height: 100%;
       background-color: var(--bg-secondary);
       border-right: 1px solid var(--border-color);
       display: flex;
       flex-direction: column;
+      overflow: hidden;
     }
     
     .sidebar-header {
@@ -92,6 +97,14 @@ import { AuthService } from '../../../core/services/auth.service';
       font-weight: 600;
       margin-bottom: var(--spacing-md);
       color: var(--primary);
+    }
+    
+    .branding-image {
+      max-width: 100%;
+      max-height: 60px;
+      object-fit: contain;
+      margin-bottom: var(--spacing-sm);
+      border-radius: 4px;
     }
     
     .new-chat-btn {
@@ -202,6 +215,8 @@ export class SidebarComponent implements OnInit, OnDestroy {
   activeSessionId?: string;
   pendingSession?: Session;
   hasMore = false;
+  brandingImage?: string | null;
+  appTitle?: string | null;
   private continuationToken?: string;
   private destroy$ = new Subject<void>();
   
@@ -209,12 +224,23 @@ export class SidebarComponent implements OnInit, OnDestroy {
     private chatService: ChatService,
     private sessionState: SessionStateService,
     private router: Router,
+    private settingsService: SettingsService,
     public authService: AuthService  // Public so template can access isAdmin$
   ) {}
   
   ngOnInit(): void {
     // Check admin role on init (refreshes after login)
     this.authService.checkAdminRole();
+    
+    // Subscribe to UI settings for branding
+    this.settingsService.settings$
+      .pipe(takeUntil(this.destroy$))
+      .subscribe(settings => {
+        this.brandingImage = (settings.branding_image && settings.branding_image_position !== 'header')
+          ? settings.branding_image
+          : null;
+        this.appTitle = settings.app_title;
+      });
     
     this.loadSessions();
     

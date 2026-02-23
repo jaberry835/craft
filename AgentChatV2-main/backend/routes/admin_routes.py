@@ -10,7 +10,8 @@ from models import (
     AgentConfig, AgentListResponse, SystemStats,
     MCPServerConfig, MCPServerListResponse, MCPDiscoveryRequest, MCPDiscoveryResponse,
     AgentType, A2AAgentCard, GroundingSource,
-    AOAIEndpointConfig, AOAIEndpointListResponse, AOAIDeploymentListResponse, ModelDeployment
+    AOAIEndpointConfig, AOAIEndpointListResponse, AOAIDeploymentListResponse, ModelDeployment,
+    UISettings, ClassificationBanner
 )
 from services.cosmos_service import cosmos_service
 from services.agent_manager import agent_manager
@@ -777,3 +778,87 @@ async def get_system_stats(request: Request, admin=Depends(require_admin)):
 
 
 # =============================================================================
+# UI Settings (Public read, Admin write)
+# =============================================================================
+
+# Separate router for public settings endpoint (no admin auth required)
+settings_router = APIRouter(prefix="/api/settings", tags=["settings"])
+
+
+@settings_router.get("/ui", response_model=UISettings)
+async def get_ui_settings_public(request: Request):
+    """
+    Get UI settings (classification banner, branding image, etc.).
+    This endpoint is public so all users can load the banner/branding on app start.
+    """
+    settings_data = await cosmos_service.get_ui_settings()
+    if not settings_data:
+        return UISettings()  # Return defaults
+
+    return UISettings(
+        id=settings_data.get("id", "ui_settings"),
+        classification_banner=ClassificationBanner(**settings_data.get("classification_banner", {})),
+        branding_image=settings_data.get("branding_image"),
+        branding_image_filename=settings_data.get("branding_image_filename"),
+        branding_image_position=settings_data.get("branding_image_position", "sidebar"),
+        app_title=settings_data.get("app_title"),
+        updated_at=settings_data.get("updatedAt")
+    )
+
+
+@router.get("/settings/ui", response_model=UISettings)
+async def get_ui_settings_admin(request: Request, admin=Depends(require_admin)):
+    """Get UI settings (admin endpoint with full access)."""
+    settings_data = await cosmos_service.get_ui_settings()
+    if not settings_data:
+        return UISettings()
+
+    return UISettings(
+        id=settings_data.get("id", "ui_settings"),
+        classification_banner=ClassificationBanner(**settings_data.get("classification_banner", {})),
+        branding_image=settings_data.get("branding_image"),
+        branding_image_filename=settings_data.get("branding_image_filename"),
+        branding_image_position=settings_data.get("branding_image_position", "sidebar"),
+        app_title=settings_data.get("app_title"),
+        updated_at=settings_data.get("updatedAt")
+    )
+
+
+@router.put("/settings/ui", response_model=UISettings)
+async def update_ui_settings(
+    request: Request,
+    ui_settings: UISettings,
+    admin=Depends(require_admin)
+):
+    """
+    Update UI settings (admin only).
+    Handles classification banner, branding image, and app title.
+    """
+    settings_dict = ui_settings.model_dump(exclude_unset=True)
+
+    # Validate branding image size (max ~500KB base64 string ~ 670KB encoded)
+    if settings_dict.get("branding_image"):
+        image_size = len(settings_dict["branding_image"])
+        max_size = 700_000  # ~500KB before base64
+        if image_size > max_size:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Branding image too large ({image_size:,} chars). Max is {max_size:,} chars (~500KB)."
+            )
+
+    # Convert classification_banner to dict if it's a model
+    if "classification_banner" in settings_dict and hasattr(settings_dict["classification_banner"], "model_dump"):
+        settings_dict["classification_banner"] = settings_dict["classification_banner"].model_dump()
+
+    saved = await cosmos_service.save_ui_settings(settings_dict)
+
+    logger.info(f"Updated UI settings by {admin.user_id}")
+    return UISettings(
+        id=saved.get("id", "ui_settings"),
+        classification_banner=ClassificationBanner(**saved.get("classification_banner", {})),
+        branding_image=saved.get("branding_image"),
+        branding_image_filename=saved.get("branding_image_filename"),
+        branding_image_position=saved.get("branding_image_position", "sidebar"),
+        app_title=saved.get("app_title"),
+        updated_at=saved.get("updatedAt")
+    )

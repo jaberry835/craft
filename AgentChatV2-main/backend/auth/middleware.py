@@ -23,6 +23,7 @@ PUBLIC_PATHS = {"/", "/health", "/docs", "/openapi.json", "/redoc", "/a2a/agents
 PUBLIC_PATH_PATTERNS = [
     re.compile(r"^/api/documents/[a-f0-9-]+/content$"),  # Document content viewing
     re.compile(r"^/a2a/[a-f0-9-]+$"),  # A2A agent card discovery (GET only - checked in _is_public_path)
+    re.compile(r"^/api/settings/ui$"),  # UI settings (public GET for banner/branding)
 ]
 
 

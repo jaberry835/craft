@@ -448,3 +448,39 @@ class AOAIDeploymentListResponse(BaseModel):
     """Response for listing all available deployments across endpoints."""
     deployments: list[dict]  # {endpoint_id, endpoint_name, deployment_name, model_name}
     count: int
+
+
+# =============================================================================
+# UI Settings Models
+# =============================================================================
+
+class ClassificationBanner(BaseModel):
+    """Classification banner configuration."""
+    enabled: bool = False
+    text: str = Field(default="UNCLASSIFIED", max_length=200)
+    background_color: str = Field(default="#007a33", max_length=20)
+    foreground_color: str = Field(default="#ffffff", max_length=20)
+
+
+class UISettings(BaseModel):
+    """UI settings for application branding and classification."""
+    id: Optional[str] = "ui_settings"
+    classification_banner: ClassificationBanner = Field(default_factory=ClassificationBanner)
+    branding_image: Optional[str] = Field(
+        default=None,
+        description="Base64-encoded branding image (max ~500KB before encoding)"
+    )
+    branding_image_filename: Optional[str] = Field(
+        default=None,
+        description="Original filename of the branding image"
+    )
+    branding_image_position: str = Field(
+        default="sidebar",
+        description="Where to display the branding logo: 'sidebar' (top-left) or 'header' (top-center)"
+    )
+    app_title: Optional[str] = Field(
+        default=None,
+        max_length=100,
+        description="Custom application title (shown in sidebar)"
+    )
+    updated_at: Optional[str] = None
