@@ -1,6 +1,7 @@
 """Configuration settings for the backend API."""
 
 import os
+import threading
 import structlog
 from pydantic_settings import BaseSettings
 from pydantic import Field
@@ -80,36 +81,43 @@ class Settings(BaseSettings):
 
 # Cached credential instance (module-level singleton)
 _azure_credential = None
+_azure_credential_lock = threading.Lock()
 
 
 def get_azure_credential():
     """
     Get cached DefaultAzureCredential for identity-based auth.
-    
+
     On Azure: Uses full credential chain including ManagedIdentityCredential
     Locally: Excludes IMDS to avoid 5+ second timeout on each token request
     """
     global _azure_credential
-    
+
+    # Double-checked locking pattern for thread-safe singleton
     if _azure_credential is not None:
         return _azure_credential
-    
-    try:
-        if is_running_on_azure():
-            # In Azure - use full credential chain with Managed Identity
-            _azure_credential = DefaultAzureCredential()
-            logger.info("DefaultAzureCredential initialized (Azure environment - Managed Identity enabled)")
-        else:
-            # Local dev - exclude IMDS to avoid slow timeouts
-            _azure_credential = DefaultAzureCredential(
-                exclude_managed_identity_credential=True,  # Skip slow IMDS timeout locally
-                exclude_shared_token_cache_credential=True,  # Avoid VS Code token cache issues
-            )
-            logger.info("DefaultAzureCredential initialized (local dev - IMDS excluded for speed)")
-        return _azure_credential
-    except Exception as e:
-        logger.warning("Failed to get DefaultAzureCredential", error=str(e))
-        return None
+
+    with _azure_credential_lock:
+        # Check again inside lock to prevent race condition
+        if _azure_credential is not None:
+            return _azure_credential
+
+        try:
+            if is_running_on_azure():
+                # In Azure - use full credential chain with Managed Identity
+                _azure_credential = DefaultAzureCredential()
+                logger.info("DefaultAzureCredential initialized (Azure environment - Managed Identity enabled)")
+            else:
+                # Local dev - exclude IMDS to avoid slow timeouts
+                _azure_credential = DefaultAzureCredential(
+                    exclude_managed_identity_credential=True,  # Skip slow IMDS timeout locally
+                    exclude_shared_token_cache_credential=True,  # Avoid VS Code token cache issues
+                )
+                logger.info("DefaultAzureCredential initialized (local dev - IMDS excluded for speed)")
+            return _azure_credential
+        except Exception as e:
+            logger.warning("Failed to get DefaultAzureCredential", error=str(e))
+            return None
 
 
 def get_search_credential(settings: Settings):
@@ -126,22 +134,29 @@ def get_search_credential(settings: Settings):
 
 # Cached token provider (module-level singleton)
 _openai_token_provider = None
+_openai_token_provider_lock = threading.Lock()
 
 
 def get_openai_token_provider():
     """Get cached token provider for Azure OpenAI using identity."""
     global _openai_token_provider
-    
+
+    # Double-checked locking pattern for thread-safe singleton
     if _openai_token_provider is not None:
         return _openai_token_provider
-    
-    credential = get_azure_credential()
-    if credential:
-        _openai_token_provider = get_bearer_token_provider(
-            credential, "https://cognitiveservices.azure.com/.default"
-        )
-        return _openai_token_provider
-    return None
+
+    with _openai_token_provider_lock:
+        # Check again inside lock to prevent race condition
+        if _openai_token_provider is not None:
+            return _openai_token_provider
+
+        credential = get_azure_credential()
+        if credential:
+            _openai_token_provider = get_bearer_token_provider(
+                credential, "https://cognitiveservices.azure.com/.default"
+            )
+            return _openai_token_provider
+        return None
 
 
 @lru_cache()

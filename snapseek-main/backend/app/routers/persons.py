@@ -1,7 +1,7 @@
 """Person management and face-based search endpoints."""
 
 import re
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query, Request
 from pydantic import BaseModel, Field
 import structlog
 
@@ -12,10 +12,27 @@ from ..models import SearchRequest
 
 logger = structlog.get_logger()
 
-router = APIRouter(prefix="/api/persons", tags=["persons"])
+router = APIRouter(prefix="/api/v1/persons", tags=["persons"])
 
-# UUID pattern for face IDs
+# Constants
 UUID_PATTERN = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.IGNORECASE)
+MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10MB
+
+
+async def validate_file_size(request: Request, max_size: int = MAX_UPLOAD_SIZE):
+    """
+    Validate file upload size before reading the entire content.
+
+    Checks Content-Length header if present, otherwise validates during streaming.
+    """
+    content_length = request.headers.get("content-length")
+    if content_length:
+        content_length = int(content_length)
+        if content_length > max_size:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large. Maximum size is {max_size / (1024 * 1024):.1f}MB"
+            )
 
 
 class PersonResponse(BaseModel):
@@ -110,7 +127,7 @@ async def list_persons(
                 search_result = await search_service.search(SearchRequest(
                     query="*",
                     person_ids=[person_id],
-                    top=0  # We just want the count
+                    top=1
                 ))
                 image_count = search_result.total_count
             except Exception:
@@ -149,7 +166,7 @@ async def get_person(
         search_result = await search_service.search(SearchRequest(
             query="*",
             person_ids=[person_id],
-            top=0
+            top=1
         ))
         image_count = search_result.total_count
     except Exception:
@@ -181,13 +198,6 @@ async def update_person(
     
     # Update face_details in all documents containing this person
     try:
-        # Find all documents with this person
-        search_result = await search_service.search(SearchRequest(
-            query="*",
-            person_ids=[person_id],
-            top=1000  # Get all
-        ))
-        
         # Update each document's face_details with the new name
         updated_count = await search_service.update_person_name_in_documents(
             person_id=person_id,
@@ -246,38 +256,46 @@ async def get_person_images(
 
 @router.post("/find-by-face", response_model=FindByFaceResponse)
 async def find_by_face(
+    request: Request,
     image: UploadFile = File(..., description="Image containing a face to search for"),
     threshold: float = Query(0.5, ge=0.0, le=1.0, description="Minimum similarity threshold"),
     settings: Settings = Depends(get_settings)
 ):
     """
     Upload an image and find all photos containing the same person.
-    
+
     The image should contain exactly one face. If multiple faces are detected,
     only the first (largest) face will be used for matching.
     """
+    # Validate file size before reading
+    await validate_file_size(request, MAX_UPLOAD_SIZE)
+
     person_service = get_person_service(settings)
-    
-    # Read image data
+
+    # Read image data with size check
     image_data = await image.read()
-    
-    if len(image_data) > 10 * 1024 * 1024:  # 10MB limit
-        raise HTTPException(status_code=400, detail="Image too large (max 10MB)")
-    
+
+    # Double-check size after reading (in case Content-Length was missing)
+    if len(image_data) > MAX_UPLOAD_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Image too large (max {MAX_UPLOAD_SIZE / (1024 * 1024):.1f}MB)"
+        )
+
     # Detect face in uploaded image
     face_id = await person_service.detect_face(image_data)
     if not face_id:
         raise HTTPException(
-            status_code=400, 
+            status_code=400,
             detail="No face detected in the uploaded image. Please upload an image with a clear face."
         )
-    
+
     # Find similar faces in the FaceList
     similar_faces = await person_service.find_similar_faces(
         face_id=face_id,
         threshold=threshold
     )
-    
+
     if not similar_faces:
         return FindByFaceResponse(
             matched_persisted_face_ids=[],
@@ -285,16 +303,16 @@ async def find_by_face(
             confidence_scores={},
             total_matches=0
         )
-    
+
     # Get document IDs from FaceList metadata
     face_metadata = await person_service.get_face_list_metadata()
     face_to_doc = {f["persisted_face_id"]: f["document_id"] for f in face_metadata}
-    
+
     # Map similar faces to document IDs
     matched_doc_ids = set()
     confidence_scores = {}
     matched_pf_ids = []
-    
+
     for match in similar_faces:
         pf_id = match["persisted_face_id"]
         matched_pf_ids.append(pf_id)
@@ -304,7 +322,7 @@ async def find_by_face(
             # Keep highest confidence for each doc
             if doc_id not in confidence_scores or match["confidence"] > confidence_scores[doc_id]:
                 confidence_scores[doc_id] = match["confidence"]
-    
+
     return FindByFaceResponse(
         matched_persisted_face_ids=matched_pf_ids,
         matched_document_ids=list(matched_doc_ids),
@@ -315,6 +333,7 @@ async def find_by_face(
 
 @router.post("/find-by-face/images")
 async def find_images_by_face(
+    request: Request,
     image: UploadFile = File(..., description="Image containing a face to search for"),
     threshold: float = Query(0.5, ge=0.0, le=1.0, description="Minimum similarity threshold"),
     top: int = Query(50, ge=1, le=100),
@@ -322,73 +341,80 @@ async def find_images_by_face(
 ):
     """
     Upload an image and get the actual image results containing the same person.
-    
+
     This is a convenience endpoint that combines find-by-face with fetching the images.
     """
+    # Validate file size before reading
+    await validate_file_size(request, MAX_UPLOAD_SIZE)
+
     person_service = get_person_service(settings)
     search_service = get_search_service(settings)
-    
-    # Read image data
+
+    # Read image data with size check
     image_data = await image.read()
-    
-    if len(image_data) > 10 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="Image too large (max 10MB)")
-    
+
+    # Double-check size after reading (in case Content-Length was missing)
+    if len(image_data) > MAX_UPLOAD_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Image too large (max {MAX_UPLOAD_SIZE / (1024 * 1024):.1f}MB)"
+        )
+
     # Detect face
     face_id = await person_service.detect_face(image_data)
     if not face_id:
         raise HTTPException(
-            status_code=400, 
+            status_code=400,
             detail="No face detected in the uploaded image"
         )
-    
+
     # Find similar faces
     similar_faces = await person_service.find_similar_faces(
         face_id=face_id,
         threshold=threshold
     )
-    
+
     if not similar_faces:
         return {
             "results": [],
             "total_count": 0,
             "message": "No matching faces found in the collection"
         }
-    
+
     # Get document IDs
     face_metadata = await person_service.get_face_list_metadata()
     face_to_doc = {f["persisted_face_id"]: f["document_id"] for f in face_metadata}
-    
+
     doc_ids = list(set(
-        face_to_doc.get(m["persisted_face_id"]) 
-        for m in similar_faces 
+        face_to_doc.get(m["persisted_face_id"])
+        for m in similar_faces
         if face_to_doc.get(m["persisted_face_id"])
     ))
-    
+
     if not doc_ids:
         return {
             "results": [],
             "total_count": 0,
             "message": "Matching faces found but documents not indexed"
         }
-    
+
     # Fetch the actual images
     images = await search_service.get_images_by_ids(doc_ids[:top])
-    
+
     # Add confidence scores to results
     confidence_map = {}
     for match in similar_faces:
         doc_id = face_to_doc.get(match["persisted_face_id"])
         if doc_id and (doc_id not in confidence_map or match["confidence"] > confidence_map[doc_id]):
             confidence_map[doc_id] = match["confidence"]
-    
+
     # Attach confidence to each result
     for img in images:
         img.score = confidence_map.get(img.id, 0.0)
-    
+
     # Sort by confidence
     images.sort(key=lambda x: x.score or 0, reverse=True)
-    
+
     return {
         "results": images,
         "total_count": len(images),

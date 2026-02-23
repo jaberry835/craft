@@ -9,7 +9,7 @@ import structlog
 from .config import get_settings
 from .routers import search_router, chat_router, persons_router
 from .routers.images import router as images_router
-from .models import HealthResponse
+from .models import HealthResponse, ServiceHealth
 from .services import SearchService
 
 # Configure standard logging
@@ -17,6 +17,10 @@ logging.basicConfig(
     format="%(message)s",
     level=logging.INFO,
 )
+
+# Suppress verbose Azure SDK HTTP logging
+logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(logging.WARNING)
+logging.getLogger("azure.identity").setLevel(logging.WARNING)
 
 # Configure structured logging
 structlog.configure(
@@ -83,23 +87,104 @@ async def root():
 
 @app.get("/health", response_model=HealthResponse, tags=["health"])
 async def health_check() -> HealthResponse:
-    """Health check endpoint."""
+    """
+    Comprehensive health check endpoint for all Azure services.
+
+    Checks:
+    - Azure AI Search (doc count)
+    - Azure OpenAI (embedding generation)
+    - Azure Face API (if configured)
+    """
+    services = []
+    doc_count = None
+
+    # Check Azure AI Search
     try:
         search_service = SearchService(settings)
         doc_count = await search_service.get_document_count()
-        
-        return HealthResponse(
+        services.append(ServiceHealth(
+            service="Azure AI Search",
             status="healthy",
-            version="1.0.0",
-            search_index_count=doc_count
-        )
+            message=f"{doc_count} documents indexed"
+        ))
     except Exception as e:
-        logger.error("Health check failed", error=str(e))
-        return HealthResponse(
+        services.append(ServiceHealth(
+            service="Azure AI Search",
             status="unhealthy",
-            version="1.0.0",
-            search_index_count=None
-        )
+            message=str(e)[:100]
+        ))
+
+    # Check Azure OpenAI (embedding generation)
+    try:
+        search_service = SearchService(settings)
+        # Generate a test embedding to verify OpenAI connectivity
+        test_embedding = search_service._generate_embedding("health check")
+        if test_embedding and len(test_embedding) > 0:
+            services.append(ServiceHealth(
+                service="Azure OpenAI",
+                status="healthy",
+                message=f"Embedding dimension: {len(test_embedding)}"
+            ))
+        else:
+            services.append(ServiceHealth(
+                service="Azure OpenAI",
+                status="unhealthy",
+                message="Empty embedding returned"
+            ))
+    except Exception as e:
+        services.append(ServiceHealth(
+            service="Azure OpenAI",
+            status="unhealthy",
+            message=str(e)[:100]
+        ))
+
+    # Check Azure Face API (if configured)
+    if settings.azure_face_endpoint:
+        try:
+            from .services.person_service import get_person_service
+            person_service = get_person_service(settings)
+            if person_service.enabled:
+                # Try to list persons to verify connectivity
+                persons = await person_service.list_persons()
+                services.append(ServiceHealth(
+                    service="Azure Face API",
+                    status="healthy",
+                    message=f"{len(persons)} persons in group"
+                ))
+            else:
+                services.append(ServiceHealth(
+                    service="Azure Face API",
+                    status="disabled",
+                    message="Not configured"
+                ))
+        except Exception as e:
+            services.append(ServiceHealth(
+                service="Azure Face API",
+                status="unhealthy",
+                message=str(e)[:100]
+            ))
+    else:
+        services.append(ServiceHealth(
+            service="Azure Face API",
+            status="disabled",
+            message="Not configured"
+        ))
+
+    # Determine overall status
+    unhealthy_count = sum(1 for s in services if s.status == "unhealthy")
+    disabled_count = sum(1 for s in services if s.status == "disabled")
+
+    if unhealthy_count > 0:
+        overall_status = "unhealthy" if unhealthy_count == len(services) - disabled_count else "degraded"
+    else:
+        overall_status = "healthy"
+
+    return HealthResponse(
+        status=overall_status,
+        version="1.0.0",
+        services=services,
+        search_index_count=doc_count
+    )
 
 
 if __name__ == "__main__":

@@ -2,14 +2,16 @@
 
 import httpx
 import structlog
+import threading
 from typing import Any
 
 from ..config import Settings, get_azure_credential
+from ..interfaces.ai_interface import IFaceService
 
 logger = structlog.get_logger()
 
 
-class PersonService:
+class PersonService(IFaceService):
     """Service for Azure Face API person management and face search."""
     
     def __init__(self, settings: Settings):
@@ -245,11 +247,20 @@ class PersonService:
 
 # Singleton instance
 _person_service: PersonService | None = None
+_person_service_lock = threading.Lock()
 
 
 def get_person_service(settings: Settings) -> PersonService:
     """Get or create singleton PersonService instance."""
     global _person_service
-    if _person_service is None:
+
+    # Double-checked locking pattern for thread-safe singleton
+    if _person_service is not None:
+        return _person_service
+
+    with _person_service_lock:
+        # Check again inside lock to prevent race condition
+        if _person_service is not None:
+            return _person_service
         _person_service = PersonService(settings)
-    return _person_service
+        return _person_service

@@ -9,6 +9,8 @@ import structlog
 import httpx
 import uuid
 import asyncio
+import json
+from pathlib import Path
 from dataclasses import dataclass
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -439,30 +441,34 @@ class FaceAnalyzer:
             self.logger.error("Find similar error", error=str(e))
             return []
 
-    async def cluster_faces_with_redetection(self, 
+    async def cluster_faces_with_redetection(self,
                                               get_image_func,
-                                              similarity_threshold: float = 0.5
+                                              similarity_threshold: float = 0.5,
+                                              max_concurrent: int = 5,
+                                              checkpoint_file: str | None = None
                                               ) -> dict[str, list[tuple[str, str]]]:
         """
         PASS 2, Step 1: Cluster faces using re-detection for FindSimilar.
-        
+
         Args:
             get_image_func: Async function(doc_id) -> image_bytes
             similarity_threshold: Minimum similarity to group faces
-            
+            max_concurrent: Maximum concurrent face detection operations
+            checkpoint_file: Path to checkpoint file for resume capability
+
         Returns:
             Dict mapping cluster_id to list of (persistedFaceId, doc_id) tuples
         """
-        self.logger.info("Pass 2: Clustering faces")
-        
+        self.logger.info("Pass 2: Clustering faces with parallel processing")
+
         faces = await self.list_faces_in_face_list()
         if not faces:
             return {}
-        
+
         # Parse userData: "doc_id|face_index"
         face_docs: dict[str, tuple[str, int]] = {}
         docs_to_process: dict[str, list[str]] = {}
-        
+
         for face in faces:
             pf_id = face.get("persistedFaceId")
             user_data = face.get("userData", "")
@@ -472,21 +478,33 @@ class FaceAnalyzer:
                 if doc_id not in docs_to_process:
                     docs_to_process[doc_id] = []
                 docs_to_process[doc_id].append(pf_id)
-        
+
         self.logger.info("Documents to process", count=len(docs_to_process))
-        
-        assigned = set()
-        clusters: dict[str, list[tuple[str, str]]] = {}
-        
-        for doc_id, pf_ids in docs_to_process.items():
+
+        # Step 1: Process documents in parallel batches to detect faces
+        doc_face_map: dict[str, dict[int, str]] = {}  # doc_id -> {face_index: temp_face_id}
+
+        # Load checkpoint if available
+        processed_docs = set()
+        if checkpoint_file:
+            checkpoint  = self._load_checkpoint(checkpoint_file)
+            if checkpoint:
+                doc_face_map = checkpoint.get("doc_face_map", {})
+                processed_docs = set(checkpoint.get("processed_docs", []))
+                self.logger.info("Loaded checkpoint",
+                               processed=len(processed_docs),
+                               total=len(docs_to_process))
+
+        async def process_document(doc_id: str, pf_ids: list[str]) -> tuple[str, dict[int, str]]:
+            """Process a single document: download and detect faces."""
             try:
                 image_data = await get_image_func(doc_id)
                 if not image_data:
-                    continue
+                    return doc_id, {}
             except Exception as e:
                 self.logger.warning("Could not get image", doc_id=doc_id, error=str(e))
-                continue
-            
+                return doc_id, {}
+
             # Re-detect to get temporary faceIds
             headers = await self._get_headers()
             params = {
@@ -494,7 +512,7 @@ class FaceAnalyzer:
                 "recognitionModel": "recognition_04",
                 "detectionModel": "detection_03",
             }
-            
+
             try:
                 async with httpx.AsyncClient(timeout=30.0) as client:
                     response = await client.post(
@@ -503,52 +521,142 @@ class FaceAnalyzer:
                         params=params,
                         content=image_data,
                     )
-                    
+
                     if response.status_code != 200:
-                        continue
-                    
+                        return doc_id, {}
+
                     detected = response.json()
-            except Exception:
-                continue
-            
-            for idx, det_face in enumerate(detected):
-                temp_face_id = det_face.get("faceId")
+
+                # Build map of face_index -> temp_face_id
+                face_map = {}
+                for idx, det_face in enumerate(detected):
+                    temp_face_id = det_face.get("faceId")
+                    if temp_face_id:
+                        face_map[idx] = temp_face_id
+
+                return doc_id, face_map
+            except Exception as e:
+                self.logger.debug("Detection failed for document", doc_id=doc_id, error=str(e))
+                return doc_id, {}
+
+        # Process documents in concurrent batches (skip already processed)
+        from asyncio import Semaphore
+        semaphore = Semaphore(max_concurrent)
+
+        async def rate_limited_process(doc_id: str, pf_ids: list[str]):
+            async with semaphore:
+                return await process_document(doc_id, pf_ids)
+
+        docs_to_detect = {doc_id: pf_ids for doc_id, pf_ids in docs_to_process.items()
+                         if doc_id not in processed_docs}
+
+        if docs_to_detect:
+            tasks = [rate_limited_process(doc_id, pf_ids) for doc_id, pf_ids in docs_to_detect.items()]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Collect results
+            successful_detections = 0
+            batch_count = 0
+            for result in results:
+                if isinstance(result, Exception):
+                    self.logger.warning("Document processing failed", error=str(result))
+                    continue
+                doc_id, face_map = result
+                if face_map:
+                    doc_face_map[doc_id] = face_map
+                    processed_docs.add(doc_id)
+                    successful_detections += 1
+                    batch_count += 1
+
+                    # Save checkpoint every 50 documents
+                    if checkpoint_file and batch_count % 50 == 0:
+                        self._save_checkpoint(checkpoint_file, {
+                            "doc_face_map": doc_face_map,
+                            "processed_docs": list(processed_docs)
+                        })
+                        self.logger.debug("Checkpoint saved", processed=len(processed_docs))
+
+            self.logger.info("Face detection complete",
+                            total_docs=len(docs_to_process),
+                            successful=successful_detections,
+                            from_checkpoint=len(processed_docs) - successful_detections)
+
+            # Final checkpoint save
+            if checkpoint_file:
+                self._save_checkpoint(checkpoint_file, {
+                    "doc_face_map": doc_face_map,
+                    "processed_docs": list(processed_docs)
+                })
+
+        # Step 2: Cluster faces using similarity search
+        assigned = set()
+        clusters: dict[str, list[tuple[str, str]]] = {}
+
+        for doc_id, face_map in doc_face_map.items():
+            pf_ids = docs_to_process.get(doc_id, [])
+
+            for pf_id in pf_ids:
+                if pf_id in assigned:
+                    continue
+
+                # Get face index and temp_face_id
+                face_idx = face_docs.get(pf_id, (None, -1))[1]
+                temp_face_id = face_map.get(face_idx)
+
                 if not temp_face_id:
                     continue
-                
-                # Find matching persistedFaceId by index
-                matching_pf_id = None
-                for pf_id in pf_ids:
-                    if face_docs.get(pf_id, (None, -1))[1] == idx:
-                        matching_pf_id = pf_id
-                        break
-                
-                if not matching_pf_id or matching_pf_id in assigned:
-                    continue
-                
+
                 # Find similar faces
                 similar = await self.find_similar_faces(
-                    temp_face_id, 
+                    temp_face_id,
                     threshold=similarity_threshold
                 )
-                
+
                 cluster_id = str(uuid.uuid4())
-                cluster_faces = [(matching_pf_id, doc_id)]
-                assigned.add(matching_pf_id)
-                
+                cluster_faces = [(pf_id, doc_id)]
+                assigned.add(pf_id)
+
                 for sim_pf_id, confidence in similar:
                     if sim_pf_id not in assigned and sim_pf_id in face_docs:
                         sim_doc_id = face_docs[sim_pf_id][0]
                         cluster_faces.append((sim_pf_id, sim_doc_id))
                         assigned.add(sim_pf_id)
-                
+
                 if cluster_faces:
                     clusters[cluster_id] = cluster_faces
-        
-        self.logger.info("Clustering complete", 
+
+        # Clean up checkpoint file if completed successfully
+        if checkpoint_file:
+            try:
+                Path(checkpoint_file).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        self.logger.info("Clustering complete",
                         cluster_count=len(clusters),
                         assigned_faces=len(assigned))
         return clusters
+
+    def _save_checkpoint(self, checkpoint_file: str, data: dict):
+        """Save checkpoint to file."""
+        try:
+            checkpoint_path = Path(checkpoint_file)
+            checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(checkpoint_path, 'w') as f:
+                json.dump(data, f)
+        except Exception as e:
+            self.logger.warning("Failed to save checkpoint", error=str(e))
+
+    def _load_checkpoint(self, checkpoint_file: str) -> dict | None:
+        """Load checkpoint from file."""
+        try:
+            checkpoint_path = Path(checkpoint_file)
+            if checkpoint_path.exists():
+                with open(checkpoint_path, 'r') as f:
+                    return json.load(f)
+        except Exception as e:
+            self.logger.warning("Failed to load checkpoint", error=str(e))
+        return None
 
     async def assign_persons_from_clusters(self, 
                                            clusters: dict[str, list[tuple[str, str]]]

@@ -7,7 +7,7 @@ from ..models import ChatRequest, ChatResponse
 from ..services import SearchService, ChatService
 from .search import get_search_service
 
-router = APIRouter(prefix="/api", tags=["chat"])
+router = APIRouter(prefix="/api/v1", tags=["chat"])
 
 # Cached singleton instance
 _chat_service: ChatService | None = None

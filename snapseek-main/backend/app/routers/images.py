@@ -11,7 +11,7 @@ from typing import Optional
 from ..config import get_settings
 from ..services.blob_service import BlobService
 
-router = APIRouter(prefix="/api/blob", tags=["blob"])
+router = APIRouter(prefix="/api/v1/blob", tags=["blob"])
 logger = structlog.get_logger()
 
 # Initialize blob service

@@ -187,8 +187,16 @@ class ImageListResponse(BaseModel):
 
 
 # Health Models
+class ServiceHealth(BaseModel):
+    """Health status for a single service."""
+    service: str
+    status: str  # "healthy", "unhealthy", or "disabled"
+    message: str | None = None
+
+
 class HealthResponse(BaseModel):
     """Health check response."""
-    status: str
+    status: str  # Overall status: "healthy", "degraded", or "unhealthy"
     version: str
+    services: list[ServiceHealth]
     search_index_count: int | None = None

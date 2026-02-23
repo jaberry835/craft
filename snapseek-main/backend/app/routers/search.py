@@ -11,7 +11,7 @@ from ..models import (
 )
 from ..services import SearchService
 
-router = APIRouter(prefix="/api", tags=["search"])
+router = APIRouter(prefix="/api/v1", tags=["search"])
 
 # Cached singleton instance
 _search_service: SearchService | None = None

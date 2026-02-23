@@ -2,6 +2,7 @@
 
 import json
 import math
+import threading
 import time
 import structlog
 from functools import lru_cache
@@ -10,6 +11,7 @@ from azure.search.documents.models import VectorizedQuery
 from openai import AzureOpenAI
 
 from ..config import Settings, get_search_credential, get_openai_token_provider
+from ..interfaces.search_interface import ISearchService
 from ..models import (
     SearchRequest, SearchResponse, ImageResult,
     FacetsResponse, FacetValue,
@@ -21,10 +23,16 @@ logger = structlog.get_logger()
 
 # Module-level embedding cache (survives service instances)
 _embedding_cache: dict[str, list[float]] = {}
+_embedding_cache_lock = threading.Lock()
 _CACHE_MAX_SIZE = 100
 
 
-class SearchService:
+def _escape_odata_value(value: str) -> str:
+    """Escape single quotes for safe OData string literals."""
+    return value.replace("'", "''")
+
+
+class SearchService(ISearchService):
     """Service for searching and retrieving images from Azure AI Search."""
     
     def __init__(self, settings: Settings):
@@ -64,28 +72,31 @@ class SearchService:
     def _generate_embedding(self, text: str) -> list[float]:
         """Generate embedding for search query with caching."""
         global _embedding_cache
-        
-        # Check cache first
+
+        # Check cache first (thread-safe read check)
         cache_key = text.lower().strip()
-        if cache_key in _embedding_cache:
-            self.logger.debug("Embedding cache hit", query=text[:50])
-            return _embedding_cache[cache_key]
-        
-        # Generate new embedding
+        with _embedding_cache_lock:
+            if cache_key in _embedding_cache:
+                self.logger.debug("Embedding cache hit", query=text[:50])
+                return _embedding_cache[cache_key]
+
+        # Generate new embedding (outside lock to avoid blocking other requests)
         response = self.openai_client.embeddings.create(
             model=self.settings.azure_openai_embedding_deployment,
             input=text[:8000],
             dimensions=self.settings.text_embedding_dimensions
         )
         embedding = response.data[0].embedding
-        
-        # Cache it (with simple size limit)
-        if len(_embedding_cache) >= _CACHE_MAX_SIZE:
-            # Remove oldest entry (first key)
-            oldest_key = next(iter(_embedding_cache))
-            del _embedding_cache[oldest_key]
-        _embedding_cache[cache_key] = embedding
-        
+
+        # Cache it with thread-safe write
+        with _embedding_cache_lock:
+            # Check size limit and evict oldest entry if needed
+            if len(_embedding_cache) >= _CACHE_MAX_SIZE:
+                # Remove oldest entry (first key)
+                oldest_key = next(iter(_embedding_cache))
+                del _embedding_cache[oldest_key]
+            _embedding_cache[cache_key] = embedding
+
         return embedding
     
     def _build_filter(self, request: SearchRequest) -> str | None:
@@ -93,11 +104,17 @@ class SearchService:
         filters = []
         
         if request.tags:
-            tag_filters = [f"tags/any(t: t eq '{tag}')" for tag in request.tags]
+            tag_filters = [
+                f"tags/any(t: t eq '{_escape_odata_value(tag)}')"
+                for tag in request.tags
+            ]
             filters.append(f"({' or '.join(tag_filters)})")
         
         if request.objects:
-            obj_filters = [f"objects/any(o: o eq '{obj}')" for obj in request.objects]
+            obj_filters = [
+                f"objects/any(o: o eq '{_escape_odata_value(obj)}')"
+                for obj in request.objects
+            ]
             filters.append(f"({' or '.join(obj_filters)})")
         
         if request.has_text is not None:
@@ -110,11 +127,17 @@ class SearchService:
             filters.append(f"face_count ge {request.min_faces}")
         
         if request.colors:
-            color_filters = [f"dominant_colors/any(c: c eq '{color}')" for color in request.colors]
+            color_filters = [
+                f"dominant_colors/any(c: c eq '{_escape_odata_value(color)}')"
+                for color in request.colors
+            ]
             filters.append(f"({' or '.join(color_filters)})")
         
         if request.person_ids:
-            person_filters = [f"person_ids/any(p: p eq '{pid}')" for pid in request.person_ids]
+            person_filters = [
+                f"person_ids/any(p: p eq '{_escape_odata_value(pid)}')"
+                for pid in request.person_ids
+            ]
             filters.append(f"({' or '.join(person_filters)})")
         
         return " and ".join(filters) if filters else None
@@ -261,7 +284,7 @@ class SearchService:
         
         return SearchResponse(
             results=images,
-            total_count=len(images),  # Return filtered count as total
+            total_count=total_before_filter,
             filtered_count=len(images),
             query=request.query,
             took_ms=elapsed_ms
@@ -469,7 +492,7 @@ class SearchService:
         self.logger.info("Fetching images by IDs", count=len(doc_ids))
         
         # Build filter for multiple IDs
-        id_filters = [f"id eq '{doc_id}'" for doc_id in doc_ids]
+        id_filters = [f"id eq '{_escape_odata_value(doc_id)}'" for doc_id in doc_ids]
         filter_str = f"({' or '.join(id_filters)})"
         
         results = self.search_client.search(
@@ -526,7 +549,7 @@ class SearchService:
         # Find all documents with this person_id
         results = self.search_client.search(
             search_text="*",
-            filter=f"person_ids/any(p: p eq '{person_id}')",
+            filter=f"person_ids/any(p: p eq '{_escape_odata_value(person_id)}')",
             top=1000,
             select=["id", "face_details"]
         )
@@ -584,7 +607,7 @@ class SearchService:
             self.logger.info("Searching for images by face ID", face_id=face_id)
             results = self.search_client.search(
                 search_text="*",
-                filter=f"persisted_face_ids/any(f: f eq '{face_id}')",
+                filter=f"persisted_face_ids/any(f: f eq '{_escape_odata_value(face_id)}')",
                 top=100,
                 select=["id", "filename", "file_url", "face_details", "person_ids"]
             )
@@ -623,11 +646,20 @@ class SearchService:
 
 # Singleton instance
 _search_service: SearchService | None = None
+_search_service_lock = threading.Lock()
 
 
 def get_search_service(settings: Settings) -> SearchService:
     """Get or create singleton SearchService instance."""
     global _search_service
-    if _search_service is None:
+
+    # Double-checked locking pattern for thread-safe singleton
+    if _search_service is not None:
+        return _search_service
+
+    with _search_service_lock:
+        # Check again inside lock to prevent race condition
+        if _search_service is not None:
+            return _search_service
         _search_service = SearchService(settings)
-    return _search_service
+        return _search_service

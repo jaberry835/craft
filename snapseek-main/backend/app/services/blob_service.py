@@ -113,7 +113,7 @@ class BlobService:
             self.logger.error("Failed to parse blob URL", error=str(e), url=blob_url)
             return None
     
-    def get_proxy_url(self, blob_url: str, base_url: str = "/api/blob") -> str:
+    def get_proxy_url(self, blob_url: str, base_url: str = "/api/v1/blob") -> str:
         """
         Convert a blob URL to a proxy URL that goes through our backend.
         
