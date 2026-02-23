@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import sys, subprocess, os, shutil, stat, tempfile
+import sys, subprocess, os, shutil, stat, tempfile, filecmp
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -94,6 +94,89 @@ def copy_local_source(source: str, target_dir: str) -> None:
         f"Unsupported local source: {source}. Expected a directory or .zip file."
     )
 
+def should_exclude(file_path: Path) -> tuple:
+    """Check if a file should be excluded. Returns (should_remove, reason)."""
+    # Check by extension
+    if file_path.suffix.lower() in EXCLUDE_EXTENSIONS:
+        return True, f"type: {file_path.suffix}"
+    # Check by specific filename
+    if file_path.name.lower() in EXCLUDE_FILENAMES:
+        return True, "Docker image file"
+    # Check by filename pattern
+    if any(pattern(file_path.name.lower()) for pattern in EXCLUDE_PATTERNS):
+        return True, "Docker/container image"
+    # Check by size (for unknown large files)
+    try:
+        size = file_path.stat().st_size
+        if size > MAX_FILE_SIZE:
+            return True, f"size: {size / (1024*1024):.1f}MB"
+    except OSError:
+        pass
+    return False, ""
+
+
+def sync_directories(fresh_dir: str, target_dir: str) -> dict:
+    """Incrementally sync fresh_dir into target_dir.
+    Only copies new/changed files and removes deleted files.
+    Returns stats dict with counts."""
+    stats = {"added": 0, "updated": 0, "removed": 0, "unchanged": 0, "excluded": 0}
+    fresh_path = Path(fresh_dir)
+    target_path = Path(target_dir)
+
+    # Build set of all relative paths in the fresh source (after exclusions)
+    fresh_files = set()
+    for root, dirs, files in os.walk(fresh_path):
+        for file in files:
+            fp = Path(root) / file
+            rel = fp.relative_to(fresh_path)
+            exclude, reason = should_exclude(fp)
+            if exclude:
+                fp.unlink()
+                stats["excluded"] += 1
+                print(f"🗑️ Excluded {rel} ({reason})")
+                continue
+            fresh_files.add(rel)
+
+    # Copy new or changed files
+    for rel in sorted(fresh_files):
+        src_file = fresh_path / rel
+        dst_file = target_path / rel
+
+        if not dst_file.exists():
+            # New file
+            dst_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_file, dst_file)
+            stats["added"] += 1
+            print(f"  ➕ Added {rel}")
+        elif not filecmp.cmp(str(src_file), str(dst_file), shallow=False):
+            # File content changed
+            shutil.copy2(src_file, dst_file)
+            stats["updated"] += 1
+            print(f"  ✏️ Updated {rel}")
+        else:
+            stats["unchanged"] += 1
+
+    # Remove files that no longer exist in source
+    if target_path.exists():
+        for root, dirs, files in os.walk(target_path):
+            for file in files:
+                fp = Path(root) / file
+                rel = fp.relative_to(target_path)
+                if rel not in fresh_files:
+                    fp.unlink()
+                    stats["removed"] += 1
+                    print(f"  🗑️ Removed {rel}")
+
+        # Clean up empty directories
+        for root, dirs, files in os.walk(target_path, topdown=False):
+            for d in dirs:
+                dp = Path(root) / d
+                if dp.exists() and not any(dp.iterdir()):
+                    dp.rmdir()
+
+    return stats
+
+
 def main():
     if len(sys.argv) < 3:
         print("Usage: python add_repo.py <repo_url|local_path|archive.zip> <branch>")
@@ -103,64 +186,49 @@ def main():
     repo_name = derive_repo_name(source)
     target_dir = f"{repo_name}-{branch}"
 
-    if os.path.exists(target_dir):
-        print(f"⚠️ Removing existing {target_dir}...")
-        shutil.rmtree(target_dir, onerror=handle_remove_readonly)
+    # Clone/copy into a temp directory first
+    with tempfile.TemporaryDirectory(prefix="add_repo_sync_") as tmp_dir:
+        fresh_dir = os.path.join(tmp_dir, "fresh")
 
-    if os.path.exists(source):
-        print(f"📦 Importing local source {source} into {target_dir}...")
-        copy_local_source(source, target_dir)
-    else:
-        subprocess.run([
-            "git", "clone", "--depth", "1",
-            "--branch", branch, "--single-branch",
-            source, target_dir
-        ], check=True)
+        if os.path.exists(source):
+            print(f"📦 Importing local source {source}...")
+            copy_local_source(source, fresh_dir)
+        else:
+            print(f"📥 Cloning {source} ({branch})...")
+            subprocess.run([
+                "git", "clone", "--depth", "1",
+                "--branch", branch, "--single-branch",
+                source, fresh_dir
+            ], check=True)
 
-    # Remove .git folder safely
-    git_dir = os.path.join(target_dir, ".git")
-    if os.path.exists(git_dir):
-        shutil.rmtree(git_dir, onerror=handle_remove_readonly)
-        print(f"🗑️ Removed {git_dir}")
+        # Remove .git folder from fresh clone
+        git_dir = os.path.join(fresh_dir, ".git")
+        if os.path.exists(git_dir):
+            shutil.rmtree(git_dir, onerror=handle_remove_readonly)
 
-    # Remove excluded file types (PDFs, videos, large binaries, Docker images, etc.)
-    removed_count = 0
-    removed_by_size = 0
-    for root, dirs, files in os.walk(target_dir):
-        for file in files:
-            file_path = Path(root) / file
-            should_remove = False
-            reason = ""
-            
-            # Check by extension
-            if file_path.suffix.lower() in EXCLUDE_EXTENSIONS:
-                should_remove = True
-                reason = f"type: {file_path.suffix}"
-            # Check by specific filename
-            elif file_path.name.lower() in EXCLUDE_FILENAMES:
-                should_remove = True
-                reason = "Docker image file"
-            # Check by filename pattern
-            elif any(pattern(file_path.name.lower()) for pattern in EXCLUDE_PATTERNS):
-                should_remove = True
-                reason = "Docker/container image"
-            # Check by size (for unknown large files)
-            elif file_path.stat().st_size > MAX_FILE_SIZE:
-                should_remove = True
-                reason = f"size: {file_path.stat().st_size / (1024*1024):.1f}MB"
-                removed_by_size += 1
-            
-            if should_remove:
-                file_path.unlink()
-                removed_count += 1
-                print(f"🗑️ Removed {file_path.relative_to(target_dir)} ({reason})")
-    
-    if removed_count > 0:
-        print(f"✨ Removed {removed_count} file(s) total")
-        if removed_by_size > 0:
-            print(f"   ({removed_by_size} removed due to size >10MB)")
-    else:
-        print("✨ No files needed removal")
+        # Incremental sync: only update what actually changed
+        is_new = not os.path.exists(target_dir)
+        if is_new:
+            print(f"🆕 Creating {target_dir} (first import)...")
+            os.makedirs(target_dir, exist_ok=True)
+        else:
+            print(f"🔄 Syncing changes into {target_dir}...")
+
+        stats = sync_directories(fresh_dir, target_dir)
+
+    # Summary
+    print(f"\n📊 Sync summary:")
+    print(f"   Added:     {stats['added']}")
+    print(f"   Updated:   {stats['updated']}")
+    print(f"   Removed:   {stats['removed']}")
+    print(f"   Unchanged: {stats['unchanged']}")
+    if stats['excluded'] > 0:
+        print(f"   Excluded:  {stats['excluded']}")
+
+    total_changes = stats['added'] + stats['updated'] + stats['removed']
+    if total_changes == 0:
+        print("\n✅ Already up to date — nothing to commit.")
+        return
 
     subprocess.run(["git", "add", target_dir], check=True)
     subprocess.run(["git", "commit", "-m", f"Add/update {repo_name} ({branch})"], check=True)
