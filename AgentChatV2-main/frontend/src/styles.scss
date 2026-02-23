@@ -46,6 +46,25 @@ body {
   font-size: 14px;
 }
 
+// Light theme overrides
+body.theme-light {
+  --primary: #0078d4;
+  --primary-dark: #005a9e;
+  --secondary: #6c757d;
+
+  --bg-primary: #f5f5f5;
+  --bg-secondary: #ffffff;
+  --bg-tertiary: #e8e8e8;
+  --bg-hover: #d6d6d6;
+
+  --text-primary: #1e1e1e;
+  --text-secondary: #444444;
+  --text-muted: #888888;
+
+  --border-color: #d1d1d1;
+  --shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
 // Scrollbar styling
 ::-webkit-scrollbar {
   width: 8px;
@@ -214,4 +233,24 @@ textarea.input {
 .message-text a:active {
   color: #ffffff !important;
   text-decoration: underline !important;
+}
+
+body.theme-light {
+  .message-text a,
+  .message-text a:link,
+  .message-text a:visited,
+  .message-text a:hover,
+  .message-text a:active {
+    color: var(--primary) !important;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: var(--bg-tertiary);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #b0b0b0;
+    &:hover {
+      background: #999;
+    }
+  }
 }

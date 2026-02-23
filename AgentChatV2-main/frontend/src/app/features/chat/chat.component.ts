@@ -87,6 +87,20 @@ interface UploadedFile {
       
       <!-- Messages area -->
       <div class="messages-area" #messagesContainer>
+        @if (hasMoreMessages) {
+          <div class="load-older-messages">
+            <button class="btn btn-secondary btn-sm" (click)="loadOlderMessages()" [disabled]="isLoadingOlder">
+              @if (isLoadingOlder) {
+                <span class="material-icons spinning">sync</span>
+                Loading...
+              } @else {
+                <span class="material-icons">expand_less</span>
+                Load older messages
+              }
+            </button>
+          </div>
+        }
+
         @if (messages.length === 0 && !isLoading) {
           <div class="empty-state">
             <span class="material-icons">forum</span>
@@ -162,10 +176,20 @@ interface UploadedFile {
     </div>
   `,
   styles: [`
+    :host {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+    }
+    
     .chat-container {
       display: flex;
       flex-direction: column;
-      height: calc(100vh - 56px);
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
       background-color: var(--bg-primary);
     }
     
@@ -388,6 +412,23 @@ interface UploadedFile {
       flex-direction: column;
       gap: var(--spacing-md);
     }
+
+    .load-older-messages {
+      display: flex;
+      justify-content: center;
+      padding: var(--spacing-sm) 0;
+
+      button {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-xs);
+        font-size: 13px;
+      }
+
+      .spinning {
+        animation: spin 1s linear infinite;
+      }
+    }
     
     .empty-state {
       flex: 1;
@@ -436,6 +477,11 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
   isLoading = false;
   isSending = false;
   streamingMessage?: DisplayMessage;
+  
+  // Message pagination
+  private messageContinuationToken?: string;
+  hasMoreMessages = false;
+  isLoadingOlder = false;
   
   private destroy$ = new Subject<void>();
   private shouldScroll = false;
@@ -586,19 +632,56 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
         }
       });
     
-    // Load messages
-    this.chatService.getMessages(this.sessionId)
+    // Load messages (newest first, then reverse for chronological display)
+    this.chatService.getMessages(this.sessionId, 50)
       .pipe(takeUntil(this.destroy$))
       .subscribe({
         next: (response) => {
           console.log('Loaded messages:', response.messages?.length || 0);
-          this.messages = response.messages as DisplayMessage[];
+          // Messages come back newest-first (DESC), reverse for chronological display
+          this.messages = (response.messages as DisplayMessage[]).reverse();
+          this.messageContinuationToken = response.continuationToken;
+          this.hasMoreMessages = response.hasMore;
           this.isLoading = false;
           this.shouldScroll = true;
         },
         error: (err) => {
           console.error('Error loading messages:', err);
           this.isLoading = false;
+        }
+      });
+  }
+  
+  /** Load older messages (previous page) and prepend to the top */
+  loadOlderMessages(): void {
+    if (!this.sessionId || !this.messageContinuationToken || this.isLoadingOlder) return;
+    
+    this.isLoadingOlder = true;
+    
+    // Save current scroll height to restore position after prepend
+    const container = this.messagesContainer.nativeElement;
+    const previousScrollHeight = container.scrollHeight;
+    
+    this.chatService.getMessages(this.sessionId, 50, this.messageContinuationToken)
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (response) => {
+          // Older messages come back newest-first (DESC), reverse for chronological order
+          const olderMessages = (response.messages as DisplayMessage[]).reverse();
+          this.messages = [...olderMessages, ...this.messages];
+          this.messageContinuationToken = response.continuationToken;
+          this.hasMoreMessages = response.hasMore;
+          this.isLoadingOlder = false;
+          
+          // Preserve scroll position: after DOM updates, adjust scroll so user stays where they were
+          requestAnimationFrame(() => {
+            const newScrollHeight = container.scrollHeight;
+            container.scrollTop = newScrollHeight - previousScrollHeight;
+          });
+        },
+        error: (err) => {
+          console.error('Error loading older messages:', err);
+          this.isLoadingOlder = false;
         }
       });
   }

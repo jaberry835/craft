@@ -18,6 +18,11 @@ import { SettingsService, UISettings } from '../../../core/services/settings.ser
     }
   `,
   styles: [`
+    :host {
+      display: block;
+      flex-shrink: 0;
+    }
+    
     .classification-banner {
       width: 100%;
       text-align: center;
@@ -26,8 +31,6 @@ import { SettingsService, UISettings } from '../../../core/services/settings.ser
       font-weight: 700;
       letter-spacing: 1px;
       text-transform: uppercase;
-      z-index: 9999;
-      flex-shrink: 0;
       user-select: none;
     }
   `]

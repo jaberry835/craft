@@ -128,8 +128,7 @@ export class ChatService {
   // Messages
   getMessages(sessionId: string, pageSize = 50, continuationToken?: string): Observable<MessageListResponse> {
     let params = new HttpParams()
-      .set('page_size', pageSize.toString())
-      .set('oldest_first', 'true');
+      .set('page_size', pageSize.toString());
     if (continuationToken) {
       params = params.set('continuation_token', continuationToken);
     }

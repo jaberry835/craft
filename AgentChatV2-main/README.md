@@ -148,13 +148,14 @@ See `backend/.env.example` for required configuration.
 
 ### CosmosDB Setup
 
-The application requires a Cosmos DB account with the **NoSQL (SQL) API**. Create the database and three containers with the following partition keys:
+The application requires a Cosmos DB account with the **NoSQL (SQL) API**. Create the database and four containers with the following partition keys:
 
 | Container | Default Name | Partition Key | Purpose |
 |-----------|-------------|---------------|---------|
 | Agents | `Agents` | `/id` | Agent configurations, AOAI endpoints, MCP server settings |
 | Sessions | `Sessions` | `/userId` | Chat sessions per user |
 | Messages | `Messages` | `/sessionId` | Chat messages grouped by session |
+| UserPreferences | `UserPreferences` | `/user_id` | Per-user preferences (theme, etc.) |
 
 **Database name** defaults to `AgentChatV2` (configurable via `AZURE_COSMOS_DB_DATABASE`).
 
@@ -202,6 +203,13 @@ az cosmosdb sql container create \
   --database-name $DB \
   --name Messages \
   --partition-key-path "/sessionId"
+
+az cosmosdb sql container create \
+  --account-name $COSMOS_ACCOUNT \
+  --resource-group $RG \
+  --database-name $DB \
+  --name UserPreferences \
+  --partition-key-path "/user_id"
 ```
 
 Container names are configurable via environment variables:
@@ -212,6 +220,7 @@ Container names are configurable via environment variables:
 | `AZURE_COSMOS_DB_AGENTS_CONTAINER` | `Agents` |
 | `AZURE_COSMOS_DB_SESSIONS_CONTAINER` | `Sessions` |
 | `AZURE_COSMOS_DB_MESSAGES_CONTAINER` | `Messages` |
+| `AZURE_COSMOS_DB_PREFERENCES_CONTAINER` | `UserPreferences` |
 
 ## Microsoft Entra ID Configuration
 

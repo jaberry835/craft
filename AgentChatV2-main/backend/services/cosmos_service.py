@@ -27,6 +27,7 @@ class CosmosDBService:
         self.agents_container = None
         self.sessions_container = None
         self.messages_container = None
+        self.preferences_container = None
     
     async def initialize(self) -> None:
         """Initialize Cosmos DB client - uses managed identity (DefaultAzureCredential) by default."""
@@ -60,6 +61,10 @@ class CosmosDBService:
             self.messages_container = self.database.create_container_if_not_exists(
                 id=settings.cosmos_messages_container,
                 partition_key=PartitionKey(path="/sessionId")
+            )
+            self.preferences_container = self.database.create_container_if_not_exists(
+                id=settings.cosmos_preferences_container,
+                partition_key=PartitionKey(path="/user_id")
             )
             
             logger.info("Cosmos DB initialized successfully")
@@ -303,18 +308,21 @@ class CosmosDBService:
             parameters=params,
             partition_key=user_id,
             max_item_count=page_size,
-            continuation=continuation_token if continuation_token else None
         )
         
-        items = list(response)
-        next_token = response.continuation_token if hasattr(response, 'continuation_token') else None
+        # Use by_page() to get a single page of results with continuation token support
+        pager = response.by_page(continuation_token if continuation_token else None)
+        page = list(next(pager, []))
+        
+        # Get continuation token for next page
+        next_token = pager.continuation_token
         has_more = next_token is not None
         
         duration_ms = (time.perf_counter() - start_time) * 1000
         
         # Transform camelCase to snake_case for Pydantic
         transformed_items = []
-        for item in items:
+        for item in page:
             transformed_items.append({
                 "id": item.get("id"),
                 "user_id": item.get("userId"),
@@ -491,18 +499,21 @@ class CosmosDBService:
             response = self.messages_container.query_items(
                 query=query,
                 parameters=params,
-                partition_key=session_id,  # Partition key is sessionId, not userId
+                partition_key=session_id,
                 max_item_count=page_size,
-                continuation=continuation_token if continuation_token else None
             )
             
-            items = list(response)
-            next_token = response.continuation_token if hasattr(response, 'continuation_token') else None
+            # Use by_page() to get a single page of results with continuation token support
+            pager = response.by_page(continuation_token if continuation_token else None)
+            page = list(next(pager, []))
+            
+            # Get continuation token for next page
+            next_token = pager.continuation_token
             has_more = next_token is not None
             
-            tracker.add_metric("count", len(items))
+            tracker.add_metric("count", len(page))
         
-        return items, next_token, has_more
+        return page, next_token, has_more
     
     async def save_message(
         self,
@@ -553,6 +564,42 @@ class CosmosDBService:
         
         for item in items:
             self.messages_container.delete_item(item=item["id"], partition_key=session_id)
+
+    # =========================================================================
+    # User Preferences
+    # =========================================================================
+
+    async def get_user_preferences(self, user_id: str) -> Optional[dict]:
+        """Get preferences for a user. Returns None if not found."""
+        try:
+            start_time = time.perf_counter()
+            result = self.preferences_container.read_item(item=user_id, partition_key=user_id)
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            if should_log_performance():
+                log_performance_summary(logger, "cosmos_get_user_preferences", {
+                    "duration_ms": round(duration_ms, 2),
+                    "user_id": user_id
+                })
+            return result
+        except CosmosResourceNotFoundError:
+            return None
+
+    async def save_user_preferences(self, user_id: str, prefs_data: dict) -> dict:
+        """Create or update user preferences."""
+        prefs_data["id"] = user_id
+        prefs_data["user_id"] = user_id
+        prefs_data["type"] = "user_preferences"
+        prefs_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+        start_time = time.perf_counter()
+        result = self.preferences_container.upsert_item(prefs_data)
+        duration_ms = (time.perf_counter() - start_time) * 1000
+        if should_log_performance():
+            log_performance_summary(logger, "cosmos_save_user_preferences", {
+                "duration_ms": round(duration_ms, 2),
+                "user_id": user_id
+            })
+        return result
 
 
 # Global service instance

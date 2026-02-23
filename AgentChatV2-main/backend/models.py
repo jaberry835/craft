@@ -238,8 +238,10 @@ class Session(BaseModel):
 class SessionListResponse(BaseModel):
     """Response for listing sessions with pagination."""
     sessions: list[Session]
-    continuation_token: Optional[str] = None
-    has_more: bool = False
+    continuation_token: Optional[str] = Field(default=None, serialization_alias="continuationToken")
+    has_more: bool = Field(default=False, serialization_alias="hasMore")
+
+    model_config = {"populate_by_name": True, "by_alias": True}
 
 
 # =============================================================================
@@ -261,8 +263,10 @@ class Message(BaseModel):
 class MessageListResponse(BaseModel):
     """Response for listing messages with pagination."""
     messages: list[Message]
-    continuation_token: Optional[str] = None
-    has_more: bool = False
+    continuation_token: Optional[str] = Field(default=None, serialization_alias="continuationToken")
+    has_more: bool = Field(default=False, serialization_alias="hasMore")
+
+    model_config = {"populate_by_name": True, "by_alias": True}
 
 
 # =============================================================================
@@ -483,4 +487,16 @@ class UISettings(BaseModel):
         max_length=100,
         description="Custom application title (shown in sidebar)"
     )
+    updated_at: Optional[str] = None
+
+
+# =============================================================================
+# User Preferences Models
+# =============================================================================
+
+class UserPreferences(BaseModel):
+    """Per-user preferences (theme, etc.)."""
+    id: Optional[str] = None  # will be set to user_id
+    user_id: Optional[str] = None
+    theme: str = Field(default="dark", description="UI theme: 'dark' or 'light'")
     updated_at: Optional[str] = None

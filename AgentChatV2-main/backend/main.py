@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from config import get_settings
 from observability import setup_telemetry, get_logger
 from auth.middleware import AuthMiddleware
-from routes import chat_router, admin_router, settings_router, document_router, health_router, a2a_router
+from routes import chat_router, admin_router, settings_router, document_router, health_router, a2a_router, preferences_router
 
 settings = get_settings()
 logger = get_logger(__name__)
@@ -65,6 +65,7 @@ app.include_router(admin_router)
 app.include_router(settings_router)  # Public UI settings endpoint
 app.include_router(document_router)
 app.include_router(a2a_router)  # A2A protocol endpoints for agent discovery and messaging
+app.include_router(preferences_router)  # User preferences (theme, etc.)
 
 
 @app.get("/")

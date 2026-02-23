@@ -656,6 +656,8 @@ async def create_aoai_endpoint(
     
     saved = await cosmos_service.save_aoai_endpoint(endpoint_dict)
     logger.info(f"Created AOAI endpoint: {saved['id']} with {len(endpoint_dict.get('deployments', []))} deployments")
+    # Refresh agent cache so agents pick up the new endpoint config
+    await agent_manager.refresh_agents()
     return saved
 
 
@@ -683,6 +685,8 @@ async def update_aoai_endpoint(
     
     saved = await cosmos_service.save_aoai_endpoint(endpoint_dict)
     logger.info(f"Updated AOAI endpoint: {endpoint_id} by {admin.user_id}")
+    # Refresh agent cache so agents pick up the updated endpoint config (new keys, URLs, etc.)
+    await agent_manager.refresh_agents()
     return saved
 
 
@@ -698,6 +702,8 @@ async def delete_aoai_endpoint(
         raise HTTPException(status_code=404, detail="AOAI endpoint not found")
     
     logger.info(f"Deleted AOAI endpoint: {endpoint_id} by {admin.user_id}")
+    # Refresh agent cache so agents no longer reference the deleted endpoint
+    await agent_manager.refresh_agents()
     return {"message": "AOAI endpoint deleted"}
 
 

@@ -8,6 +8,7 @@ import { SidebarComponent } from './shared/components/sidebar/sidebar.component'
 import { HeaderComponent } from './shared/components/header/header.component';
 import { ClassificationBannerComponent } from './shared/components/classification-banner/classification-banner.component';
 import { SettingsService } from './core/services/settings.service';
+import { PreferencesService } from './core/services/preferences.service';
 
 @Component({
   selector: 'app-root',
@@ -42,6 +43,7 @@ import { SettingsService } from './core/services/settings.service';
     .app-container {
       display: flex;
       flex: 1;
+      min-height: 0;
       overflow: hidden;
     }
     
@@ -82,7 +84,8 @@ export class AppComponent implements OnInit, OnDestroy {
   constructor(
     private authService: MsalService,
     private broadcastService: MsalBroadcastService,
-    private settingsService: SettingsService
+    private settingsService: SettingsService,
+    private preferencesService: PreferencesService
   ) {}
 
   ngOnInit(): void {
@@ -114,6 +117,8 @@ export class AppComponent implements OnInit, OnDestroy {
       .subscribe(() => {
         this.checkAndSetActiveAccount();
         this.isLoading = false;
+        // Load user preferences (theme) after auth is ready
+        this.preferencesService.loadPreferences().subscribe();
       });
   }
 

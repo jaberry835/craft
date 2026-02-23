@@ -343,46 +343,50 @@ class AgentManager:
         api_version = settings.azure_openai_api_version
         
         if aoai_endpoint_id:
-            # Try to get the specific AOAI endpoint configuration
-            # This is done synchronously since we're in a sync context
-            import asyncio
-            try:
-                loop = asyncio.get_running_loop()
-                # We're already in an async context, need to handle this differently
-                from services.cosmos_service import cosmos_service
-                # Use a cached lookup or direct query
-                # For now, we'll do this synchronously with a blocking call
-            except RuntimeError:
-                loop = None
-            
-            # Alternative: Pre-load the endpoint config and cache it
-            # For now, we'll use the cached aoai_endpoint from agent_config if available
             cached_endpoint = agent_config.get("_aoai_endpoint_config")
             if cached_endpoint:
                 endpoint_url = cached_endpoint.get("endpoint", endpoint_url)
-                if cached_endpoint.get("api_key"):
-                    api_key = cached_endpoint.get("api_key")
+                cached_key = cached_endpoint.get("api_key")
+                if cached_key:
+                    api_key = cached_key
+                    logger.info(f"[AOAI-CONFIG] Agent '{agent_name}': using API key from AOAI endpoint config "
+                                f"(endpoint_id={aoai_endpoint_id}, key_length={len(cached_key)}, "
+                                f"key_prefix={cached_key[:6]}...)")
+                else:
+                    logger.info(f"[AOAI-CONFIG] Agent '{agent_name}': AOAI endpoint config has NO api_key "
+                                f"(endpoint_id={aoai_endpoint_id}), will use token auth")
                 if cached_endpoint.get("api_version"):
                     api_version = cached_endpoint.get("api_version")
-                logger.info(f"[AOAI-CONFIG] Using custom AOAI endpoint for agent '{agent_name}': {endpoint_url}")
+                cloud = cached_endpoint.get("cloud", "unknown")
+                logger.info(f"[AOAI-CONFIG] Using custom AOAI endpoint for agent '{agent_name}': "
+                            f"endpoint={endpoint_url}, cloud={cloud}, api_version={api_version}")
+            else:
+                logger.warning(f"[AOAI-CONFIG] Agent '{agent_name}' has aoai_endpoint_id={aoai_endpoint_id} "
+                               f"but NO cached endpoint config found! Using global defaults. "
+                               f"Try refreshing agents from Admin UI.")
+        else:
+            logger.info(f"[AOAI-CONFIG] Agent '{agent_name}': no aoai_endpoint_id, using global defaults")
         
-        # Log AOAI configuration for debugging
+        # Determine auth method and log the decision
+        auth_method = "api_key" if api_key else "token_provider"
+        scope = settings.azure_cognitive_services_scope if not api_key else "N/A"
         logger.info(f"[AOAI-CONFIG] Creating chat client for agent '{agent_name}': "
-                    f"endpoint={endpoint_url}, "
-                    f"deployment={deployment_name}, "
-                    f"api_version={api_version}")
+                    f"endpoint={endpoint_url}, deployment={deployment_name}, "
+                    f"api_version={api_version}, auth={auth_method}, "
+                    f"has_api_key={bool(api_key)}, token_scope={scope}")
         
         # Use API key if available, otherwise use token provider
         if api_key:
-            logger.debug(f"[AOAI-CONFIG] Using API key authentication for agent '{agent_name}'")
+            logger.info(f"[AOAI-CONFIG] Agent '{agent_name}': authenticating with API key "
+                        f"(length={len(api_key)}, prefix={api_key[:6]}...)")
             return AzureOpenAIChatClient(
                 endpoint=endpoint_url,
                 deployment_name=deployment_name,
                 api_key=api_key
             )
         else:
-            # Use token provider with Azure Government scope
-            logger.debug(f"[AOAI-CONFIG] Using token provider authentication for agent '{agent_name}'")
+            logger.info(f"[AOAI-CONFIG] Agent '{agent_name}': authenticating with token provider "
+                        f"(scope={settings.azure_cognitive_services_scope})")
             return AzureOpenAIChatClient(
                 endpoint=endpoint_url,
                 deployment_name=deployment_name,

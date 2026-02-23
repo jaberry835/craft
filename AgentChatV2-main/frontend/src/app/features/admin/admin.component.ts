@@ -13,20 +13,29 @@ import { environment } from '../../../environments/environment';
   template: `
     <div class="admin-container">
       <div class="admin-header">
-        <h1>Agent Administration</h1>
-        <div class="header-actions">
-          <button class="btn btn-secondary" (click)="openA2AModal()">
-            <span class="material-icons">link</span>
-            Add A2A Agent
-          </button>
-          <button class="btn btn-primary" (click)="openEditor()">
-            <span class="material-icons">add</span>
-            New Agent
-          </button>
-        </div>
+        <h1>Administration</h1>
       </div>
+
+      <!-- Agents Section -->
+      <div class="agents-section">
+        <div class="section-header">
+          <h2>
+            <span class="material-icons">smart_toy</span>
+            Agents
+          </h2>
+          <div class="header-actions">
+            <button class="btn btn-secondary" (click)="openA2AModal()">
+              <span class="material-icons">link</span>
+              Add A2A Agent
+            </button>
+            <button class="btn btn-primary" (click)="openEditor()">
+              <span class="material-icons">add</span>
+              New Agent
+            </button>
+          </div>
+        </div>
       
-      <div class="agents-list">
+        <div class="agents-list">
         @for (agent of agents; track agent.id) {
           <div class="agent-card" [class.a2a-agent]="agent.agent_type === 'a2a'">
             <div class="agent-header">
@@ -98,6 +107,7 @@ import { environment } from '../../../environments/environment';
             <p>Create your first agent or seed default agents to get started.</p>
           </div>
         }
+      </div>
       </div>
       
       <!-- Azure OpenAI Endpoints Section -->
@@ -1589,6 +1599,11 @@ import { environment } from '../../../environments/environment';
       to { transform: rotate(360deg); }
     }
     
+    /* Agents Section */
+    .agents-section {
+      margin-top: var(--spacing-lg);
+    }
+
     /* Azure OpenAI Endpoints Section */
     .aoai-section {
       margin-top: var(--spacing-xl);

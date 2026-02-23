@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     cosmos_agents_container: str = Field(default="Agents", alias="AZURE_COSMOS_DB_AGENTS_CONTAINER")
     cosmos_sessions_container: str = Field(default="Sessions", alias="AZURE_COSMOS_DB_SESSIONS_CONTAINER")
     cosmos_messages_container: str = Field(default="Messages", alias="AZURE_COSMOS_DB_MESSAGES_CONTAINER")
+    cosmos_preferences_container: str = Field(default="UserPreferences", alias="AZURE_COSMOS_DB_PREFERENCES_CONTAINER")
     
     # Azure AI Search
     search_endpoint: str = Field(default="", alias="AZURE_SEARCH_ENDPOINT")
