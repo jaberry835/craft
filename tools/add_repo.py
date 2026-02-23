@@ -177,17 +177,33 @@ def sync_directories(fresh_dir: str, target_dir: str) -> dict:
     return stats
 
 
-def main():
-    if len(sys.argv) < 3:
-        print("Usage: python add_repo.py <repo_url|local_path|archive.zip> <branch>")
-        sys.exit(1)
+def parse_args():
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Add or sync a repo into the curated workspace."
+    )
+    parser.add_argument("source", help="Git repo URL, local directory, or .zip file")
+    parser.add_argument("branch", help="Branch name to clone")
+    parser.add_argument(
+        "--tmp-dir",
+        default=None,
+        help="Directory to use for temp files (default: system temp)"
+    )
+    return parser.parse_args()
 
-    source, branch = sys.argv[1], sys.argv[2]
+
+def main():
+    args = parse_args()
+    source, branch = args.source, args.branch
+    tmp_base = args.tmp_dir
     repo_name = derive_repo_name(source)
     target_dir = f"{repo_name}-{branch}"
 
     # Clone/copy into a temp directory first
-    with tempfile.TemporaryDirectory(prefix="add_repo_sync_") as tmp_dir:
+    if tmp_base:
+        os.makedirs(tmp_base, exist_ok=True)
+        print(f"📂 Using temp directory base: {tmp_base}")
+    with tempfile.TemporaryDirectory(prefix="add_repo_sync_", dir=tmp_base) as tmp_dir:
         fresh_dir = os.path.join(tmp_dir, "fresh")
 
         if os.path.exists(source):
