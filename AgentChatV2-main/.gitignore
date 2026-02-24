@@ -8,6 +8,10 @@ venv/
 env/
 .env
 
+# Environment files with secrets (use .example versions as templates)
+frontend/src/environments/environment.ts
+frontend/src/environments/environment.prod.ts
+
 # Build outputs
 dist/
 build/
@@ -67,3 +71,4 @@ yarn-error.log*
 *.tmp
 *.temp
 .cache/
+frontend/src/environments/environment.ts
