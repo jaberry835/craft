@@ -8,5 +8,7 @@ from .adx_tools import register_adx_tools
 from .fictional_api_tools import register_fictional_api_tools
 from .document_tools import register_document_tools
 from .rag_tools import register_rag_tools
+from .company_and_device_tools import register_company_and_device_tools
+from .postgres_tools import register_postgres_tools
 
-__all__ = ['register_math_tools', 'register_adx_tools', 'register_fictional_api_tools', 'register_document_tools', 'register_rag_tools']
+__all__ = ['register_math_tools', 'register_adx_tools', 'register_fictional_api_tools', 'register_document_tools', 'register_rag_tools', 'register_company_and_device_tools', 'register_postgres_tools']

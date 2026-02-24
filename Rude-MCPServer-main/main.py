@@ -59,7 +59,7 @@ from starlette.middleware.cors import CORSMiddleware
 # Import tool registration functions
 try:
     logger.info("📦 Importing tool registration functions...")
-    from tools import register_math_tools, register_adx_tools, register_fictional_api_tools, register_document_tools, register_rag_tools
+    from tools import register_math_tools, register_adx_tools, register_fictional_api_tools, register_document_tools, register_rag_tools, register_company_and_device_tools, register_postgres_tools
     logger.info("✅ Tool imports successful")
 except ImportError as e:
     logger.error(f"❌ Failed to import tools: {e}")
@@ -93,6 +93,8 @@ class MCPInitializationMiddleware(BaseHTTPMiddleware):
                     try:
                         data = json.loads(body)
                         method = data.get("method", "")
+                        request_id = data.get("id", "no-id")
+                        logger.info(f"📨 MCP request received - method: '{method}', id: {request_id}")
                         
                         # Check for authentication requirements
                         auth_header = request.headers.get("Authorization")
@@ -145,7 +147,10 @@ class MCPInitializationMiddleware(BaseHTTPMiddleware):
                                         }
                                     )
                             else:
-                                logger.info("🔓 tools/call request with bearer token (custom app) - proceeding")
+                                # Log the tool being called for debugging
+                                tool_name = data.get("params", {}).get("name", "unknown")
+                                tool_args = data.get("params", {}).get("arguments", {})
+                                logger.info(f"🔓 tools/call request - Tool: '{tool_name}', Args: {tool_args}")
                         
                     except json.JSONDecodeError:
                         pass
@@ -161,7 +166,15 @@ class MCPInitializationMiddleware(BaseHTTPMiddleware):
                 return await call_next(new_request)
                         
             except Exception as e:
-                logger.debug(f"MCP initialization middleware error: {e}")
+                logger.error(f"MCP initialization middleware error: {e}", exc_info=True)
+                # Still need to recreate request with body if we consumed it
+                try:
+                    async def receive_recovery():
+                        return {"type": "http.request", "body": body}
+                    new_request = Request(scope=request.scope, receive=receive_recovery)
+                    return await call_next(new_request)
+                except Exception:
+                    pass
                 
         return await call_next(request)
 
@@ -393,10 +406,14 @@ register_adx_tools(mcp)
 logger.info("✅ ADX tools registered")
 register_fictional_api_tools(mcp)
 logger.info("✅ Fictional API tools registered")
+register_company_and_device_tools(mcp)
+logger.info("✅ Company and Device demo tools registered")
 register_document_tools(mcp)
 logger.info("✅ Document tools registered")
 register_rag_tools(mcp)
 logger.info("✅ RAG tools registered")
+register_postgres_tools(mcp)
+logger.info("✅ PostgreSQL tools registered")
 logger.info("🎉 All tools registered successfully")
 
 
