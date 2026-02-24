@@ -1,0 +1,46 @@
+# AgentChatV2 Azure Developer CLI Configuration
+# 
+# This application deploys to existing Azure App Services as containers.
+# Infrastructure is assumed to be pre-provisioned.
+# Use the scripts in ./deploy for container deployment.
+#
+# Supported clouds: AzureCloud, AzureUSGovernment, AzureChinaCloud, AzureGermanCloud
+#
+name: agentchatv2
+metadata:
+  template: agentchatv2@1.0.0
+
+services:
+  backend:
+    project: ./backend
+    language: python
+    host: appservice
+    docker:
+      path: ./backend/Dockerfile
+
+  frontend:
+    project: ./frontend
+    language: js
+    host: appservice
+    docker:
+      path: ./frontend/Dockerfile
+
+# No infrastructure provisioning - using existing resources
+# See ./deploy/README.md for deployment instructions
+
+pipeline:
+  provider: github
+
+hooks:
+  predeploy:
+    shell: pwsh
+    run: |
+      Write-Host "Deploying to existing App Services..."
+      Write-Host "Cloud: $env:AZURE_CLOUD"
+  
+  postdeploy:
+    shell: pwsh
+    run: |
+      Write-Host "Deployment complete!"
+      Write-Host "Backend URL: $env:BACKEND_URL"
+      Write-Host "Frontend URL: $env:FRONTEND_URL"
