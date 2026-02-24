@@ -13,9 +13,8 @@ from dataclasses import dataclass
 from fastmcp import FastMCP
 from azure.kusto.data import KustoClient, KustoConnectionStringBuilder
 from azure.kusto.data.exceptions import KustoServiceError
-from azure.identity import DefaultAzureCredential, ManagedIdentityCredential
 from context import current_user_token, current_user_id, current_session_id, get_user_token
-import msal
+from auth import SimpleTokenCredential, OnBehalfOfCredential, get_obo_credential
 
 # Application Insights integration
 try:
@@ -43,291 +42,19 @@ class KustoConfig:
         return cls(cluster_url=cluster_url, database=database)
 
 
-class SimpleTokenCredential:
-    """Simple credential wrapper for pre-obtained ADX tokens"""
-    
-    def __init__(self, access_token: str):
-        self.access_token = access_token
-        logger.info("🔧 SimpleTokenCredential created")
-        
-        # Try to parse token expiration for better expires_on value
-        self._actual_expires_on = None
-        try:
-            import base64
-            import json
-            parts = access_token.split('.')
-            if len(parts) >= 2:
-                payload = parts[1]
-                payload += '=' * (4 - len(payload) % 4)
-                decoded = base64.b64decode(payload)
-                token_data = json.loads(decoded)
-                exp = token_data.get('exp')
-                if exp:
-                    self._actual_expires_on = exp
-                    logger.info(f"🔍 SimpleTokenCredential: parsed token expiration: {exp}")
-        except Exception as e:
-            logger.debug(f"Could not parse token expiration: {e}")
-        
-    def get_token(self, *scopes, **kwargs):
-        """Return the pre-obtained token in the format expected by Azure SDK"""
-        logger.info(f"🔄 SimpleTokenCredential.get_token called with scopes: {scopes}")
-        
-        # Create a simple object with the token attribute
-        class TokenResponse:
-            def __init__(self, token, expires_on):
-                self.token = token
-                self.expires_on = expires_on
-        
-        # Use actual expiration if available, otherwise default to 1 hour
-        expires_on = self._actual_expires_on if self._actual_expires_on else (int(time.time()) + 3600)
-        
-        logger.info(f"🔍 SimpleTokenCredential returning token with expires_on: {expires_on}")
-        
-        return TokenResponse(
-            token=self.access_token,
-            expires_on=expires_on
-        )
-
-
-class OnBehalfOfCredential:
-    """Custom credential class for On-Behalf-Of flow using MSAL"""
-    
-    def __init__(self, tenant_id: str, client_id: str, client_secret: str, user_assertion: str):
-        self.tenant_id = tenant_id
-        self.client_id = client_id
-        self.client_secret = client_secret
-        self.user_assertion = user_assertion
-        self._token_cache = {}
-        
-    def get_token(self, *scopes, **kwargs):
-        """Get access token using On-Behalf-Of flow"""
-        scope_key = "|".join(scopes)
-        
-        # Check cache first (simple time-based cache could be added)
-        if scope_key in self._token_cache:
-            cached_token = self._token_cache[scope_key]
-            # Simple expiry check (you might want to add buffer time)
-            if hasattr(cached_token, 'expires_on') and cached_token.expires_on > time.time():
-                return cached_token
-        
-        try:
-            # Create MSAL confidential client app
-            # Use Azure Government endpoint for government clouds
-            authority_base = os.getenv("AZURE_AUTHORITY_HOST", "https://login.microsoftonline.us")
-            app = msal.ConfidentialClientApplication(
-                self.client_id,
-                authority=f"{authority_base}/{self.tenant_id}",
-                client_credential=self.client_secret
-            )
-            
-            # Acquire token on behalf of user
-            # Request token for ADX specifically
-            adx_scope = "https://kusto.kusto.usgovcloudapi.net/.default"
-            result = app.acquire_token_on_behalf_of(
-                user_assertion=self.user_assertion,
-                scopes=[adx_scope]
-            )
-            
-            if "access_token" in result:
-                # Create a token response object with the expected attributes
-                class TokenResponse:
-                    def __init__(self, token, expires_on):
-                        self.token = token
-                        self.expires_on = expires_on
-                
-                token_response = TokenResponse(
-                    token=result['access_token'],
-                    expires_on=result.get('expires_in', 3600) + int(time.time())
-                )
-                
-                # Cache the token response
-                self._token_cache[scope_key] = token_response
-                
-                logger.info("Successfully acquired token via On-Behalf-Of flow")
-                return token_response
-            else:
-                error_msg = result.get('error_description', result.get('error', 'Unknown error'))
-                logger.error(f"Failed to acquire token via OBO: {error_msg}")
-                raise Exception(f"Failed to acquire token via On-Behalf-Of flow: {error_msg}")
-                
-        except Exception as e:
-            logger.error(f"Error in On-Behalf-Of token acquisition: {e}")
-            raise
-
-
 class KustoClientManager:
     """Manages Azure Data Explorer client connections with managed identity and user impersonation"""
     
     def __init__(self, config: KustoConfig):
         self.config = config
-        self._service_client: Optional[KustoClient] = None  # Cache only for service identity
-        self._service_credential = None
 
-    def _get_service_credential(self):  # Deprecated path retained to avoid accidental calls
-        raise RuntimeError("Service identity authentication disabled: user bearer token required")
-    
     def _get_user_credential(self, user_token: str):
-        """Get Azure credential for user impersonation via On-Behalf-Of flow"""
-        try:
-            logger.info("🔄 Starting user credential creation for OBO flow...")
-            logger.info(f"🔍 Token preview: {user_token[:50]}...")
-            logger.info(f"🔍 Token length: {len(user_token)} characters")
-            
-            # Check if the token is already for ADX (based on audience)
-            # If so, we can use it directly instead of OBO flow
-            import base64
-            import json
-            
-            try:
-                logger.info("🔍 Attempting to decode JWT token to check audience...")
-                # Decode the JWT token to check the audience
-                parts = user_token.split('.')
-                if len(parts) >= 2:
-                    # Add padding if needed
-                    payload = parts[1]
-                    payload += '=' * (4 - len(payload) % 4)
-                    decoded = base64.b64decode(payload)
-                    token_data = json.loads(decoded)
-                    audience = token_data.get('aud', '')
-                    issuer = token_data.get('iss', '')
-                    subject = token_data.get('sub', '')
-                    
-                    logger.info(f"🔍 Token decoded successfully:")
-                    logger.info(f"   - Audience (aud): {audience}")
-                    logger.info(f"   - Issuer (iss): {issuer}")
-                    logger.info(f"   - Subject (sub): {subject[:20]}..." if subject else "   - Subject: None")
-                    
-                    # If token is already for ADX, create a simple credential wrapper
-                    if 'kusto' in audience.lower():
-                        logger.info("✅ Token is already for ADX, using directly with SimpleTokenCredential")
-                        return SimpleTokenCredential(user_token)
-                    else:
-                        logger.info("🔄 Token is not for ADX, proceeding with OBO flow")
-                        logger.info(f"   - Expected: audience containing 'kusto'")
-                        logger.info(f"   - Actual: {audience}")
-                        
-                        # Check if token is expired
-                        exp = token_data.get('exp')
-                        if exp:
-                            import time
-                            from datetime import datetime
-                            if exp < time.time():
-                                logger.error("❌ Token is expired!")
-                                logger.error(f"   - Expired at: {datetime.fromtimestamp(exp)}")
-                                logger.error(f"   - Current time: {datetime.fromtimestamp(time.time())}")
-                                raise ValueError("User token is expired")
-                        
-                        # Check token type
-                        token_use = token_data.get('token_use', 'unknown')
-                        logger.info(f"🔍 Token use: {token_use}")
-                        
-                        # Validate it's an access token (not ID token)
-                        if token_use == 'id':
-                            logger.warning("⚠️ This appears to be an ID token, not an access token")
-                            logger.warning("   OBO flow may fail - need an access token instead")
-            except Exception as e:
-                logger.warning(f"⚠️ Could not decode token, proceeding with OBO: {e}")
-            
-            # Log environment configuration for OBO flow
-            logger.info("🔧 Checking OBO flow environment configuration...")
-            
-            # Get required environment variables for OBO flow
-            tenant_id = os.getenv("AZURE_TENANT_ID")
-            client_id = os.getenv("AZURE_CLIENT_ID") 
-            client_secret = os.getenv("AZURE_CLIENT_SECRET")
-            authority_host = os.getenv("AZURE_AUTHORITY_HOST", "https://login.microsoftonline.com")
-            obo_scope = os.getenv("OBO_SCOPE", "https://kusto.kusto.windows.net/.default")
-            
-            logger.info(f"🔍 Environment variables:")
-            logger.info(f"   - AZURE_TENANT_ID: {'SET (' + tenant_id[:8] + '...)' if tenant_id else 'NOT_SET'}")
-            logger.info(f"   - AZURE_CLIENT_ID: {'SET (' + client_id[:8] + '...)' if client_id else 'NOT_SET'}")
-            logger.info(f"   - AZURE_CLIENT_SECRET: {'SET (****)' if client_secret else 'NOT_SET'}")
-            logger.info(f"   - AZURE_AUTHORITY_HOST: {authority_host}")
-            logger.info(f"   - OBO_SCOPE: {obo_scope}")
-            
-            if not all([tenant_id, client_id, client_secret]):
-                missing = [name for name, value in [
-                    ("AZURE_TENANT_ID", tenant_id),
-                    ("AZURE_CLIENT_ID", client_id), 
-                    ("AZURE_CLIENT_SECRET", client_secret)
-                ] if not value]
-                error_msg = f"Missing required environment variables for OBO flow: {', '.join(missing)}"
-                logger.error(f"❌ {error_msg}")
-                raise ValueError(error_msg)
-            
-            # Create OBO credential with logging
-            logger.info("🔧 Creating OnBehalfOfCredential...")
-            try:
-                credential = OnBehalfOfCredential(
-                    tenant_id=tenant_id,
-                    client_id=client_id,
-                    client_secret=client_secret,
-                    user_assertion=user_token
-                )
-                
-                logger.info("✅ OnBehalfOfCredential created successfully")
-                
-                # Test the credential by getting a token
-                logger.info("🧪 Testing OBO credential by requesting token...")
-                try:
-                    token_scope = obo_scope
-                    logger.info(f"🔍 Requesting token for scope: {token_scope}")
-                    token_result = credential.get_token(token_scope)
-                    logger.info(f"✅ OBO token obtained successfully")
-                    logger.info(f"   - Token preview: {token_result.token[:50]}...")
-                    logger.info(f"   - Expires on: {token_result.expires_on}")
-                    
-                    # Validate the new token
-                    try:
-                        import base64
-                        import json
-                        new_parts = token_result.token.split('.')
-                        if len(new_parts) >= 2:
-                            new_payload = new_parts[1]
-                            new_payload += '=' * (4 - len(new_payload) % 4)
-                            new_decoded = base64.b64decode(new_payload)
-                            new_token_data = json.loads(new_decoded)
-                            new_audience = new_token_data.get('aud', '')
-                            logger.info(f"🔍 New token audience: {new_audience}")
-                            logger.info(f"🔍 New token is for ADX: {'kusto' in new_audience.lower()}")
-                    except Exception as validate_error:
-                        logger.debug(f"Could not validate new token: {validate_error}")
-                    
-                except Exception as token_error:
-                    logger.error(f"❌ Failed to get OBO token: {token_error}")
-                    logger.error(f"   - Error type: {type(token_error).__name__}")
-                    logger.error(f"   - Scope attempted: {token_scope}")
-                    
-                    # More specific error analysis
-                    error_str = str(token_error).lower()
-                    if "aadsts50013" in error_str:
-                        logger.error("🔍 AADSTS50013: Assertion is not valid - token may be wrong type")
-                    elif "aadsts500131" in error_str:
-                        logger.error("🔍 AADSTS500131: Invalid audience - check OBO_SCOPE configuration")
-                    elif "aadsts65001" in error_str:
-                        logger.error("🔍 AADSTS65001: App not found - check AZURE_CLIENT_ID")
-                    elif "aadsts7000215" in error_str:
-                        logger.error("🔍 AADSTS7000215: Invalid client secret")
-                    elif "401" in error_str:
-                        logger.error("🔍 401 Unauthorized in OBO token request")
-                    
-                    raise
-                
-                return credential
-                
-            except Exception as cred_error:
-                logger.error(f"❌ Failed to create OnBehalfOfCredential: {cred_error}")
-                logger.error(f"   - Error type: {type(cred_error).__name__}")
-                raise
-            
-        except Exception as e:
-            logger.error(f"❌ _get_user_credential failed: {e}")
-            logger.error(f"   - Error type: {type(e).__name__}")
-            raise
-            
-        except Exception as e:
-            logger.error(f"Failed to create user credential: {e}")
-            raise
+        """Get Azure credential for user impersonation via On-Behalf-Of flow.
+        
+        Delegates to the shared auth module's get_obo_credential helper.
+        """
+        obo_scope = os.getenv("OBO_SCOPE", "https://kusto.kusto.usgovcloudapi.net/.default")
+        return get_obo_credential(user_token, obo_scope)
         
     def get_client(self) -> KustoClient:
         """Get Kusto client with user impersonation - always creates fresh client with current token"""
@@ -338,7 +65,7 @@ class KustoClientManager:
             # Debug logging
             logger.info(f"🔍 ADX get_client called - user token available: {'YES' if user_token else 'NO'}")
             if user_token:
-                logger.info(f"🔍 Token details: length={len(user_token)}, preview={user_token[:30]}...")
+                logger.info(f"🔍 Token details: length={len(user_token)}, preview={user_token[:10]}...")
             
             if not user_token:
                 # No fallback - require user token for impersonation
@@ -369,40 +96,7 @@ class KustoClientManager:
             # Re-raise the error instead of falling back
             raise
     
-    def _get_service_client(self) -> KustoClient:
-        """Get or create service identity Kusto client"""
-        if self._service_client is None:
-            try:
-                logger.info("🔐 Creating service identity Kusto client...")
-                logger.info("🔍 Using DefaultAzureCredential (tries: ManagedIdentity → WorkloadIdentity → AzureCLI → ...)")
-                
-                credential = self._get_service_credential()
-                kcsb = KustoConnectionStringBuilder.with_azure_token_credential(
-                    self.config.cluster_url,
-                    credential
-                )
-                self._service_client = KustoClient(kcsb)
-                logger.info(f"✅ Connected to Kusto cluster with service identity: {self.config.cluster_url}")
-                
-                # Test the service client
-                logger.info("🧪 Testing service identity client connection...")
-                try:
-                    test_response = self._service_client.execute("NetDefaultDB", "print 'SERVICE_IDENTITY_TEST'")
-                    logger.info("✅ Service identity client test successful")
-                except Exception as test_error:
-                    logger.error(f"❌ Service identity client test failed: {test_error}")
-                    logger.error(f"   - Error type: {type(test_error).__name__}")
-                    # Don't fail here, let the actual query attempt handle the error
-                
-            except Exception as e:
-                logger.error(f"❌ Failed to create service Kusto client: {e}")
-                logger.error(f"   - Error type: {type(e).__name__}")
-                logger.error(f"   - Cluster URL: {self.config.cluster_url}")
-                raise
-        else:
-            logger.info("♻️ Reusing existing service identity client")
-            
-        return self._service_client
+
 
 
 # Global Kusto client manager (initialized on first use)
@@ -462,7 +156,7 @@ def register_adx_tools(mcp: FastMCP):
             
             if user_token:
                 debug_info["context"]["token_length"] = len(user_token)
-                debug_info["context"]["token_preview"] = f"{user_token[:50]}..."
+                debug_info["context"]["token_preview"] = f"{user_token[:10]}..."
                 
                 # Token analysis
                 try:
@@ -508,21 +202,14 @@ def register_adx_tools(mcp: FastMCP):
                             obo_scope = os.getenv("OBO_SCOPE", "https://kusto.kusto.windows.net/.default")
                             token_result = user_cred.get_token(obo_scope)
                             debug_info["credentials_test"]["token_acquisition"] = "SUCCESS"
-                            debug_info["credentials_test"]["token_preview"] = f"{token_result.token[:50]}..." if hasattr(token_result, 'token') else "N/A"
+                            debug_info["credentials_test"]["token_preview"] = f"{token_result.token[:10]}..." if hasattr(token_result, 'token') else "N/A"
                         except Exception as token_error:
                             debug_info["credentials_test"]["token_acquisition"] = f"FAILED: {str(token_error)}"
                             
                     except Exception as e:
                         debug_info["credentials_test"]["user_credential"] = f"FAILED: {str(e)}"
                 
-                # Test service credential creation
-                try:
-                    service_cred = manager._get_service_credential()
-                    debug_info["credentials_test"]["service_credential"] = "SUCCESS"
-                    debug_info["credentials_test"]["service_credential_type"] = type(service_cred).__name__
-                except Exception as e:
-                    debug_info["credentials_test"]["service_credential"] = f"FAILED: {str(e)}"
-                
+
             except Exception as e:
                 debug_info["credentials_test"]["manager_error"] = str(e)
             
@@ -796,16 +483,21 @@ def register_adx_tools(mcp: FastMCP):
             }
             
             if user_token:
-                auth_info["token_preview"] = f"{user_token[:20]}..." if len(user_token) > 20 else user_token
+                auth_info["token_preview"] = f"{user_token[:10]}..."
                 
                 # Check if OBO environment variables are configured
+                has_secret = bool(os.getenv("AZURE_CLIENT_SECRET"))
+                has_cert = bool(os.getenv("AZURE_CLIENT_CERTIFICATE_PATH"))
                 obo_vars = {
                     "AZURE_TENANT_ID": bool(os.getenv("AZURE_TENANT_ID")),
                     "AZURE_CLIENT_ID": bool(os.getenv("AZURE_CLIENT_ID")),
-                    "AZURE_CLIENT_SECRET": bool(os.getenv("AZURE_CLIENT_SECRET"))
+                    "AZURE_CLIENT_SECRET": has_secret,
+                    "AZURE_CLIENT_CERTIFICATE_PATH": has_cert,
+                    "AZURE_CLIENT_CERTIFICATE_THUMBPRINT": bool(os.getenv("AZURE_CLIENT_CERTIFICATE_THUMBPRINT"))
                 }
                 auth_info["obo_config"] = obo_vars
-                auth_info["obo_ready"] = all(obo_vars.values())
+                auth_info["obo_credential_type"] = "certificate" if has_cert else ("secret" if has_secret else "none")
+                auth_info["obo_ready"] = obo_vars["AZURE_TENANT_ID"] and obo_vars["AZURE_CLIENT_ID"] and (has_secret or has_cert)
             
             logger.info(f"Auth info: {auth_info['authentication_mode']}")
             return auth_info
@@ -824,7 +516,7 @@ def register_adx_tools(mcp: FastMCP):
             user_token = get_user_token()
             logger.info(f"🔍 kusto_list_databases - user token available: {'YES' if user_token else 'NO'}")
             if user_token:
-                logger.info(f"🔍 Token details: length={len(user_token)}, preview={user_token[:30]}...")
+                logger.info(f"🔍 Token details: length={len(user_token)}, preview={user_token[:10]}...")
             
             manager = get_kusto_manager()
             client = manager.get_client()

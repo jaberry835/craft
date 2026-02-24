@@ -15,11 +15,13 @@ requests>=2.31.0
 # Azure dependencies
 azure-kusto-data>=4.3.1
 azure-identity>=1.16.1
+psycopg2-binary>=2.9.9
 azure-storage-blob>=12.19.0
 azure-search-documents>=11.4.0
 azure-core>=1.29.0
 openai>=1.0.0
 msal>=1.24.0
+cryptography>=41.0.0
 
 # Application Insights
 opencensus-ext-azure>=1.1.9
