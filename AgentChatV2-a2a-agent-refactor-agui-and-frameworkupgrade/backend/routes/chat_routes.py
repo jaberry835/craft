@@ -36,8 +36,6 @@ from services.agent_manager import (
     ChatterEvent, ChatterEventType,
     AgentResponse as AgentManagerResponse,
 )
-from services.search_service import search_service
-from services.embedding_service import embedding_service
 from auth.middleware import get_user_token
 from observability import get_logger, track_performance, should_log_performance, should_log_agent, log_performance_summary, MetricType
 
@@ -48,54 +46,6 @@ logger = get_logger(__name__)
 def _agui_sse(event) -> str:
     """Serialize an AG-UI event as an SSE data frame."""
     return f"data: {event.model_dump_json()}\n\n"
-
-
-# =============================================================================
-# RAG Helper
-# =============================================================================
-
-async def get_document_context(
-    query: str,
-    session_id: str,
-    user_id: str,
-    top_k: int = 3
-) -> Optional[str]:
-    """
-    Retrieve relevant document context for RAG.
-    Returns formatted context string or None if no documents found.
-    """
-    try:
-        # Generate embedding for the query
-        query_embedding = await embedding_service.generate_embedding(query)
-        if not query_embedding:
-            return None
-        
-        # Search for relevant documents in this session
-        documents = await search_service.search_documents(
-            query_embedding=query_embedding,
-            session_id=session_id,
-            user_id=user_id,
-            top_k=top_k
-        )
-        
-        if not documents:
-            return None
-        
-        # Format context for injection
-        context_parts = ["Here are relevant excerpts from uploaded documents:\n"]
-        for doc in documents:
-            context_parts.append(f"--- From: {doc['title']} ---")
-            context_parts.append(doc['content'])
-            context_parts.append("")
-        
-        context = "\n".join(context_parts)
-        if should_log_agent():
-            logger.info(f"Retrieved {len(documents)} document chunks for RAG context")
-        return context
-        
-    except Exception as e:
-        logger.warning(f"Failed to retrieve document context: {e}")
-        return None
 
 
 # =============================================================================
@@ -309,52 +259,18 @@ async def send_message(request: Request, chat_request: ChatRequest):
                 agents = await cosmos_service.list_agents()
                 agent_ids = [a["id"] for a in agents]
             
-            # Build message history
-            messages, _, _ = await cosmos_service.get_session_messages(
-                session_id=session_id,
-                user_id=user.user_id,
-                page_size=20,
-                oldest_first=True
-            )
-            
-            chat_messages = [
-                {"role": m["role"], "content": m["content"]}
-                for m in messages
-            ]
-            
-            # Ensure the current user message is included
-            current_msg = {"role": "user", "content": chat_request.message}
-            if not chat_messages or chat_messages[-1].get("content") != chat_request.message:
-                chat_messages.append(current_msg)
-            
-            # RAG: Retrieve relevant document context
-            doc_context = await get_document_context(
-                query=chat_request.message,
-                session_id=session_id,
-                user_id=user.user_id
-            )
-            
-            if doc_context:
-                context_message = {
-                    "role": "system",
-                    "content": f"Use the following document context to help answer the user's question:\n\n{doc_context}"
-                }
-                chat_messages.insert(0, context_message)
-                if should_log_agent():
-                    logger.info("Injected RAG document context into conversation")
-            
-            if should_log_agent():
-                logger.info(f"Sending {len(chat_messages)} messages to orchestration")
-                if chat_messages:
-                    logger.info(f"Last message: role={chat_messages[-1].get('role')}, content={chat_messages[-1].get('content')[:100]}...")
-            
             full_response = []
             
-            # Stream from orchestrated agents
+            # Stream from orchestrated agents.
+            # Conversation history and RAG document context are loaded
+            # automatically by Agent Framework context providers
+            # (CosmosHistoryProvider and DocumentRAGProvider).
             async for event in agent_manager.execute_orchestration(
                 pattern=pattern,
                 agent_ids=agent_ids,
-                messages=chat_messages,
+                user_message=chat_request.message,
+                session_id=session_id,
+                user_id=user.user_id,
                 user_token=user_token
             ):
                 if isinstance(event, ChatterEvent):
@@ -379,11 +295,14 @@ async def send_message(request: Request, chat_request: ChatRequest):
                     elif event.type == ChatterEventType.DELEGATION:
                         step_name = f"delegate:{event.agent_name}"
                         yield _agui_sse(StepStartedEvent(step_name=step_name))
-                        yield _agui_sse(CustomEvent(name="chatter", value={
+                        delegation_metadata: dict = {
                             "chatter_type": event.type.value,
                             "agent_name": event.agent_name,
                             "content": event.content,
-                        }))
+                        }
+                        if event.friendly_message:
+                            delegation_metadata["friendly_message"] = event.friendly_message
+                        yield _agui_sse(CustomEvent(name="chatter", value=delegation_metadata))
 
                     elif event.type == ChatterEventType.TOOL_CALL:
                         tool_call_counter += 1
@@ -523,37 +442,14 @@ async def send_message_sync(request: Request, chat_request: ChatRequest):
     
     agent_ids = chat_request.agent_ids or session.get("selected_agents", [])
     
-    messages, _, _ = await cosmos_service.get_session_messages(
-        session_id=session_id,
-        user_id=user.user_id,
-        page_size=20,
-        oldest_first=True
-    )
-    
-    chat_messages = [{"role": m["role"], "content": m["content"]} for m in messages]
-    
-    # RAG: Retrieve relevant document context
-    doc_context = await get_document_context(
-        query=chat_request.message,
-        session_id=session_id,
-        user_id=user.user_id
-    )
-    
-    # Inject document context as a system message if found
-    if doc_context:
-        context_message = {
-            "role": "system",
-            "content": f"Use the following document context to help answer the user's question:\n\n{doc_context}"
-        }
-        chat_messages.insert(0, context_message)
-        if should_log_agent():
-            logger.info("Injected RAG document context into sync conversation")
-    
+    # Agent Framework providers handle history loading and RAG injection
     agent_responses = []
     async for response in agent_manager.execute_orchestration(
         pattern=pattern,
         agent_ids=agent_ids,
-        messages=chat_messages,
+        user_message=chat_request.message,
+        session_id=session_id,
+        user_id=user.user_id,
         user_token=user_token
     ):
         agent_responses.append({

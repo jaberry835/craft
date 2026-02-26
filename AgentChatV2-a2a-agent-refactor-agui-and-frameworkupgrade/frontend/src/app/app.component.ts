@@ -92,9 +92,9 @@ export class AppComponent implements OnInit, OnDestroy {
     // Load UI settings (classification banner, branding) early
     this.settingsService.loadSettings().subscribe();
 
-    // Redirect handling is done in APP_INITIALIZER (main.ts) to avoid
-    // race conditions with MsalGuard. We still subscribe here to keep
-    // the observable active for the broadcast service.
+    // Handle redirect responses from login. This is the SOLE redirect handler;
+    // APP_INITIALIZER only calls initialize(). MsalGuard waits for inProgress$
+    // to reach None before firing, so there is no race condition.
     this.authService.handleRedirectObservable().subscribe({
       next: (result) => {
         if (result?.account) {

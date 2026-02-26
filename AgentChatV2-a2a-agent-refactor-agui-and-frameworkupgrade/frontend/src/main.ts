@@ -28,20 +28,13 @@ export function MSALInstanceFactory(): IPublicClientApplication {
   return new PublicClientApplication(environment.msalConfig);
 }
 
-// Ensure MSAL is fully initialized and any redirect response is processed
-// before the app boots. msal-browser v3 requires initialize() to be awaited
-// before any other API call, and handleRedirectPromise() must complete before
-// MsalGuard fires to avoid 'interaction_in_progress' errors.
+// Ensure MSAL is fully initialized before the app boots.
+// msal-browser v3 requires initialize() to be awaited before any other API call.
+// NOTE: Do NOT call handleRedirectPromise() here — redirect handling is done
+// via handleRedirectObservable() in AppComponent to avoid double-call issues
+// that cause inProgress$ to get stuck at HandleRedirect and the app to hang.
 export function initializeMsal(msalService: MsalService) {
-  return () =>
-    msalService.instance.initialize().then(() =>
-      msalService.instance.handleRedirectPromise().then((result) => {
-        if (result?.account) {
-          msalService.instance.setActiveAccount(result.account);
-          console.log('[MSAL] Redirect login successful:', result.account.username);
-        }
-      })
-    );
+  return () => msalService.instance.initialize();
 }
 
 // MSAL Guard configuration - used for login

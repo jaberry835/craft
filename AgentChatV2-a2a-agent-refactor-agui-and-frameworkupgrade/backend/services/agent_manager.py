@@ -12,9 +12,6 @@ import time
 from agent_framework import Agent, Message
 from agent_framework.azure import AzureOpenAIChatClient
 
-# Note: Workflow orchestration is handled manually below
-# The agent_framework may have different workflow APIs
-
 from config import get_settings, get_azure_credential
 from observability import (
     get_logger, track_performance, should_log_agent, should_log_a2a, MetricType
@@ -23,6 +20,9 @@ from services.cosmos_service import cosmos_service
 from services.mcp_client import mcp_client
 from services.a2a_client import a2a_client, A2A_AVAILABLE
 from services.grounding_service import grounding_service
+from services.context_providers import CosmosHistoryProvider, DocumentRAGProvider
+from services.embedding_service import embedding_service
+from services.search_service import search_service
 
 settings = get_settings()
 logger = get_logger(__name__)
@@ -391,9 +391,19 @@ class AgentManager:
     async def _create_specialist_agent(
         self,
         agent_config: dict,
-        user_token: Optional[str] = None
+        user_token: Optional[str] = None,
+        context_providers: Optional[list] = None,
     ) -> Agent:
-        """Create a specialist Agent with MCP tools and optional grounding."""
+        """Create a specialist Agent with MCP tools and optional grounding.
+        
+        Args:
+            agent_config: Agent configuration from Cosmos DB.
+            user_token: Optional user auth token for MCP/A2A pass-through.
+            context_providers: Optional list of BaseContextProvider instances
+                (e.g. CosmosHistoryProvider, DocumentRAGProvider) so the
+                framework automatically loads conversation history and RAG
+                context into the agent's run.
+        """
         # Specialist agents get MCP tools
         tools = await mcp_client.get_tools_for_agent(agent_config, user_token)
         if tools is None:
@@ -444,7 +454,8 @@ You are being called as a specialist by an orchestrator agent. The user's reques
             description=agent_config.get("description", ""),
             instructions=enhanced_instructions,
             client=chat_client,
-            tools=tools if tools else None
+            tools=tools if tools else None,
+            context_providers=context_providers,
         )
         
         return agent
@@ -864,11 +875,18 @@ RESPOND WITH JSON:
         self,
         orchestrator_config: dict,
         specialist_configs: list[dict],
-        messages: list[dict]
+        user_message: str,
+        session_id: str,
+        user_id: str,
     ) -> dict:
         """
         Phase 1: Run orchestrator to analyze the request and decide action.
-        
+
+        Uses AgentSession with CosmosHistoryProvider (for automatic
+        conversation-history loading) and DocumentRAGProvider (for automatic
+        document-context injection) so the orchestrator sees the full
+        conversation and any relevant uploaded documents.
+
         Returns:
             dict with keys:
                 - action: "direct" or "delegate"
@@ -896,32 +914,42 @@ RESPOND WITH JSON:
         # Format the prompt with agent list
         analysis_prompt = analysis_prompt.replace("{agent_list}", "\n".join(agent_list) if agent_list else "No specialists available")
         
-        # Create a temporary chat client for analysis
+        # Create chat client
         chat_client = self._create_chat_client(orchestrator_config)
         
-        # Build chat messages with analysis prompt as system
-        analysis_messages = [
-            Message(role="system", text=analysis_prompt)
-        ]
-        for msg in messages:
-            role_str = msg.get("role", "user").lower()
-            if role_str in ("user", "assistant", "system"):
-                role = role_str
-            else:
-                role = "user"
-            analysis_messages.append(Message(role=role, text=msg.get("content", "")))
-        
-        # Create simple agent for analysis (no tools)
-        analysis_agent = Agent(
+        # Create analysis agent with context providers for automatic
+        # history loading and RAG injection (no manual message building).
+        # store_inputs/store_outputs default to False so the analysis
+        # agent's internal JSON decision is never persisted to Cosmos.
+        analysis_agent = chat_client.as_agent(
             name="Analyzer",
-            description="Analyzes requests",
             instructions=analysis_prompt,
-            client=chat_client
+            context_providers=[
+                CosmosHistoryProvider(cosmos_service),
+                DocumentRAGProvider(embedding_service, search_service),
+            ],
         )
         
-        # Get analysis response
+        # Create an AgentSession and populate provider-scoped state so the
+        # providers know which Cosmos session to query.
+        session = analysis_agent.create_session()
+        session.state.setdefault("cosmos-history", {}).update({
+            "session_id": session_id,
+            "user_id": user_id,
+            "current_query": user_message,
+        })
+        session.state.setdefault("document-rag", {}).update({
+            "session_id": session_id,
+            "user_id": user_id,
+            "user_query": user_message,
+        })
+        
+        # Run — providers automatically load history + RAG; the framework
+        # adds user_message as the current input.
         response_parts = []
-        async for update in analysis_agent.run(analysis_messages, stream=True):
+        async for update in analysis_agent.run(
+            user_message, session=session, stream=True
+        ):
             if update.text:
                 response_parts.append(update.text)
         
@@ -997,7 +1025,9 @@ RESPOND WITH JSON:
         agent_id: str,
         message: str,
         user_token: Optional[str] = None,
-        chatter_queue: Optional[asyncio.Queue] = None
+        chatter_queue: Optional[asyncio.Queue] = None,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> dict:
         """
         Call a specialist agent. For local agents, executes directly to capture
@@ -1017,19 +1047,29 @@ RESPOND WITH JSON:
         agent_name = config.get("name", "Agent")
         agent_type = config.get("agent_type", "local")
         
-        # Emit delegation event
+        # Emit delegation event — note: for local agents with session context,
+        # the framework's CosmosHistoryProvider will also inject conversation
+        # history automatically, so the specialist sees more than just this message.
         if chatter_queue:
+            has_context = bool(session_id and user_id)
+            content_preview = message[:200] + ("..." if len(message) > 200 else "")
+            friendly = (
+                f"Asking {agent_name} (with conversation history)"
+                if has_context
+                else f"Asking {agent_name}"
+            )
             await chatter_queue.put(ChatterEvent(
                 type=ChatterEventType.DELEGATION,
                 agent_name=agent_name,
-                content=message[:200] + ("..." if len(message) > 200 else ""),
-                friendly_message=f"Delegating to {agent_name}"
+                content=content_preview,
+                friendly_message=friendly,
             ))
         
         # --- Local agents: execute directly for rich chatter ---
         if agent_type != "a2a":
             return await self._call_specialist_local(
-                agent_id, agent_name, message, user_token, chatter_queue
+                agent_id, agent_name, message, user_token, chatter_queue,
+                session_id=session_id, user_id=user_id,
             )
         
         # --- External A2A agents: use HTTP protocol ---
@@ -1043,31 +1083,147 @@ RESPOND WITH JSON:
         agent_name: str,
         message: str,
         user_token: Optional[str],
-        chatter_queue: Optional[asyncio.Queue]
+        chatter_queue: Optional[asyncio.Queue],
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> dict:
         """
-        Execute a local specialist directly via execute_single() with
-        include_chatter=True for rich tool call/token usage events.
+        Execute a local specialist directly with include_chatter=True for
+        rich tool call / token usage events.
+
+        When ``session_id`` and ``user_id`` are provided the agent is created
+        with the framework's ``CosmosHistoryProvider`` and
+        ``DocumentRAGProvider`` so conversation history and RAG document
+        context are loaded automatically — the same pattern the orchestrator
+        analysis phase uses.  This lets specialists resolve follow-up
+        references like "tell me more about section 2" without manual
+        message building.
         """
         if should_log_agent():
             logger.info(f"LOCAL specialist call: {agent_name} <- {message[:100]}...")
         
         start_time = time.time()
         try:
-            messages = [{"role": "user", "content": message}]
+            config = self._configs_cache.get(agent_id)
+            if not config:
+                config = await cosmos_service.get_agent(agent_id)
+                if config:
+                    self._configs_cache[agent_id] = config
+            if not config:
+                raise ValueError(f"Agent {agent_id} not found")
+
+            # ── Build context providers when session context is available ──
+            has_session = bool(session_id and user_id)
+            providers = None
+            if has_session:
+                providers = [
+                    CosmosHistoryProvider(cosmos_service),
+                    DocumentRAGProvider(embedding_service, search_service),
+                ]
+
+            # Create the specialist agent with framework context providers
+            agent = await self._create_specialist_agent(
+                config, user_token, context_providers=providers
+            )
+
+            # ── Prepare session state for the providers ──
+            session = None
+            if has_session:
+                session = agent.create_session()
+                session.state.setdefault("cosmos-history", {}).update({
+                    "session_id": session_id,
+                    "user_id": user_id,
+                    "current_query": message,
+                })
+                session.state.setdefault("document-rag", {}).update({
+                    "session_id": session_id,
+                    "user_id": user_id,
+                    "user_query": message,
+                })
+
+            # ── Stream the response ──
             response_parts = []
-            
-            async for item in self.execute_single(
-                agent_id, messages, user_token, include_chatter=True
-            ):
-                if isinstance(item, str):
-                    response_parts.append(item)
-                elif isinstance(item, ChatterEvent):
-                    # Forward chatter events with correct agent name
-                    item.agent_name = agent_name
-                    if chatter_queue:
-                        await chatter_queue.put(item)
-            
+
+            # Track tool calls for timing
+            seen_tool_calls: set[str] = set()
+            seen_tool_results: set[str] = set()
+            pending_tool_calls: dict[str, tuple[float, str, Optional[dict]]] = {}
+            total_tokens_input = 0
+            total_tokens_output = 0
+
+            async for update in agent.run(message, session=session, stream=True):
+                if update.text:
+                    response_parts.append(update.text)
+
+                # Capture chatter events (tool calls, results, token usage)
+                if hasattr(update, 'contents') and update.contents:
+                    for content_item in update.contents:
+                        if content_item.type == 'function_call':
+                            call_id = getattr(content_item, 'call_id', None)
+                            tool_name = getattr(content_item, 'name', None)
+                            tool_args = getattr(content_item, 'arguments', None)
+                            if call_id and tool_name and call_id not in seen_tool_calls:
+                                seen_tool_calls.add(call_id)
+                                args_dict = tool_args if isinstance(tool_args, dict) else None
+                                pending_tool_calls[call_id] = (time.time(), tool_name, args_dict)
+                                friendly_msg = _get_friendly_tool_description(tool_name, args_dict)
+                                event = ChatterEvent(
+                                    type=ChatterEventType.TOOL_CALL,
+                                    agent_name=agent_name,
+                                    content=f"Calling {tool_name}",
+                                    tool_name=tool_name,
+                                    tool_args=args_dict,
+                                    friendly_message=friendly_msg,
+                                )
+                                if chatter_queue:
+                                    await chatter_queue.put(event)
+
+                        elif content_item.type == 'function_result':
+                            call_id = getattr(content_item, 'call_id', None)
+                            result = getattr(content_item, 'result', None)
+                            if call_id and call_id not in seen_tool_results:
+                                seen_tool_results.add(call_id)
+                                duration_ms = None
+                                tool_name_result = None
+                                if call_id in pending_tool_calls:
+                                    st, tool_name_result, _ = pending_tool_calls[call_id]
+                                    duration_ms = (time.time() - st) * 1000
+                                result_display = ChatterEvent.extract_result_text(result)
+                                if len(result_display) > 300:
+                                    result_display = result_display[:300] + "..."
+                                friendly_msg = _get_friendly_result_summary(tool_name_result or "", result_display)
+                                event = ChatterEvent(
+                                    type=ChatterEventType.TOOL_RESULT,
+                                    agent_name=agent_name,
+                                    content=result_display or "Result received",
+                                    tool_name=tool_name_result,
+                                    duration_ms=duration_ms,
+                                    friendly_message=friendly_msg,
+                                )
+                                if chatter_queue:
+                                    await chatter_queue.put(event)
+
+                        elif content_item.type == 'usage':
+                            details = getattr(content_item, 'usage_details', None)
+                            if details:
+                                uc_in = details.get('input_token_count') if isinstance(details, dict) else getattr(details, 'input_token_count', None)
+                                uc_out = details.get('output_token_count') if isinstance(details, dict) else getattr(details, 'output_token_count', None)
+                                if uc_in:
+                                    total_tokens_input += uc_in
+                                if uc_out:
+                                    total_tokens_output += uc_out
+                                if uc_in or uc_out:
+                                    event = ChatterEvent(
+                                        type=ChatterEventType.THINKING,
+                                        agent_name=agent_name,
+                                        content=f"LLM call: {uc_in or 0} input, {uc_out or 0} output tokens",
+                                        tokens_input=uc_in,
+                                        tokens_output=uc_out,
+                                        friendly_message="Analyzing information...",
+                                    )
+                                    if chatter_queue:
+                                        await chatter_queue.put(event)
+
             response_text = "".join(response_parts)
             duration_ms = (time.time() - start_time) * 1000
             
@@ -1157,7 +1313,9 @@ RESPOND WITH JSON:
         user_token: Optional[str] = None,
         chatter_queue: Optional[asyncio.Queue] = None,
         max_rounds: int = 10,
-        orchestrator_config: Optional[dict] = None
+        orchestrator_config: Optional[dict] = None,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> list[dict]:
         """
         Phase 2: Execute specialists according to the orchestration pattern.
@@ -1173,7 +1331,8 @@ RESPOND WITH JSON:
         if pattern == OrchestrationPattern.SINGLE or len(specialist_ids) == 1:
             # Single: Call just the first specialist
             result = await self._call_specialist_a2a(
-                specialist_ids[0], user_message, user_token, chatter_queue
+                specialist_ids[0], user_message, user_token, chatter_queue,
+                session_id=session_id, user_id=user_id,
             )
             results.append(result)
         
@@ -1182,7 +1341,8 @@ RESPOND WITH JSON:
             accumulated_context = user_message
             for agent_id in specialist_ids:
                 result = await self._call_specialist_a2a(
-                    agent_id, accumulated_context, user_token, chatter_queue
+                    agent_id, accumulated_context, user_token, chatter_queue,
+                    session_id=session_id, user_id=user_id,
                 )
                 results.append(result)
                 # Add this response to context for next agent
@@ -1192,7 +1352,8 @@ RESPOND WITH JSON:
         elif pattern == OrchestrationPattern.CONCURRENT:
             # Concurrent: Call all in parallel
             tasks = [
-                self._call_specialist_a2a(agent_id, user_message, user_token, chatter_queue)
+                self._call_specialist_a2a(agent_id, user_message, user_token, chatter_queue,
+                                         session_id=session_id, user_id=user_id)
                 for agent_id in specialist_ids
             ]
             results = await asyncio.gather(*tasks)
@@ -1236,7 +1397,8 @@ RESPOND WITH JSON:
             accumulated_context = user_message
             for agent_id in sorted_specialists:
                 result = await self._call_specialist_a2a(
-                    agent_id, accumulated_context, user_token, chatter_queue
+                    agent_id, accumulated_context, user_token, chatter_queue,
+                    session_id=session_id, user_id=user_id,
                 )
                 results.append(result)
                 # Add this response to context for next agent
@@ -1286,7 +1448,8 @@ RESPOND WITH JSON:
                         continue
                     
                     result = await self._call_specialist_a2a(
-                        agent_id, round_context, user_token, chatter_queue
+                        agent_id, round_context, user_token, chatter_queue,
+                        session_id=session_id, user_id=user_id,
                     )
                     results.append(result)
                     
@@ -1300,7 +1463,8 @@ RESPOND WITH JSON:
                 round_had_output = False
                 for agent_id in specialist_ids:
                     result = await self._call_specialist_a2a(
-                        agent_id, current_context, user_token, chatter_queue
+                        agent_id, current_context, user_token, chatter_queue,
+                        session_id=session_id, user_id=user_id,
                     )
                     results.append(result)
                     
@@ -1322,10 +1486,15 @@ RESPOND WITH JSON:
         self,
         orchestrator_config: dict,
         specialist_results: list[dict],
-        original_messages: list[dict]
+        user_message: str,
     ) -> str:
         """
         Phase 3: Run orchestrator to synthesize specialist results.
+        
+        Args:
+            orchestrator_config: The orchestrator agent configuration.
+            specialist_results: Results from specialist agent executions.
+            user_message: The original user question.
         
         Returns:
             Synthesized response text
@@ -1356,27 +1525,20 @@ RESPOND WITH JSON:
         # Create chat client
         chat_client = self._create_chat_client(orchestrator_config)
         
-        # Build messages: original conversation + synthesis instruction
-        synthesis_messages = [
-            Message(role="system", text=synthesis_prompt)
-        ]
-        
-        # Add original user message for context
-        for msg in original_messages:
-            if msg.get("role") == "user":
-                synthesis_messages.append(Message(role="user", text=msg.get("content", "")))
-        
-        # Create synthesis agent
+        # Create synthesis agent — instructions contain the synthesis prompt
+        # with specialist responses already embedded.  No providers or session
+        # needed; the synthesizer only needs the user question + specialist output.
         synthesis_agent = Agent(
             name="Synthesizer",
             description="Synthesizes results",
             instructions=synthesis_prompt,
-            client=chat_client
+            client=chat_client,
         )
         
-        # Get synthesis response
+        # Pass only the user's original question; the specialist responses are
+        # embedded in the instructions (system prompt) already.
         response_parts = []
-        async for update in synthesis_agent.run(synthesis_messages, stream=True):
+        async for update in synthesis_agent.run(user_message, stream=True):
             if update.text:
                 response_parts.append(update.text)
         
@@ -1387,27 +1549,36 @@ RESPOND WITH JSON:
         self,
         pattern: OrchestrationPattern,
         agent_ids: list[str],
-        messages: list[dict],
+        user_message: str,
+        session_id: str,
+        user_id: str,
         user_token: Optional[str] = None,
-        max_rounds: int = 10
+        max_rounds: int = 10,
     ) -> AsyncIterator[AgentResponse]:
         """
         Execute agents using Two-Phase Orchestration with pattern-controlled execution.
-        
+
+        Conversation history and RAG document context are loaded automatically
+        by the Agent Framework's context-provider system (CosmosHistoryProvider
+        and DocumentRAGProvider).  Callers only need to supply the current user
+        message and session identifiers.
+
         Phase 1 (Analysis): Orchestrator analyzes request and decides:
                            - Answer directly (generic questions)
                            - Delegate to specialists (domain-specific)
-        
-        Phase 2 (Execution): Execute specialists via A2A using the session's pattern
+
+        Phase 2 (Execution): Execute specialists using the session's pattern
                             (sequential, concurrent, magentic, group_chat)
-        
+
         Phase 3 (Synthesis): Orchestrator synthesizes specialist results into
                             a coherent final response
-        
+
         Args:
             pattern: The orchestration pattern to use for specialist execution
             agent_ids: List of agent IDs (should include orchestrator + specialists)
-            messages: Chat messages/context
+            user_message: The current user message
+            session_id: Cosmos DB session ID (for history/RAG providers)
+            user_id: Cosmos DB user ID (for history/RAG providers)
             user_token: User's auth token for MCP/A2A pass-through
             max_rounds: Maximum rounds for iterative patterns
         """
@@ -1441,15 +1612,10 @@ RESPOND WITH JSON:
         if should_log_agent():
             logger.info(f"Two-Phase Orchestration: pattern={pattern.value}, specialists={len(specialist_configs)}")
         
-        # Extract the user's latest message
-        user_message = ""
-        for msg in reversed(messages):
-            if msg.get("role") == "user":
-                user_message = msg.get("content", "")
-                break
-        
         # =====================================================================
         # Phase 1: Analysis - Orchestrator decides how to handle the request
+        # Uses AgentSession with CosmosHistoryProvider + DocumentRAGProvider
+        # so the orchestrator sees full conversation history and RAG context.
         # =====================================================================
         if should_log_agent():
             logger.info("Phase 1: Orchestrator analyzing request...")
@@ -1466,7 +1632,9 @@ RESPOND WITH JSON:
         decision = await self._run_orchestrator_for_analysis(
             orchestrator_config,
             specialist_configs,
-            messages
+            user_message,
+            session_id,
+            user_id,
         )
         
         if should_log_agent():
@@ -1564,7 +1732,9 @@ RESPOND WITH JSON:
                 user_token=user_token,
                 chatter_queue=chatter_queue,
                 max_rounds=max_rounds,
-                orchestrator_config=orchestrator_config
+                orchestrator_config=orchestrator_config,
+                session_id=session_id,
+                user_id=user_id,
             )
         )
         
@@ -1609,7 +1779,7 @@ RESPOND WITH JSON:
         synthesized_response = await self._run_orchestrator_for_synthesis(
             orchestrator_config,
             specialist_results,
-            messages
+            user_message,
         )
         
         # Build final response
