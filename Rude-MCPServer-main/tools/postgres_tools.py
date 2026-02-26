@@ -86,17 +86,13 @@ class PostgresClientManager:
         # The AAD username is the user's UPN or object-id — but for AAD token auth
         # with PostgreSQL Flexible Server, the "user" field should be the AAD user
         # principal that was granted access.  We read it from the incoming token.
-        import base64
         pg_user = os.getenv("POSTGRES_AAD_USER", "")
         if not pg_user:
             # Try to extract from the user token
             try:
-                parts = user_token.split('.')
-                if len(parts) >= 2:
-                    payload = parts[1]
-                    payload += '=' * (4 - len(payload) % 4)
-                    decoded = base64.b64decode(payload)
-                    token_data = json.loads(decoded)
+                from auth import decode_jwt_payload
+                token_data = decode_jwt_payload(user_token)
+                if token_data:
                     # preferred_username or upn are common claims
                     pg_user = token_data.get('preferred_username') or token_data.get('upn') or token_data.get('unique_name', '')
                     logger.info(f"🔍 Extracted PostgreSQL AAD user from token: {pg_user}")

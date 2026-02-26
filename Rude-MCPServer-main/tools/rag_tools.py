@@ -22,7 +22,7 @@ import os
 import base64
 import re
 from urllib.parse import quote
-import requests
+import httpx
 
 from fastmcp import FastMCP
 from context import current_user_token
@@ -169,8 +169,9 @@ def register_rag_tools(mcp: FastMCP):
                 token = current_user_token.get()
                 if token:
                     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json, text/plain"}
-                    resp = requests.get(access_check_url, headers=headers, timeout=5)
-                    if resp.ok:
+                    async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5, read=25, write=5, pool=5)) as client:
+                        resp = await client.get(access_check_url, headers=headers)
+                    if resp.is_success:
                         raw = resp.text.strip()
                         groups: List[str] = []
                         # Try JSON first

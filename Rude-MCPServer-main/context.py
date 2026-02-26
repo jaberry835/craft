@@ -26,7 +26,4 @@ def get_user_token() -> str:
         token = _thread_local.user_token
     return token
 
-def clear_user_token():
-    """Clear user token from both storages"""
-    if hasattr(_thread_local, 'user_token'):
-        delattr(_thread_local, 'user_token')
+

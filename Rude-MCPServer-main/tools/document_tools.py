@@ -66,47 +66,6 @@ except ImportError as e:
     class HttpResponseError(Exception):
         pass
 
-class DocumentChunk:
-    """Document chunk model for search results."""
-    
-    def __init__(self, data: dict):
-        self.chunk_id = data.get('chunkId', '')
-        self.document_id = data.get('documentId', '')
-        self.user_id = data.get('userId', '')
-        self.session_id = data.get('sessionId', '')
-        self.file_name = data.get('fileName', '')
-        self.content = data.get('content', '')
-        self.chunk_index = data.get('chunkIndex', 0)
-        self.uploaded_at = data.get('uploadedAt', '')
-        self.score = data.get('score', 0.0)
-
-class DocumentMetadata:
-    """Document metadata model."""
-    
-    def __init__(self, data: dict):
-        self.document_id = data.get('documentId', '')
-        self.file_name = data.get('fileName', '')
-        self.user_id = data.get('userId', '')
-        self.session_id = data.get('sessionId', '')
-        self.upload_date = data.get('uploadDate', '')
-        self.file_size = data.get('fileSize', 0)
-        self.status = data.get('status', 'uploaded')
-        self.blob_url = data.get('blobUrl', '')
-        self.content_type = data.get('contentType', 'application/octet-stream')
-    
-    def to_dict(self):
-        return {
-            'documentId': self.document_id,
-            'fileName': self.file_name,
-            'userId': self.user_id,
-            'sessionId': self.session_id,
-            'uploadDate': self.upload_date,
-            'fileSize': self.file_size,
-            'status': self.status,
-            'blobUrl': self.blob_url,
-            'contentType': self.content_type
-        }
-
 def register_document_tools(mcp: FastMCP):
     """Register all document tools with the FastMCP server"""
     

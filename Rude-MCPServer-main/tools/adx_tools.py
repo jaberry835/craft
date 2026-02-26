@@ -160,15 +160,9 @@ def register_adx_tools(mcp: FastMCP):
                 
                 # Token analysis
                 try:
-                    import base64
-                    import json
-                    parts = user_token.split('.')
-                    if len(parts) >= 2:
-                        payload = parts[1]
-                        payload += '=' * (4 - len(payload) % 4)
-                        decoded = base64.b64decode(payload)
-                        token_data = json.loads(decoded)
-                        
+                    from auth import decode_jwt_payload
+                    token_data = decode_jwt_payload(user_token)
+                    if token_data:
                         debug_info["token_analysis"]["audience"] = token_data.get('aud', 'N/A')
                         debug_info["token_analysis"]["issuer"] = token_data.get('iss', 'N/A')
                         debug_info["token_analysis"]["subject"] = f"{token_data.get('sub', 'N/A')[:20]}..." if token_data.get('sub') else 'N/A'
@@ -199,7 +193,7 @@ def register_adx_tools(mcp: FastMCP):
                         
                         # Test token acquisition without storing the credential object
                         try:
-                            obo_scope = os.getenv("OBO_SCOPE", "https://kusto.kusto.windows.net/.default")
+                            obo_scope = os.getenv("OBO_SCOPE", "https://kusto.kusto.usgovcloudapi.net/.default")
                             token_result = user_cred.get_token(obo_scope)
                             debug_info["credentials_test"]["token_acquisition"] = "SUCCESS"
                             debug_info["credentials_test"]["token_preview"] = f"{token_result.token[:10]}..." if hasattr(token_result, 'token') else "N/A"

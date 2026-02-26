@@ -6,10 +6,16 @@ Designed to be hosted on Azure App Service over HTTP using Streamable transport
 import os
 import logging
 import sys
+import json
+import asyncio
+import base64
+import traceback
 from typing import Dict, Any, List
 from datetime import datetime
+from urllib.parse import urlencode
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
+from starlette.responses import JSONResponse, RedirectResponse
 
 # Configure logging FIRST, before any other imports or operations
 logging.basicConfig(
@@ -59,7 +65,7 @@ from starlette.middleware.cors import CORSMiddleware
 # Import tool registration functions
 try:
     logger.info("📦 Importing tool registration functions...")
-    from tools import register_math_tools, register_adx_tools, register_fictional_api_tools, register_document_tools, register_rag_tools, register_company_and_device_tools, register_postgres_tools
+    from tools import register_adx_tools, register_fictional_api_tools, register_document_tools, register_rag_tools, register_company_and_device_tools, register_postgres_tools
     logger.info("✅ Tool imports successful")
 except ImportError as e:
     logger.error(f"❌ Failed to import tools: {e}")
@@ -73,335 +79,198 @@ except ImportError as e:
     raise
 
 
-class MCPInitializationMiddleware(BaseHTTPMiddleware):
-    """Middleware to handle MCP initialization timing issues with GitHub Copilot"""
-    
+class MCPMiddleware(BaseHTTPMiddleware):
+    """Unified middleware handling authentication, context propagation, and MCP initialization.
+
+    Replaces the former MCPInitializationMiddleware, ContextMiddleware,
+    and AuthenticationMiddleware with a single pass that:
+      1. Extracts the Authorization header once.
+      2. Sets context variables (user_id, session_id, token).
+      3. Logs the request context and token claims.
+      4. Enforces OAuth when enabled.
+      5. Handles first-request initialisation delay and body parsing for MCP POST requests.
+    """
+
+    _SKIP_AUTH_PATHS = ("/health", "/.well-known/", "/debug/", "/api/tools")
+
     def __init__(self, app):
         super().__init__(app)
         self.first_tools_request = True
-        self.initialization_delay = 0.3  # Small delay for first tools request
-        logger.info(f"🕐 MCP initialization middleware enabled with {self.initialization_delay}s delay")
-    
-    async def dispatch(self, request: Request, call_next):
-        # Check if this is an MCP tools/list request
-        if request.url.path in ["/mcp", "/mcp/"] and request.method == "POST":
-            try:
-                # Read the request body to check if it's a tools/list request
-                body = await request.body()
-                if body:
-                    import json
-                    try:
-                        data = json.loads(body)
-                        method = data.get("method", "")
-                        request_id = data.get("id", "no-id")
-                        logger.info(f"📨 MCP request received - method: '{method}', id: {request_id}")
-                        
-                        # Check for authentication requirements
-                        auth_header = request.headers.get("Authorization")
-                        has_token = auth_header and auth_header.startswith("Bearer ")
-                        
-                        # Handle tools/list timing and authentication
-                        if method == "tools/list":
-                            if self.first_tools_request:
-                                logger.info("🚀 First tools/list request detected - applying initialization delay")
-                                import asyncio
-                                await asyncio.sleep(self.initialization_delay)
-                                self.first_tools_request = False
-                                logger.info("✅ Initialization delay complete - proceeding with tools/list")
-                            
-                            # Check authentication for tools/list
-                            if not has_token:
-                                # No token - return OAuth challenge for GitHub Copilot
-                                logger.info("🔐 tools/list requires authentication - returning OAuth challenge")
-                                oauth_enabled = os.getenv("MCP_OAUTH_ENABLED", "false").lower() == "true"
-                                if oauth_enabled:
-                                    from fastapi.responses import JSONResponse
-                                    return JSONResponse(
-                                        status_code=401,
-                                        content={
-                                            "error": "authentication_required",
-                                            "message": "OAuth 2.1 authentication required",
-                                            "oauth": {
-                                                "authorization_url": f"https://login.microsoftonline.us/{os.getenv('AZURE_TENANT_ID')}/oauth2/v2.0/authorize",
-                                                "client_id": os.getenv('AZURE_CLIENT_ID'),
-                                                "scope": f"{os.getenv('MCP_API_SCOPE')} openid profile",
-                                                "redirect_uri": "http://localhost:8000/oauth/redirect"
-                                            }
-                                        }
-                                    )
-                            else:
-                                logger.info("🔓 tools/list request with bearer token (custom app) - proceeding")
-                        
-                        # Handle tools/call authentication
-                        elif method == "tools/call":
-                            if not has_token:
-                                logger.info("🔐 tools/call requires authentication - returning OAuth challenge")
-                                oauth_enabled = os.getenv("MCP_OAUTH_ENABLED", "false").lower() == "true"
-                                if oauth_enabled:
-                                    from fastapi.responses import JSONResponse
-                                    return JSONResponse(
-                                        status_code=401,
-                                        content={
-                                            "error": "authentication_required",
-                                            "message": "OAuth 2.1 authentication required"
-                                        }
-                                    )
-                            else:
-                                # Log the tool being called for debugging
-                                tool_name = data.get("params", {}).get("name", "unknown")
-                                tool_args = data.get("params", {}).get("arguments", {})
-                                logger.info(f"🔓 tools/call request - Tool: '{tool_name}', Args: {tool_args}")
-                        
-                    except json.JSONDecodeError:
-                        pass
-                
-                # Recreate the request with the body for the next middleware
-                from starlette.requests import Request as StarletteRequest
-                
-                async def receive():
-                    return {"type": "http.request", "body": body}
-                
-                # Create a new request with the same properties
-                new_request = StarletteRequest(scope=request.scope, receive=receive)
-                return await call_next(new_request)
-                        
-            except Exception as e:
-                logger.error(f"MCP initialization middleware error: {e}", exc_info=True)
-                # Still need to recreate request with body if we consumed it
-                try:
-                    async def receive_recovery():
-                        return {"type": "http.request", "body": body}
-                    new_request = Request(scope=request.scope, receive=receive_recovery)
-                    return await call_next(new_request)
-                except Exception:
-                    pass
-                
-        return await call_next(request)
+        self.initialization_delay = 0.3
+        logger.info(f"MCPMiddleware enabled (init delay: {self.initialization_delay}s)")
 
+    # ------------------------------------------------------------------
+    # Main entry point
+    # ------------------------------------------------------------------
 
-class ContextMiddleware(BaseHTTPMiddleware):
-    """Middleware to extract and store request context from headers"""
-    
     async def dispatch(self, request: Request, call_next):
-        # Extract user context from headers for ALL requests (including MCP)
-        user_id = request.headers.get("X-User-ID") or request.headers.get("x-user-id") or "defaMCPUser"
-        session_id = request.headers.get("X-Session-ID") or request.headers.get("x-session-id")
-        
-        # Extract bearer token for user impersonation
+        # 1. Extract auth header & bearer token ONCE
         auth_header = request.headers.get("Authorization")
         user_token = None
         if auth_header and auth_header.startswith("Bearer "):
-            user_token = auth_header[7:]  # Remove "Bearer " prefix
-        
-        # Store in context variables
+            user_token = auth_header[7:]
+
+        # 2. Set context variables for downstream tools
+        user_id = (
+            request.headers.get("X-User-ID")
+            or request.headers.get("x-user-id")
+            or "defaMCPUser"
+        )
+        session_id = request.headers.get("X-Session-ID") or request.headers.get("x-session-id")
         current_user_id.set(user_id)
         if session_id:
             current_session_id.set(session_id)
         if user_token:
-            # Use the new helper function to set in both places
             from context import set_user_token
             set_user_token(user_token)
-            logger.info(f"🔧 Stored user token in both contextvars and thread-local storage")
-        
-        # Log authentication events to Application Insights
+
+        # 3. Log authentication event to Application Insights
         try:
             if app_insights_ready:
-                app_insights = get_application_insights()
-                auth_mode = "user_token" if user_token else "service_identity"
-                app_insights.log_authentication_event(
-                    auth_mode=auth_mode,
+                ai = get_application_insights()
+                ai.log_authentication_event(
+                    auth_mode="user_token" if user_token else "service_identity",
                     user_id=user_id,
-                    success=True
+                    success=True,
                 )
         except Exception as e:
             logger.debug(f"Failed to log authentication event: {e}")
-        
-        # Enhanced logging for debugging authentication issues
+
+        # 4. Log request context (skip noisy /health calls)
         if not request.url.path.startswith("/health"):
-            # Log request details for non-health endpoints
-            token_status = "PRESENT" if user_token else "MISSING"
-            token_preview = f"{user_token[:50]}..." if user_token else "None"
-            
-            logger.info(f"🔍 Context middleware processing:")
-            logger.info(f"   - Path: {request.url.path}")
-            logger.info(f"   - Method: {request.method}")
-            logger.info(f"   - User ID: {user_id}")
-            logger.info(f"   - Session ID: {session_id}")
-            logger.info(f"   - Authorization header: {'PRESENT' if auth_header else 'MISSING'}")
-            logger.info(f"   - Bearer token: {token_status}")
-            
-            if user_token:
-                logger.info(f"   - Token preview: {token_preview}")
-                logger.info(f"   - Token length: {len(user_token)} characters")
-                
-                # Try to decode and log token details for debugging
-                try:
-                    import base64
-                    import json
-                    parts = user_token.split('.')
-                    if len(parts) >= 2:
-                        payload = parts[1]
-                        payload += '=' * (4 - len(payload) % 4)
-                        decoded = base64.b64decode(payload)
-                        token_data = json.loads(decoded)
-                        
-                        logger.info(f"   - Token audience (aud): {token_data.get('aud', 'N/A')}")
-                        logger.info(f"   - Token issuer (iss): {token_data.get('iss', 'N/A')}")
-                        logger.info(f"   - Token subject (sub): {token_data.get('sub', 'N/A')[:20]}..." if token_data.get('sub') else "   - Token subject: N/A")
-                        
-                        exp = token_data.get('exp')
-                        if exp:
-                            from datetime import datetime
-                            exp_date = datetime.fromtimestamp(exp)
-                            logger.info(f"   - Token expires: {exp_date}")
-                except Exception as decode_error:
-                    logger.debug(f"   - Could not decode token: {decode_error}")
-        
-        response = await call_next(request)
-        return response
+            self._log_request_context(request, user_id, session_id, user_token)
 
-
-class AuthenticationMiddleware(BaseHTTPMiddleware):
-    """Middleware to enforce OAuth authentication for GitHub Copilot integration"""
-    
-    async def dispatch(self, request: Request, call_next):
-        logger.info(f"🔐 AuthenticationMiddleware called for {request.method} {request.url.path}")
-        
-        # Skip authentication for certain endpoints
-        skip_auth_paths = [
-            "/health", 
-            "/.well-known/",
-            "/debug/",
-            "/api/tools"  # Allow unauthenticated access to tools list
-        ]
-        
-        logger.info(f"🔐 Checking skip paths for {request.url.path}")
-        if any(request.url.path.startswith(path) for path in skip_auth_paths):
-            logger.info(f"🔐 Skipping auth for path {request.url.path}")
-            return await call_next(request)
-        
-        # Check if OAuth is enabled
+        # 5. OAuth enforcement (when enabled)
         oauth_enabled = os.getenv("MCP_OAUTH_ENABLED", "false").lower() == "true"
-        logger.info(f"🔐 OAuth enabled: {oauth_enabled} (MCP_OAUTH_ENABLED={os.getenv('MCP_OAUTH_ENABLED')})")
-        if not oauth_enabled:
-            # OAuth disabled - allow all requests (backward compatibility)
-            logger.info("🔐 OAuth disabled - allowing request")
-            return await call_next(request)
-        
-        # Extract bearer token from Authorization header
-        auth_header = request.headers.get("Authorization")
-        token = None
-        if auth_header and auth_header.startswith("Bearer "):
-            token = auth_header[7:]  # Remove "Bearer " prefix
-            logger.info(f"🔍 AuthenticationMiddleware: Found bearer token (length: {len(token)})")
-        else:
-            logger.info(f"🔍 AuthenticationMiddleware: No bearer token found. Auth header: {'PRESENT' if auth_header else 'MISSING'}")
-        
-        # Handle MCP endpoints with OAuth flow
-        if request.url.path.startswith("/mcp"):
-            return await self._handle_mcp_request(request, call_next, token)
-        
-        # Handle direct API calls (non-MCP endpoints) with bearer token authentication
-        else:
-            return await self._handle_direct_api_request(request, call_next, token)
-    
-    async def _handle_mcp_request(self, request: Request, call_next, token: str = None):
-        """Handle MCP-specific authentication logic"""
-        if request.method == "POST":
-            logger.info(f"🔐 Processing MCP POST request to {request.url.path}")
-            
-            # For MCP requests, we need to check authentication but avoid double body consumption
-            # If we have a token, allow through. If not, check if this is a request that needs auth
-            if token:
-                logger.info("🔓 MCP request with valid bearer token - proceeding")
-                return await call_next(request)
-            else:
-                # No token - for MCP requests, we need to peek at the method to decide
-                # But to avoid double body consumption, we'll let requests through and handle auth errors later
-                # The MCPInitializationMiddleware will handle the body parsing
-                logger.info("� MCP request without token - allowing through (will be checked by MCP protocol)")
-                return await call_next(request)
-        
-        # For non-POST MCP requests, just pass through
+        if oauth_enabled and not any(request.url.path.startswith(p) for p in self._SKIP_AUTH_PATHS):
+            # Non-MCP, non-skip endpoints require a bearer token
+            if not request.url.path.startswith("/mcp") and not user_token:
+                return JSONResponse(
+                    status_code=401,
+                    content={
+                        "error": "Authentication required",
+                        "message": "Bearer token required for API access",
+                    },
+                    headers={"WWW-Authenticate": 'Bearer realm="API"'},
+                )
+
+        # 6. MCP POST body parsing, init delay, and auth challenges
+        if request.url.path in ("/mcp", "/mcp/") and request.method == "POST":
+            return await self._handle_mcp_post(request, call_next, user_token, oauth_enabled)
+
         return await call_next(request)
-    
-    async def _handle_direct_api_request(self, request: Request, call_next, token: str = None):
-        """Handle direct API calls (non-MCP endpoints) with bearer token authentication"""
-        if token:
-            logger.info("🔓 Direct API request with valid bearer token - proceeding")
-            return await call_next(request)
-        else:
-            logger.info("🔐 Direct API request missing bearer token - returning 401")
-            from starlette.responses import JSONResponse
-            return JSONResponse(
-                status_code=401,
-                content={
-                    "error": "Authentication required", 
-                    "message": "Bearer token required for API access"
-                },
-                headers={"WWW-Authenticate": 'Bearer realm="API"'}
-            )
-    
-    async def _create_oauth_challenge(self):
-        """Create OAuth challenge response for GitHub Copilot"""
-        from starlette.responses import JSONResponse
-        
-        tenant_id = os.getenv("AZURE_TENANT_ID")
-        client_id = os.getenv("AZURE_CLIENT_ID")
-        authority_host = os.getenv("AZURE_AUTHORITY_HOST", "https://login.microsoftonline.us")
-        api_scope = os.getenv("MCP_API_SCOPE", f"api://{client_id}/mcp-access")
-        
-        # Use our redirect handler to solve the 127.0.0.1 vs localhost issue
-        redirect_uri = "http://localhost:8000/oauth/redirect"
-        
-        logger.info(f"🔐 OAuth challenge details:")
-        logger.info(f"   - Authorization URL: {authority_host}/{tenant_id}/oauth2/v2.0/authorize")
-        logger.info(f"   - Client ID: {client_id}")
-        logger.info(f"   - Scope: {api_scope} openid profile")
-        logger.info(f"   - Redirect URI: {redirect_uri}")
-        
-        # Return OAuth challenge with authentication URLs
-        oauth_challenge = {
-            "error": {
-                "code": -32002,  # MCP authentication required error
-                "message": "Authentication required",
-                "data": {
-                    "auth_required": True,
-                    "auth_type": "oauth2",
-                    "authorization_url": f"{authority_host}/{tenant_id}/oauth2/v2.0/authorize",
-                    "client_id": client_id,
-                    "scope": f"{api_scope} openid profile",
-                    "redirect_uri": redirect_uri,
-                    "auth_discovery_url": "/.well-known/oauth-authorization-server"
-                }
-            }
-        }
-        
-        # Also set WWW-Authenticate header for HTTP-level OAuth discovery
-        headers = {
-            "WWW-Authenticate": f'Bearer realm="MCP", scope="{api_scope}"',
-            "Location": f"{authority_host}/{tenant_id}/oauth2/v2.0/authorize"
-        }
-        
+
+    # ------------------------------------------------------------------
+    # MCP POST handling
+    # ------------------------------------------------------------------
+
+    async def _handle_mcp_post(self, request, call_next, user_token, oauth_enabled):
+        """Read the MCP POST body once for logging, init delay, and auth challenges."""
+        body = b""
+        try:
+            body = await request.body()
+            data = None
+            if body:
+                try:
+                    data = json.loads(body)
+                except json.JSONDecodeError:
+                    pass
+
+            if data:
+                method = data.get("method", "")
+                request_id = data.get("id", "no-id")
+                has_token = bool(user_token)
+                logger.info(f"MCP request - method: '{method}', id: {request_id}")
+
+                if method == "tools/list":
+                    if self.first_tools_request:
+                        logger.info("First tools/list - applying initialization delay")
+                        await asyncio.sleep(self.initialization_delay)
+                        self.first_tools_request = False
+                    if not has_token and oauth_enabled:
+                        return self._oauth_challenge_response()
+
+                elif method == "tools/call":
+                    if not has_token and oauth_enabled:
+                        return JSONResponse(
+                            status_code=401,
+                            content={
+                                "error": "authentication_required",
+                                "message": "OAuth 2.1 authentication required",
+                            },
+                        )
+                    tool_name = data.get("params", {}).get("name", "unknown")
+                    tool_args = data.get("params", {}).get("arguments", {})
+                    logger.info(f"tools/call - Tool: '{tool_name}', Args: {tool_args}")
+
+            # Recreate the request with the consumed body
+            async def receive():
+                return {"type": "http.request", "body": body}
+            new_request = Request(scope=request.scope, receive=receive)
+            return await call_next(new_request)
+
+        except Exception as e:
+            logger.error(f"MCPMiddleware error: {e}", exc_info=True)
+            try:
+                async def receive_recovery():
+                    return {"type": "http.request", "body": body}
+                new_request = Request(scope=request.scope, receive=receive_recovery)
+                return await call_next(new_request)
+            except Exception:
+                pass
+
+        return await call_next(request)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _oauth_challenge_response(self):
+        """Return a 401 JSON response with OAuth discovery hints."""
         return JSONResponse(
-            content=oauth_challenge,
             status_code=401,
-            headers=headers
+            content={
+                "error": "authentication_required",
+                "message": "OAuth 2.1 authentication required",
+                "oauth": {
+                    "authorization_url": f"https://login.microsoftonline.us/{os.getenv('AZURE_TENANT_ID')}/oauth2/v2.0/authorize",
+                    "client_id": os.getenv("AZURE_CLIENT_ID"),
+                    "scope": f"{os.getenv('MCP_API_SCOPE')} openid profile",
+                    "redirect_uri": "http://localhost:8000/oauth/redirect",
+                },
+            },
         )
+
+    @staticmethod
+    def _log_request_context(request, user_id, session_id, user_token):
+        """Compact request + token summary (one or two log lines)."""
+        logger.info(
+            f"Request: {request.method} {request.url.path} | "
+            f"user={user_id} session={session_id} "
+            f"token={'PRESENT' if user_token else 'MISSING'}"
+        )
+        if user_token:
+            from auth import decode_jwt_payload
+            claims = decode_jwt_payload(user_token)
+            if claims:
+                exp = claims.get("exp")
+                exp_str = datetime.fromtimestamp(exp).isoformat() if exp else "N/A"
+                logger.info(
+                    f"   Token: aud={claims.get('aud', 'N/A')} "
+                    f"iss={claims.get('iss', 'N/A')} exp={exp_str}"
+                )
 
 
 # Initialize FastMCP server
 logger.info("🔧 Initializing FastMCP server...")
 
 # For now, let's disable OAuth at the FastMCP level and handle authentication via middleware
-# The ContextMiddleware already handles Bearer token extraction and OBO flow
+# The MCPMiddleware handles Bearer token extraction and OBO flow
 mcp = FastMCP("Rude MCP Server")
 logger.info("✅ FastMCP server initialized (OAuth handled via middleware)")
 
 # Register all tools
 logger.info("📋 Registering tools...")
-#register_math_tools(mcp)
-#logger.info("✅ Math tools registered")
 register_adx_tools(mcp)
 logger.info("✅ ADX tools registered")
 register_fictional_api_tools(mcp)
@@ -448,7 +317,6 @@ def get_health_status() -> Dict[str, Any]:
             "server_name": "Rude MCP Server",
             "version": "1.0.0",
             "features": {
-                #"math_tools": True,
                 "azure_data_explorer": kusto_status,
                 "fictional_api": fictional_api_status,
                 "document_service": document_service_status,
@@ -511,17 +379,9 @@ app = mcp.http_app()
 # Use FastMCP's built-in lifespan for proper initialization
 # This ensures the StreamableHTTP session manager is properly initialized
 
-# Add the MCP initialization middleware FIRST to handle timing issues
-logger.info("🚀 Adding MCP initialization middleware...")
-app.add_middleware(MCPInitializationMiddleware)
-
-# Add the context middleware BEFORE other middleware
-logger.info("🔧 Adding context middleware...")
-app.add_middleware(ContextMiddleware)
-
-# Add the authentication middleware for OAuth enforcement
-logger.info("🔐 Adding authentication middleware...")
-app.add_middleware(AuthenticationMiddleware)
+# Add unified MCPMiddleware (auth + context + MCP init in one pass)
+logger.info("🔧 Adding MCPMiddleware...")
+app.add_middleware(MCPMiddleware)
 
 # Configure CORS middleware
 logger.info("🔧 Configuring CORS middleware...")
@@ -531,14 +391,12 @@ configure_cors(app)
 @app.route("/health")
 async def health_endpoint(request):
     """Azure App Service health check endpoint"""
-    from starlette.responses import JSONResponse
     return JSONResponse(get_health_status())
 
 # OAuth discovery endpoints for GitHub Copilot and other MCP clients
 @app.route("/.well-known/oauth-authorization-server")
 async def oauth_metadata(request):
     """OAuth 2.1 authorization server metadata for MCP clients like GitHub Copilot"""
-    from starlette.responses import JSONResponse
     
     tenant_id = os.getenv("AZURE_TENANT_ID")
     client_id = os.getenv("AZURE_CLIENT_ID")
@@ -574,7 +432,6 @@ async def oauth_metadata(request):
 @app.route("/.well-known/mcp-oauth")
 async def mcp_oauth_metadata(request):
     """MCP-specific OAuth configuration for clients like GitHub Copilot"""
-    from starlette.responses import JSONResponse
     
     client_id = os.getenv("AZURE_CLIENT_ID")
     api_scope = os.getenv("MCP_API_SCOPE", f"api://{client_id}/mcp-access")
@@ -594,8 +451,6 @@ async def mcp_oauth_metadata(request):
 @app.route("/oauth/redirect/{port:path}")
 async def oauth_redirect_handler_with_port(request):
     """Handle OAuth redirects from Azure AD and forward to GitHub Copilot on specific port"""
-    from starlette.responses import RedirectResponse
-    from urllib.parse import urlencode
     
     # Get the port from the URL path
     port = request.path_params.get("port", "33418")
@@ -615,8 +470,6 @@ async def oauth_redirect_handler_with_port(request):
 @app.route("/oauth/redirect")
 async def oauth_redirect_handler(request):
     """Handle OAuth redirects from Azure AD and forward to GitHub Copilot"""
-    from starlette.responses import RedirectResponse
-    from urllib.parse import urlencode
     
     # Get all query parameters from the Azure AD redirect
     query_params = dict(request.query_params)
@@ -629,8 +482,6 @@ async def oauth_redirect_handler(request):
     # Check if we can extract the actual port from the referrer or state
     if "state" in query_params:
         try:
-            import base64
-            import json
             # Try to decode state if it contains port info
             state_data = json.loads(base64.b64decode(query_params["state"]).decode())
             if "port" in state_data:
@@ -648,7 +499,6 @@ async def oauth_redirect_handler(request):
 @app.route("/api/tools")
 async def list_tools_endpoint(request):
     """List all available MCP tools with count (requires authentication)"""
-    from starlette.responses import JSONResponse
     
     try:
         # Get tools from the MCP server
@@ -704,7 +554,6 @@ async def list_tools_endpoint(request):
         
     except Exception as e:
         logger.error(f"Failed to list tools: {e}")
-        import traceback
         logger.error(f"Full traceback: {traceback.format_exc()}")
         return JSONResponse({
             "error": "Failed to retrieve tools",
@@ -715,7 +564,6 @@ async def list_tools_endpoint(request):
 @app.route("/debug/tools")
 async def debug_tools_endpoint(request):
     """Debug endpoint to test tool registration and access"""
-    from starlette.responses import JSONResponse
     try:
         # Try to get tools via the async method
         tools = await mcp.get_tools()
@@ -754,7 +602,6 @@ async def debug_tools_endpoint(request):
         
     except Exception as e:
         logger.error(f"Debug tools endpoint error: {e}")
-        import traceback
         logger.error(f"Full traceback: {traceback.format_exc()}")
         return JSONResponse({
             "error": "Failed to retrieve tools",
@@ -765,7 +612,6 @@ async def debug_tools_endpoint(request):
 @app.route("/")
 async def root(request):
     """Server information endpoint"""
-    from starlette.responses import JSONResponse
     return JSONResponse({
         "name": "Rude MCP Server",
         "version": "1.0.0",
@@ -778,7 +624,6 @@ async def root(request):
             "debug_tools": "/debug/tools"
         },
         "tools": {
-            #"math_tools": ["add", "subtract", "multiply", "divide", "power", "square_root", "calculate_statistics", "factorial"],
             "adx_tools": ["kusto_list_databases", "kusto_list_tables", "kusto_describe_table", "kusto_query", "kusto_get_cluster_info"],
             "fictional_api_tools": ["get_ip_company_info", "get_company_devices", "get_company_summary", "fictional_api_health_check"],
                 "document_tools": ["list_documents", "get_document", "search_documents", "get_document_content_summary"],
@@ -802,7 +647,6 @@ if __name__ == "__main__":
                 "server_name": "Rude MCP Server",
                 "version": os.getenv("MCP_SERVER_VERSION", "1.0.0"),
                 "environment": os.getenv("ENVIRONMENT", "production"),
-                #"features": "math_tools,adx_tools,fictional_api_tools,document_tools"
                 "features": "adx_tools,fictional_api_tools,document_tools"
             })
         else:

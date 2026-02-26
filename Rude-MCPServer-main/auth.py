@@ -8,11 +8,30 @@ import logging
 import time
 import base64
 import json
-from typing import Optional
+from datetime import datetime
+from typing import Any, Dict, Optional
 
 import msal
 
 logger = logging.getLogger(__name__)
+
+
+def decode_jwt_payload(token: str) -> Optional[Dict[str, Any]]:
+    """Decode the payload of a JWT token without verification.
+
+    Returns the decoded claims dict, or None if decoding fails.
+    """
+    try:
+        parts = token.split('.')
+        if len(parts) < 2:
+            return None
+        payload = parts[1]
+        payload += '=' * (4 - len(payload) % 4)
+        decoded = base64.b64decode(payload)
+        return json.loads(decoded)
+    except Exception as e:
+        logger.debug(f"Could not decode JWT payload: {e}")
+        return None
 
 
 class TokenResponse:
@@ -35,19 +54,12 @@ class SimpleTokenCredential:
 
         # Try to parse token expiration for better expires_on value
         self._actual_expires_on = None
-        try:
-            parts = access_token.split('.')
-            if len(parts) >= 2:
-                payload = parts[1]
-                payload += '=' * (4 - len(payload) % 4)
-                decoded = base64.b64decode(payload)
-                token_data = json.loads(decoded)
-                exp = token_data.get('exp')
-                if exp:
-                    self._actual_expires_on = exp
-                    logger.info(f"🔍 SimpleTokenCredential: parsed token expiration: {exp}")
-        except Exception as e:
-            logger.debug(f"Could not parse token expiration: {e}")
+        token_data = decode_jwt_payload(access_token)
+        if token_data:
+            exp = token_data.get('exp')
+            if exp:
+                self._actual_expires_on = exp
+                logger.info(f"🔍 SimpleTokenCredential: parsed token expiration: {exp}")
 
     def get_token(self, *scopes, **kwargs) -> TokenResponse:
         """Return the pre-obtained token in the format expected by Azure SDK."""
@@ -189,38 +201,30 @@ def get_obo_credential(user_token: str, target_scope: str) -> "SimpleTokenCreden
     logger.info(f"🔍 Token preview: {user_token[:10]}...")
 
     # Try to decode token to check audience
-    try:
-        parts = user_token.split('.')
-        if len(parts) >= 2:
-            payload = parts[1]
-            payload += '=' * (4 - len(payload) % 4)
-            decoded = base64.b64decode(payload)
-            token_data = json.loads(decoded)
-            audience = token_data.get('aud', '')
-            logger.info(f"🔍 Token audience: {audience}")
+    token_data = decode_jwt_payload(user_token)
+    if token_data:
+        audience = token_data.get('aud', '')
+        logger.info(f"🔍 Token audience: {audience}")
 
-            # Derive a keyword from the target scope for audience matching
-            # e.g. 'kusto' from 'https://kusto.kusto.usgovcloudapi.net/.default'
-            #      'ossrdbms' from 'https://ossrdbms-aad.database.usgovcloudapi.net/.default'
-            scope_host = target_scope.split('//')[1].split('/')[0] if '//' in target_scope else ''
-            scope_keyword = scope_host.split('.')[0].lower()  # e.g. 'kusto', 'ossrdbms-aad'
+        # Derive a keyword from the target scope for audience matching
+        # e.g. 'kusto' from 'https://kusto.kusto.usgovcloudapi.net/.default'
+        #      'ossrdbms' from 'https://ossrdbms-aad.database.usgovcloudapi.net/.default'
+        scope_host = target_scope.split('//')[1].split('/')[0] if '//' in target_scope else ''
+        scope_keyword = scope_host.split('.')[0].lower()  # e.g. 'kusto', 'ossrdbms-aad'
 
-            if scope_keyword and scope_keyword in audience.lower():
-                logger.info(f"✅ Token already targets {scope_keyword}, using directly")
-                return SimpleTokenCredential(user_token)
-            else:
-                logger.info(f"🔄 Token audience ({audience}) doesn't match {scope_keyword}, using OBO flow")
+        if scope_keyword and scope_keyword in audience.lower():
+            logger.info(f"✅ Token already targets {scope_keyword}, using directly")
+            return SimpleTokenCredential(user_token)
+        else:
+            logger.info(f"🔄 Token audience ({audience}) doesn't match {scope_keyword}, using OBO flow")
 
-            # Check token expiration
-            exp = token_data.get('exp')
-            if exp and exp < time.time():
-                from datetime import datetime
-                logger.error(f"❌ Token is expired at {datetime.fromtimestamp(exp)}")
-                raise ValueError("User token is expired")
-    except ValueError:
-        raise
-    except Exception as e:
-        logger.warning(f"⚠️ Could not decode token, proceeding with OBO: {e}")
+        # Check token expiration
+        exp = token_data.get('exp')
+        if exp and exp < time.time():
+            logger.error(f"❌ Token is expired at {datetime.fromtimestamp(exp)}")
+            raise ValueError("User token is expired")
+    else:
+        logger.warning("⚠️ Could not decode token, proceeding with OBO")
 
     # Read OBO env vars
     tenant_id = os.getenv("AZURE_TENANT_ID")

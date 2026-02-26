@@ -27,7 +27,6 @@ cryptography>=41.0.0
 opencensus-ext-azure>=1.1.9
 opencensus-ext-logging>=0.1.1
 opencensus-ext-requests>=0.8.0
-opencensus-ext-flask>=0.8.0
 
 # Web server dependencies
 gunicorn>=21.2.0
