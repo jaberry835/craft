@@ -1,28 +1,37 @@
 """
 A2A Server Routes
-Exposes local agents via the A2A (Agent-to-Agent) protocol.
-Allows external systems to discover and communicate with agents hosted here.
+Exposes local agents via the A2A (Agent-to-Agent) protocol using the A2A SDK.
 
-A2A Protocol Endpoints:
-- GET  /.well-known/agent.json     - List all agent cards (discovery)
-- GET  /a2a/{agent_id}/v1/card     - Get specific agent card
-- POST /a2a/{agent_id}/v1/message  - Send message to agent
-- POST /a2a/{agent_id}/v1/message:stream - Send message with streaming response
+Uses A2AFastAPIApplication from the SDK for proper JSON-RPC handling, task
+management, and SSE streaming. Each local agent gets its own A2A endpoint.
+
+A2A Protocol Endpoints (per agent, managed by SDK):
+- GET  /a2a/{id}/.well-known/agent-card.json  - Agent card (discovery)
+- POST /a2a/{id}                               - JSON-RPC (message/send, etc.)
+
+Global:
+- GET  /.well-known/agent.json                 - List all agent cards
 """
-from typing import Optional, Any
-from datetime import datetime
-import json
 import uuid
-import time
+from typing import Optional
 
-from fastapi import APIRouter, Request, HTTPException
-from fastapi.responses import StreamingResponse, JSONResponse
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, APIRouter, Request
+from starlette.requests import Request as StarletteRequest
+
+from a2a.server.apps import A2AFastAPIApplication, CallContextBuilder
+from a2a.server.request_handlers import DefaultRequestHandler
+from a2a.server.agent_execution import AgentExecutor, RequestContext
+from a2a.server.events import EventQueue, InMemoryQueueManager
+from a2a.server.tasks import InMemoryTaskStore
+from a2a.server.context import ServerCallContext
+from a2a.types import (
+    AgentCard, AgentSkill, AgentCapabilities,
+    Message, Part, TextPart, Role,
+)
 
 from config import get_settings
 from observability import get_logger, should_log_a2a
 from services.cosmos_service import cosmos_service
-from services.agent_manager import agent_manager, ChatterEvent
 
 settings = get_settings()
 logger = get_logger(__name__)
@@ -31,121 +40,264 @@ router = APIRouter(tags=["a2a"])
 
 
 # =============================================================================
-# A2A Protocol Models
+# Browser-Friendly GET for Agent Base URLs
 # =============================================================================
 
-class A2ASkill(BaseModel):
-    """A2A Agent Skill."""
-    id: str
-    name: str
-    description: Optional[str] = None
-    tags: list[str] = Field(default_factory=list)
-    examples: list[str] = Field(default_factory=list)
+@router.get("/a2a/{agent_id}")
+async def get_agent_card_redirect(agent_id: str, request: Request):
+    """Return agent card when browsing the A2A base URL.
 
-
-class A2ACapabilities(BaseModel):
-    """A2A Agent Capabilities."""
-    streaming: bool = True
-    push_notifications: bool = False
-    state_transition_history: bool = False
-
-
-class A2AAgentCard(BaseModel):
-    """A2A Agent Card - metadata for agent discovery."""
-    name: str
-    description: Optional[str] = None
-    url: str
-    version: str = "1.0"
-    protocol_version: str = "0.3.0"
-    capabilities: A2ACapabilities = Field(default_factory=A2ACapabilities)
-    skills: list[A2ASkill] = Field(default_factory=list)
-    default_input_modes: list[str] = Field(default_factory=lambda: ["text"])
-    default_output_modes: list[str] = Field(default_factory=lambda: ["text"])
-
-
-class A2ATextPart(BaseModel):
-    """A2A Text Part in a message."""
-    kind: str = "text"
-    text: str
-    metadata: Optional[dict[str, Any]] = None
-
-
-class A2APart(BaseModel):
-    """A2A Message Part (wrapper)."""
-    kind: str = "text"
-    text: Optional[str] = None
-    metadata: Optional[dict[str, Any]] = None
-
-
-class A2AMessage(BaseModel):
-    """A2A Protocol Message."""
-    kind: str = "message"
-    role: str = "user"  # "user" or "agent"
-    parts: list[A2APart]
-    message_id: Optional[str] = Field(default=None, alias="messageId")
-    context_id: Optional[str] = Field(default=None, alias="contextId")
-    metadata: Optional[dict[str, Any]] = None
-    
-    model_config = {"populate_by_name": True}
-
-
-class A2AMessageRequest(BaseModel):
-    """A2A Message Request."""
-    message: A2AMessage
-
-
-class A2AMessageResponse(BaseModel):
-    """A2A Message Response."""
-    kind: str = "message"
-    role: str = "agent"
-    parts: list[A2APart]
-    message_id: Optional[str] = Field(default=None, alias="messageId")
-    context_id: Optional[str] = Field(default=None, alias="contextId")
-    
-    model_config = {"populate_by_name": True, "by_alias": True}
+    The SDK registers POST /a2a/{id} for JSON-RPC, but browsers send GET.
+    This handler returns the agent card so the URL is browsable.
+    """
+    base_url = _get_base_url(request)
+    agents = await cosmos_service.list_agents()
+    agent_config = next((a for a in agents if a.get("id") == agent_id), None)
+    if not agent_config:
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"error": "Agent not found"}, status_code=404)
+    card = build_agent_card(agent_config, base_url)
+    return card.model_dump(by_alias=True)
 
 
 # =============================================================================
-# Helper Functions
+# A2A SDK Integration
 # =============================================================================
 
-def _get_base_url(request: Request) -> str:
-    """Get base URL from request for agent card URLs."""
-    # Use configured base URL if available, otherwise derive from request
-    if hasattr(settings, 'base_url') and settings.base_url:
-        return settings.base_url.rstrip('/')
-    
-    scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
-    host = request.headers.get("x-forwarded-host", request.url.netloc)
-    return f"{scheme}://{host}"
+class AuthContextBuilder(CallContextBuilder):
+    """Extracts user auth token from the HTTP request into ServerCallContext.
+
+    This allows the AgentExecutor to access the user's bearer token for
+    MCP tool authentication passthrough.
+    """
+
+    def build(self, request: StarletteRequest) -> ServerCallContext:
+        context = ServerCallContext()
+        context.state["user_token"] = getattr(request.state, "token", None)
+        return context
 
 
-def _agent_to_card(agent: dict, base_url: str) -> A2AAgentCard:
-    """Convert internal agent config to A2A Agent Card."""
-    agent_id = agent.get("id", "unknown")
-    
-    # Create skill from agent description
-    skills = [A2ASkill(
-        id=agent_id,
-        name=agent.get("name", "Agent"),
-        description=agent.get("description", ""),
-        tags=[],
-        examples=[]
-    )]
-    
-    return A2AAgentCard(
-        name=agent.get("name", "Agent"),
-        description=agent.get("description", ""),
-        url=f"{base_url}/a2a/{agent_id}/v1/card",
+class ChatAgentExecutor(AgentExecutor):
+    """Bridges agent_manager.execute_single() to the A2A SDK's EventQueue.
+
+    Each instance handles a single agent. The execute() method:
+    1. Extracts text from the incoming A2A message
+    2. Calls agent_manager.execute_single() to run the agent
+    3. Enqueues the response as an A2A Message to the EventQueue
+
+    The SDK's DefaultRequestHandler then handles task lifecycle,
+    JSON-RPC formatting, and SSE streaming automatically.
+    """
+
+    def __init__(self, agent_id: str):
+        self.agent_id = agent_id
+
+    async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
+        from services.agent_manager import agent_manager
+
+        # Extract text from incoming A2A message parts
+        input_text = self._extract_text(context)
+        if not input_text:
+            error_msg = Message(
+                role=Role.agent,
+                parts=[Part(root=TextPart(text="Error: Message must contain text"))],
+                message_id=str(uuid.uuid4()),
+            )
+            await event_queue.enqueue_event(error_msg)
+            return
+
+        # Get user token from call context for MCP tool passthrough
+        user_token = None
+        if context.call_context:
+            user_token = context.call_context.state.get("user_token")
+
+        if should_log_a2a():
+            logger.info(
+                f"A2A executing agent {self.agent_id}, "
+                f"token present: {user_token is not None}, "
+                f"message: {input_text[:100]}..."
+            )
+
+        # Execute the agent via agent_manager
+        messages = [{"role": "user", "content": input_text}]
+        chunks = []
+        try:
+            async for item in agent_manager.execute_single(
+                self.agent_id, messages, user_token, include_chatter=False
+            ):
+                if isinstance(item, str):
+                    chunks.append(item)
+        except Exception as e:
+            logger.error(f"A2A agent {self.agent_id} execution error: {e}", exc_info=True)
+            error_msg = Message(
+                role=Role.agent,
+                parts=[Part(root=TextPart(text=f"Error: {str(e)}"))],
+                message_id=str(uuid.uuid4()),
+            )
+            await event_queue.enqueue_event(error_msg)
+            return
+
+        response_text = "".join(chunks)
+
+        if should_log_a2a():
+            logger.info(f"A2A agent {self.agent_id} completed: {len(response_text)} chars")
+
+        # Enqueue response as A2A Message — the SDK handles task lifecycle
+        response_message = Message(
+            role=Role.agent,
+            parts=[Part(root=TextPart(text=response_text))],
+            message_id=str(uuid.uuid4()),
+        )
+        await event_queue.enqueue_event(response_message)
+
+    async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
+        """Cancel is not currently supported."""
+        logger.warning(f"Cancel requested for agent {self.agent_id} — not supported")
+
+    @staticmethod
+    def _extract_text(context: RequestContext) -> str:
+        """Extract text content from A2A message parts."""
+        if not context.request or not context.request.message:
+            return ""
+
+        parts_text = []
+        for part in context.request.message.parts:
+            # Part is a RootModel with .root being TextPart | FilePart | DataPart
+            actual = getattr(part, "root", part)
+            if hasattr(actual, "text"):
+                parts_text.append(actual.text)
+        return " ".join(parts_text).strip()
+
+
+# =============================================================================
+# Agent Card Builder
+# =============================================================================
+
+def _get_base_url(request: Request = None) -> str:
+    """Get base URL for agent card URLs.
+
+    Uses configured base_url if available, otherwise derives from request.
+    Falls back to localhost for startup-time card generation.
+    """
+    if hasattr(settings, "base_url") and settings.base_url:
+        return settings.base_url.rstrip("/")
+
+    if request:
+        scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
+        host = request.headers.get("x-forwarded-host", request.url.netloc)
+        return f"{scheme}://{host}"
+
+    # Fallback for startup-time generation
+    return "http://localhost:5000"
+
+
+def build_agent_card(agent_config: dict, base_url: str) -> AgentCard:
+    """Build an SDK AgentCard from a database agent configuration."""
+    agent_id = agent_config.get("id", "unknown")
+
+    return AgentCard(
+        name=agent_config.get("name", "Agent"),
+        description=agent_config.get("description", ""),
+        url=f"{base_url}/a2a/{agent_id}",
         version="1.0",
-        protocol_version="0.3.0",
-        capabilities=A2ACapabilities(streaming=True),
-        skills=skills
+        capabilities=AgentCapabilities(streaming=True),
+        skills=[AgentSkill(
+            id=agent_id,
+            name=agent_config.get("name", "Agent"),
+            description=agent_config.get("description", ""),
+            tags=[],
+        )],
+        default_input_modes=["text"],
+        default_output_modes=["text"],
     )
 
 
 # =============================================================================
-# A2A Discovery Endpoints
+# A2A Server Manager
+# =============================================================================
+
+class A2AServerManager:
+    """Manages per-agent A2A endpoints using the SDK.
+
+    For each local agent, creates:
+    - A ChatAgentExecutor (bridges to agent_manager)
+    - A DefaultRequestHandler (handles A2A protocol: tasks, JSON-RPC)
+    - Routes added to the main FastAPI app via A2AFastAPIApplication
+
+    This replaces ~400 lines of custom JSON-RPC/model code with SDK calls.
+    """
+
+    def __init__(self):
+        self._apps: dict[str, A2AFastAPIApplication] = {}
+        self._context_builder = AuthContextBuilder()
+
+    async def mount_agents(self, app: FastAPI) -> None:
+        """Register A2A routes for all local agents on the FastAPI app."""
+        base_url = _get_base_url()
+        agents = await cosmos_service.list_agents()
+        local_agents = [
+            a for a in agents
+            if a.get("agent_type", "local") == "local" and a.get("a2a_enabled", True)
+        ]
+
+        count = 0
+        for agent_config in local_agents:
+            try:
+                self._register_agent(app, agent_config, base_url)
+                count += 1
+            except Exception as e:
+                logger.error(
+                    f"Failed to register A2A routes for agent {agent_config.get('id')}: {e}",
+                    exc_info=True,
+                )
+
+        logger.info(f"A2A server: registered {count} agent endpoint(s)")
+
+    def _register_agent(self, app: FastAPI, agent_config: dict, base_url: str) -> None:
+        """Register A2A SDK routes for a single agent."""
+        agent_id = agent_config["id"]
+        agent_name = agent_config.get("name", "Agent")
+
+        # Build SDK components
+        card = build_agent_card(agent_config, base_url)
+        executor = ChatAgentExecutor(agent_id)
+        task_store = InMemoryTaskStore()
+        queue_manager = InMemoryQueueManager()
+
+        handler = DefaultRequestHandler(
+            agent_executor=executor,
+            task_store=task_store,
+            queue_manager=queue_manager,
+        )
+
+        a2a_app = A2AFastAPIApplication(
+            agent_card=card,
+            http_handler=handler,
+            context_builder=self._context_builder,
+        )
+
+        # Add routes directly to the main app with per-agent URL paths
+        a2a_app.add_routes_to_app(
+            app,
+            agent_card_url=f"/a2a/{agent_id}/.well-known/agent-card.json",
+            rpc_url=f"/a2a/{agent_id}",
+        )
+
+        self._apps[agent_id] = a2a_app
+
+        if should_log_a2a():
+            logger.info(
+                f"  A2A: {agent_name} -> POST /a2a/{agent_id} "
+                f"| GET /a2a/{agent_id}/.well-known/agent-card.json"
+            )
+
+
+# Singleton
+a2a_server = A2AServerManager()
+
+
+# =============================================================================
+# Global Discovery Endpoint
 # =============================================================================
 
 @router.get("/.well-known/agent.json")
@@ -156,382 +308,18 @@ async def get_all_agent_cards(request: Request):
     """
     base_url = _get_base_url(request)
     agents = await cosmos_service.list_agents()
-    
-    # Filter to only local agents with A2A enabled
+
     local_agents = [
-        a for a in agents 
+        a for a in agents
         if a.get("agent_type", "local") == "local" and a.get("a2a_enabled", True)
     ]
-    
-    # Return list of agent cards
-    cards = [_agent_to_card(a, base_url).model_dump(by_alias=True) for a in local_agents]
-    
+
+    cards = [build_agent_card(a, base_url).model_dump(by_alias=True) for a in local_agents]
+
     if should_log_a2a():
         logger.info(f"A2A discovery: returning {len(cards)} agent cards")
+
     return {"agents": cards, "count": len(cards)}
 
 
-@router.get("/a2a/{agent_id}/v1/card")
-async def get_agent_card(request: Request, agent_id: str):
-    """
-    Get A2A Agent Card for a specific agent.
-    """
-    agent = await cosmos_service.get_agent(agent_id)
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    
-    # Only expose local agents via A2A
-    if agent.get("agent_type", "local") != "local":
-        raise HTTPException(status_code=404, detail="Agent not available via A2A")
-    
-    if not agent.get("a2a_enabled", True):
-        raise HTTPException(status_code=403, detail="Agent does not have A2A enabled")
-    
-    base_url = _get_base_url(request)
-    card = _agent_to_card(agent, base_url)
-    
-    return card.model_dump(by_alias=True)
 
-
-@router.get("/a2a/{agent_id}/.well-known/agent.json")
-async def get_agent_card_wellknown(request: Request, agent_id: str):
-    """
-    Well-known endpoint for individual agent discovery.
-    This is the path the A2A SDK expects when discovering an agent.
-    Redirects to the standard /v1/card endpoint logic.
-    """
-    return await get_agent_card(request, agent_id)
-
-
-@router.get("/a2a/{agent_id}")
-async def get_agent_card_base(request: Request, agent_id: str):
-    """
-    Base A2A endpoint - returns agent card for browser convenience.
-    This allows users to paste the A2A URL directly in a browser and see the card.
-    A2A clients will use /.well-known/agent.json, but this works for both.
-    """
-    return await get_agent_card(request, agent_id)
-
-
-# =============================================================================
-# A2A Message Endpoints
-# =============================================================================
-
-async def _handle_a2a_message(request: Request, agent_id: str, body: dict) -> dict:
-    """
-    Common handler for A2A message requests.
-    Supports both JSON-RPC format (from A2A SDK) and simple message format.
-    """
-    agent = await cosmos_service.get_agent(agent_id)
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    
-    if agent.get("agent_type", "local") != "local":
-        raise HTTPException(status_code=404, detail="Agent not available via A2A")
-    
-    # Handle JSON-RPC format (what the A2A SDK sends)
-    # Format: {"jsonrpc": "2.0", "method": "message/send", "params": {...}, "id": "..."}
-    if "jsonrpc" in body:
-        method = body.get("method", "")
-        params = body.get("params", {})
-        request_id = body.get("id", "1")
-        
-        # Extract message from params
-        message_data = params.get("message", {})
-        parts = message_data.get("parts", [])
-        
-        input_text = ""
-        for part in parts:
-            if part.get("kind") == "text" or "text" in part:
-                input_text += part.get("text", "") + " "
-        input_text = input_text.strip()
-        
-        if not input_text:
-            return {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "error": {"code": -32602, "message": "Message must contain text"}
-            }
-        
-        # Execute agent
-        try:
-            messages = [{"role": "user", "content": input_text}]
-            user_token = getattr(request.state, 'token', None)
-            
-            if should_log_a2a():
-                logger.info(f"A2A executing agent {agent_id} with token present: {user_token is not None}, message: {input_text[:100]}...")
-            
-            # Collect all chunks and chatter events from the async generator
-            chunks = []
-            chatter_events = []
-            start_time = time.time()
-            
-            try:
-                async for item in agent_manager.execute_single(agent_id, messages, user_token, include_chatter=True):
-                    if isinstance(item, ChatterEvent):
-                        # Convert ChatterEvent to serializable dict including token info
-                        event_dict = {
-                            "type": item.type.value,
-                            "agent_name": item.agent_name,
-                            "content": item.content,
-                            "tool_name": item.tool_name,
-                            "tool_args": item.tool_args,
-                            "duration_ms": item.duration_ms
-                        }
-                        # Include token counts if present
-                        if item.tokens_input is not None:
-                            event_dict["tokens_input"] = item.tokens_input
-                        if item.tokens_output is not None:
-                            event_dict["tokens_output"] = item.tokens_output
-                        # Include friendly message if present
-                        if item.friendly_message:
-                            event_dict["friendly_message"] = item.friendly_message
-                        chatter_events.append(event_dict)
-                    elif isinstance(item, str):
-                        chunks.append(item)
-            except Exception as gen_error:
-                logger.error(f"A2A generator error for {agent_id}: {gen_error}", exc_info=True)
-                raise
-            
-            response_text = "".join(chunks)
-            total_duration_ms = (time.time() - start_time) * 1000
-            if should_log_a2a():
-                logger.info(f"A2A agent {agent_id} completed with {len(response_text)} chars, {len(chatter_events)} tool events")
-            
-            # Return JSON-RPC response with A2A message format
-            # Include chatter events as metadata for transparency
-            return {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "result": {
-                    "kind": "message",
-                    "role": "agent",
-                    "messageId": str(uuid.uuid4()),
-                    "parts": [{"kind": "text", "text": response_text}],
-                    "metadata": {
-                        "chatter_events": chatter_events,
-                        "duration_ms": total_duration_ms
-                    }
-                }
-            }
-        except Exception as e:
-            import traceback
-            logger.error(f"A2A JSON-RPC error for agent {agent_id}: {e}\n{traceback.format_exc()}")
-            return {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "error": {"code": -32603, "message": str(e)}
-            }
-    
-    # Handle simple message format (legacy)
-    message_data = body.get("message", body)
-    parts = message_data.get("parts", [])
-    
-    input_text = ""
-    for part in parts:
-        if part.get("kind") == "text" or "text" in part:
-            input_text += part.get("text", "") + " "
-    input_text = input_text.strip()
-    
-    if not input_text:
-        raise HTTPException(status_code=400, detail="Message must contain text")
-    
-    context_id = message_data.get("contextId") or str(uuid.uuid4())
-    message_id = str(uuid.uuid4())
-    
-    try:
-        messages = [{"role": "user", "content": input_text}]
-        user_token = getattr(request.state, 'token', None)
-        
-        response_text = ""
-        async for chunk in agent_manager.execute_single(agent_id, messages, user_token):
-            response_text += chunk
-        
-        return {
-            "kind": "message",
-            "role": "agent",
-            "parts": [{"kind": "text", "text": response_text}],
-            "messageId": message_id,
-            "contextId": context_id
-        }
-    except Exception as e:
-        logger.error(f"A2A message error for agent {agent_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/a2a/{agent_id}")
-async def send_message_direct(request: Request, agent_id: str):
-    """
-    Direct A2A endpoint - handles JSON-RPC messages from A2A SDK.
-    This is the URL pattern the agent-framework-a2a SDK uses.
-    """
-    try:
-        body = await request.json()
-        if should_log_a2a():
-            logger.info(f"A2A direct message to agent {agent_id}: method={body.get('method', 'unknown')}")
-        result = await _handle_a2a_message(request, agent_id, body)
-        return JSONResponse(content=result)
-    except HTTPException:
-        raise
-    except Exception as e:
-        import traceback
-        logger.error(f"A2A route error for {agent_id}: {e}\n{traceback.format_exc()}")
-        return JSONResponse(
-            status_code=500,
-            content={
-                "jsonrpc": "2.0",
-                "id": "1",
-                "error": {"code": -32603, "message": str(e)}
-            }
-        )
-
-
-@router.post("/a2a/{agent_id}/v1/message")
-async def send_message(request: Request, agent_id: str, message_request: A2AMessageRequest):
-    """
-    Send a message to an agent and get a complete response.
-    Non-streaming version of the A2A message endpoint (v1 path).
-    """
-    agent = await cosmos_service.get_agent(agent_id)
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    
-    if agent.get("agent_type", "local") != "local":
-        raise HTTPException(status_code=404, detail="Agent not available via A2A")
-    
-    # Extract text from message parts
-    input_text = ""
-    for part in message_request.message.parts:
-        if part.kind == "text" and part.text:
-            input_text += part.text + " "
-    input_text = input_text.strip()
-    
-    if not input_text:
-        raise HTTPException(status_code=400, detail="Message must contain text")
-    
-    # Get context ID (conversation ID) - generate if not provided
-    context_id = message_request.message.context_id or str(uuid.uuid4())
-    message_id = str(uuid.uuid4())
-    
-    try:
-        # Execute agent
-        messages = [{"role": "user", "content": input_text}]
-        
-        # Get user token if available for MCP pass-through
-        user_token = getattr(request.state, 'token', None)
-        
-        response_text = ""
-        async for item in agent_manager.execute_single(agent_id, messages, user_token, include_chatter=False):
-            if isinstance(item, str):
-                response_text += item
-        
-        # Build A2A response
-        response = A2AMessageResponse(
-            kind="message",
-            role="agent",
-            parts=[A2APart(kind="text", text=response_text)],
-            message_id=message_id,
-            context_id=context_id
-        )
-        
-        return response.model_dump(by_alias=True)
-        
-    except Exception as e:
-        logger.error(f"A2A message error for agent {agent_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/a2a/{agent_id}/v1/message:stream")
-async def send_message_stream(request: Request, agent_id: str, message_request: A2AMessageRequest):
-    """
-    Send a message to an agent with streaming response.
-    Returns Server-Sent Events (SSE) stream following A2A protocol.
-    """
-    agent = await cosmos_service.get_agent(agent_id)
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    
-    if agent.get("agent_type", "local") != "local":
-        raise HTTPException(status_code=404, detail="Agent not available via A2A")
-    
-    # Extract text from message parts
-    input_text = ""
-    for part in message_request.message.parts:
-        if part.kind == "text" and part.text:
-            input_text += part.text + " "
-    input_text = input_text.strip()
-    
-    if not input_text:
-        raise HTTPException(status_code=400, detail="Message must contain text")
-    
-    # Get context ID (conversation ID) - generate if not provided
-    context_id = message_request.message.context_id or str(uuid.uuid4())
-    message_id = str(uuid.uuid4())
-    
-    async def generate_stream():
-        """Generate A2A streaming response."""
-        try:
-            messages = [{"role": "user", "content": input_text}]
-            user_token = getattr(request.state, 'token', None)
-            
-            full_response = ""
-            async for item in agent_manager.execute_single(agent_id, messages, user_token, include_chatter=False):
-                if isinstance(item, str):
-                    full_response += item
-                # For simplicity, collect full response then send
-                # In production, could stream incremental updates
-            
-            # Send final message response
-            response = {
-                "kind": "message",
-                "role": "agent",
-                "parts": [{"kind": "text", "text": full_response}],
-                "messageId": message_id,
-                "contextId": context_id
-            }
-            
-            yield json.dumps(response)
-            
-        except Exception as e:
-            logger.error(f"A2A stream error for agent {agent_id}: {e}")
-            error_response = {
-                "kind": "error",
-                "error": str(e),
-                "contextId": context_id
-            }
-            yield json.dumps(error_response)
-    
-    return StreamingResponse(
-        generate_stream(),
-        media_type="application/json"
-    )
-
-
-# =============================================================================
-# A2A Task Endpoints (Optional - for long-running operations)
-# =============================================================================
-
-@router.post("/a2a/{agent_id}/v1/task")
-async def create_task(request: Request, agent_id: str, message_request: A2AMessageRequest):
-    """
-    Create a long-running task for an agent.
-    Returns task ID for polling status.
-    
-    Note: This is a placeholder for future implementation.
-    Current implementation forwards to synchronous message endpoint.
-    """
-    # For now, forward to synchronous message endpoint
-    return await send_message(request, agent_id, message_request)
-
-
-@router.get("/a2a/{agent_id}/v1/task/{task_id}")
-async def get_task_status(agent_id: str, task_id: str):
-    """
-    Get status of a long-running task.
-    
-    Note: This is a placeholder for future implementation.
-    """
-    raise HTTPException(
-        status_code=501, 
-        detail="Task-based A2A operations not yet implemented"
-    )

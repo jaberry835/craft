@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from config import get_settings
 from observability import setup_telemetry, get_logger
 from auth.middleware import AuthMiddleware
-from routes import chat_router, admin_router, settings_router, document_router, health_router, a2a_router, preferences_router
+from routes import chat_router, admin_router, settings_router, document_router, health_router, a2a_router, a2a_server, preferences_router
 
 settings = get_settings()
 logger = get_logger(__name__)
@@ -26,11 +26,16 @@ async def lifespan(app: FastAPI):
     from services.agent_manager import agent_manager
     from services.search_service import search_service
     from services.embedding_service import embedding_service
+    from services.document_intelligence_service import document_intelligence_service
     
     await cosmos_service.initialize()
     await agent_manager.initialize()
     await search_service.initialize()
     await embedding_service.initialize()
+    await document_intelligence_service.initialize()
+    
+    # Mount A2A SDK routes for each local agent (JSON-RPC + agent cards)
+    await a2a_server.mount_agents(app)
     
     logger.info("AgentChatV2 started successfully")
     yield

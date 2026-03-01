@@ -79,16 +79,22 @@ class MCPDiscoveryResponse(BaseModel):
 
 
 class GroundingSource(BaseModel):
-    """Configuration for grounding an agent with documents from Azure Blob Storage.
+    """Configuration for grounding an agent with documents.
     
-    Agents can be grounded in organizational documents by pointing to Azure Blob
-    Storage containers. The documents are indexed into a vector store and the agent
-    uses file search to find relevant information when answering questions.
+    Supports two modes:
+    - managed (default): Documents from Azure Blob Storage are automatically
+      chunked, embedded, and indexed into a system-managed search index.
+    - external: Points to a pre-existing Azure AI Search index that the admin
+      has created and populated outside this system.  The index must follow
+      the required schema (see docs/EXTERNAL_GROUNDING_INDEX.md).
     """
+    type: str = Field(
+        default="managed",
+        description="Source type: 'managed' (blob-indexed) or 'external' (pre-existing search index)"
+    )
     container_url: str = Field(
-        ..., 
-        min_length=1,
-        description="Azure Blob Storage container URL (e.g., https://account.blob.core.windows.net/container)"
+        default="",
+        description="Azure Blob Storage container URL (required for managed sources)"
     )
     name: Optional[str] = Field(
         default=None,
@@ -102,6 +108,11 @@ class GroundingSource(BaseModel):
     blob_prefix: Optional[str] = Field(
         default=None,
         description="Optional prefix to filter blobs (e.g., 'policies/' to only include blobs in that folder)"
+    )
+    # For external sources: the pre-existing Azure AI Search index name
+    index_name: Optional[str] = Field(
+        default=None,
+        description="Azure AI Search index name (required for external sources)"
     )
 
 
@@ -280,15 +291,6 @@ class ChatRequest(BaseModel):
     orchestration_type: Optional[OrchestrationPattern] = None
     agent_ids: Optional[list[str]] = None
     include_documents: bool = True
-
-
-class ChatStreamChunk(BaseModel):
-    """Streaming chat response chunk."""
-    type: str  # "content", "agent_start", "agent_end", "error", "done"
-    agent_id: Optional[str] = None
-    agent_name: Optional[str] = None
-    content: Optional[str] = None
-    metadata: dict = Field(default_factory=dict)
 
 
 class TokenUsage(BaseModel):

@@ -1,9 +1,15 @@
 """
 A2A Client Service
-Handles discovery and creation of external A2A agents.
-Implements the A2A protocol for consuming remote agents.
+Handles discovery, creation, and communication with A2A agents.
+Uses the agent-framework-a2a SDK for all A2A protocol operations.
+
+Key SDK features used:
+- A2AAgent: Wraps any remote A2A endpoint, handles protocol details
+- A2ACardResolver: Discovers agent capabilities via agent cards
+- ClientCallInterceptor: Handles authentication for secured endpoints
+- Streaming: Real-time updates via Server-Sent Events
 """
-from typing import Optional, Any
+from typing import Optional, Any, AsyncIterator
 import httpx
 
 from observability import get_logger, should_log_a2a
@@ -12,32 +18,59 @@ from config import get_settings
 settings = get_settings()
 logger = get_logger(__name__)
 
-# A2A imports - these require agent-framework-a2a package
+# A2A imports - require agent-framework-a2a package
 try:
     from agent_framework.a2a import A2AAgent
     from a2a.client import A2ACardResolver
+    from a2a.client.middleware import ClientCallInterceptor
     from a2a.types import AgentCard
     A2A_AVAILABLE = True
 except ImportError:
     A2A_AVAILABLE = False
+    ClientCallInterceptor = object  # Fallback base class when A2A not installed
     logger.warning("A2A packages not installed. External A2A agent support disabled.")
+
+
+class BearerAuthInterceptor(ClientCallInterceptor):
+    """Auth interceptor that adds a Bearer token to A2A requests.
+    
+    Implements the SDK's ClientCallInterceptor interface to inject
+    the user's Bearer token into outgoing A2A HTTP requests for
+    on-behalf-of authentication pass-through.
+    """
+    
+    def __init__(self, token: str):
+        self.token = token
+    
+    async def intercept(
+        self,
+        method_name: str,
+        request_payload: dict[str, Any],
+        http_kwargs: dict[str, Any],
+        agent_card: Any = None,
+        context: Any = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        headers = http_kwargs.get("headers", {})
+        headers["Authorization"] = f"Bearer {self.token}"
+        http_kwargs["headers"] = headers
+        return request_payload, http_kwargs
 
 
 class A2AClientService:
     """
-    Service for discovering and creating external A2A agents.
+    Service for discovering and communicating with A2A agents.
     
-    A2A Protocol Overview:
-    - Agent Cards: JSON metadata at /.well-known/agent.json describing agent capabilities
-    - Messages: HTTP POST to /v1/message:stream for sending messages
-    - Tasks: For long-running operations (optional)
+    Uses the agent-framework-a2a SDK for all protocol operations:
+    - Discovery via A2ACardResolver
+    - Communication via A2AAgent (supports both sync and streaming)
+    - Authentication via BearerAuthInterceptor
     """
     
     def __init__(self):
         self._http_client: Optional[httpx.AsyncClient] = None
     
     async def _get_http_client(self) -> httpx.AsyncClient:
-        """Get or create HTTP client for A2A requests."""
+        """Get or create HTTP client for A2A discovery requests."""
         if self._http_client is None or self._http_client.is_closed:
             self._http_client = httpx.AsyncClient(timeout=60.0)
         return self._http_client
@@ -52,13 +85,9 @@ class A2AClientService:
         
         Returns:
             dict: Agent card data including name, description, skills, capabilities
-        
-        Raises:
-            RuntimeError: If A2A packages not installed
-            httpx.HTTPError: If agent card fetch fails
         """
         if not A2A_AVAILABLE:
-            raise RuntimeError("A2A packages not installed. Run: pip install agent-framework-a2a a2a")
+            raise RuntimeError("A2A packages not installed. Run: pip install agent-framework-a2a a2a-sdk")
         
         if should_log_a2a():
             logger.info(f"Discovering A2A agent at {base_url}")
@@ -112,54 +141,140 @@ class A2AClientService:
             logger.error(f"Error discovering A2A agent at {base_url}: {type(e).__name__}: {e}")
             raise
     
-    def create_a2a_agent(self, config: dict) -> Any:
+    def build_a2a_url(self, config: dict) -> str:
         """
-        Create an A2AAgent instance from stored configuration.
+        Build the A2A URL for an agent based on its type.
         
-        The A2AAgent follows the same AgentProtocol as ChatAgent,
-        so it can be used interchangeably in orchestration patterns.
+        - External A2A agents: uses the configured a2a_url
+        - Local agents: builds URL from backend_url + agent ID
+        """
+        agent_type = config.get("agent_type", "local")
+        if agent_type == "a2a":
+            url = config.get("a2a_url")
+            if not url:
+                raise ValueError("a2a_url is required for external A2A agents")
+            return url
+        else:
+            agent_id = config.get("id")
+            if not agent_id:
+                raise ValueError("Agent id is required for local A2A agents")
+            return f"{settings.backend_url.rstrip('/')}/a2a/{agent_id}"
+    
+    def create_a2a_agent(
+        self, 
+        config: dict, 
+        user_token: Optional[str] = None
+    ) -> "A2AAgent":
+        """
+        Create an A2AAgent instance from configuration.
+        
+        Handles both external A2A agents and local agents exposed via A2A endpoints.
+        Uses the SDK's auth_interceptor for secured endpoints instead of custom HTTP clients.
+        
+        The returned agent can be used as a context manager for proper lifecycle:
+            async with a2a_client.create_a2a_agent(config, token) as agent:
+                response = await agent.run("Hello")
+        
+        Or used directly for tool creation:
+            agent = a2a_client.create_a2a_agent(config, token)
+            tool = agent.as_tool(name="...", description="...")
         
         Args:
-            config: Agent configuration dict with a2a_url and optionally a2a_card
+            config: Agent configuration dict (works for both local and a2a agent types)
+            user_token: Optional auth token for pass-through authentication
         
         Returns:
             A2AAgent: Agent instance that communicates via A2A protocol
-        
-        Raises:
-            RuntimeError: If A2A packages not installed
-            ValueError: If config missing required fields
         """
         if not A2A_AVAILABLE:
-            raise RuntimeError("A2A packages not installed. Run: pip install agent-framework-a2a a2a")
+            raise RuntimeError("A2A packages not installed. Run: pip install agent-framework-a2a a2a-sdk")
         
-        a2a_url = config.get("a2a_url")
-        if not a2a_url:
-            raise ValueError("a2a_url is required for A2A agents")
-        
-        name = config.get("name", "A2A Agent")
+        url = self.build_a2a_url(config)
+        name = config.get("name", "Agent").replace(" ", "_")
         description = config.get("description", "")
         
-        # If we have a cached agent card, use it
-        a2a_card = config.get("a2a_card")
-        if a2a_card and isinstance(a2a_card, dict):
-            if should_log_a2a():
-                logger.debug(f"Creating A2AAgent '{name}' with cached card")
-            # Note: A2AAgent can accept agent_card parameter if needed
-            agent = A2AAgent(
-                name=name,
-                description=description or a2a_card.get("description", ""),
-                url=a2a_url
-            )
-        else:
-            if should_log_a2a():
-                logger.debug(f"Creating A2AAgent '{name}' with direct URL")
-            agent = A2AAgent(
-                name=name,
-                description=description,
-                url=a2a_url
-            )
+        # Use SDK's auth_interceptor for token pass-through
+        auth = BearerAuthInterceptor(user_token) if user_token else None
         
-        return agent
+        if should_log_a2a():
+            logger.debug(f"Creating A2AAgent '{name}' at {url} (has_token={user_token is not None})")
+        
+        return A2AAgent(
+            name=name,
+            description=description,
+            url=url,
+            auth_interceptor=auth,
+        )
+    
+    async def call_agent(
+        self, 
+        config: dict, 
+        message: str, 
+        user_token: Optional[str] = None
+    ) -> dict:
+        """
+        Call an A2A agent using the SDK and get the full response.
+        
+        Uses A2AAgent.run() which handles all protocol details including
+        agent card resolution, message formatting, and response parsing.
+        
+        Args:
+            config: Agent configuration dict
+            message: The message to send
+            user_token: Optional auth token for secured endpoints
+        
+        Returns:
+            dict with 'text' and 'error' keys
+        """
+        agent_name = config.get("name", "Agent")
+        try:
+            async with self.create_a2a_agent(config, user_token) as agent:
+                response = await agent.run(message)
+                text_parts = []
+                for msg in response.messages:
+                    if hasattr(msg, 'text') and msg.text:
+                        text_parts.append(msg.text)
+                
+                final_text = "\n".join(text_parts) if text_parts else ""
+                if should_log_a2a():
+                    logger.info(f"A2A call to '{agent_name}' returned {len(final_text)} chars")
+                return {"text": final_text, "error": None}
+                
+        except Exception as e:
+            logger.error(f"Error calling A2A agent '{agent_name}': {type(e).__name__}: {e}")
+            return {"text": "", "error": str(e)}
+    
+    async def call_agent_stream(
+        self,
+        config: dict,
+        message: str,
+        user_token: Optional[str] = None
+    ) -> AsyncIterator[str]:
+        """
+        Call an A2A agent with streaming via the SDK.
+        
+        Uses A2AAgent.run(stream=True) which provides real-time updates
+        via Server-Sent Events as the remote agent works.
+        
+        Args:
+            config: Agent configuration dict
+            message: The message to send
+            user_token: Optional auth token for secured endpoints
+        
+        Yields:
+            str: Text content chunks as they arrive
+        """
+        agent_name = config.get("name", "Agent")
+        try:
+            async with self.create_a2a_agent(config, user_token) as agent:
+                async with agent.run(message, stream=True) as stream:
+                    async for update in stream:
+                        for content in update.contents:
+                            if hasattr(content, 'text') and content.text:
+                                yield content.text
+        except Exception as e:
+            logger.error(f"Error streaming from A2A agent '{agent_name}': {type(e).__name__}: {e}")
+            raise
     
     async def test_connection(self, base_url: str) -> dict:
         """
@@ -194,167 +309,6 @@ class A2AClientService:
         if self._http_client and not self._http_client.is_closed:
             await self._http_client.aclose()
             self._http_client = None
-    
-    async def call_agent_direct(
-        self, 
-        agent_url: str, 
-        message: str, 
-        user_token: Optional[str] = None
-    ) -> dict:
-        """
-        Call an A2A agent directly via HTTP, returning full response with metadata.
-        
-        This bypasses the A2AAgent SDK to get access to the full JSON-RPC response,
-        including metadata with chatter events (tool calls/results).
-        
-        Args:
-            agent_url: Full URL to the A2A agent endpoint (e.g., http://localhost:5000/a2a/{agent_id})
-            message: The message to send to the agent
-            user_token: Optional auth token for pass-through authentication
-        
-        Returns:
-            dict with:
-                - text: The agent's text response
-                - chatter_events: List of tool call/result events from the agent
-                - duration_ms: Total execution time in milliseconds
-                - error: Error message if failed
-        """
-        import uuid
-        
-        request_id = str(uuid.uuid4())
-        
-        # Build JSON-RPC request
-        payload = {
-            "jsonrpc": "2.0",
-            "method": "message/send",
-            "params": {
-                "message": {
-                    "kind": "message",
-                    "role": "user",
-                    "parts": [{"kind": "text", "text": message}]
-                }
-            },
-            "id": request_id
-        }
-        
-        headers = {"Content-Type": "application/json"}
-        if user_token:
-            headers["Authorization"] = f"Bearer {user_token}"
-        
-        try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                response = await client.post(
-                    agent_url,
-                    json=payload,
-                    headers=headers
-                )
-                response.raise_for_status()
-                result = response.json()
-            
-            # Parse JSON-RPC response
-            if "error" in result:
-                return {
-                    "text": "",
-                    "chatter_events": [],
-                    "duration_ms": None,
-                    "error": result["error"].get("message", "Unknown error")
-                }
-            
-            # Extract result
-            message_result = result.get("result", {})
-            parts = message_result.get("parts", [])
-            metadata = message_result.get("metadata", {})
-            
-            # Get text from parts
-            text = ""
-            for part in parts:
-                if part.get("kind") == "text":
-                    text += part.get("text", "")
-            
-            # Get chatter events from metadata
-            chatter_events = metadata.get("chatter_events", [])
-            duration_ms = metadata.get("duration_ms")
-            
-            return {
-                "text": text,
-                "chatter_events": chatter_events,
-                "duration_ms": duration_ms,
-                "error": None
-            }
-            
-        except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP error calling A2A agent at {agent_url}: {e.response.status_code}")
-            return {
-                "text": "",
-                "chatter_events": [],
-                "duration_ms": None,
-                "error": f"HTTP {e.response.status_code}: {e.response.text[:200]}"
-            }
-        except Exception as e:
-            logger.error(f"Error calling A2A agent at {agent_url}: {type(e).__name__}: {e}")
-            return {
-                "text": "",
-                "chatter_events": [],
-                "duration_ms": None,
-                "error": str(e)
-            }
-    
-    def create_local_a2a_agent(self, config: dict, base_url: str, user_token: Optional[str] = None) -> Any:
-        """
-        Create an A2AAgent that points to a local agent exposed via A2A endpoints.
-        
-        This allows the orchestrator to call local agents using the same A2A protocol
-        that would be used for external agents, enabling:
-        - Consistent protocol for all agent communication
-        - Local agents to be discoverable and callable by external systems
-        - Same code path for local and external agent orchestration
-        
-        Args:
-            config: Agent configuration dict with id, name, description
-            base_url: Base URL of this server (e.g., http://localhost:5000)
-            user_token: User's auth token for pass-through authentication
-        
-        Returns:
-            A2AAgent: Agent instance that communicates via local A2A endpoints
-        """
-        if not A2A_AVAILABLE:
-            raise RuntimeError("A2A packages not installed. Run: pip install agent-framework-a2a a2a-sdk")
-        
-        agent_id = config.get("id")
-        if not agent_id:
-            raise ValueError("Agent id is required")
-        
-        name = config.get("name", "Agent")
-        description = config.get("description", "")
-        
-        # Build the local A2A URL for this agent
-        # Format: {base_url}/a2a/{agent_id}
-        a2a_url = f"{base_url.rstrip('/')}/a2a/{agent_id}"
-        
-        if should_log_a2a():
-            logger.debug(f"Creating local A2AAgent '{name}' at {a2a_url} (has_token={user_token is not None})")
-        
-        # Create HTTP client with auth headers if token provided
-        http_client = None
-        if user_token:
-            if should_log_a2a():
-                logger.info(f"Creating A2AAgent with auth header for '{name}'")
-            http_client = httpx.AsyncClient(
-                timeout=60.0,
-                headers={"Authorization": f"Bearer {user_token}"}
-            )
-        else:
-            if should_log_a2a():
-                logger.warning(f"Creating A2AAgent WITHOUT auth header for '{name}' - no user_token provided")
-        
-        agent = A2AAgent(
-            name=name.replace(" ", "_"),  # Sanitize for API compatibility
-            description=description,
-            url=a2a_url,
-            http_client=http_client
-        )
-        
-        return agent
 
 
 # Singleton instance

@@ -6,7 +6,7 @@ Uses AzureCliCredential for local dev, DefaultAzureCredential for production.
 from typing import Optional, Union
 import time
 
-from openai import AzureOpenAI
+from openai import AsyncAzureOpenAI
 
 from config import get_settings, get_azure_credential
 from observability import get_logger, track_performance, should_log_performance, log_performance_summary, MetricType
@@ -18,8 +18,11 @@ logger = get_logger(__name__)
 class EmbeddingService:
     """Service for generating text embeddings."""
     
+    # Batch sizes for embedding API calls
+    EMBEDDING_BATCH_SIZE = 16  # texts per API call (safe limit for ada-002)
+
     def __init__(self):
-        self.client: Optional[AzureOpenAI] = None
+        self.client: Optional[AsyncAzureOpenAI] = None
         self._credential = None
         self._initialized = False
     
@@ -33,7 +36,7 @@ class EmbeddingService:
             # Use API key if explicitly provided (for testing or specific scenarios)
             if settings.azure_openai_key:
                 logger.info("Using Azure OpenAI with API key")
-                self.client = AzureOpenAI(
+                self.client = AsyncAzureOpenAI(
                     azure_endpoint=settings.azure_openai_endpoint,
                     api_version=settings.azure_openai_api_version,
                     api_key=settings.azure_openai_key
@@ -45,7 +48,7 @@ class EmbeddingService:
                 logger.info(f"Using Azure OpenAI with {type(self._credential).__name__} ({env_mode} mode)")
                 
                 # Create client with token provider for automatic token refresh
-                self.client = AzureOpenAI(
+                self.client = AsyncAzureOpenAI(
                     azure_endpoint=settings.azure_openai_endpoint,
                     api_version=settings.azure_openai_api_version,
                     azure_ad_token_provider=self._get_token_provider()
@@ -91,7 +94,7 @@ class EmbeddingService:
                     f"text_length={len(text)}")
         
         try:
-            response = self.client.embeddings.create(
+            response = await self.client.embeddings.create(
                 input=text,
                 model=settings.azure_openai_embedding_deployment
             )
@@ -122,25 +125,32 @@ class EmbeddingService:
             return []
         
         start_time = time.perf_counter()
-        
-        response = self.client.embeddings.create(
-            input=texts,
-            model=settings.azure_openai_embedding_deployment
-        )
-        
+        all_embeddings: list[list[float]] = []
+        total_tokens = 0
+
+        # Process in batches to respect API limits
+        for batch_start in range(0, len(texts), self.EMBEDDING_BATCH_SIZE):
+            batch = texts[batch_start:batch_start + self.EMBEDDING_BATCH_SIZE]
+            response = await self.client.embeddings.create(
+                input=batch,
+                model=settings.azure_openai_embedding_deployment
+            )
+            all_embeddings.extend(item.embedding for item in response.data)
+            total_tokens += getattr(response.usage, 'total_tokens', 0) if hasattr(response, 'usage') else 0
+
         duration_ms = (time.perf_counter() - start_time) * 1000
-        tokens_used = getattr(response.usage, 'total_tokens', 0) if hasattr(response, 'usage') else 0
         
         if should_log_performance():
             log_performance_summary(logger, "aoai_embedding_batch", {
                 "duration_ms": round(duration_ms, 2),
-                "tokens_used": tokens_used,
+                "tokens_used": total_tokens,
                 "batch_size": len(texts),
+                "num_api_calls": (len(texts) + self.EMBEDDING_BATCH_SIZE - 1) // self.EMBEDDING_BATCH_SIZE,
                 "avg_text_length": sum(len(t) for t in texts) / len(texts) if texts else 0,
                 "deployment": settings.azure_openai_embedding_deployment
             })
         
-        return [item.embedding for item in response.data]
+        return all_embeddings
     
     async def chunk_and_embed(
         self,

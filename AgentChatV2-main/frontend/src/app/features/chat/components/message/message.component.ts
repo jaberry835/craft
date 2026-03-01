@@ -1,5 +1,6 @@
-import { Component, Input, DoCheck, ViewChild, ElementRef, AfterViewChecked } from '@angular/core';
+import { Component, Input, DoCheck, ViewChild, ElementRef, AfterViewChecked, HostListener } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { HttpClient } from '@angular/common/http';
 
 import { Message } from '../../../../core/services/chat.service';
 
@@ -10,6 +11,7 @@ interface ChatterEvent {
   content: string;
   toolName?: string;
   toolArgs?: Record<string, unknown>;
+  toolCallId?: string;      // AG-UI tool_call_id for matching start/args/end/result
   timestamp: number;
   durationMs?: number;      // Duration of tool execution in ms
   tokensInput?: number;     // Input tokens for LLM calls
@@ -111,7 +113,17 @@ interface DisplayMessage extends Message {
           </div>
         }
         
-        <div class="message-text" [innerHTML]="formatContent(message.content)"></div>
+        @if (hasImageAttachment()) {
+          <div class="image-attachment">
+            <img [src]="getImageDataUrl()" [alt]="getImageFilename()" class="chat-image" />
+            <span class="image-label">
+              <span class="material-icons">image</span>
+              {{ getImageFilename() }}
+            </span>
+          </div>
+        } @else {
+          <div class="message-text" [innerHTML]="formatContent(message.content)"></div>
+        }
         
         @if (isStreaming) {
           <span class="typing-indicator">
@@ -458,7 +470,38 @@ interface DisplayMessage extends Message {
       color: var(--text-secondary);
       font-style: italic;
     }
-    
+
+    .image-attachment {
+      margin: var(--spacing-sm) 0;
+
+      .chat-image {
+        max-width: 400px;
+        max-height: 400px;
+        border-radius: 8px;
+        border: 1px solid var(--border-color);
+        cursor: pointer;
+        transition: transform 0.2s;
+        display: block;
+
+        &:hover {
+          transform: scale(1.02);
+        }
+      }
+
+      .image-label {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        margin-top: 4px;
+        font-size: 12px;
+        color: var(--text-muted);
+
+        .material-icons {
+          font-size: 14px;
+        }
+      }
+    }
+
     .message-text {
       font-size: 14px;
       line-height: 1.6;
@@ -484,6 +527,20 @@ interface DisplayMessage extends Message {
           font-size: 0.75em;
           margin-left: 2px;
           opacity: 0.7;
+        }
+        
+        &.doc-citation {
+          color: #90caf9 !important;
+          text-decoration-style: dotted;
+          
+          &:visited {
+            color: #90caf9 !important;
+          }
+          
+          &::before {
+            content: '📄 ';
+            font-size: 0.85em;
+          }
         }
       }
       
@@ -546,12 +603,57 @@ interface DisplayMessage extends Message {
 export class MessageComponent implements DoCheck {
   @Input() message!: DisplayMessage;
   @Input() isStreaming = false;
+  /** IDs of selected agents that have document grounding — used for auto-linking filenames */
+  @Input() groundedAgentIds: string[] = [];
   
   @ViewChild('chatterContainer') chatterContainer?: ElementRef<HTMLDivElement>;
   
   chatterExpanded = false;  // Technical details are collapsed by default
   private previousChatterCount = 0;
   private shouldScrollToBottom = false;
+  
+  constructor(private http: HttpClient) {}
+  
+  /**
+   * Intercept clicks on .doc-citation links.
+   * Instead of navigating (which loses the Authorization header),
+   * fetch the document via HttpClient and open a blob URL in a new tab.
+   */
+  @HostListener('click', ['$event'])
+  onDocCitationClick(event: MouseEvent): void {
+    const target = event.target as HTMLElement;
+    const anchor = target.closest('a.doc-citation') as HTMLAnchorElement | null;
+    if (!anchor) return;
+    
+    event.preventDefault();
+    event.stopPropagation();
+    
+    const url = anchor.getAttribute('href');
+    if (!url) return;
+    
+    // Fetch with auth header (Angular's HttpInterceptor adds Bearer token)
+    this.http.get(url, { responseType: 'blob', observe: 'response' }).subscribe({
+      next: (response) => {
+        const blob = response.body;
+        if (!blob) return;
+        const contentType = response.headers.get('Content-Type') || 'text/plain';
+        const blobUrl = URL.createObjectURL(new Blob([blob], { type: contentType }));
+        window.open(blobUrl, '_blank');
+        // Revoke after a delay to allow the tab to load
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+      },
+      error: (err) => {
+        console.error('Failed to fetch grounding document:', err);
+        if (err.status === 403) {
+          alert('You do not have permission to view this document.');
+        } else if (err.status === 404) {
+          alert('Document not found.');
+        } else {
+          alert('Failed to load document. Please try again.');
+        }
+      }
+    });
+  }
   
   ngDoCheck(): void {
     // Auto-scroll activity feed when new events arrive during streaming
@@ -584,7 +686,7 @@ export class MessageComponent implements DoCheck {
   
   formatContent(content: string): string {
     // Basic markdown-like formatting
-    return content
+    let result = content
       // Code blocks
       .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>')
       // Inline code
@@ -595,8 +697,96 @@ export class MessageComponent implements DoCheck {
       .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
       // Italic
       .replace(/\*([^*]+)\*/g, '<em>$1</em>');
+    
+    // Rewrite Azure Blob Storage URLs to use the backend blob proxy.
+    // This applies to ALL assistant messages — MCP tools often return direct
+    // blob URLs that the user can't access without SAS tokens.  The proxy
+    // uses managed identity and applies SS token checks.
+    if (this.message.role === 'assistant') {
+      const blobUrlPattern = /(<a\s[^>]*href=")(https:\/\/[^"]+\.blob\.core\.(?:windows\.net|usgovcloudapi\.net|chinacloudapi\.cn)\/[^"]+)("[^>]*>)/gi;
+      result = result.replace(blobUrlPattern, (_m, prefix, blobUrl, suffix) => {
+        const proxyUrl = `/api/documents/blob-proxy?url=${encodeURIComponent(blobUrl)}`;
+        // Add doc-citation class for the click interceptor
+        const classedSuffix = suffix.includes('class="')
+          ? suffix.replace('class="', 'class="doc-citation ')
+          : suffix.replace('>', ' class="doc-citation">');
+        return `${prefix}${proxyUrl}${classedSuffix}`;
+      });
+    }
+    
+    // Auto-link grounding document file names (e.g., meeting-snack-policy.md)
+    // Only for assistant messages from agents that have document grounding configured.
+    // This prevents interference with non-grounded agents (e.g., MCP-only agents
+    // whose tool results may contain filenames that should NOT become grounding links).
+    if (this.message.role === 'assistant' && this.groundedAgentIds.length > 0) {
+      const agentId = this.groundedAgentIds[0];
+      const docExtensions = 'md|txt|json|csv|pdf';
+      const fileNameRe = `[\\w][\\w.-]*\\.(?:${docExtensions})`;
+      
+      // Step 1: Rewrite any existing <a href="bare-filename.ext"> links created by the
+      // markdown converter (LLM wrote [file.md](file.md)) — redirect them to the proxy.
+      const existingLinkPattern = new RegExp(
+        `(<a\\s[^>]*href=")(?:(?:https?://[^"]*/)?)?(${fileNameRe})("[^>]*>)`, 'gi'
+      );
+      result = result.replace(existingLinkPattern, (_m, prefix, fileName, suffix) => {
+        const url = `/api/documents/grounding/${agentId}/${encodeURIComponent(fileName)}`;
+        // Ensure the doc-citation class is added
+        const classAttr = suffix.includes('class="') 
+          ? suffix.replace('class="', 'class="doc-citation ') 
+          : suffix.replace('>', ' class="doc-citation">');
+        return `${prefix}${url}${classAttr}`;
+      });
+      
+      // Step 2: Auto-link bare filenames in text segments that are NOT inside <a>...</a> tags.
+      const fileNamePattern = new RegExp(`\\b(${fileNameRe})\\b`, 'g');
+      // Track whether we're inside an <a> tag to avoid nesting anchors.
+      let insideAnchor = false;
+      result = result.replace(
+        /(<a\b[^>]*>)|(<\/a>)|(<[^>]+>)|([^<]+)/gi,
+        (_wholeMatch, openA, closeA, otherTag, text) => {
+          if (openA) { insideAnchor = true; return openA; }
+          if (closeA) { insideAnchor = false; return closeA; }
+          if (otherTag) return otherTag;
+          // Only auto-link in text that's NOT inside an existing <a> tag
+          if (insideAnchor || !text) return text || '';
+          return text.replace(fileNamePattern, (_fm: string, fileName: string) => {
+            const url = `/api/documents/grounding/${agentId}/${encodeURIComponent(fileName)}`;
+            return `<a href="${url}" target="_blank" rel="noopener noreferrer" class="doc-citation">${fileName}</a>`;
+          });
+        }
+      );
+    }
+    
+    return result;
   }
   
+  /**
+   * Check if this message has an image attachment in metadata.
+   */
+  hasImageAttachment(): boolean {
+    const metadata = (this.message as any).metadata;
+    return !!metadata?.['image_attachment'];
+  }
+
+  /**
+   * Build a data URL from the base64 image attachment.
+   */
+  getImageDataUrl(): string {
+    const metadata = (this.message as any).metadata;
+    const img = metadata?.['image_attachment'] as Record<string, unknown> | undefined;
+    if (!img) return '';
+    return `data:${img['content_type']};base64,${img['base64']}`;
+  }
+
+  /**
+   * Get the original filename from the image attachment.
+   */
+  getImageFilename(): string {
+    const metadata = (this.message as any).metadata;
+    const img = metadata?.['image_attachment'] as Record<string, unknown> | undefined;
+    return (img?.['filename'] as string) || 'Image';
+  }
+
   hasChatterEvents(): boolean {
     return !!(this.message as DisplayMessage).chatterEvents?.length;
   }

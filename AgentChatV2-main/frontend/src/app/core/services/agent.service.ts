@@ -87,10 +87,12 @@ export interface A2ATestResponse {
 
 // Grounding configuration for document RAG
 export interface GroundingSource {
-  container_url: string;  // Azure Blob Storage container URL
+  type?: 'managed' | 'external';  // 'managed' (blob-indexed) or 'external' (pre-existing index)
+  container_url: string;  // Azure Blob Storage container URL (for managed)
   name?: string;          // Friendly name for the source
   description?: string;   // Description of what documents are in this source
   blob_prefix?: string;   // Optional prefix to filter blobs
+  index_name?: string;    // Azure AI Search index name (for external)
 }
 
 export interface GroundingValidationResponse {
@@ -102,6 +104,23 @@ export interface GroundingValidationResponse {
 export interface GroundingStatusResponse {
   available: boolean;
   message: string;
+}
+
+export interface ReindexResponse {
+  message: string;
+  index_name: string;
+  document_count: number;
+}
+
+export interface SearchIndexInfo {
+  name: string;
+  field_count: number;
+  document_count: number | null;
+}
+
+export interface SearchIndexListResponse {
+  indexes: SearchIndexInfo[];
+  count: number;
 }
 
 // Azure OpenAI Endpoint Types
@@ -167,6 +186,7 @@ export interface AgentConfig {
   // Grounding sources for document RAG
   grounding_sources?: GroundingSource[];
   grounding_index_name?: string;  // System-managed, do not set manually
+  has_grounding?: boolean;  // Lightweight flag from chat endpoint (no full sources)
   
   // For A2A agents
   a2a_url?: string;
@@ -375,6 +395,27 @@ export class AgentService {
     return this.http.post<GroundingValidationResponse>(
       `${this.groundingApiUrl}/validate`,
       { container_url: containerUrl }
+    );
+  }
+
+  /**
+   * Re-index grounding documents for an agent.
+   * Deletes the existing index and rebuilds from blob sources with current schema/metadata.
+   */
+  reindexGrounding(agentId: string): Observable<ReindexResponse> {
+    return this.http.post<ReindexResponse>(
+      `${this.adminApiUrl}/${agentId}/reindex`,
+      {}
+    );
+  }
+
+  /**
+   * List all Azure AI Search indexes available on the configured search service.
+   * Used to populate the 'Use Existing Index' dropdown for BYOI.
+   */
+  listSearchIndexes(): Observable<SearchIndexListResponse> {
+    return this.http.get<SearchIndexListResponse>(
+      `${environment.apiUrl}/admin/search/indexes`
     );
   }
   

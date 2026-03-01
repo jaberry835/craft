@@ -67,6 +67,17 @@ class Settings(BaseSettings):
     search_key: str = Field(default="", alias="AZURE_SEARCH_KEY")
     search_index_name: str = Field(default="documents", alias="AZURE_SEARCH_INDEX_NAME")
     
+    # Azure Document Intelligence
+    # Used for rich document extraction (PDFs, scanned docs, Office files).
+    # If endpoint is empty, DI is disabled and local parsers are used.
+    document_intelligence_endpoint: str = Field(default="", alias="AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT")
+    document_intelligence_key: str = Field(default="", alias="AZURE_DOCUMENT_INTELLIGENCE_KEY")
+    
+    # Security Token Service (SS Token / Access Checker)
+    # Endpoint that returns the list of SS tokens a user is authorized for.
+    # Called with the user's bearer token to enforce document-level security filtering.
+    access_checker_endpoint: str = Field(default="", alias="ACCESS_CHECKER_ENDPOINT")
+    
     # MCP Server
     mcp_server_endpoint: str = Field(alias="MCP_SERVER_ENDPOINT")
     
@@ -80,6 +91,11 @@ class Settings(BaseSettings):
         default="",
         alias="APPLICATIONINSIGHTS_CONNECTION_STRING"
     )
+    
+    # Managed Identity
+    # Set this to the client ID of a user-assigned managed identity.
+    # If empty, ManagedIdentityCredential defaults to the system-assigned identity.
+    azure_managed_identity_client_id: str = Field(default="", alias="AZURE_MANAGED_IDENTITY_CLIENT_ID")
     
     # Token Management
     default_max_input_tokens: int = Field(default=8000, alias="DEFAULT_MAX_INPUT_TOKENS")
@@ -118,5 +134,10 @@ def get_azure_credential() -> Union[AzureCliCredential, ManagedIdentityCredentia
         # Use ManagedIdentityCredential directly instead of DefaultAzureCredential
         # This avoids the credential chain that fails in App Service containers
         # The AZURE_AUTHORITY_HOST env var ensures Azure Government is used
-        return ManagedIdentityCredential()
+        if settings.azure_managed_identity_client_id:
+            # User-assigned managed identity — client_id is required to disambiguate
+            return ManagedIdentityCredential(client_id=settings.azure_managed_identity_client_id)
+        else:
+            # System-assigned managed identity (default)
+            return ManagedIdentityCredential()
 

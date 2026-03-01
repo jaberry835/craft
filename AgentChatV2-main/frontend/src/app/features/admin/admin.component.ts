@@ -2,7 +2,7 @@ import { Component, OnInit, OnDestroy } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { Subject, takeUntil } from 'rxjs';
 
-import { AgentService, AgentConfig, MCPToolConfig, A2ADiscoveryResponse, GroundingSource, GroundingStatusResponse, AOAIEndpointConfig, AOAIDeploymentOption } from '../../core/services/agent.service';
+import { AgentService, AgentConfig, MCPToolConfig, A2ADiscoveryResponse, GroundingSource, GroundingStatusResponse, ReindexResponse, AOAIEndpointConfig, AOAIDeploymentOption, SearchIndexInfo } from '../../core/services/agent.service';
 import { SettingsService, UISettings, ClassificationBanner } from '../../core/services/settings.service';
 import { environment } from '../../../environments/environment';
 
@@ -810,63 +810,150 @@ import { environment } from '../../../environments/environment';
                   Document Grounding (RAG)
                   <span class="material-icons info-tooltip" title="Retrieval Augmented Generation (RAG) grounds the agent in your documents. When asked questions, the agent will automatically search indexed documents for relevant context before responding.">info_outline</span>
                 </label>
-                <span class="field-hint">Ground this agent in documents from Azure Blob Storage. The agent will automatically search these documents when answering questions.</span>
+                <span class="field-hint">Ground this agent in documents from Azure Blob Storage or an existing Azure AI Search index.</span>
                 
-                <!-- Add Grounding Source -->
-                <div class="grounding-input">
-                  <div class="grounding-input-row">
-                    <input 
-                      type="text" 
-                      class="input" 
-                      [(ngModel)]="groundingSourceName"
-                      placeholder="Source name (e.g., HR Policies)"
-                      title="A friendly name to identify this document source"
-                      style="max-width: 200px;"
-                    />
-                    <input 
-                      type="text" 
-                      class="input" 
-                      [(ngModel)]="groundingContainerUrl"
-                      placeholder="Azure Blob container URL"
-                      title="Azure Blob Storage container URL. Format:&#10;https://<storage-account>.blob.core.windows.net/<container>&#10;&#10;Examples:&#10;• https://mycompany.blob.core.windows.net/hr-docs&#10;• https://contoso.blob.core.windows.us/policies&#10;&#10;Supported file types: .txt, .md, .json, .csv, .xml, .html, .py, .js, .ts, .sql, .ps1"
-                      style="flex: 1;"
-                    />
-                    <button 
-                      class="btn btn-secondary" 
-                      (click)="addGroundingSource()"
-                      [disabled]="!groundingContainerUrl || isValidatingGrounding"
-                    >
-                      <span class="material-icons">{{ isValidatingGrounding ? 'hourglass_empty' : 'add' }}</span>
-                      {{ isValidatingGrounding ? 'Validating...' : 'Add Source' }}
-                    </button>
-                  </div>
-                  
-                  @if (groundingError) {
-                    <div class="discovery-error">
-                      <span class="material-icons">error</span>
-                      {{ groundingError }}
-                    </div>
-                  }
+                <!-- Grounding Mode Toggle -->
+                <div class="grounding-mode-toggle">
+                  <label class="toggle-option" [class.active]="groundingMode === 'managed'" (click)="setGroundingMode('managed')">
+                    <span class="material-icons" style="font-size: 16px;">cloud_upload</span>
+                    Index from Blob Storage
+                  </label>
+                  <label class="toggle-option" [class.active]="groundingMode === 'external'" (click)="setGroundingMode('external')">
+                    <span class="material-icons" style="font-size: 16px;">search</span>
+                    Use Existing Index
+                  </label>
                 </div>
                 
-                <!-- Configured Grounding Sources -->
-                @if (editingAgent!.grounding_sources && editingAgent!.grounding_sources.length > 0) {
-                  <div class="grounding-sources">
-                    <label>Configured Sources ({{ editingAgent!.grounding_sources.length }})</label>
-                    <div class="sources-list">
-                      @for (source of editingAgent!.grounding_sources; track source.container_url; let i = $index) {
-                        <div class="source-item">
-                          <div class="source-info">
-                            <span class="material-icons">folder</span>
-                            <div class="source-details">
-                              <strong>{{ source.name || 'Documents' }}</strong>
-                              <span class="source-url">{{ source.container_url }}</span>
+                <!-- Managed Mode: Blob Storage Sources -->
+                @if (groundingMode === 'managed') {
+                  <div class="grounding-input">
+                    <div class="grounding-input-row">
+                      <input 
+                        type="text" 
+                        class="input" 
+                        [(ngModel)]="groundingSourceName"
+                        placeholder="Source name (e.g., HR Policies)"
+                        title="A friendly name to identify this document source"
+                        style="max-width: 200px;"
+                      />
+                      <input 
+                        type="text" 
+                        class="input" 
+                        [(ngModel)]="groundingContainerUrl"
+                        placeholder="Azure Blob container URL"
+                        title="Azure Blob Storage container URL. Format:&#10;https://<storage-account>.blob.core.windows.net/<container>&#10;&#10;Examples:&#10;• https://mycompany.blob.core.windows.net/hr-docs&#10;• https://contoso.blob.core.windows.us/policies&#10;&#10;Supported file types: .txt, .md, .json, .csv, .xml, .html, .py, .js, .ts, .sql, .ps1"
+                        style="flex: 1;"
+                      />
+                      <button 
+                        class="btn btn-secondary" 
+                        (click)="addGroundingSource()"
+                        [disabled]="!groundingContainerUrl || isValidatingGrounding"
+                      >
+                        <span class="material-icons">{{ isValidatingGrounding ? 'hourglass_empty' : 'add' }}</span>
+                        {{ isValidatingGrounding ? 'Validating...' : 'Add Source' }}
+                      </button>
+                    </div>
+                    
+                    @if (groundingError) {
+                      <div class="discovery-error">
+                        <span class="material-icons">error</span>
+                        {{ groundingError }}
+                      </div>
+                    }
+                  </div>
+                  
+                  <!-- Configured Managed Grounding Sources -->
+                  @if (getManagedSources().length > 0) {
+                    <div class="grounding-sources">
+                      <label>Configured Sources ({{ getManagedSources().length }})</label>
+                      <div class="sources-list">
+                        @for (source of getManagedSources(); track source.container_url; let i = $index) {
+                          <div class="source-item">
+                            <div class="source-info">
+                              <span class="material-icons">folder</span>
+                              <div class="source-details">
+                                <strong>{{ source.name || 'Documents' }}</strong>
+                                <span class="source-url">{{ source.container_url }}</span>
+                              </div>
                             </div>
+                            <button class="btn-chip-remove" (click)="removeManagedSource(i)" title="Remove source">×</button>
                           </div>
-                          <button class="btn-chip-remove" (click)="removeGroundingSource(i)" title="Remove source">×</button>
+                        }
+                      </div>
+                      @if (editingAgent!.id) {
+                        <div class="reindex-section">
+                          <button 
+                            class="btn btn-secondary"
+                            (click)="reindexGrounding()"
+                            [disabled]="isReindexing"
+                            title="Re-index documents from blob sources. Use after updating document security markings or blob metadata."
+                          >
+                            <span class="material-icons" [class.spinning]="isReindexing">{{ isReindexing ? 'sync' : 'refresh' }}</span>
+                            {{ isReindexing ? 'Re-indexing...' : 'Re-index Documents' }}
+                          </button>
+                          @if (reindexResult) {
+                            <span class="reindex-result success">
+                              <span class="material-icons">check_circle</span>
+                              {{ reindexResult }}
+                            </span>
+                          }
+                          @if (reindexError) {
+                            <span class="reindex-result error">
+                              <span class="material-icons">error</span>
+                              {{ reindexError }}
+                            </span>
+                          }
                         </div>
                       }
                     </div>
+                  }
+                }
+                
+                <!-- External Mode: Use Existing Index -->
+                @if (groundingMode === 'external') {
+                  <div class="grounding-input">
+                    <div class="grounding-input-row">
+                      <select 
+                        class="input"
+                        [(ngModel)]="selectedExternalIndex"
+                        (ngModelChange)="onExternalIndexSelect($event)"
+                        style="flex: 1;"
+                      >
+                        <option value="">Select an existing search index...</option>
+                        @for (idx of availableIndexes; track idx.name) {
+                          <option [value]="idx.name">
+                            {{ idx.name }} ({{ idx.document_count !== null ? idx.document_count + ' docs' : 'unknown size' }}, {{ idx.field_count }} fields)
+                          </option>
+                        }
+                      </select>
+                      <button 
+                        class="btn btn-secondary"
+                        (click)="loadSearchIndexes()"
+                        [disabled]="isLoadingIndexes"
+                        title="Refresh the list of available indexes"
+                      >
+                        <span class="material-icons" [class.spinning]="isLoadingIndexes">{{ isLoadingIndexes ? 'sync' : 'refresh' }}</span>
+                      </button>
+                    </div>
+                    @if (isLoadingIndexes) {
+                      <span class="field-hint">Loading indexes from Azure AI Search...</span>
+                    }
+                    @if (externalIndexError) {
+                      <div class="discovery-error">
+                        <span class="material-icons">error</span>
+                        {{ externalIndexError }}
+                      </div>
+                    }
+                    @if (selectedExternalIndex) {
+                      <div class="external-index-info">
+                        <span class="material-icons" style="color: #4caf50;">check_circle</span>
+                        <span>Using index: <strong>{{ selectedExternalIndex }}</strong></span>
+                      </div>
+                      <span class="field-hint">
+                        The agent will query this index directly. The index must contain 'content' and 'contentVector' fields.
+                        See the BYOI documentation for the required schema.
+                      </span>
+                    }
                   </div>
                 }
               </div>
@@ -1472,6 +1559,52 @@ import { environment } from '../../../environments/environment';
     }
     
     /* Grounding Styles */
+    .grounding-mode-toggle {
+      display: flex;
+      gap: var(--spacing-xs);
+      margin: var(--spacing-sm) 0;
+    }
+    
+    .toggle-option {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 8px 12px;
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      background: var(--bg-primary);
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 13px;
+      transition: all 0.15s ease;
+      
+      &:hover {
+        border-color: var(--accent-color);
+        color: var(--text-primary);
+      }
+      
+      &.active {
+        border-color: var(--accent-color);
+        background: color-mix(in srgb, var(--accent-color) 10%, transparent);
+        color: var(--accent-color);
+        font-weight: 500;
+      }
+    }
+    
+    .external-index-info {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: var(--spacing-sm);
+      padding: 8px 12px;
+      background: color-mix(in srgb, #4caf50 8%, transparent);
+      border: 1px solid color-mix(in srgb, #4caf50 30%, transparent);
+      border-radius: 6px;
+      font-size: 13px;
+    }
+    
     .grounding-input {
       background-color: var(--bg-primary);
       border: 1px solid var(--border-color);
@@ -1485,8 +1618,17 @@ import { environment } from '../../../environments/environment';
       gap: var(--spacing-sm);
       flex-wrap: wrap;
       
-      input {
+      input, select {
         min-width: 150px;
+      }
+      
+      select {
+        background: var(--bg-primary);
+        color: var(--text-primary);
+        border: 1px solid var(--border-color);
+        border-radius: 6px;
+        padding: 8px 12px;
+        font-size: 13px;
       }
       
       button {
@@ -1550,6 +1692,38 @@ import { environment } from '../../../environments/environment';
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
+        }
+      }
+    }
+
+    .reindex-section {
+      display: flex;
+      align-items: center;
+      gap: var(--spacing-sm);
+      margin-top: var(--spacing-sm);
+      padding-top: var(--spacing-sm);
+      border-top: 1px solid var(--border-color);
+
+      .btn {
+        flex-shrink: 0;
+      }
+
+      .reindex-result {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 12px;
+
+        .material-icons {
+          font-size: 16px;
+        }
+
+        &.success {
+          color: var(--success-color, #4caf50);
+        }
+
+        &.error {
+          color: var(--error-color, #f44336);
         }
       }
     }
@@ -2114,6 +2288,15 @@ export class AdminComponent implements OnInit, OnDestroy {
   groundingSourceName = '';
   groundingError = '';
   isValidatingGrounding = false;
+  isReindexing = false;
+  reindexResult = '';
+  reindexError = '';
+  // External index (BYOI) state
+  groundingMode: 'managed' | 'external' = 'managed';
+  availableIndexes: SearchIndexInfo[] = [];
+  selectedExternalIndex = '';
+  isLoadingIndexes = false;
+  externalIndexError = '';
   
   // AOAI Endpoints state
   aoaiEndpoints: AOAIEndpointConfig[] = [];
@@ -2215,6 +2398,17 @@ export class AdminComponent implements OnInit, OnDestroy {
     this.groundingContainerUrl = '';
     this.groundingSourceName = '';
     this.groundingError = '';
+    this.reindexResult = '';
+    this.reindexError = '';
+    // Initialize grounding mode based on existing sources
+    const existingSources = this.editingAgent?.grounding_sources || [];
+    const hasExternal = existingSources.some(s => s.type === 'external');
+    this.groundingMode = hasExternal ? 'external' : 'managed';
+    this.selectedExternalIndex = hasExternal ? (existingSources.find(s => s.type === 'external')?.index_name || '') : '';
+    this.externalIndexError = '';
+    if (hasExternal || this.groundingAvailable) {
+      this.loadSearchIndexes();
+    }
     // Initialize deployment selection
     this.initSelectedDeploymentKey();
     this.showEditor = true;
@@ -2514,6 +2708,92 @@ export class AdminComponent implements OnInit, OnDestroy {
   removeGroundingSource(index: number): void {
     if (!this.editingAgent?.grounding_sources) return;
     this.editingAgent.grounding_sources.splice(index, 1);
+  }
+
+  removeManagedSource(index: number): void {
+    if (!this.editingAgent?.grounding_sources) return;
+    const managed = this.getManagedSources();
+    if (index < 0 || index >= managed.length) return;
+    const source = managed[index];
+    const realIndex = this.editingAgent.grounding_sources.indexOf(source);
+    if (realIndex !== -1) {
+      this.editingAgent.grounding_sources.splice(realIndex, 1);
+    }
+  }
+
+  getManagedSources(): any[] {
+    if (!this.editingAgent?.grounding_sources) return [];
+    return this.editingAgent.grounding_sources.filter(
+      (s: any) => !s.type || s.type === 'managed'
+    );
+  }
+
+  setGroundingMode(mode: 'managed' | 'external'): void {
+    if (this.groundingMode === mode) return;
+    this.groundingMode = mode;
+    if (mode === 'external' && this.availableIndexes.length === 0) {
+      this.loadSearchIndexes();
+    }
+  }
+
+  loadSearchIndexes(): void {
+    this.isLoadingIndexes = true;
+    this.externalIndexError = '';
+    this.agentService.listSearchIndexes()
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (response) => {
+          this.availableIndexes = response.indexes;
+          this.isLoadingIndexes = false;
+        },
+        error: (err) => {
+          this.isLoadingIndexes = false;
+          this.externalIndexError = err.error?.detail || err.message || 'Failed to load search indexes';
+          console.error('Error loading search indexes:', err);
+        }
+      });
+  }
+
+  onExternalIndexSelect(indexName: string): void {
+    this.selectedExternalIndex = indexName;
+    if (!this.editingAgent) return;
+
+    // Remove any existing external sources
+    this.editingAgent.grounding_sources = (this.editingAgent.grounding_sources || []).filter(
+      (s: any) => !s.type || s.type === 'managed'
+    );
+
+    if (indexName) {
+      // Add the external source
+      this.editingAgent.grounding_sources.push({
+        type: 'external',
+        index_name: indexName,
+        name: indexName,
+        container_url: ''
+      });
+    }
+  }
+
+  reindexGrounding(): void {
+    if (!this.editingAgent?.id || this.isReindexing) return;
+
+    this.isReindexing = true;
+    this.reindexResult = '';
+    this.reindexError = '';
+
+    this.agentService.reindexGrounding(this.editingAgent.id)
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (response) => {
+          this.isReindexing = false;
+          this.reindexResult = response.message;
+        },
+        error: (err) => {
+          this.isReindexing = false;
+          this.reindexError = err.error?.detail || err.message || 'Failed to re-index documents';
+          console.error('Reindex error:', err);
+        }
+      });
   }
   
   private extractContainerName(url: string): string {

@@ -3,6 +3,7 @@ import { MsalService } from '@azure/msal-angular';
 import { Subject, takeUntil } from 'rxjs';
 import { SettingsService } from '../../../core/services/settings.service';
 import { PreferencesService } from '../../../core/services/preferences.service';
+import { AuthService } from '../../../core/services/auth.service';
 
 @Component({
   selector: 'app-header',
@@ -43,6 +44,10 @@ import { PreferencesService } from '../../../core/services/preferences.service';
               <button class="dropdown-item" (click)="toggleTheme()">
                 <span class="material-icons">{{ currentTheme === 'dark' ? 'light_mode' : 'dark_mode' }}</span>
                 <span>{{ currentTheme === 'dark' ? 'Light Mode' : 'Dark Mode' }}</span>
+              </button>
+              <button class="dropdown-item" (click)="reauthorize()">
+                <span class="material-icons">admin_panel_settings</span>
+                <span>Reauthorize Permissions</span>
               </button>
               <div class="dropdown-divider"></div>
               <button class="dropdown-item danger" (click)="logout()">
@@ -243,12 +248,12 @@ export class HeaderComponent implements OnInit, OnDestroy {
   private destroy$ = new Subject<void>();
 
   get userName(): string | undefined {
-    const account = this.authService.instance.getActiveAccount();
+    const account = this.msalService.instance.getActiveAccount();
     return account?.name;
   }
 
   get userEmail(): string | undefined {
-    const account = this.authService.instance.getActiveAccount();
+    const account = this.msalService.instance.getActiveAccount();
     return account?.username;
   }
   
@@ -262,7 +267,8 @@ export class HeaderComponent implements OnInit, OnDestroy {
   }
   
   constructor(
-    private authService: MsalService,
+    private msalService: MsalService,
+    private authService: AuthService,
     private settingsService: SettingsService,
     private preferencesService: PreferencesService,
     private elRef: ElementRef
@@ -302,9 +308,14 @@ export class HeaderComponent implements OnInit, OnDestroy {
     this.menuOpen = false;
   }
 
+  reauthorize(): void {
+    this.menuOpen = false;
+    this.authService.reConsent();
+  }
+
   logout(): void {
     this.menuOpen = false;
-    this.authService.logout();
+    this.msalService.logout();
   }
 
   ngOnDestroy(): void {

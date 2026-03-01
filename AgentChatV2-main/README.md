@@ -286,6 +286,7 @@ Both local development (Azure CLI credentials) and production deployment (App Se
 | **Cosmos DB** | `Cosmos DB Built-in Data Contributor` | Read/write sessions, messages, and agent configs |
 | **Azure AI Search** | `Search Index Data Contributor` | Query and write documents to search indexes |
 | **Storage Account** | `Storage Blob Data Contributor` | Upload and read documents |
+| **Document Intelligence** | `Cognitive Services User` | Extract structured text from PDFs, scanned docs, and Office files (optional — only needed if DI is configured) |
 
 ### Production: App Service Managed Identity
 
@@ -359,6 +360,20 @@ az role assignment create `
   --scope "/subscriptions/$(az account show --query id -o tsv)/resourceGroups/$rg/providers/Microsoft.Storage/storageAccounts/$storageName"
 ```
 
+#### 6. Document Intelligence Role (optional — for rich document extraction)
+
+Only needed if `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT` is configured. Without this, the app falls back to local parsers (pymupdf, openpyxl, etc.).
+
+```powershell
+$docIntelName = "your-doc-intel-resource"
+
+az role assignment create `
+  --role "Cognitive Services User" `
+  --assignee-object-id $principalId `
+  --assignee-principal-type ServicePrincipal `
+  --scope "/subscriptions/$(az account show --query id -o tsv)/resourceGroups/$rg/providers/Microsoft.CognitiveServices/accounts/$docIntelName"
+```
+
 ### Local Development: User Assignment
 
 For local development using Azure CLI credentials, assign roles to your user account.
@@ -405,6 +420,16 @@ az role assignment create \
   --role "Storage Blob Data Contributor" \
   --assignee "user@domain.com" \
   --scope $STORAGE_ID
+```
+
+**Document Intelligence (optional):**
+```bash
+DOC_INTEL_ID=$(az cognitiveservices account show --name <doc-intel-resource> --resource-group <rg> --query id -o tsv)
+
+az role assignment create \
+  --role "Cognitive Services User" \
+  --assignee "user@domain.com" \
+  --scope $DOC_INTEL_ID
 ```
 
 ### Role Propagation
@@ -472,6 +497,68 @@ AgentChatV2/
 | **Magentic** | Orchestrator delegates to specialists | Complex multi-step tasks |
 | **Group Chat** | Round-robin conversation | Brainstorming, debate |
 
+## Document Grounding (RAG) with Security Filtering
+
+Agents can be grounded in documents stored in Azure Blob Storage. Documents are chunked, embedded, and indexed into Azure AI Search for retrieval-augmented generation (RAG).
+
+### Setup
+
+1. **Create an Azure Blob Storage container** with your documents (Markdown, text, etc.)
+2. **Configure grounding sources** in the Admin UI under the agent's "Document Grounding (RAG)" section — provide a source name and the blob container URL
+3. **Click "Update Agent"** to save, then **"Re-index Documents"** to build the search index
+
+### Document-Level Security (SS Tokens)
+
+The platform supports document-level access control using security stamp (SS) tokens. When enabled, only documents whose security token matches the user's allowed tokens are returned during RAG search.
+
+#### How It Works
+
+1. **At ingestion time**: Each blob's metadata is read for an `ss_tokens` key (also supports `ss_token` singular). The value is stored in the AI Search index as a filterable `ssToken` field on every chunk.
+2. **At query time**: The user's bearer token is forwarded to an Access Checker API, which returns the list of SS token hashes the user is authorized to see. The search query applies an OData filter: `search.in(ssToken, 'hash1|hash2|hash3', '|')`.
+3. **Result**: Users only see document chunks they are authorized to access.
+
+#### Blob Metadata Setup
+
+For each blob in your storage container, add a metadata key:
+
+| Key | Value | Example |
+|-----|-------|---------|
+| `ss_tokens` | The security hash for the document | `hash1` |
+
+You can set blob metadata via Azure Storage Explorer, the Azure Portal, or the Azure CLI:
+
+```bash
+az storage blob metadata update \
+  --container-name mycontainer \
+  --name my-document.md \
+  --metadata ss_tokens=hash1 \
+  --account-name mystorageaccount
+```
+
+#### Access Checker API
+
+Set the `ACCESS_CHECKER_ENDPOINT` environment variable to a REST endpoint that returns the user's allowed SS tokens:
+
+```
+ACCESS_CHECKER_ENDPOINT=https://your-function.azurewebsites.us/api/user-access
+```
+
+**Request**: `GET` with the user's `Authorization: Bearer <token>` header forwarded.
+
+**Response**: A JSON array of allowed token hashes:
+```json
+["hash1", "hash2", "hash3"]
+```
+
+#### Behavior When Not Configured
+
+- If `ACCESS_CHECKER_ENDPOINT` is **empty or not set**, security filtering is skipped entirely — all documents are returned regardless of their `ssToken` value.
+- If the Access Checker API is **unreachable**, the system fails open (no filter applied). This can be changed to fail-closed in `security_token_service.py`.
+
+#### Re-indexing
+
+After changing blob metadata (adding/updating `ss_tokens`), click **"Re-index Documents"** in the Admin UI to rebuild the search index with the updated security tokens. No need to click "Update Agent" — the re-index runs immediately.
+
 ## API Endpoints
 
 | Endpoint | Method | Description |
@@ -481,6 +568,7 @@ AgentChatV2/
 | `/api/chat/send` | POST | Send message (SSE stream with chatter) |
 | `/api/admin/agents` | GET/POST | List/create agents |
 | `/api/admin/agents/{id}` | PUT/DELETE | Update/delete agent |
+| `/api/admin/agents/{id}/reindex` | POST | Re-index grounding documents for an agent |
 | `/api/admin/aoai-endpoints` | GET/POST | List/create Azure OpenAI endpoints |
 | `/api/admin/aoai-endpoints/{id}` | PUT/DELETE | Update/delete AOAI endpoint |
 | `/api/admin/aoai-endpoints/{id}/refresh` | POST | Re-discover model deployments |

@@ -54,22 +54,46 @@ export interface MessageListResponse {
   hasMore: boolean;
 }
 
-export interface StreamChunk {
-  type: 'content' | 'agent_start' | 'agent_end' | 'error' | 'done' | 'chatter';
-  agentId?: string;
-  agentName?: string;
-  content?: string;
-  session_id?: string;  // Sent by backend on 'done' event for new sessions
-  metadata?: Record<string, unknown>;
-  // Chatter event fields (when type === 'chatter')
-  chatter_type?: 'thinking' | 'tool_call' | 'tool_result' | 'delegation' | 'content';
-  agent_name?: string;  // Backend uses snake_case
-  tool_name?: string;
-  tool_args?: Record<string, unknown>;
-  duration_ms?: number;    // Duration of tool execution in ms
-  tokens_input?: number;   // Input tokens for LLM calls
-  tokens_output?: number;  // Output tokens for LLM calls
-  friendly_message?: string;  // User-friendly description of the action
+// =============================================================================
+// AG-UI Protocol Event Types (standardized SSE events from backend)
+// =============================================================================
+
+/** All AG-UI event type strings the backend can emit. */
+export type AGUIEventType =
+  | 'RUN_STARTED' | 'RUN_FINISHED' | 'RUN_ERROR'
+  | 'STEP_STARTED' | 'STEP_FINISHED'
+  | 'TEXT_MESSAGE_START' | 'TEXT_MESSAGE_CONTENT' | 'TEXT_MESSAGE_END'
+  | 'TOOL_CALL_START' | 'TOOL_CALL_ARGS' | 'TOOL_CALL_END' | 'TOOL_CALL_RESULT'
+  | 'CUSTOM';
+
+/** A single AG-UI event received from the SSE stream. */
+export interface AGUIEvent {
+  type: AGUIEventType;
+  timestamp?: string | null;
+
+  // Lifecycle (RUN_STARTED / RUN_FINISHED)
+  thread_id?: string;
+  run_id?: string;
+
+  // Steps (STEP_STARTED / STEP_FINISHED)
+  step_name?: string;
+
+  // Text messages (TEXT_MESSAGE_START / CONTENT / END)
+  message_id?: string;
+  role?: string;
+  delta?: string;
+
+  // Tool calls (TOOL_CALL_START / ARGS / END / RESULT)
+  tool_call_id?: string;
+  tool_call_name?: string;
+  content?: string;        // TOOL_CALL_RESULT content
+
+  // Custom events
+  name?: string;           // CUSTOM event name
+  value?: Record<string, unknown>;   // CUSTOM event payload
+
+  // Error (RUN_ERROR)
+  message?: string;        // Error message
 }
 
 // Callback for when a new session stream completes
@@ -138,9 +162,9 @@ export class ChatService {
     );
   }
   
-  // Chat with streaming
-  sendMessage(request: ChatRequest): Observable<StreamChunk> {
-    const subject = new Subject<StreamChunk>();
+  // Chat with streaming (AG-UI protocol)
+  sendMessage(request: ChatRequest): Observable<AGUIEvent> {
+    const subject = new Subject<AGUIEvent>();
     
     // Use fetch for SSE streaming
     this.streamChat(request, subject);
@@ -148,7 +172,7 @@ export class ChatService {
     return subject.asObservable();
   }
   
-  private async streamChat(request: ChatRequest, subject: Subject<StreamChunk>): Promise<void> {
+  private async streamChat(request: ChatRequest, subject: Subject<AGUIEvent>): Promise<void> {
     try {
       // Get token before making request
       const token = await this.getAuthToken();
@@ -196,28 +220,28 @@ export class ChatService {
         for (const line of lines) {
           if (line.startsWith('data: ')) {
             try {
-              const data = JSON.parse(line.slice(6)) as StreamChunk;
+              const data = JSON.parse(line.slice(6)) as AGUIEvent;
               
-              // Log all done chunks for debugging
-              if (data.type === 'done') {
-                console.log('ChatService: received done chunk', {
+              // Log lifecycle events for debugging
+              if (data.type === 'RUN_FINISHED' || data.type === 'RUN_ERROR') {
+                console.log('ChatService: received', data.type, {
                   pendingSessionId: request.pendingSessionId,
-                  sessionId: data.session_id,
-                  hasSessionId: !!data.session_id
+                  threadId: data.thread_id,
                 });
               }
               
               subject.next(data);
               
-              // If this is a new session completing, notify callbacks from the SERVICE
-              // This ensures the callback runs even if the component is destroyed
-              if (data.type === 'done' && 
-                  request.pendingSessionId && 
-                  data.session_id) {
-                console.log('ChatService: new session created, notifying callbacks', 
-                  request.pendingSessionId, '->', data.session_id);
-                this.newSessionCompleteCallbacks.forEach(cb => 
-                  cb(request.pendingSessionId!, data.session_id!)
+              // If this is a CUSTOM session_created event, notify callbacks
+              if (data.type === 'CUSTOM' &&
+                  data.name === 'session_created' &&
+                  request.pendingSessionId &&
+                  data.value?.['session_id']) {
+                const realSessionId = data.value['session_id'] as string;
+                console.log('ChatService: new session created, notifying callbacks',
+                  request.pendingSessionId, '->', realSessionId);
+                this.newSessionCompleteCallbacks.forEach(cb =>
+                  cb(request.pendingSessionId!, realSessionId)
                 );
               }
             } catch (e) {

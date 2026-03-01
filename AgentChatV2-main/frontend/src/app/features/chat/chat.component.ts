@@ -3,7 +3,7 @@ import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, Router } from '@angular/router';
 import { Subject, takeUntil } from 'rxjs';
 
-import { ChatService, Message, Session, StreamChunk } from '../../core/services/chat.service';
+import { ChatService, Message, Session, AGUIEvent } from '../../core/services/chat.service';
 import { AgentService, AgentConfig } from '../../core/services/agent.service';
 import { SessionStateService } from '../../core/services/session-state.service';
 import { DocumentService, DocumentMetadata } from '../../core/services/document.service';
@@ -18,6 +18,7 @@ export interface ChatterEvent {
   content: string;
   toolName?: string;
   toolArgs?: Record<string, unknown>;
+  toolCallId?: string;      // AG-UI tool_call_id for matching start/args/end/result
   timestamp: number;
   durationMs?: number;      // Duration of tool execution in ms
   tokensInput?: number;     // Input tokens for LLM calls
@@ -113,6 +114,7 @@ interface UploadedFile {
           <app-message 
             [message]="message"
             [isStreaming]="message.isStreaming ?? false"
+            [groundedAgentIds]="groundedAgentIds"
           ></app-message>
         }
         
@@ -120,6 +122,7 @@ interface UploadedFile {
           <app-message 
             [message]="streamingMessage"
             [isStreaming]="true"
+            [groundedAgentIds]="groundedAgentIds"
           ></app-message>
         }
         
@@ -156,7 +159,7 @@ interface UploadedFile {
               <div class="file-chip clickable" [title]="'Click to view: ' + file.document.title" (click)="openDocument(file)">
                 <span class="material-icons">{{ getFileIcon(file.document.fileType) }}</span>
                 <span class="file-name">{{ file.document.title }}</span>
-                <span class="file-info">{{ file.document.chunksCount }} chunks</span>
+                <span class="file-info">{{ file.document.chunksCount > 0 ? file.document.chunksCount + ' chunks' : 'image' }}</span>
                 <button class="remove-file" (click)="removeFile(file); $event.stopPropagation()" title="Remove">
                   <span class="material-icons">close</span>
                 </button>
@@ -639,7 +642,7 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
         next: (response) => {
           console.log('Loaded messages:', response.messages?.length || 0);
           // Messages come back newest-first (DESC), reverse for chronological display
-          this.messages = (response.messages as DisplayMessage[]).reverse();
+          this.messages = (response.messages as DisplayMessage[]).reverse().map(m => this.hydrateChatter(m));
           this.messageContinuationToken = response.continuationToken;
           this.hasMoreMessages = response.hasMore;
           this.isLoading = false;
@@ -667,7 +670,7 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
       .subscribe({
         next: (response) => {
           // Older messages come back newest-first (DESC), reverse for chronological order
-          const olderMessages = (response.messages as DisplayMessage[]).reverse();
+          const olderMessages = (response.messages as DisplayMessage[]).reverse().map(m => this.hydrateChatter(m));
           this.messages = [...olderMessages, ...this.messages];
           this.messageContinuationToken = response.continuationToken;
           this.hasMoreMessages = response.hasMore;
@@ -704,6 +707,14 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
         if (!a.is_orchestrator && b.is_orchestrator) return 1;
         return (a.name || '').localeCompare(b.name || '');
       });
+  }
+  
+  /** IDs of selected agents that have document grounding configured */
+  get groundedAgentIds(): string[] {
+    return this.agents
+      .filter(a => a.id && this.selectedAgentIds.includes(a.id)
+        && (a.has_grounding || (a.grounding_sources && a.grounding_sources.length > 0)))
+      .map(a => a.id!);
   }
   
   toggleAgent(agentId: string): void {
@@ -782,8 +793,8 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
     // For new sessions, let the stream complete naturally so sidebar gets refreshed
     // For existing sessions, we can cancel on destroy
     const subscription = (isNewSession ? stream$ : stream$.pipe(takeUntil(this.destroy$))).subscribe({
-      next: (chunk: StreamChunk) => {
-        this.handleStreamChunk(chunk, isNewSession);
+      next: (event: AGUIEvent) => {
+        this.handleAGUIEvent(event, isNewSession);
       },
       error: (error) => {
         console.error('Chat error:', error);
@@ -808,94 +819,264 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
     });
   }
   
-  private handleStreamChunk(chunk: StreamChunk, isNewSession: boolean = false): void {
-    // For new sessions, always handle the done chunk even if streamingMessage is gone
-    // (user may have navigated away)
-    // Note: Backend sends session_id at top level, not in metadata
-    if (chunk.type === 'done' && isNewSession && chunk.session_id) {
-      const newSessionId = chunk.session_id;
-      console.log('Stream done for new session:', newSessionId, 'pendingId:', this.currentPendingId);
-      
-      // Use the service to handle all cleanup - this works even if component is navigated away
-      if (this.currentPendingId) {
-        const messagesToCache = [...this.messages];
-        if (this.streamingMessage) {
-          messagesToCache.push({
-            ...this.streamingMessage,
-            isStreaming: false
-          });
+  private handleAGUIEvent(event: AGUIEvent, isNewSession: boolean = false): void {
+    // Handle session_created CUSTOM event for new sessions
+    if (event.type === 'CUSTOM' && event.name === 'session_created' && isNewSession) {
+      const newSessionId = event.value?.['session_id'] as string | undefined;
+      if (newSessionId) {
+        console.log('AG-UI session_created:', newSessionId, 'pendingId:', this.currentPendingId);
+
+        if (this.currentPendingId) {
+          const messagesToCache = [...this.messages];
+          if (this.streamingMessage) {
+            messagesToCache.push({ ...this.streamingMessage, isStreaming: false });
+          }
+          this.sessionState.completeNewSession(this.currentPendingId, newSessionId, messagesToCache);
+          this.currentPendingId = undefined;
         }
-        
-        // This method handles: mapping, caching messages, clearing pending, refreshing sidebar
-        this.sessionState.completeNewSession(this.currentPendingId, newSessionId, messagesToCache);
-        this.currentPendingId = undefined;
-      }
-      
-      // Only navigate if we're still on the new chat page or pending session
-      if (!this.sessionId || this.sessionId.startsWith('pending-')) {
-        this.sessionId = newSessionId;
-        this.router.navigate(['/chat', newSessionId], { replaceUrl: true });
+
+        if (!this.sessionId || this.sessionId.startsWith('pending-')) {
+          this.sessionId = newSessionId;
+          this.router.navigate(['/chat', newSessionId], { replaceUrl: true });
+        }
       }
       return;
     }
-    
+
+    // RUN_FINISHED / RUN_ERROR don't need streamingMessage
+    if (event.type === 'RUN_FINISHED') {
+      // Refresh sidebar for document-titled sessions
+      if (this.session?.title?.startsWith('Document:')) {
+        this.sessionState.refreshSessions();
+      }
+      return;
+    }
+
+    if (event.type === 'RUN_ERROR') {
+      console.error('AG-UI RUN_ERROR:', event.message);
+      return;
+    }
+
     if (!this.streamingMessage) return;
-    
-    switch (chunk.type) {
-      case 'chatter':
-        // Add chatter event to streaming message
+
+    switch (event.type) {
+      // --- Orchestration steps ---
+      case 'STEP_STARTED': {
         if (!this.streamingMessage.chatterEvents) {
           this.streamingMessage.chatterEvents = [];
         }
-        const chatterEvent: ChatterEvent = {
-          type: chunk.chatter_type || 'thinking',
-          agentName: chunk.agent_name || 'Agent',
-          content: chunk.content || '',
-          toolName: chunk.tool_name,
-          toolArgs: chunk.tool_args,
-          timestamp: Date.now(),
-          durationMs: chunk.duration_ms,
-          tokensInput: chunk.tokens_input,
-          tokensOutput: chunk.tokens_output,
-          friendlyMessage: chunk.friendly_message
-        };
+        const stepName = event.step_name || '';
+        let chatterType: ChatterEvent['type'] = 'thinking';
+        let agentName = 'Orchestrator';
+        if (stepName.startsWith('delegate:')) {
+          chatterType = 'delegation';
+          agentName = stepName.slice('delegate:'.length);
+        } else if (stepName.startsWith('thinking:')) {
+          agentName = stepName.slice('thinking:'.length);
+        }
         this.streamingMessage.chatterEvents = [
           ...this.streamingMessage.chatterEvents,
-          chatterEvent
+          { type: chatterType, agentName, content: '', timestamp: Date.now() }
         ];
         break;
-        
-      case 'agent_start':
-        // New agent is responding
+      }
+
+      case 'STEP_FINISHED': {
+        if (!this.streamingMessage.chatterEvents) {
+          this.streamingMessage.chatterEvents = [];
+        }
+        const stepName = event.step_name || '';
+        let agentName = 'Orchestrator';
+        if (stepName.startsWith('delegate:')) {
+          agentName = stepName.slice('delegate:'.length);
+        }
+        this.streamingMessage.chatterEvents = [
+          ...this.streamingMessage.chatterEvents,
+          { type: 'content', agentName, content: 'Completed', timestamp: Date.now() }
+        ];
+        break;
+      }
+
+      // --- Tool calls ---
+      case 'TOOL_CALL_START': {
+        if (!this.streamingMessage.chatterEvents) {
+          this.streamingMessage.chatterEvents = [];
+        }
+        this.streamingMessage.chatterEvents = [
+          ...this.streamingMessage.chatterEvents,
+          {
+            type: 'tool_call',
+            agentName: 'Agent',
+            content: '',
+            toolName: event.tool_call_name,
+            toolCallId: event.tool_call_id,
+            timestamp: Date.now(),
+          }
+        ];
+        break;
+      }
+
+      case 'TOOL_CALL_ARGS': {
+        // Accumulate args on the most recent tool_call event with matching ID
+        const events = this.streamingMessage.chatterEvents || [];
+        for (let i = events.length - 1; i >= 0; i--) {
+          if (events[i].type === 'tool_call' && events[i].toolCallId === event.tool_call_id) {
+            try {
+              events[i].toolArgs = JSON.parse(event.delta || '{}');
+            } catch {
+              events[i].toolArgs = { raw: event.delta };
+            }
+            // Trigger change detection
+            this.streamingMessage.chatterEvents = [...events];
+            break;
+          }
+        }
+        break;
+      }
+
+      case 'TOOL_CALL_END':
+        // Tool call completed — no UI change needed (result follows)
+        break;
+
+      case 'TOOL_CALL_RESULT': {
+        if (!this.streamingMessage.chatterEvents) {
+          this.streamingMessage.chatterEvents = [];
+        }
+        this.streamingMessage.chatterEvents = [
+          ...this.streamingMessage.chatterEvents,
+          {
+            type: 'tool_result',
+            agentName: 'Agent',
+            content: event.content || '',
+            toolCallId: event.tool_call_id,
+            timestamp: Date.now(),
+          }
+        ];
+        break;
+      }
+
+      // --- Text message (final response) ---
+      case 'TEXT_MESSAGE_START':
         this.streamingMessage.agentResponses = [
           ...(this.streamingMessage.agentResponses || []),
-          { agentName: chunk.agentName || 'Agent', content: '' }
+          { agentName: 'Assistant', content: '' }
         ];
         break;
-        
-      case 'content':
-        // Add content
+
+      case 'TEXT_MESSAGE_CONTENT':
         if (this.streamingMessage.agentResponses && this.streamingMessage.agentResponses.length > 0) {
           const lastResponse = this.streamingMessage.agentResponses[this.streamingMessage.agentResponses.length - 1];
-          lastResponse.content += chunk.content || '';
+          lastResponse.content += event.delta || '';
         }
-        this.streamingMessage.content += chunk.content || '';
+        this.streamingMessage.content += event.delta || '';
         break;
-        
-      case 'done':
-        // New session done handling is done above, this is for follow-up messages
-        // Refresh sidebar in case session title was updated (e.g., from "Document:" to question)
-        if (this.session?.title?.startsWith('Document:')) {
-          this.sessionState.refreshSessions();
+
+      case 'TEXT_MESSAGE_END':
+        // Message complete — no additional action
+        break;
+
+      // --- Custom metadata (chatter enrichment) ---
+      case 'CUSTOM': {
+        if (event.name === 'chatter' && event.value) {
+          this.enrichChatterFromCustom(event.value);
         }
         break;
-        
-      case 'error':
-        console.error('Stream error:', chunk.content);
+      }
+
+      default:
         break;
     }
-    
+
     this.shouldScroll = true;
+  }
+
+  /**
+   * Enrich existing chatter events with metadata from CUSTOM("chatter") events.
+   * These carry agent_name, friendly_message, duration_ms, tokens, etc.
+   */
+  private enrichChatterFromCustom(value: Record<string, unknown>): void {
+    if (!this.streamingMessage?.chatterEvents) return;
+
+    const events = this.streamingMessage.chatterEvents;
+    const chatterType = value['chatter_type'] as string | undefined;
+    const agentName = value['agent_name'] as string | undefined;
+    const toolCallId = value['tool_call_id'] as string | undefined;
+
+    // For tool_call/tool_result, match by tool_call_id
+    if (toolCallId) {
+      for (let i = events.length - 1; i >= 0; i--) {
+        if (events[i].toolCallId === toolCallId) {
+          this.applyChatterMetadata(events[i], value);
+          this.streamingMessage.chatterEvents = [...events];
+          return;
+        }
+      }
+    }
+
+    // For thinking/delegation/content, match by type + agent_name (most recent)
+    if (chatterType && agentName) {
+      const typeMap: Record<string, ChatterEvent['type']> = {
+        thinking: 'thinking', delegation: 'delegation', content: 'content',
+        tool_call: 'tool_call', tool_result: 'tool_result',
+      };
+      const mappedType = typeMap[chatterType];
+      if (mappedType) {
+        for (let i = events.length - 1; i >= 0; i--) {
+          if (events[i].type === mappedType && events[i].agentName === agentName) {
+            this.applyChatterMetadata(events[i], value);
+            this.streamingMessage.chatterEvents = [...events];
+            return;
+          }
+        }
+        // If no matching event found for thinking/delegation, create one
+        if (mappedType === 'thinking' || mappedType === 'delegation') {
+          const newEvent: ChatterEvent = {
+            type: mappedType,
+            agentName,
+            content: (value['content'] as string) || '',
+            timestamp: Date.now(),
+          };
+          this.applyChatterMetadata(newEvent, value);
+          this.streamingMessage.chatterEvents = [...events, newEvent];
+        }
+      }
+    }
+  }
+
+  private applyChatterMetadata(target: ChatterEvent, value: Record<string, unknown>): void {
+    if (value['friendly_message']) target.friendlyMessage = value['friendly_message'] as string;
+    if (value['duration_ms'] != null) target.durationMs = value['duration_ms'] as number;
+    if (value['tokens_input'] != null) target.tokensInput = value['tokens_input'] as number;
+    if (value['tokens_output'] != null) target.tokensOutput = value['tokens_output'] as number;
+    if (value['content'] && !target.content) target.content = value['content'] as string;
+    if (value['agent_name']) target.agentName = value['agent_name'] as string;
+  }
+
+  /**
+   * Hydrate chatter events from persisted metadata when loading historical messages.
+   * The backend stores chatter_events in message.metadata for assistant messages.
+   */
+  private hydrateChatter(msg: DisplayMessage): DisplayMessage {
+    if (msg.role !== 'assistant' || !msg.metadata?.['chatter_events']) {
+      return msg;
+    }
+    const raw = msg.metadata['chatter_events'] as Array<Record<string, unknown>>;
+    if (!Array.isArray(raw) || raw.length === 0) {
+      return msg;
+    }
+    msg.chatterEvents = raw.map(e => ({
+      type: (e['type'] as ChatterEvent['type']) || 'thinking',
+      agentName: (e['agent_name'] as string) || 'Agent',
+      content: (e['content'] as string) || '',
+      toolName: e['tool_name'] as string | undefined,
+      toolArgs: e['tool_args'] as Record<string, unknown> | undefined,
+      timestamp: (e['timestamp'] as number) || 0,
+      durationMs: e['duration_ms'] as number | undefined,
+      tokensInput: e['tokens_input'] as number | undefined,
+      tokensOutput: e['tokens_output'] as number | undefined,
+      friendlyMessage: e['friendly_message'] as string | undefined,
+    }));
+    return msg;
   }
   
   handleFileUpload(file: File): void {
@@ -910,7 +1091,7 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
     }
     
     // Validate file type
-    const allowedTypes = ['txt', 'md', 'pdf', 'json', 'csv'];
+    const allowedTypes = ['txt', 'md', 'pdf', 'json', 'csv', 'docx', 'xlsx', 'pptx', 'jpg', 'jpeg', 'png', 'tiff'];
     const extension = file.name.split('.').pop()?.toLowerCase() || '';
     if (!allowedTypes.includes(extension)) {
       this.uploadError = `File type .${extension} not supported. Allowed: ${allowedTypes.join(', ')}`;
@@ -1010,7 +1191,14 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
       'txt': 'article',
       'md': 'description',
       'json': 'data_object',
-      'csv': 'table_chart'
+      'csv': 'table_chart',
+      'docx': 'description',
+      'xlsx': 'table_chart',
+      'pptx': 'slideshow',
+      'jpg': 'image',
+      'jpeg': 'image',
+      'png': 'image',
+      'tiff': 'image'
     };
     return icons[fileType] || 'attach_file';
   }

@@ -4,6 +4,7 @@ import { MsalService } from '@azure/msal-angular';
 import { InteractionRequiredAuthError, SilentRequest } from '@azure/msal-browser';
 import { from, switchMap, catchError, throwError, EMPTY } from 'rxjs';
 import { environment } from '@env/environment';
+import { AuthService } from '../services/auth.service';
 
 /**
  * Auth interceptor that attaches JWT tokens to API requests.
@@ -31,7 +32,13 @@ export const authInterceptor: HttpInterceptorFn = (
   const account = msalService.instance.getActiveAccount();
   
   if (!account) {
-    console.error('[Auth] No active account - redirecting to login');
+    // If a consent re-auth is pending, do NOT trigger a competing redirect here.
+    // Let MsalGuard handle the redirect so prompt=consent is included.
+    if (AuthService.isConsentPending()) {
+      console.log('[Auth] No active account but consent redirect pending - deferring to MsalGuard');
+      return EMPTY;
+    }
+    console.warn('[Auth] No active account - triggering loginRedirect');
     msalService.loginRedirect({ scopes: environment.loginScopes });
     return EMPTY;
   }
@@ -70,6 +77,7 @@ export const authInterceptor: HttpInterceptorFn = (
       
       // If interaction required, redirect to login
       if (error instanceof InteractionRequiredAuthError) {
+        console.warn('[Auth] InteractionRequiredAuthError - triggering loginRedirect');
         msalService.loginRedirect({
           scopes: environment.apiScopes,
           account: account

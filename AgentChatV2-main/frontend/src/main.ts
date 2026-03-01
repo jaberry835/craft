@@ -1,3 +1,4 @@
+import { APP_INITIALIZER } from '@angular/core';
 import { bootstrapApplication } from '@angular/platform-browser';
 import { provideRouter } from '@angular/router';
 import { provideHttpClient, withInterceptors } from '@angular/common/http';
@@ -25,6 +26,15 @@ import { authInterceptor } from './app/core/interceptors/auth.interceptor';
 // MSAL instance factory
 export function MSALInstanceFactory(): IPublicClientApplication {
   return new PublicClientApplication(environment.msalConfig);
+}
+
+// Ensure MSAL is fully initialized before the app boots.
+// msal-browser v3 requires initialize() to be awaited before any other API call.
+// NOTE: Do NOT call handleRedirectPromise() here — redirect handling is done
+// via handleRedirectObservable() in AppComponent to avoid double-call issues
+// that cause inProgress$ to get stuck at HandleRedirect and the app to hang.
+export function initializeMsal(msalService: MsalService) {
+  return () => msalService.instance.initialize();
 }
 
 // MSAL Guard configuration - used for login
@@ -66,6 +76,12 @@ bootstrapApplication(AppComponent, {
     },
     MsalService,
     MsalGuard,
-    MsalBroadcastService
+    MsalBroadcastService,
+    {
+      provide: APP_INITIALIZER,
+      useFactory: initializeMsal,
+      deps: [MsalService],
+      multi: true
+    }
   ]
 }).catch(err => console.error(err));

@@ -16,7 +16,7 @@ export const routes: Routes = [
   {
     path: 'admin',
     loadComponent: () => import('./features/admin/admin.component').then(m => m.AdminComponent),
-    canActivate: [MsalGuard, adminGuard]  // Requires both authentication and admin role
+    canActivate: [MsalGuard, adminGuard]
   },
   {
     path: '**',

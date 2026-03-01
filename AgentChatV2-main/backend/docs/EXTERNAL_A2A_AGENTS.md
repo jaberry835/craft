@@ -37,10 +37,10 @@ URLs are relative to the agent's base URL.
 
 ### Same Entra ID Tenant (Recommended)
 
-If the external A2A agent runs in the same Azure Entra ID tenant as your AgentChatV2 instance, authentication works automatically:
+If the external A2A agent runs in the same Azure Entra ID tenant as your AgentChatV2 instance, authentication works automatically using the SDK's `AuthInterceptor`:
 
 ```
-User Token → Orchestrator → A2A HTTP Call → External Agent → MCP Tools
+User Token → Orchestrator → A2AAgent (with BearerAuthInterceptor) → External Agent → MCP Tools
 ```
 
 **Requirements:**
@@ -52,7 +52,7 @@ User Token → Orchestrator → A2A HTTP Call → External Agent → MCP Tools
 **How it works:**
 1. User authenticates to AgentChatV2 (gets access token)
 2. Orchestrator delegates to external A2A agent
-3. User's token is passed via `Authorization: Bearer {token}` header
+3. `BearerAuthInterceptor` adds the token to the A2A SDK request
 4. External agent validates token and executes on behalf of user
 5. Any MCP tools on the external agent use the same token
 
@@ -99,15 +99,14 @@ For agents outside your organization (different tenant, different IdP), you'll n
 │                        AgentChatV2                               │
 │                                                                  │
 │  ┌──────────┐    ┌──────────────┐    ┌───────────────────────┐  │
-│  │  User    │───▶│ Orchestrator │───▶│ A2A Tool Wrapper      │  │
-│  │  Token   │    │    Agent     │    │ (passes user_token)   │  │
+│  │  User    │───▶│ Orchestrator │───▶│ A2AAgent (SDK)        │  │
+│  │  Token   │    │    Agent     │    │ + BearerAuthInterceptor│  │
 │  └──────────┘    └──────────────┘    └───────────┬───────────┘  │
 │                                                   │              │
 └───────────────────────────────────────────────────┼──────────────┘
                                                     │
-                                    HTTP POST with  │
-                                    Authorization:  │
-                                    Bearer {token}  │
+                                    A2A Protocol    │
+                                    (via SDK)       │
                                                     ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                    External A2A Agent                            │
@@ -187,5 +186,5 @@ By default, all local agents are exposed via A2A. To disable:
 ## Related Documentation
 
 - [A2A Protocol Specification](https://a2a-protocol.org/latest/)
-- [Microsoft Agent Framework A2A Integration](https://learn.microsoft.com/en-us/agent-framework/user-guide/hosting/agent-to-agent-integration)
+- [Microsoft Agent Framework A2A Integration](https://learn.microsoft.com/en-us/agent-framework/integrations/a2a?pivots=programming-language-python)
 - [Main README](../README.md)

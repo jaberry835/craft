@@ -9,6 +9,7 @@ import { HeaderComponent } from './shared/components/header/header.component';
 import { ClassificationBannerComponent } from './shared/components/classification-banner/classification-banner.component';
 import { SettingsService } from './core/services/settings.service';
 import { PreferencesService } from './core/services/preferences.service';
+import { AuthService } from './core/services/auth.service';
 
 @Component({
   selector: 'app-root',
@@ -92,18 +93,19 @@ export class AppComponent implements OnInit, OnDestroy {
     // Load UI settings (classification banner, branding) early
     this.settingsService.loadSettings().subscribe();
 
-    // Handle the redirect callback from Azure AD login
+    // Handle redirect responses from login. This is the SOLE redirect handler;
+    // APP_INITIALIZER only calls initialize(). MsalGuard waits for inProgress$
+    // to reach None before firing, so there is no race condition.
     this.authService.handleRedirectObservable().subscribe({
       next: (result) => {
-        if (result) {
-          // Set the account from the successful login
+        if (result?.account) {
           this.authService.instance.setActiveAccount(result.account);
-          console.log('[MSAL] Login successful, active account set:', result.account?.username);
+          console.log('[MSAL] Active account set:', result.account.username);
+          // Clear consent flag now that the redirect completed successfully
+          AuthService.clearConsentFlag();
         }
       },
-      error: (error) => {
-        console.error('[MSAL] Redirect error:', error);
-      }
+      error: (error) => console.error('[MSAL] Redirect error:', error)
     });
     
     // Also check if there's already an account in cache (page refresh scenario)

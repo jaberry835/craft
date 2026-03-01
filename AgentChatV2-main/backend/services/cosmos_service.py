@@ -515,6 +515,28 @@ class CosmosDBService:
         
         return page, next_token, has_more
     
+    async def get_session_image_messages(
+        self, session_id: str, user_id: str
+    ) -> list[dict]:
+        """Get messages that have image attachments for vision support."""
+        query = """
+            SELECT * FROM c
+            WHERE c.sessionId = @session_id
+              AND c.userId = @user_id
+              AND IS_DEFINED(c.metadata.image_attachment)
+            ORDER BY c.timestamp ASC
+        """
+        params = [
+            {"name": "@session_id", "value": session_id},
+            {"name": "@user_id", "value": user_id},
+        ]
+        items = list(self.messages_container.query_items(
+            query=query,
+            parameters=params,
+            partition_key=session_id,
+        ))
+        return items
+
     async def save_message(
         self,
         session_id: str,

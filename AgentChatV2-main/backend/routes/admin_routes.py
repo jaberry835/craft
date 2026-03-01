@@ -93,11 +93,23 @@ async def create_agent(
     # Create grounding index if grounding sources are configured
     grounding_sources = saved.get("grounding_sources", [])
     logger.info(f"Agent create: grounding_sources={len(grounding_sources)}, is_available={grounding_service.is_available}")
-    if grounding_sources and grounding_service.is_available:
+    
+    # Check if any source is an external (BYOI) index
+    external_sources = [s for s in grounding_sources if s.get("type") == "external"]
+    managed_sources = [s for s in grounding_sources if s.get("type", "managed") == "managed"]
+    
+    if external_sources:
+        # Use the first external source's index name as the grounding index
+        ext_index = external_sources[0].get("index_name")
+        if ext_index:
+            saved["grounding_index_name"] = ext_index
+            await cosmos_service.save_agent(saved)
+            logger.info(f"Agent {saved['id']} using external index: {ext_index}")
+    elif managed_sources and grounding_service.is_available:
         grounding_index = await grounding_service.create_or_update_grounding_index(
             agent_id=saved["id"],
             agent_name=saved.get("name", "Agent"),
-            grounding_sources=grounding_sources
+            grounding_sources=managed_sources
         )
         if grounding_index:
             saved["grounding_index_name"] = grounding_index
@@ -148,37 +160,55 @@ async def update_agent(
     old_grounding = existing.get("grounding_sources", [])
     existing_grounding_index = existing.get("grounding_index_name")
     
-    logger.info(f"Agent update: new_grounding={len(new_grounding)}, old_grounding={len(old_grounding)}, existing_index={existing_grounding_index}, is_available={grounding_service.is_available}")
+    # Separate external vs managed sources
+    new_external = [s for s in new_grounding if s.get("type") == "external"]
+    new_managed = [s for s in new_grounding if s.get("type", "managed") == "managed"]
+    old_external = [s for s in old_grounding if s.get("type") == "external"]
+    old_managed = [s for s in old_grounding if s.get("type", "managed") == "managed"]
     
-    # Compare grounding sources to see if we need to update
-    grounding_changed = (
-        len(new_grounding) != len(old_grounding) or
-        any(
-            n.get("container_url") != o.get("container_url") or
-            n.get("blob_prefix") != o.get("blob_prefix")
-            for n, o in zip(new_grounding, old_grounding)
+    logger.info(f"Agent update: new_grounding={len(new_grounding)} (ext={len(new_external)}, mgd={len(new_managed)}), "
+                f"old_grounding={len(old_grounding)}, existing_index={existing_grounding_index}, "
+                f"is_available={grounding_service.is_available}")
+    
+    if new_external:
+        # External index takes precedence — set grounding_index_name directly
+        ext_index = new_external[0].get("index_name")
+        if ext_index:
+            # If switching from managed to external, clean up old managed index
+            if not old_external and existing_grounding_index and grounding_service.is_available:
+                await grounding_service.delete_grounding_index(agent_id)
+                logger.info(f"Cleaned up managed index when switching to external for agent {agent_id}")
+            agent_dict["grounding_index_name"] = ext_index
+            logger.info(f"Agent {agent_id} using external index: {ext_index}")
+    elif new_managed:
+        # Compare managed sources to see if we need to re-index
+        grounding_changed = (
+            len(new_managed) != len(old_managed) or
+            any(
+                n.get("container_url") != o.get("container_url") or
+                n.get("blob_prefix") != o.get("blob_prefix")
+                for n, o in zip(new_managed, old_managed)
+            )
         )
-    )
-    
-    if grounding_changed and grounding_service.is_available:
-        if new_grounding:
-            # Create or update grounding index
+        
+        if grounding_changed and grounding_service.is_available:
             grounding_index = await grounding_service.create_or_update_grounding_index(
                 agent_id=agent_id,
                 agent_name=agent_dict.get("name", existing.get("name", "Agent")),
-                grounding_sources=new_grounding
+                grounding_sources=new_managed
             )
             agent_dict["grounding_index_name"] = grounding_index
             logger.info(f"Updated grounding index for agent {agent_id}: {grounding_index}")
         else:
-            # No grounding sources - delete grounding index
-            if existing_grounding_index:
-                await grounding_service.delete_grounding_index(agent_id)
-            agent_dict["grounding_index_name"] = None
-            logger.info(f"Removed grounding index from agent {agent_id}")
+            agent_dict["grounding_index_name"] = existing_grounding_index
     else:
-        # Preserve existing grounding_index_name
-        agent_dict["grounding_index_name"] = existing_grounding_index
+        # No grounding sources - delete grounding index
+        if existing_grounding_index and grounding_service.is_available:
+            # Only delete if it was a managed index (not external)
+            if not old_external:
+                await grounding_service.delete_grounding_index(agent_id)
+        agent_dict["grounding_index_name"] = None
+        logger.info(f"Removed grounding index from agent {agent_id}")
     
     saved = await cosmos_service.save_agent(agent_dict)
     await agent_manager.refresh_agents()
@@ -201,15 +231,86 @@ async def delete_agent(
     if not success:
         raise HTTPException(status_code=404, detail="Agent not found")
     
-    # Clean up grounding index if exists
+    # Clean up grounding index if exists (only for managed sources, not external)
     if agent and agent.get("grounding_sources") and grounding_service.is_available:
-        await grounding_service.delete_grounding_index(agent_id)
-        logger.info(f"Deleted grounding index for agent {agent_id}")
+        has_external = any(s.get("type") == "external" for s in agent.get("grounding_sources", []))
+        if not has_external:
+            await grounding_service.delete_grounding_index(agent_id)
+            logger.info(f"Deleted grounding index for agent {agent_id}")
     
     await agent_manager.refresh_agents()
     
     logger.info(f"Deleted agent: {agent_id} by {admin.user_id}")
     return {"message": "Agent deleted"}
+
+
+# =============================================================================
+# Grounding Re-index
+# =============================================================================
+
+@router.post("/agents/{agent_id}/reindex")
+async def reindex_grounding(
+    request: Request,
+    agent_id: str,
+    admin=Depends(require_admin)
+):
+    """Force re-index grounding documents for an agent.
+    
+    Deletes the existing grounding index (if any) and rebuilds it from
+    the agent's configured blob sources.  Useful after adding security
+    metadata (ss_token) to blobs or when the index schema has changed.
+    """
+    agent = await cosmos_service.get_agent(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    grounding_sources = agent.get("grounding_sources", [])
+    if not grounding_sources:
+        raise HTTPException(status_code=400, detail="Agent has no grounding sources configured")
+    
+    # External indexes cannot be re-indexed from here
+    has_external = any(s.get("type") == "external" for s in grounding_sources)
+    if has_external:
+        raise HTTPException(
+            status_code=400,
+            detail="This agent uses an external search index. Re-indexing must be done outside this system."
+        )
+    
+    managed_sources = [s for s in grounding_sources if s.get("type", "managed") == "managed"]
+    if not managed_sources:
+        raise HTTPException(status_code=400, detail="Agent has no managed grounding sources to re-index")
+    
+    if not grounding_service.is_available:
+        raise HTTPException(status_code=503, detail="Grounding service is not available")
+    
+    # Delete existing index so it gets recreated with current schema
+    await grounding_service.delete_grounding_index(agent_id)
+    
+    # Rebuild
+    grounding_index = await grounding_service.create_or_update_grounding_index(
+        agent_id=agent_id,
+        agent_name=agent.get("name", "Agent"),
+        grounding_sources=managed_sources
+    )
+    
+    if grounding_index:
+        # Persist the index name
+        agent["grounding_index_name"] = grounding_index
+        await cosmos_service.save_agent(agent)
+        await agent_manager.refresh_agents()
+        
+        # Get doc count
+        status = await grounding_service.get_index_status(agent_id)
+        doc_count = status.get("document_count", 0) if status else 0
+        
+        logger.info(f"Re-indexed grounding for agent {agent_id}: {doc_count} chunks in {grounding_index}")
+        return {
+            "message": f"Re-indexed {doc_count} document chunks",
+            "index_name": grounding_index,
+            "document_count": doc_count
+        }
+    else:
+        raise HTTPException(status_code=500, detail="Failed to create grounding index")
 
 
 # =============================================================================
@@ -263,6 +364,26 @@ async def get_grounding_status(
         "message": "Grounding service is configured and ready" if grounding_service.is_available 
                    else "Grounding service is not configured. Set AZURE_AI_FOUNDRY_ENDPOINT to enable."
     }
+
+
+@router.get("/search/indexes")
+async def list_search_indexes(
+    request: Request,
+    admin=Depends(require_admin)
+):
+    """List all Azure AI Search indexes on the configured search service.
+    
+    Used by the admin UI to populate the 'Use Existing Index' dropdown
+    for the BYOI (Bring Your Own Index) feature.
+    """
+    if not grounding_service.is_available:
+        raise HTTPException(
+            status_code=503,
+            detail="Azure AI Search is not configured. Set AZURE_SEARCH_ENDPOINT to enable."
+        )
+    
+    indexes = await grounding_service.list_indexes()
+    return {"indexes": indexes, "count": len(indexes)}
 
 
 # =============================================================================

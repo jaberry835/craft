@@ -35,9 +35,15 @@ export const environment = {
       loadFrameTimeout: 10000
     }
   },
-  // Standard OIDC scopes for login
-  loginScopes: ['openid', 'profile', 'email'],
+  // Login scopes — include User.Read so Azure AD shows a consent dialog when needed
+  loginScopes: ['openid', 'profile', 'email', 'User.Read'],
   // API scope from app registration
   // Format: api://<client-id>/<scope-name> — must match "Expose an API" in your app registration
-  apiScopes: ['api://<your-client-id>/<your-scope-name>']
+  apiScopes: ['api://<your-client-id>/<your-scope-name>'],
+  // All delegated scopes from the app registration (used by "Reauthorize Permissions")
+  // Include every scope here that users need to consent to.
+  consentScopes: [
+    'openid', 'profile', 'email', 'User.Read', 'offline_access',
+    'api://<your-client-id>/<your-scope-name>'
+  ]
 };

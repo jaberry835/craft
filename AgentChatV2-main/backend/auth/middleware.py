@@ -22,7 +22,7 @@ PUBLIC_PATHS = {"/", "/health", "/docs", "/openapi.json", "/redoc", "/a2a/agents
 # - A2A agent cards: GET requests for agent discovery (POST requests still require auth)
 PUBLIC_PATH_PATTERNS = [
     re.compile(r"^/api/documents/[a-f0-9-]+/content$"),  # Document content viewing
-    re.compile(r"^/a2a/[a-f0-9-]+$"),  # A2A agent card discovery (GET only - checked in _is_public_path)
+    re.compile(r"^/a2a/[a-f0-9-]+(/\.well-known/agent-card\.json)?$"),  # A2A discovery (GET only)
     re.compile(r"^/api/settings/ui$"),  # UI settings (public GET for banner/branding)
 ]
 

@@ -3,27 +3,26 @@ Agent Manager
 Creates and orchestrates agents using Microsoft Agent Framework.
 Supports dynamic agent configuration and multiple orchestration patterns.
 """
-from typing import Optional, AsyncIterator, Union, Annotated, Callable, Any
+from typing import Optional, AsyncIterator, Union, Any
 from dataclasses import dataclass, field
 from enum import Enum
 import asyncio
 import time
 
-from agent_framework import ChatAgent, ChatMessage, Role, FunctionCallContent, FunctionResultContent, TextContent, UsageContent, ai_function, AIFunction
+from agent_framework import Agent, Message
 from agent_framework.azure import AzureOpenAIChatClient
-
-# Note: Workflow orchestration is handled manually below
-# The agent_framework may have different workflow APIs
 
 from config import get_settings, get_azure_credential
 from observability import (
-    get_logger, track_performance, should_log_performance, should_log_agent, should_log_a2a,
-    AOAIPerformanceTracker, MetricType, log_performance_summary
+    get_logger, track_performance, should_log_agent, should_log_a2a, MetricType
 )
 from services.cosmos_service import cosmos_service
 from services.mcp_client import mcp_client
 from services.a2a_client import a2a_client, A2A_AVAILABLE
 from services.grounding_service import grounding_service
+from services.context_providers import CosmosHistoryProvider, DocumentRAGProvider
+from services.embedding_service import embedding_service
+from services.search_service import search_service
 
 settings = get_settings()
 logger = get_logger(__name__)
@@ -168,16 +167,16 @@ class ChatterEvent:
     def extract_result_text(result: Any) -> str:
         """
         Extract text from various result types.
-        Handles TextContent objects, lists, dicts, and primitives.
+        Handles Content objects with type='text', lists, dicts, and primitives.
         """
         if result is None:
             return ""
         
-        # Handle TextContent objects
+        # Handle Content objects with text attribute
         if hasattr(result, 'text'):
             return str(result.text)
         
-        # Handle lists (of TextContent or other items)
+        # Handle lists (of Content or other items)
         if isinstance(result, list):
             parts = []
             for item in result:
@@ -232,22 +231,18 @@ class AgentResponse:
     chatter_events: list[ChatterEvent] = field(default_factory=list)
 
 
-def _convert_to_chat_messages(messages: list[dict]) -> list[ChatMessage]:
-    """Convert dict messages to ChatMessage objects for the agent framework."""
+def _convert_to_chat_messages(messages: list[dict]) -> list[Message]:
+    """Convert dict messages to Message objects for the agent framework."""
     chat_messages = []
     for msg in messages:
         role_str = msg.get("role", "user").lower()
-        # Map role string to Role enum
-        if role_str == "user":
-            role = Role.USER
-        elif role_str == "assistant":
-            role = Role.ASSISTANT
-        elif role_str == "system":
-            role = Role.SYSTEM
+        # Map role string directly (rc1 uses plain strings for roles)
+        if role_str in ("user", "assistant", "system"):
+            role = role_str
         else:
-            role = Role.USER
+            role = "user"
         
-        chat_messages.append(ChatMessage(role=role, text=msg.get("content", "")))
+        chat_messages.append(Message(role=role, text=msg.get("content", "")))
     return chat_messages
 
 
@@ -260,7 +255,7 @@ class AgentManager:
     
     def __init__(self):
         self._credential = None
-        self._agents_cache: dict[str, ChatAgent] = {}
+        self._agents_cache: dict[str, Agent] = {}
         self._configs_cache: dict[str, dict] = {}
         self._lock = asyncio.Lock()
         self._specialist_semaphore = asyncio.Semaphore(self.MAX_CONCURRENT_SPECIALISTS)
@@ -385,20 +380,30 @@ class AgentManager:
                 api_key=api_key
             )
         else:
-            logger.info(f"[AOAI-CONFIG] Agent '{agent_name}': authenticating with token provider "
+            logger.info(f"[AOAI-CONFIG] Agent '{agent_name}': authenticating with credential "
                         f"(scope={settings.azure_cognitive_services_scope})")
             return AzureOpenAIChatClient(
                 endpoint=endpoint_url,
                 deployment_name=deployment_name,
-                ad_token_provider=self._get_token_provider()
+                credential=self._get_token_provider()
             )
     
     async def _create_specialist_agent(
         self,
         agent_config: dict,
-        user_token: Optional[str] = None
-    ) -> ChatAgent:
-        """Create a specialist ChatAgent with MCP tools and optional grounding."""
+        user_token: Optional[str] = None,
+        context_providers: Optional[list] = None,
+    ) -> Agent:
+        """Create a specialist Agent with MCP tools and optional grounding.
+        
+        Args:
+            agent_config: Agent configuration from Cosmos DB.
+            user_token: Optional user auth token for MCP/A2A pass-through.
+            context_providers: Optional list of BaseContextProvider instances
+                (e.g. CosmosHistoryProvider, DocumentRAGProvider) so the
+                framework automatically loads conversation history and RAG
+                context into the agent's run.
+        """
         # Specialist agents get MCP tools
         tools = await mcp_client.get_tools_for_agent(agent_config, user_token)
         if tools is None:
@@ -408,10 +413,17 @@ class AgentManager:
         grounding_sources = agent_config.get("grounding_sources", [])
         grounding_index = agent_config.get("grounding_index_name")
         if grounding_sources and grounding_index and grounding_service.is_available:
+            # Check if this is an external (BYOI) index
+            has_external = any(s.get("type") == "external" for s in grounding_sources)
+            index_override = grounding_index if has_external else None
+            
             # Create a search tool that queries the agent's grounded documents
+            # Pass user_token so the tool can apply SS token security filtering
             search_tool = grounding_service.create_search_tool(
                 agent_id=agent_config.get("id", ""),
-                agent_name=agent_config.get("name", "Agent")
+                agent_name=agent_config.get("name", "Agent"),
+                user_token=user_token,
+                index_name_override=index_override
             )
             tools.append(search_tool)
             if should_log_agent():
@@ -444,267 +456,47 @@ You are being called as a specialist by an orchestrator agent. The user's reques
         enhanced_instructions = base_instructions + action_suffix
         
         # Build the agent
-        agent = ChatAgent(
+        agent = Agent(
             name=sanitized_name,
             description=agent_config.get("description", ""),
             instructions=enhanced_instructions,
-            chat_client=chat_client,
-            tools=tools if tools else None
+            client=chat_client,
+            tools=tools if tools else None,
+            context_providers=context_providers,
         )
         
         return agent
     
-    async def _create_orchestrator_agent(
-        self,
-        orchestrator_config: dict,
-        specialist_agent_ids: list[str],
-        user_token: Optional[str] = None,
-        chatter_queue: Optional[asyncio.Queue] = None
-    ) -> ChatAgent:
-        """
-        Create an orchestrator agent with A2A tools to call specialist agents.
-        
-        All specialist agents (local and external) are called via A2A protocol.
-        Local agents are exposed at /a2a/{agent_id} endpoints, allowing:
-        - Consistent A2A protocol for all agent communication
-        - Local agents discoverable and callable by external systems
-        - Same code path for local and external agent orchestration
-        
-        When chatter_queue is provided, uses custom tool wrappers that capture
-        streaming events from specialist agents.
-        """
-        # Determine the base URL for local A2A endpoints
-        # Uses BACKEND_URL from environment (defaults to localhost:5000 for dev)
-        local_base_url = settings.backend_url
-        
-        if should_log_agent():
-            logger.debug(f"Creating orchestrator with user_token present: {user_token is not None}, A2A base URL: {local_base_url}")
-        
-        # Create specialist agents as tools
-        agent_tools = []
-        agent_descriptions = []
-        
-        for agent_id in specialist_agent_ids:
-            config = self._configs_cache.get(agent_id)
-            if not config:
-                config = await cosmos_service.get_agent(agent_id)
-            
-            if config and config.get("id") != orchestrator_config.get("id"):
-                agent_type = config.get("agent_type", "local")
-                
-                # Use custom chatter-capturing wrapper that makes direct A2A HTTP calls
-                if chatter_queue:
-                    agent_tool = self._create_a2a_tool_with_chatter(
-                        config, chatter_queue, user_token
-                    )
-                else:
-                    # Fallback: create A2AAgent and use as_tool() (no chatter capture)
-                    if agent_type == "a2a":
-                        if A2A_AVAILABLE:
-                            specialist = a2a_client.create_a2a_agent(config)
-                        else:
-                            if should_log_a2a():
-                                logger.warning(f"Skipping external A2A agent {config.get('name')} - A2A not available")
-                            continue
-                    else:
-                        if A2A_AVAILABLE:
-                            specialist = a2a_client.create_local_a2a_agent(config, local_base_url, user_token)
-                        else:
-                            specialist = await self._create_specialist_agent(config, user_token)
-                    
-                    agent_tool = specialist.as_tool(
-                        name=config.get("name", "agent").replace(" ", "_").lower(),
-                        description=config.get("description", f"Specialist agent: {config.get('name')}")
-                    )
-                
-                agent_tools.append(agent_tool)
-                agent_descriptions.append(f"- {config.get('name')}: {config.get('description', 'No description')}")
-        
-        # Build context about available agents for the orchestrator's prompt
-        if agent_descriptions:
-            # When specialists exist, provide the list
-            agent_context = "=== AVAILABLE SPECIALIST AGENTS ===\n" + "\n".join(agent_descriptions)
-            agent_context += "\n\nYou can delegate tasks to these agents by calling them as tools."
-            agent_context += "\n=================================\n\n"
-        else:
-            # When no specialists exist, tell orchestrator to answer directly
-            agent_context = """=== AGENT AVAILABILITY STATUS ===
-NO SPECIALIST AGENTS ARE CURRENTLY REGISTERED.
-
-Since no specialist agents are available, you MUST answer all questions directly yourself.
-Do not say you will delegate - there is no one to delegate to.
-Answer the user's question to the best of your ability.
-=================================
-
-"""
-        
-        # Put agent context BEFORE the base instructions so the orchestrator knows the situation first
-        base_instructions = orchestrator_config.get("system_prompt", "You are a helpful assistant.")
-        enhanced_instructions = agent_context + base_instructions
-        
-        # Debug: log the full instructions
-        if should_log_agent():
-            logger.debug(f"Orchestrator enhanced instructions:\n{enhanced_instructions}")
-        
-        # Create chat client
-        chat_client = self._create_chat_client(orchestrator_config)
-        
-        # Sanitize orchestrator name for OpenAI API compatibility
-        raw_name = orchestrator_config.get("name", "Orchestrator")
-        sanitized_name = raw_name.replace(" ", "_").replace("<", "").replace(">", "").replace("|", "").replace("/", "").replace("\\", "")
-        
-        # Build orchestrator with specialist agents as tools
-        orchestrator = ChatAgent(
-            name=sanitized_name,
-            description=orchestrator_config.get("description", ""),
-            instructions=enhanced_instructions,
-            chat_client=chat_client,
-            tools=agent_tools if agent_tools else None
-        )
-        
-        if should_log_agent():
-            logger.info(f"Created orchestrator with {len(agent_tools)} specialist agent tools (A2A mode: {A2A_AVAILABLE})")
-        return orchestrator
-    
-    def _create_a2a_tool_with_chatter(
-        self,
-        config: dict,
-        chatter_queue: asyncio.Queue,
-        user_token: Optional[str] = None
-    ) -> AIFunction:
-        """
-        Create a custom tool wrapper for an A2A agent that captures chatter events.
-        
-        Uses direct HTTP calls to the A2A endpoint to get the full response 
-        including metadata with tool call/result events from the remote agent.
-        This provides visibility into what the specialist agent is doing.
-        """
-        agent_name = config.get("name", "Agent")
-        agent_id = config.get("id", "")
-        tool_name = agent_name.replace(" ", "_").lower()
-        base_description = config.get("description", f"Specialist agent: {agent_name}")
-        tool_description = f"{base_description}. Pass the user's request directly without adding commentary or assumptions - this agent has its own tools to discover needed information."
-        
-        # Build A2A URL for direct calls
-        agent_type = config.get("agent_type", "local")
-        if agent_type == "a2a":
-            a2a_url = config.get("a2a_url", "")
-        else:
-            # Local agent - build A2A URL from backend_url setting
-            a2a_url = f"{settings.backend_url.rstrip('/')}/a2a/{agent_id}"
-        
-        async def call_a2a_specialist(request: Annotated[str, "The user's exact request or question. Pass it directly without modification or commentary."]) -> str:
-            """Execute the A2A agent via direct HTTP call to capture all events."""
-            if should_log_a2a():
-                logger.info(f"A2A CALL: {agent_name} <- {request[:100]}...")
-            
-            start_time = time.time()
-            
-            # Emit delegation event showing what request is being sent
-            delegation_event = ChatterEvent(
-                type=ChatterEventType.DELEGATION,
-                agent_name=agent_name,
-                content=request[:200] + ("..." if len(request) > 200 else "")
-            )
-            await chatter_queue.put(delegation_event)
-            
-            # Emit thinking event
-            thinking_event = ChatterEvent(
-                type=ChatterEventType.THINKING,
-                agent_name=agent_name,
-                content=f"Working on request..."
-            )
-            await chatter_queue.put(thinking_event)
-            
-            try:
-                # Use direct HTTP call to get full response with metadata
-                result = await a2a_client.call_agent_direct(
-                    agent_url=a2a_url,
-                    message=request,
-                    user_token=user_token
-                )
-                
-                if result.get("error"):
-                    logger.error(f"A2A CALL ERROR: {agent_name}: {result['error']}")
-                    return f"Error calling {agent_name}: {result['error']}"
-                
-                # Emit chatter events from the remote agent
-                for event_data in result.get("chatter_events", []):
-                    try:
-                        event_type_str = event_data.get("type", "thinking")
-                        event_type = ChatterEventType(event_type_str)
-                        
-                        event = ChatterEvent(
-                            type=event_type,
-                            agent_name=agent_name,  # Prefix with source agent name
-                            content=event_data.get("content", ""),
-                            tool_name=event_data.get("tool_name"),
-                            tool_args=event_data.get("tool_args"),
-                            duration_ms=event_data.get("duration_ms"),
-                            tokens_input=event_data.get("tokens_input"),
-                            tokens_output=event_data.get("tokens_output")
-                        )
-                        await chatter_queue.put(event)
-                    except Exception as e:
-                        logger.warning(f"Failed to emit chatter event: {e}")
-                
-                final_response = result.get("text", "")
-                total_duration_ms = result.get("duration_ms") or ((time.time() - start_time) * 1000)
-                
-                # Emit completion event with total duration
-                complete_event = ChatterEvent(
-                    type=ChatterEventType.CONTENT,
-                    agent_name=agent_name,
-                    content=f"Completed ({len(final_response)} chars)",
-                    duration_ms=total_duration_ms
-                )
-                await chatter_queue.put(complete_event)
-                
-                if should_log_a2a():
-                    logger.info(f"A2A CALL: {agent_name} -> response length={len(final_response)}, events={len(result.get('chatter_events', []))}")
-                return final_response
-                
-            except Exception as e:
-                logger.error(f"A2A CALL ERROR: {agent_name}: {type(e).__name__}: {e}")
-                return f"Error calling {agent_name}: {str(e)}"
-        
-        return AIFunction(
-            name=tool_name,
-            description=tool_description,
-            func=call_a2a_specialist,
-            additional_properties={}
-        )
-
     async def _create_agent(
         self,
         agent_config: dict,
         user_token: Optional[str] = None
-    ) -> ChatAgent:
+    ) -> Agent:
         """
         Create an agent from configuration.
         
-        Handles both local ChatAgent and external A2AAgent based on agent_type.
+        Handles both local Agent and external A2AAgent based on agent_type.
         Both implement the same AgentProtocol, so they're interchangeable.
         """
         agent_type = agent_config.get("agent_type", "local")
         
         if agent_type == "a2a":
-            # External A2A agent
+            # External A2A agent - use SDK with auth support
             if not A2A_AVAILABLE:
                 raise RuntimeError(
                     f"Cannot create A2A agent '{agent_config.get('name')}': "
-                    "A2A packages not installed. Run: pip install agent-framework-a2a a2a"
+                    "A2A packages not installed. Run: pip install agent-framework-a2a a2a-sdk"
                 )
-            return a2a_client.create_a2a_agent(agent_config)
+            return a2a_client.create_a2a_agent(agent_config, user_token)
         else:
-            # Local ChatAgent (default)
+            # Local Agent (default)
             return await self._create_specialist_agent(agent_config, user_token)
     
     async def get_agent(
         self,
         agent_id: str,
         user_token: Optional[str] = None
-    ) -> Optional[ChatAgent]:
+    ) -> Optional[Agent]:
         """Get or create an agent by ID."""
         config = self._configs_cache.get(agent_id)
         if not config:
@@ -756,7 +548,7 @@ Answer the user's question to the best of your ability.
             
             chat_messages = _convert_to_chat_messages(messages)
             if should_log_agent():
-                logger.debug(f"Starting run_stream with {len(chat_messages)} messages")
+                logger.debug(f"Starting run (stream=True) with {len(chat_messages)} messages")
             
             # Track tool calls for timing
             seen_tool_calls: set[str] = set()
@@ -765,14 +557,14 @@ Answer the user's question to the best of your ability.
             total_tokens_input = 0
             total_tokens_output = 0
             
-            async for update in agent.run_stream(chat_messages):
+            async for update in agent.run(chat_messages, stream=True):
                 if update.text:
                     yield update.text
                 
                 # Capture tool call/result events if requested
                 if include_chatter and hasattr(update, 'contents') and update.contents:
                     for content_item in update.contents:
-                        if isinstance(content_item, FunctionCallContent):
+                        if content_item.type == 'function_call':
                             call_id = getattr(content_item, 'call_id', None)
                             tool_name = getattr(content_item, 'name', None)
                             tool_args = getattr(content_item, 'arguments', None)
@@ -795,7 +587,7 @@ Answer the user's question to the best of your ability.
                                 )
                                 yield event
                         
-                        elif isinstance(content_item, FunctionResultContent):
+                        elif content_item.type == 'function_result':
                             call_id = getattr(content_item, 'call_id', None)
                             result = getattr(content_item, 'result', None)
                             
@@ -809,7 +601,7 @@ Answer the user's question to the best of your ability.
                                     start_time, tool_name_result, _ = pending_tool_calls[call_id]
                                     duration_ms = (time.time() - start_time) * 1000
                                 
-                                # Format result for display - extract text from TextContent objects
+                                # Format result for display - extract text from Content objects
                                 result_display = ChatterEvent.extract_result_text(result)
                                 if len(result_display) > 300:
                                     result_display = result_display[:300] + "..."
@@ -827,12 +619,12 @@ Answer the user's question to the best of your ability.
                                 )
                                 yield event
                         
-                        # Handle UsageContent to capture token counts
-                        elif isinstance(content_item, UsageContent):
-                            details = getattr(content_item, 'details', None)
+                        # Handle usage content to capture token counts
+                        elif content_item.type == 'usage':
+                            details = getattr(content_item, 'usage_details', None)
                             if details:
-                                uc_input = getattr(details, 'input_token_count', None)
-                                uc_output = getattr(details, 'output_token_count', None)
+                                uc_input = details.get('input_token_count') if isinstance(details, dict) else getattr(details, 'input_token_count', None)
+                                uc_output = details.get('output_token_count') if isinstance(details, dict) else getattr(details, 'output_token_count', None)
                                 if uc_input:
                                     total_tokens_input += uc_input
                                 if uc_output:
@@ -862,7 +654,7 @@ Answer the user's question to the best of your ability.
                 yield summary_event
                     
             if should_log_agent():
-                logger.debug(f"run_stream completed for {agent_id}")
+                logger.debug(f"run completed for {agent_id}")
         except Exception as e:
             logger.error(f"execute_single error for agent {agent_id}: {e}", exc_info=True)
             raise
@@ -1034,21 +826,21 @@ RESPOND WITH JSON:
         
         # Create chat client and agent
         chat_client = self._create_chat_client(orchestrator_config)
-        eval_agent = ChatAgent(
+        eval_agent = Agent(
             name="Evaluator",
             description="Evaluates if more investigation is needed",
             instructions=eval_prompt,
-            chat_client=chat_client
+            client=chat_client
         )
         
         # Get evaluation
         eval_messages = [
-            ChatMessage(role=Role.SYSTEM, text=eval_prompt),
-            ChatMessage(role=Role.USER, text="Should we continue investigating or do we have enough information?")
+            Message(role="system", text=eval_prompt),
+            Message(role="user", text="Should we continue investigating or do we have enough information?")
         ]
         
         response_parts = []
-        async for update in eval_agent.run_stream(eval_messages):
+        async for update in eval_agent.run(eval_messages, stream=True):
             if update.text:
                 response_parts.append(update.text)
         
@@ -1090,11 +882,18 @@ RESPOND WITH JSON:
         self,
         orchestrator_config: dict,
         specialist_configs: list[dict],
-        messages: list[dict]
+        user_message: str,
+        session_id: str,
+        user_id: str,
     ) -> dict:
         """
         Phase 1: Run orchestrator to analyze the request and decide action.
-        
+
+        Uses AgentSession with CosmosHistoryProvider (for automatic
+        conversation-history loading) and DocumentRAGProvider (for automatic
+        document-context injection) so the orchestrator sees the full
+        conversation and any relevant uploaded documents.
+
         Returns:
             dict with keys:
                 - action: "direct" or "delegate"
@@ -1122,34 +921,42 @@ RESPOND WITH JSON:
         # Format the prompt with agent list
         analysis_prompt = analysis_prompt.replace("{agent_list}", "\n".join(agent_list) if agent_list else "No specialists available")
         
-        # Create a temporary chat client for analysis
+        # Create chat client
         chat_client = self._create_chat_client(orchestrator_config)
         
-        # Build chat messages with analysis prompt as system
-        analysis_messages = [
-            ChatMessage(role=Role.SYSTEM, text=analysis_prompt)
-        ]
-        for msg in messages:
-            role_str = msg.get("role", "user").lower()
-            if role_str == "user":
-                role = Role.USER
-            elif role_str == "assistant":
-                role = Role.ASSISTANT
-            else:
-                role = Role.USER
-            analysis_messages.append(ChatMessage(role=role, text=msg.get("content", "")))
-        
-        # Create simple agent for analysis (no tools)
-        analysis_agent = ChatAgent(
+        # Create analysis agent with context providers for automatic
+        # history loading and RAG injection (no manual message building).
+        # store_inputs/store_outputs default to False so the analysis
+        # agent's internal JSON decision is never persisted to Cosmos.
+        analysis_agent = chat_client.as_agent(
             name="Analyzer",
-            description="Analyzes requests",
             instructions=analysis_prompt,
-            chat_client=chat_client
+            context_providers=[
+                CosmosHistoryProvider(cosmos_service),
+                DocumentRAGProvider(embedding_service, search_service),
+            ],
         )
         
-        # Get analysis response
+        # Create an AgentSession and populate provider-scoped state so the
+        # providers know which Cosmos session to query.
+        session = analysis_agent.create_session()
+        session.state.setdefault("cosmos-history", {}).update({
+            "session_id": session_id,
+            "user_id": user_id,
+            "current_query": user_message,
+        })
+        session.state.setdefault("document-rag", {}).update({
+            "session_id": session_id,
+            "user_id": user_id,
+            "user_query": user_message,
+        })
+        
+        # Run — providers automatically load history + RAG; the framework
+        # adds user_message as the current input.
         response_parts = []
-        async for update in analysis_agent.run_stream(analysis_messages):
+        async for update in analysis_agent.run(
+            user_message, session=session, stream=True
+        ):
             if update.text:
                 response_parts.append(update.text)
         
@@ -1225,10 +1032,14 @@ RESPOND WITH JSON:
         agent_id: str,
         message: str,
         user_token: Optional[str] = None,
-        chatter_queue: Optional[asyncio.Queue] = None
+        chatter_queue: Optional[asyncio.Queue] = None,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> dict:
         """
-        Call a specialist agent via A2A protocol.
+        Call a specialist agent. For local agents, executes directly to capture
+        rich chatter (tool calls, token usage, etc.). For external A2A agents,
+        uses the A2A HTTP protocol.
         
         Returns:
             dict with keys: agent_id, agent_name, response, error (if any)
@@ -1243,63 +1054,447 @@ RESPOND WITH JSON:
         agent_name = config.get("name", "Agent")
         agent_type = config.get("agent_type", "local")
         
-        # Build A2A URL
-        if agent_type == "a2a":
-            a2a_url = config.get("a2a_url", "")
-        else:
-            a2a_url = f"{settings.backend_url.rstrip('/')}/a2a/{agent_id}"
-        
-        if should_log_a2a():
-            logger.info(f"A2A CALL (pattern): {agent_name} <- {message[:100]}...")
-        
-        # Emit delegation event
+        # Emit delegation event — note: for local agents with session context,
+        # the framework's CosmosHistoryProvider will also inject conversation
+        # history automatically, so the specialist sees more than just this message.
         if chatter_queue:
-            delegation_event = ChatterEvent(
+            has_context = bool(session_id and user_id)
+            content_preview = message[:200] + ("..." if len(message) > 200 else "")
+            friendly = (
+                f"Asking {agent_name} (with conversation history)"
+                if has_context
+                else f"Asking {agent_name}"
+            )
+            await chatter_queue.put(ChatterEvent(
                 type=ChatterEventType.DELEGATION,
                 agent_name=agent_name,
-                content=message[:200] + ("..." if len(message) > 200 else "")
-            )
-            await chatter_queue.put(delegation_event)
+                content=content_preview,
+                friendly_message=friendly,
+            ))
         
-        try:
-            result = await a2a_client.call_agent_direct(
-                agent_url=a2a_url,
-                message=message,
-                user_token=user_token
+        # --- Local agents: execute directly for rich chatter ---
+        if agent_type != "a2a":
+            return await self._call_specialist_local(
+                agent_id, agent_name, message, user_token, chatter_queue,
+                session_id=session_id, user_id=user_id,
             )
-            
-            if result.get("error"):
-                return {"agent_id": agent_id, "agent_name": agent_name, "response": "", "error": result["error"]}
-            
-            # Forward chatter events
+        
+        # --- External A2A agents: use HTTP protocol ---
+        return await self._call_specialist_remote(
+            agent_id, agent_name, config, message, user_token, chatter_queue
+        )
+    
+    async def _call_specialist_with_vision(
+        self,
+        agent_config: dict,
+        agent_name: str,
+        message: str,
+        session_id: str,
+        user_id: str,
+        image_messages: list[dict],
+        chatter_queue: Optional[asyncio.Queue] = None,
+    ) -> dict:
+        """
+        Call a specialist using the direct Azure OpenAI vision API for
+        multimodal support.  Used when the session contains image attachments.
+
+        Bypasses the agent framework to construct multimodal messages with
+        ``image_url`` content parts that GPT-4-vision / GPT-4.1 can analyse.
+        Conversation history and images are loaded from Cosmos DB and included
+        directly in the chat completions request.
+        """
+        from openai import AsyncAzureOpenAI
+
+        start_time = time.time()
+        agent_id = agent_config.get("id", "")
+
+        # Emit chatter event
+        if chatter_queue:
+            await chatter_queue.put(ChatterEvent(
+                type=ChatterEventType.THINKING,
+                agent_name=agent_name,
+                content=f"Analysing with vision ({len(image_messages)} image(s))…",
+                friendly_message=f"{agent_name} is analysing images",
+            ))
+
+        # ── Resolve AOAI connection params (mirrors _create_chat_client) ──
+        deployment_name = agent_config.get("model")
+        if not deployment_name:
+            return {
+                "agent_id": agent_id, "agent_name": agent_name,
+                "response": "", "error": "No model configured for vision agent",
+            }
+
+        endpoint_url = settings.azure_openai_endpoint
+        api_key = settings.azure_openai_key
+        api_version = settings.azure_openai_api_version
+
+        aoai_ep_cfg = (agent_config.get("_aoai_endpoint_config") or {}) if agent_config.get("aoai_endpoint_id") else {}
+        if aoai_ep_cfg:
+            endpoint_url = aoai_ep_cfg.get("endpoint", endpoint_url)
+            if aoai_ep_cfg.get("api_key"):
+                api_key = aoai_ep_cfg["api_key"]
+            if aoai_ep_cfg.get("api_version"):
+                api_version = aoai_ep_cfg["api_version"]
+
+        # ── Create async Azure OpenAI client ──
+        client_kwargs: dict = {"azure_endpoint": endpoint_url, "api_version": api_version}
+        if api_key:
+            client_kwargs["api_key"] = api_key
+        else:
+            client_kwargs["azure_ad_token_provider"] = self._get_token_provider()
+
+        client = AsyncAzureOpenAI(**client_kwargs)
+
+        try:
+            # ── Build messages with multimodal content ──
+            oai_messages: list[dict] = []
+
+            # System prompt
+            system_prompt = agent_config.get("system_prompt", "You are a helpful assistant.")
+            system_prompt += (
+                "\n\nYou have vision capabilities. When the user shares images, "
+                "analyse them thoroughly and reference visual details in your response."
+            )
+            oai_messages.append({"role": "system", "content": system_prompt})
+
+            # Conversation history (oldest-first)
+            raw_msgs, _, _ = await cosmos_service.get_session_messages(
+                session_id=session_id, user_id=user_id,
+                page_size=50, oldest_first=True,
+            )
+
+            # Drop the most recent user message — it represents the current
+            # turn which chat_routes already saved before orchestration began.
+            if raw_msgs and raw_msgs[-1].get("role") == "user":
+                raw_msgs = raw_msgs[:-1]
+
+            image_ids = {m["id"] for m in image_messages}
+
+            for msg in raw_msgs:
+                role = msg.get("role", "user")
+                content_text = msg.get("content", "")
+                metadata = msg.get("metadata", {})
+
+                if msg["id"] in image_ids and "image_attachment" in metadata:
+                    img = metadata["image_attachment"]
+                    oai_messages.append({
+                        "role": role,
+                        "content": [
+                            {"type": "text", "text": content_text},
+                            {"type": "image_url", "image_url": {
+                                "url": f"data:{img['content_type']};base64,{img['base64']}",
+                                "detail": "auto",
+                            }},
+                        ],
+                    })
+                else:
+                    oai_messages.append({"role": role, "content": content_text})
+
+            # Current user turn
+            oai_messages.append({"role": "user", "content": message})
+
+            if should_log_agent():
+                logger.info(
+                    f"Vision call to {agent_name}: {len(oai_messages)} messages, "
+                    f"{len(image_messages)} image(s), model={deployment_name}"
+                )
+
+            # ── Call AOAI vision model (streaming) ──
+            stream = await client.chat.completions.create(
+                model=deployment_name,
+                messages=oai_messages,
+                stream=True,
+                max_tokens=agent_config.get("max_tokens") or 4096,
+                temperature=agent_config.get("temperature", 0.7),
+            )
+
+            response_parts: list[str] = []
+            async for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                    response_parts.append(chunk.choices[0].delta.content)
+
+            response_text = "".join(response_parts)
+            duration_ms = (time.time() - start_time) * 1000
+
+            if should_log_agent():
+                logger.info(
+                    f"VISION specialist {agent_name}: {len(response_text)} chars "
+                    f"in {duration_ms:.0f}ms ({len(image_messages)} images)"
+                )
+
             if chatter_queue:
-                for event_data in result.get("chatter_events", []):
-                    try:
-                        event = ChatterEvent(
-                            type=ChatterEventType(event_data.get("type", "thinking")),
-                            agent_name=agent_name,
-                            content=event_data.get("content", ""),
-                            tool_name=event_data.get("tool_name"),
-                            tool_args=event_data.get("tool_args"),
-                            duration_ms=event_data.get("duration_ms"),
-                            tokens_input=event_data.get("tokens_input"),
-                            tokens_output=event_data.get("tokens_output")
+                await chatter_queue.put(ChatterEvent(
+                    type=ChatterEventType.CONTENT,
+                    agent_name=agent_name,
+                    content=f"Completed ({len(response_text)} chars)",
+                    duration_ms=duration_ms,
+                    friendly_message=f"{agent_name} finished in {duration_ms / 1000:.1f}s",
+                ))
+
+            return {
+                "agent_id": agent_id,
+                "agent_name": agent_name,
+                "response": response_text,
+            }
+
+        except Exception as e:
+            logger.error(f"Vision call to {agent_name} failed: {e}", exc_info=True)
+            duration_ms = (time.time() - start_time) * 1000
+            if chatter_queue:
+                await chatter_queue.put(ChatterEvent(
+                    type=ChatterEventType.CONTENT,
+                    agent_name=agent_name,
+                    content=f"Vision call failed: {e}",
+                    duration_ms=duration_ms,
+                    friendly_message=f"{agent_name} encountered an error",
+                ))
+            return {
+                "agent_id": agent_id, "agent_name": agent_name,
+                "response": "", "error": str(e),
+            }
+        finally:
+            await client.close()
+
+    async def _call_specialist_local(
+        self,
+        agent_id: str,
+        agent_name: str,
+        message: str,
+        user_token: Optional[str],
+        chatter_queue: Optional[asyncio.Queue],
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> dict:
+        """
+        Execute a local specialist directly with include_chatter=True for
+        rich tool call / token usage events.
+
+        When ``session_id`` and ``user_id`` are provided the agent is created
+        with the framework's ``CosmosHistoryProvider`` and
+        ``DocumentRAGProvider`` so conversation history and RAG document
+        context are loaded automatically — the same pattern the orchestrator
+        analysis phase uses.  This lets specialists resolve follow-up
+        references like "tell me more about section 2" without manual
+        message building.
+        """
+        if should_log_agent():
+            logger.info(f"LOCAL specialist call: {agent_name} <- {message[:100]}...")
+        
+        start_time = time.time()
+        try:
+            config = self._configs_cache.get(agent_id)
+            if not config:
+                config = await cosmos_service.get_agent(agent_id)
+                if config:
+                    self._configs_cache[agent_id] = config
+            if not config:
+                raise ValueError(f"Agent {agent_id} not found")
+
+            # ── Build context providers when session context is available ──
+            has_session = bool(session_id and user_id)
+
+            # ── Check for image attachments → use vision path ──
+            if has_session:
+                image_messages = await cosmos_service.get_session_image_messages(
+                    session_id, user_id
+                )
+                if image_messages:
+                    if should_log_agent():
+                        logger.info(
+                            f"Session {session_id} has {len(image_messages)} image(s), "
+                            f"using vision path for {agent_name}"
                         )
-                        await chatter_queue.put(event)
-                    except Exception as e:
-                        logger.warning(f"Failed to emit chatter event: {e}")
+                    return await self._call_specialist_with_vision(
+                        config, agent_name, message, session_id, user_id,
+                        image_messages, chatter_queue,
+                    )
+
+            providers = None
+            if has_session:
+                providers = [
+                    CosmosHistoryProvider(cosmos_service),
+                    DocumentRAGProvider(embedding_service, search_service),
+                ]
+
+            # Create the specialist agent with framework context providers
+            agent = await self._create_specialist_agent(
+                config, user_token, context_providers=providers
+            )
+
+            # ── Prepare session state for the providers ──
+            session = None
+            if has_session:
+                session = agent.create_session()
+                session.state.setdefault("cosmos-history", {}).update({
+                    "session_id": session_id,
+                    "user_id": user_id,
+                    "current_query": message,
+                })
+                session.state.setdefault("document-rag", {}).update({
+                    "session_id": session_id,
+                    "user_id": user_id,
+                    "user_query": message,
+                })
+
+            # ── Stream the response ──
+            response_parts = []
+
+            # Track tool calls for timing
+            seen_tool_calls: set[str] = set()
+            seen_tool_results: set[str] = set()
+            pending_tool_calls: dict[str, tuple[float, str, Optional[dict]]] = {}
+            total_tokens_input = 0
+            total_tokens_output = 0
+
+            async for update in agent.run(message, session=session, stream=True):
+                if update.text:
+                    response_parts.append(update.text)
+
+                # Capture chatter events (tool calls, results, token usage)
+                if hasattr(update, 'contents') and update.contents:
+                    for content_item in update.contents:
+                        if content_item.type == 'function_call':
+                            call_id = getattr(content_item, 'call_id', None)
+                            tool_name = getattr(content_item, 'name', None)
+                            tool_args = getattr(content_item, 'arguments', None)
+                            if call_id and tool_name and call_id not in seen_tool_calls:
+                                seen_tool_calls.add(call_id)
+                                args_dict = tool_args if isinstance(tool_args, dict) else None
+                                pending_tool_calls[call_id] = (time.time(), tool_name, args_dict)
+                                friendly_msg = _get_friendly_tool_description(tool_name, args_dict)
+                                event = ChatterEvent(
+                                    type=ChatterEventType.TOOL_CALL,
+                                    agent_name=agent_name,
+                                    content=f"Calling {tool_name}",
+                                    tool_name=tool_name,
+                                    tool_args=args_dict,
+                                    friendly_message=friendly_msg,
+                                )
+                                if chatter_queue:
+                                    await chatter_queue.put(event)
+
+                        elif content_item.type == 'function_result':
+                            call_id = getattr(content_item, 'call_id', None)
+                            result = getattr(content_item, 'result', None)
+                            if call_id and call_id not in seen_tool_results:
+                                seen_tool_results.add(call_id)
+                                duration_ms = None
+                                tool_name_result = None
+                                if call_id in pending_tool_calls:
+                                    st, tool_name_result, _ = pending_tool_calls[call_id]
+                                    duration_ms = (time.time() - st) * 1000
+                                result_display = ChatterEvent.extract_result_text(result)
+                                if len(result_display) > 300:
+                                    result_display = result_display[:300] + "..."
+                                friendly_msg = _get_friendly_result_summary(tool_name_result or "", result_display)
+                                event = ChatterEvent(
+                                    type=ChatterEventType.TOOL_RESULT,
+                                    agent_name=agent_name,
+                                    content=result_display or "Result received",
+                                    tool_name=tool_name_result,
+                                    duration_ms=duration_ms,
+                                    friendly_message=friendly_msg,
+                                )
+                                if chatter_queue:
+                                    await chatter_queue.put(event)
+
+                        elif content_item.type == 'usage':
+                            details = getattr(content_item, 'usage_details', None)
+                            if details:
+                                uc_in = details.get('input_token_count') if isinstance(details, dict) else getattr(details, 'input_token_count', None)
+                                uc_out = details.get('output_token_count') if isinstance(details, dict) else getattr(details, 'output_token_count', None)
+                                if uc_in:
+                                    total_tokens_input += uc_in
+                                if uc_out:
+                                    total_tokens_output += uc_out
+                                if uc_in or uc_out:
+                                    event = ChatterEvent(
+                                        type=ChatterEventType.THINKING,
+                                        agent_name=agent_name,
+                                        content=f"LLM call: {uc_in or 0} input, {uc_out or 0} output tokens",
+                                        tokens_input=uc_in,
+                                        tokens_output=uc_out,
+                                        friendly_message="Analyzing information...",
+                                    )
+                                    if chatter_queue:
+                                        await chatter_queue.put(event)
+
+            response_text = "".join(response_parts)
+            duration_ms = (time.time() - start_time) * 1000
             
-            # Debug: Log the specialist response content
-            response_text = result.get("text", "")
-            if should_log_a2a():
-                logger.info(f"A2A RESPONSE from {agent_name}: {response_text[:500]}{'...' if len(response_text) > 500 else ''}")
+            if should_log_agent():
+                logger.info(f"LOCAL specialist {agent_name}: {len(response_text)} chars in {duration_ms:.0f}ms")
+            
+            # Emit completion event with duration
+            if chatter_queue:
+                await chatter_queue.put(ChatterEvent(
+                    type=ChatterEventType.CONTENT,
+                    agent_name=agent_name,
+                    content=f"Completed ({len(response_text)} chars)",
+                    duration_ms=duration_ms,
+                    friendly_message=f"{agent_name} finished in {duration_ms/1000:.1f}s"
+                ))
             
             return {
                 "agent_id": agent_id,
                 "agent_name": agent_name,
                 "response": response_text,
-                "tokens_input": result.get("tokens_input", 0),
-                "tokens_output": result.get("tokens_output", 0)
+            }
+            
+        except Exception as e:
+            logger.error(f"Local specialist call to {agent_name} failed: {e}", exc_info=True)
+            if chatter_queue:
+                await chatter_queue.put(ChatterEvent(
+                    type=ChatterEventType.CONTENT,
+                    agent_name=agent_name,
+                    content=f"Error: {str(e)[:200]}",
+                    friendly_message=f"{agent_name} encountered an error"
+                ))
+            return {"agent_id": agent_id, "agent_name": agent_name, "response": "", "error": str(e)}
+    
+    async def _call_specialist_remote(
+        self,
+        agent_id: str,
+        agent_name: str,
+        config: dict,
+        message: str,
+        user_token: Optional[str],
+        chatter_queue: Optional[asyncio.Queue]
+    ) -> dict:
+        """
+        Call an external A2A agent via HTTP protocol. Returns only final text
+        (no internal tool events available from remote agents).
+        """
+        if should_log_a2a():
+            logger.info(f"A2A CALL (remote): {agent_name} <- {message[:100]}...")
+        
+        start_time = time.time()
+        try:
+            result = await a2a_client.call_agent(config, message, user_token)
+            duration_ms = (time.time() - start_time) * 1000
+            
+            if result.get("error"):
+                return {"agent_id": agent_id, "agent_name": agent_name, "response": "", "error": result["error"]}
+            
+            response_text = result.get("text", "")
+            if should_log_a2a():
+                logger.info(f"A2A RESPONSE from {agent_name}: {response_text[:500]}{'...' if len(response_text) > 500 else ''}")
+            
+            # Emit completion event
+            if chatter_queue:
+                await chatter_queue.put(ChatterEvent(
+                    type=ChatterEventType.CONTENT,
+                    agent_name=agent_name,
+                    content=f"Completed ({len(response_text)} chars)",
+                    duration_ms=duration_ms,
+                    friendly_message=f"{agent_name} responded in {duration_ms/1000:.1f}s"
+                ))
+            
+            return {
+                "agent_id": agent_id,
+                "agent_name": agent_name,
+                "response": response_text,
             }
             
         except Exception as e:
@@ -1314,7 +1509,9 @@ RESPOND WITH JSON:
         user_token: Optional[str] = None,
         chatter_queue: Optional[asyncio.Queue] = None,
         max_rounds: int = 10,
-        orchestrator_config: Optional[dict] = None
+        orchestrator_config: Optional[dict] = None,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> list[dict]:
         """
         Phase 2: Execute specialists according to the orchestration pattern.
@@ -1330,7 +1527,8 @@ RESPOND WITH JSON:
         if pattern == OrchestrationPattern.SINGLE or len(specialist_ids) == 1:
             # Single: Call just the first specialist
             result = await self._call_specialist_a2a(
-                specialist_ids[0], user_message, user_token, chatter_queue
+                specialist_ids[0], user_message, user_token, chatter_queue,
+                session_id=session_id, user_id=user_id,
             )
             results.append(result)
         
@@ -1339,7 +1537,8 @@ RESPOND WITH JSON:
             accumulated_context = user_message
             for agent_id in specialist_ids:
                 result = await self._call_specialist_a2a(
-                    agent_id, accumulated_context, user_token, chatter_queue
+                    agent_id, accumulated_context, user_token, chatter_queue,
+                    session_id=session_id, user_id=user_id,
                 )
                 results.append(result)
                 # Add this response to context for next agent
@@ -1349,7 +1548,8 @@ RESPOND WITH JSON:
         elif pattern == OrchestrationPattern.CONCURRENT:
             # Concurrent: Call all in parallel
             tasks = [
-                self._call_specialist_a2a(agent_id, user_message, user_token, chatter_queue)
+                self._call_specialist_a2a(agent_id, user_message, user_token, chatter_queue,
+                                         session_id=session_id, user_id=user_id)
                 for agent_id in specialist_ids
             ]
             results = await asyncio.gather(*tasks)
@@ -1393,7 +1593,8 @@ RESPOND WITH JSON:
             accumulated_context = user_message
             for agent_id in sorted_specialists:
                 result = await self._call_specialist_a2a(
-                    agent_id, accumulated_context, user_token, chatter_queue
+                    agent_id, accumulated_context, user_token, chatter_queue,
+                    session_id=session_id, user_id=user_id,
                 )
                 results.append(result)
                 # Add this response to context for next agent
@@ -1443,7 +1644,8 @@ RESPOND WITH JSON:
                         continue
                     
                     result = await self._call_specialist_a2a(
-                        agent_id, round_context, user_token, chatter_queue
+                        agent_id, round_context, user_token, chatter_queue,
+                        session_id=session_id, user_id=user_id,
                     )
                     results.append(result)
                     
@@ -1457,7 +1659,8 @@ RESPOND WITH JSON:
                 round_had_output = False
                 for agent_id in specialist_ids:
                     result = await self._call_specialist_a2a(
-                        agent_id, current_context, user_token, chatter_queue
+                        agent_id, current_context, user_token, chatter_queue,
+                        session_id=session_id, user_id=user_id,
                     )
                     results.append(result)
                     
@@ -1479,10 +1682,15 @@ RESPOND WITH JSON:
         self,
         orchestrator_config: dict,
         specialist_results: list[dict],
-        original_messages: list[dict]
+        user_message: str,
     ) -> str:
         """
         Phase 3: Run orchestrator to synthesize specialist results.
+        
+        Args:
+            orchestrator_config: The orchestrator agent configuration.
+            specialist_results: Results from specialist agent executions.
+            user_message: The original user question.
         
         Returns:
             Synthesized response text
@@ -1513,27 +1721,20 @@ RESPOND WITH JSON:
         # Create chat client
         chat_client = self._create_chat_client(orchestrator_config)
         
-        # Build messages: original conversation + synthesis instruction
-        synthesis_messages = [
-            ChatMessage(role=Role.SYSTEM, text=synthesis_prompt)
-        ]
-        
-        # Add original user message for context
-        for msg in original_messages:
-            if msg.get("role") == "user":
-                synthesis_messages.append(ChatMessage(role=Role.USER, text=msg.get("content", "")))
-        
-        # Create synthesis agent
-        synthesis_agent = ChatAgent(
+        # Create synthesis agent — instructions contain the synthesis prompt
+        # with specialist responses already embedded.  No providers or session
+        # needed; the synthesizer only needs the user question + specialist output.
+        synthesis_agent = Agent(
             name="Synthesizer",
             description="Synthesizes results",
             instructions=synthesis_prompt,
-            chat_client=chat_client
+            client=chat_client,
         )
         
-        # Get synthesis response
+        # Pass only the user's original question; the specialist responses are
+        # embedded in the instructions (system prompt) already.
         response_parts = []
-        async for update in synthesis_agent.run_stream(synthesis_messages):
+        async for update in synthesis_agent.run(user_message, stream=True):
             if update.text:
                 response_parts.append(update.text)
         
@@ -1544,27 +1745,36 @@ RESPOND WITH JSON:
         self,
         pattern: OrchestrationPattern,
         agent_ids: list[str],
-        messages: list[dict],
+        user_message: str,
+        session_id: str,
+        user_id: str,
         user_token: Optional[str] = None,
-        max_rounds: int = 10
+        max_rounds: int = 10,
     ) -> AsyncIterator[AgentResponse]:
         """
         Execute agents using Two-Phase Orchestration with pattern-controlled execution.
-        
+
+        Conversation history and RAG document context are loaded automatically
+        by the Agent Framework's context-provider system (CosmosHistoryProvider
+        and DocumentRAGProvider).  Callers only need to supply the current user
+        message and session identifiers.
+
         Phase 1 (Analysis): Orchestrator analyzes request and decides:
                            - Answer directly (generic questions)
                            - Delegate to specialists (domain-specific)
-        
-        Phase 2 (Execution): Execute specialists via A2A using the session's pattern
+
+        Phase 2 (Execution): Execute specialists using the session's pattern
                             (sequential, concurrent, magentic, group_chat)
-        
+
         Phase 3 (Synthesis): Orchestrator synthesizes specialist results into
                             a coherent final response
-        
+
         Args:
             pattern: The orchestration pattern to use for specialist execution
             agent_ids: List of agent IDs (should include orchestrator + specialists)
-            messages: Chat messages/context
+            user_message: The current user message
+            session_id: Cosmos DB session ID (for history/RAG providers)
+            user_id: Cosmos DB user ID (for history/RAG providers)
             user_token: User's auth token for MCP/A2A pass-through
             max_rounds: Maximum rounds for iterative patterns
         """
@@ -1598,15 +1808,10 @@ RESPOND WITH JSON:
         if should_log_agent():
             logger.info(f"Two-Phase Orchestration: pattern={pattern.value}, specialists={len(specialist_configs)}")
         
-        # Extract the user's latest message
-        user_message = ""
-        for msg in reversed(messages):
-            if msg.get("role") == "user":
-                user_message = msg.get("content", "")
-                break
-        
         # =====================================================================
         # Phase 1: Analysis - Orchestrator decides how to handle the request
+        # Uses AgentSession with CosmosHistoryProvider + DocumentRAGProvider
+        # so the orchestrator sees full conversation history and RAG context.
         # =====================================================================
         if should_log_agent():
             logger.info("Phase 1: Orchestrator analyzing request...")
@@ -1623,11 +1828,37 @@ RESPOND WITH JSON:
         decision = await self._run_orchestrator_for_analysis(
             orchestrator_config,
             specialist_configs,
-            messages
+            user_message,
+            session_id,
+            user_id,
         )
         
         if should_log_agent():
             logger.info(f"Phase 1 decision: action={decision.get('action')}, specialists={decision.get('specialists', [])}")
+        
+        # Emit decision result event
+        reasoning = decision.get("reasoning", "")
+        action = decision.get("action", "unknown")
+        if action == "delegate":
+            # Resolve specialist names for the decision event
+            specialist_names = []
+            for sid in decision.get("specialists", []):
+                sc = self._configs_cache.get(sid, {})
+                specialist_names.append(sc.get("name", sid))
+            decision_msg = f"Decision: delegate to {', '.join(specialist_names)}" if specialist_names else f"Decision: {action}"
+            if reasoning:
+                decision_msg += f" — {reasoning}"
+        else:
+            decision_msg = f"Decision: answer directly"
+            if reasoning:
+                decision_msg += f" — {reasoning}"
+        
+        yield ChatterEvent(
+            type=ChatterEventType.THINKING,
+            agent_name=orchestrator_config.get("name", "Orchestrator"),
+            content=decision_msg,
+            friendly_message=decision_msg
+        )
         
         # =====================================================================
         # Handle Direct Response (no specialists needed)
@@ -1687,18 +1918,36 @@ RESPOND WITH JSON:
         )
         yield pattern_event
         
-        # Execute specialists according to pattern
-        specialist_results = await self._execute_specialists_with_pattern(
-            pattern=pattern,
-            specialist_ids=specialist_ids,
-            user_message=user_message,
-            user_token=user_token,
-            chatter_queue=chatter_queue,
-            max_rounds=max_rounds,
-            orchestrator_config=orchestrator_config
+        # Execute specialists in a background task and stream chatter events
+        # in real-time as they arrive (instead of batching after completion).
+        specialist_task = asyncio.create_task(
+            self._execute_specialists_with_pattern(
+                pattern=pattern,
+                specialist_ids=specialist_ids,
+                user_message=user_message,
+                user_token=user_token,
+                chatter_queue=chatter_queue,
+                max_rounds=max_rounds,
+                orchestrator_config=orchestrator_config,
+                session_id=session_id,
+                user_id=user_id,
+            )
         )
         
-        # Yield any chatter events that accumulated
+        # Stream chatter events as they arrive from specialists
+        while not specialist_task.done():
+            try:
+                event = await asyncio.wait_for(chatter_queue.get(), timeout=0.1)
+                yield event
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.QueueEmpty:
+                await asyncio.sleep(0.05)
+        
+        # Get the result (raises if the task errored)
+        specialist_results = await specialist_task
+        
+        # Drain any remaining events
         while not chatter_queue.empty():
             try:
                 event = chatter_queue.get_nowait()
@@ -1726,7 +1975,7 @@ RESPOND WITH JSON:
         synthesized_response = await self._run_orchestrator_for_synthesis(
             orchestrator_config,
             specialist_results,
-            messages
+            user_message,
         )
         
         # Build final response
@@ -1745,750 +1994,6 @@ RESPOND WITH JSON:
             },
             chatter_events=[]
         )
-    
-    async def _execute_single_pattern(
-        self,
-        agent: ChatAgent,
-        messages: list[dict],
-        chatter_queue: Optional[asyncio.Queue] = None
-    ) -> AsyncIterator[Union[ChatterEvent, AgentResponse]]:
-        """Execute single agent with performance tracking and chatter event streaming.
-        
-        Yields ChatterEvent objects during execution for real-time UI updates,
-        then yields the final AgentResponse with all accumulated events.
-        
-        Uses a concurrent approach to poll the chatter queue even while the agent
-        is blocked waiting for tool calls (like specialist agents) to complete.
-        
-        Args:
-            agent: The agent to execute
-            messages: Chat messages/context
-            chatter_queue: Optional queue for receiving chatter from specialist agents
-        
-        Note: The Agent Framework streams FunctionCallContent updates incrementally
-        as the LLM generates the function call token-by-token. We only emit events
-        when we have complete data (valid call_id and non-empty tool name).
-        """
-        response_content = []
-        tokens_input = 0
-        tokens_output = 0
-        last_update = None
-        chatter_events: list[ChatterEvent] = []
-        seen_tool_calls: set[str] = set()  # Track tool call IDs we've already emitted
-        seen_tool_results: set[str] = set()  # Track tool result IDs we've already emitted
-        pending_tool_calls: dict[str, float] = {}  # Track start time for each tool call
-        
-        # Debug: log what we're sending
-        if should_log_agent():
-            logger.info(f"Executing agent '{agent.name}' with {len(messages)} messages")
-            if messages:
-                logger.info(f"Last message: {messages[-1]}")
-        
-        start_time = time.perf_counter()
-        chat_messages = _convert_to_chat_messages(messages)
-        
-        # Use an async iterator with concurrent queue polling
-        # This allows us to yield chatter events even while waiting for agent updates
-        agent_stream = agent.run_stream(chat_messages).__aiter__()
-        stream_done = False
-        
-        while not stream_done:
-            # Create tasks for both: getting next agent update AND getting queue events
-            next_update_task = asyncio.create_task(self._get_next_update(agent_stream))
-            
-            # If we have a chatter queue, poll it with a short timeout while waiting for agent
-            if chatter_queue:
-                while not next_update_task.done():
-                    # Wait for either: queue event or agent update (with short timeout)
-                    try:
-                        queue_event = await asyncio.wait_for(chatter_queue.get(), timeout=0.05)
-                        chatter_events.append(queue_event)
-                        yield queue_event
-                    except asyncio.TimeoutError:
-                        # No queue event, check if agent task is done
-                        if next_update_task.done():
-                            break
-                        continue
-            
-            # Get the agent update (or StopAsyncIteration if done)
-            try:
-                update = await next_update_task
-            except StopAsyncIteration:
-                stream_done = True
-                continue
-            
-            last_update = update
-            
-            # Process contents to extract chatter events from this agent
-            if hasattr(update, 'contents') and update.contents:
-                for content_item in update.contents:
-                    # Handle function/tool calls
-                    if isinstance(content_item, FunctionCallContent):
-                        # Get the call_id - this is the unique identifier for this function call
-                        call_id = getattr(content_item, 'call_id', None)
-                        tool_name = getattr(content_item, 'name', None) or getattr(content_item, 'function_name', None)
-                        
-                        # Skip incomplete streaming updates:
-                        # - Must have a valid call_id (not None/empty)
-                        # - Must have a non-empty tool name
-                        # The LLM streams partial updates as it builds the function call JSON
-                        if not call_id or not tool_name:
-                            logger.debug(f"Skipping incomplete FunctionCallContent: call_id={call_id}, name={tool_name}")
-                            continue
-                        
-                        # Only emit if we haven't seen this call_id
-                        if call_id not in seen_tool_calls:
-                            seen_tool_calls.add(call_id)
-                            pending_tool_calls[call_id] = time.perf_counter()  # Track start time
-                            tool_args = getattr(content_item, 'arguments', {})
-                            
-                            # Check if this is a delegation to another agent
-                            # (agent.as_tool() creates functions with agent names)
-                            is_delegation = tool_name.replace('_', ' ').lower() in [
-                                c.get('name', '').lower() for c in self._configs_cache.values()
-                            ]
-                            
-                            event_type = ChatterEventType.DELEGATION if is_delegation else ChatterEventType.TOOL_CALL
-                            
-                            chatter_event = ChatterEvent(
-                                type=event_type,
-                                agent_name=agent.name,
-                                content=f"Calling {tool_name}" if not is_delegation else f"Delegating to {tool_name}",
-                                tool_name=tool_name,
-                                tool_args=tool_args if isinstance(tool_args, dict) else {}
-                            )
-                            chatter_events.append(chatter_event)
-                            # logger.info(f"CHATTER YIELDING: {agent.name} -> {event_type.value}: {tool_name}")  # Commented: verbose chatter logging
-                            yield chatter_event
-                    
-                    # Handle function/tool results
-                    elif isinstance(content_item, FunctionResultContent):
-                        call_id = getattr(content_item, 'call_id', None)
-                        
-                        # Skip if no call_id
-                        if not call_id:
-                            logger.debug(f"Skipping FunctionResultContent with no call_id")
-                            continue
-                        
-                        # Only emit if we haven't seen this call_id
-                        if call_id not in seen_tool_results:
-                            seen_tool_results.add(call_id)
-                            
-                            # Calculate duration if we tracked the start
-                            duration_ms = None
-                            if call_id in pending_tool_calls:
-                                duration_ms = (time.perf_counter() - pending_tool_calls[call_id]) * 1000
-                                del pending_tool_calls[call_id]
-                            
-                            result = getattr(content_item, 'result', '')
-                            
-                            # Extract text from result - it might be a string, object, or list
-                            if isinstance(result, str):
-                                result_str = result[:500]
-                            elif isinstance(result, (list, tuple)):
-                                # Could be a list of content items
-                                parts = []
-                                for item in result:
-                                    if hasattr(item, 'text'):
-                                        parts.append(item.text)
-                                    else:
-                                        parts.append(str(item))
-                                result_str = " ".join(parts)[:500]
-                            elif hasattr(result, 'text'):
-                                result_str = result.text[:500] if result.text else ''
-                            else:
-                                result_str = str(result)[:500] if result else ''
-                            
-                            chatter_event = ChatterEvent(
-                                type=ChatterEventType.TOOL_RESULT,
-                                agent_name=agent.name,
-                                content=result_str,
-                                tool_name=call_id,  # Store call_id so frontend can match
-                                duration_ms=duration_ms
-                            )
-                            chatter_events.append(chatter_event)
-                            # logger.info(f"CHATTER YIELDING: {agent.name} -> tool_result for {call_id}" + (f" (duration={duration_ms:.1f}ms)" if duration_ms else ""))  # Commented: verbose chatter logging
-                            yield chatter_event
-                    
-                    # Handle usage content - emit token usage info
-                    elif isinstance(content_item, UsageContent):
-                        # UsageContent has a 'details' property which is a UsageDetails object
-                        # UsageDetails has: input_token_count, output_token_count, total_token_count
-                        details = getattr(content_item, 'details', None)
-                        uc_input_tokens = None
-                        uc_output_tokens = None
-                        
-                        if details:
-                            uc_input_tokens = getattr(details, 'input_token_count', None)
-                            uc_output_tokens = getattr(details, 'output_token_count', None)
-                        
-                        if uc_input_tokens or uc_output_tokens:
-                            chatter_event = ChatterEvent(
-                                type=ChatterEventType.THINKING,
-                                agent_name=agent.name,
-                                content=f"LLM call: {uc_input_tokens or 0} input, {uc_output_tokens or 0} output tokens",
-                                tokens_input=uc_input_tokens,
-                                tokens_output=uc_output_tokens
-                            )
-                            chatter_events.append(chatter_event)
-                            # logger.info(f"CHATTER YIELDING: {agent.name} -> usage: {uc_input_tokens} in, {uc_output_tokens} out")  # Commented: verbose chatter logging
-                            yield chatter_event
-                    
-                    # Handle text content - this is the actual response
-                    elif isinstance(content_item, TextContent):
-                        text = getattr(content_item, 'text', '')
-                        if text:
-                            response_content.append(text)
-            
-            # Also check update.text for simple text streaming
-            elif update.text:
-                response_content.append(update.text)
-            
-            # Try multiple ways to capture token usage
-            tokens_input, tokens_output = self._extract_token_usage(
-                update, tokens_input, tokens_output
-            )
-        
-        # Drain any remaining events from the chatter queue
-        if chatter_queue:
-            while True:
-                try:
-                    specialist_event = chatter_queue.get_nowait()
-                    chatter_events.append(specialist_event)
-                    yield specialist_event
-                except asyncio.QueueEmpty:
-                    break
-        
-        # Try to get usage from the final update (some frameworks only report at the end)
-        if last_update and tokens_input == 0 and tokens_output == 0:
-            tokens_input, tokens_output = self._extract_token_usage_final(last_update)
-        
-        duration_ms = (time.perf_counter() - start_time) * 1000
-        total_tokens = tokens_input + tokens_output
-        
-        # If no token info available, estimate based on text length
-        response_text = "".join(response_content)
-        tokens_estimated = False
-        if total_tokens == 0 and response_text:
-            # Estimate input tokens from messages
-            input_text = " ".join(m.get("content", "") for m in messages)
-            tokens_input = self._estimate_tokens(input_text)
-            tokens_output = self._estimate_tokens(response_text)
-            total_tokens = tokens_input + tokens_output
-            tokens_estimated = True
-        
-        # Log AOAI performance
-        if should_log_performance():
-            perf_data = {
-                "duration_ms": round(duration_ms, 2),
-                "tokens_input": tokens_input,
-                "tokens_output": tokens_output,
-                "tokens_total": total_tokens,
-                "response_length": len(response_text),
-                "message_count": len(messages),
-                "chatter_events_count": len(chatter_events)
-            }
-            if tokens_estimated:
-                perf_data["tokens_estimated"] = True
-            log_performance_summary(logger, f"aoai_agent_{agent.name}", perf_data)
-        
-        yield AgentResponse(
-            agent_id=agent.name,
-            agent_name=agent.name,
-            content=response_text,
-            tokens_used=total_tokens,
-            metadata={
-                "duration_ms": round(duration_ms, 2),
-                "tokens_input": tokens_input,
-                "tokens_output": tokens_output,
-                "tokens_estimated": tokens_estimated
-            },
-            chatter_events=chatter_events
-        )
-    
-    async def _get_next_update(self, async_iterator):
-        """Helper to get the next item from an async iterator.
-        
-        Returns the next item or raises StopAsyncIteration when done.
-        This allows us to wrap the iterator in a task for concurrent waiting.
-        """
-        return await async_iterator.__anext__()
-    
-    def _extract_token_usage(self, update, current_input: int, current_output: int) -> tuple[int, int]:
-        """Try multiple ways to extract token usage from a streaming update."""
-        tokens_input = current_input
-        tokens_output = current_output
-        
-        # Method 1: Direct usage attribute (OpenAI style)
-        if hasattr(update, 'usage') and update.usage:
-            usage = update.usage
-            if hasattr(usage, 'prompt_tokens'):
-                tokens_input = usage.prompt_tokens or 0
-            if hasattr(usage, 'completion_tokens'):
-                tokens_output = usage.completion_tokens or 0
-            if hasattr(usage, 'input_tokens'):
-                tokens_input = usage.input_tokens or 0
-            if hasattr(usage, 'output_tokens'):
-                tokens_output = usage.output_tokens or 0
-        
-        # Method 2: Dict-style usage
-        if hasattr(update, 'usage') and isinstance(update.usage, dict):
-            tokens_input = update.usage.get('prompt_tokens', 0) or update.usage.get('input_tokens', 0)
-            tokens_output = update.usage.get('completion_tokens', 0) or update.usage.get('output_tokens', 0)
-        
-        # Method 3: Metadata attribute
-        if hasattr(update, 'metadata') and update.metadata:
-            meta = update.metadata
-            if isinstance(meta, dict):
-                if 'usage' in meta:
-                    usage = meta['usage']
-                    tokens_input = usage.get('prompt_tokens', 0) or usage.get('input_tokens', 0)
-                    tokens_output = usage.get('completion_tokens', 0) or usage.get('output_tokens', 0)
-                tokens_input = meta.get('prompt_tokens', tokens_input) or meta.get('input_tokens', tokens_input)
-                tokens_output = meta.get('completion_tokens', tokens_output) or meta.get('output_tokens', tokens_output)
-        
-        # Method 4: model_extra for pydantic models
-        if hasattr(update, 'model_extra') and update.model_extra:
-            extra = update.model_extra
-            if 'usage' in extra:
-                usage = extra['usage']
-                if isinstance(usage, dict):
-                    tokens_input = usage.get('prompt_tokens', 0) or usage.get('input_tokens', 0)
-                    tokens_output = usage.get('completion_tokens', 0) or usage.get('output_tokens', 0)
-        
-        return tokens_input, tokens_output
-    
-    def _extract_token_usage_final(self, update) -> tuple[int, int]:
-        """Try to extract token usage from final update with debug logging."""
-        tokens_input = 0
-        tokens_output = 0
-        
-        # Log available attributes for debugging (only when performance logging is on)
-        if should_log_performance():
-            attrs = [attr for attr in dir(update) if not attr.startswith('_')]
-            logger.debug(f"Final update attributes: {attrs}")
-            
-            # Log the update object itself if it has a dict representation
-            if hasattr(update, '__dict__'):
-                logger.debug(f"Final update __dict__: {update.__dict__}")
-            if hasattr(update, 'model_dump'):
-                try:
-                    logger.debug(f"Final update model_dump: {update.model_dump()}")
-                except Exception:
-                    pass
-        
-        return self._extract_token_usage(update, tokens_input, tokens_output)
-    
-    def _estimate_tokens(self, text: str) -> int:
-        """
-        Estimate token count from text using rough approximation.
-        This is a fallback when actual token usage isn't available.
-        
-        Rule of thumb: ~4 characters per token for English text.
-        """
-        if not text:
-            return 0
-        # Rough estimation: 1 token per 4 characters
-        return max(1, len(text) // 4)
-    
-    async def _execute_sequential(
-        self,
-        agents: list[ChatAgent],
-        messages: list[dict]
-    ) -> AsyncIterator[AgentResponse]:
-        """Execute agents in sequence, passing context between them, with performance tracking."""
-        current_messages = messages.copy()
-        total_duration_ms = 0
-        total_tokens = 0
-        
-        for agent in agents:
-            response_content = []
-            tokens_input = 0
-            tokens_output = 0
-            last_update = None
-            
-            start_time = time.perf_counter()
-            chat_messages = _convert_to_chat_messages(current_messages)
-            
-            async for update in agent.run_stream(chat_messages):
-                last_update = update
-                if update.text:
-                    response_content.append(update.text)
-                tokens_input, tokens_output = self._extract_token_usage(
-                    update, tokens_input, tokens_output
-                )
-            
-            # Try final update if no tokens captured
-            if last_update and tokens_input == 0 and tokens_output == 0:
-                tokens_input, tokens_output = self._extract_token_usage_final(last_update)
-            
-            duration_ms = (time.perf_counter() - start_time) * 1000
-            full_response = "".join(response_content)
-            
-            # If no token info available, estimate based on text length
-            tokens_estimated = False
-            if tokens_input == 0 and tokens_output == 0 and full_response:
-                input_text = " ".join(m.get("content", "") for m in current_messages)
-                tokens_input = self._estimate_tokens(input_text)
-                tokens_output = self._estimate_tokens(full_response)
-                tokens_estimated = True
-            
-            agent_tokens = tokens_input + tokens_output
-            total_duration_ms += duration_ms
-            total_tokens += agent_tokens
-            
-            # Log per-agent performance
-            if should_log_performance():
-                perf_data = {
-                    "duration_ms": round(duration_ms, 2),
-                    "tokens_input": tokens_input,
-                    "tokens_output": tokens_output,
-                    "tokens_total": agent_tokens
-                }
-                if tokens_estimated:
-                    perf_data["tokens_estimated"] = True
-                log_performance_summary(logger, f"aoai_sequential_{agent.name}", perf_data)
-            
-            yield AgentResponse(
-                agent_id=agent.name,
-                agent_name=agent.name,
-                content=full_response,
-                tokens_used=agent_tokens,
-                metadata={
-                    "pattern": "sequential",
-                    "duration_ms": round(duration_ms, 2),
-                    "tokens_input": tokens_input,
-                    "tokens_output": tokens_output,
-                    "tokens_estimated": tokens_estimated
-                }
-            )
-            
-            # Pass response to next agent
-            current_messages.append({
-                "role": "assistant",
-                "content": full_response
-            })
-        
-        # Log total sequential execution
-        if should_log_performance():
-            log_performance_summary(logger, "sequential_total", {
-                "total_duration_ms": round(total_duration_ms, 2),
-                "total_tokens": total_tokens,
-                "agent_count": len(agents)
-            })
-    
-    async def _execute_concurrent(
-        self,
-        agents: list[ChatAgent],
-        messages: list[dict]
-    ) -> AsyncIterator[AgentResponse]:
-        """Execute agents concurrently and aggregate results with performance tracking."""
-        chat_messages = _convert_to_chat_messages(messages)
-        concurrent_start = time.perf_counter()
-        
-        # Run all agents in parallel
-        async def run_agent(agent: ChatAgent) -> AgentResponse:
-            response_content = []
-            tokens_input = 0
-            tokens_output = 0
-            last_update = None
-            
-            start_time = time.perf_counter()
-            
-            async for update in agent.run_stream(chat_messages):
-                last_update = update
-                if update.text:
-                    response_content.append(update.text)
-                tokens_input, tokens_output = self._extract_token_usage(
-                    update, tokens_input, tokens_output
-                )
-            
-            # Try final update if no tokens captured
-            if last_update and tokens_input == 0 and tokens_output == 0:
-                tokens_input, tokens_output = self._extract_token_usage_final(last_update)
-            
-            duration_ms = (time.perf_counter() - start_time) * 1000
-            response_text = "".join(response_content)
-            
-            # If no token info available, estimate based on text length
-            tokens_estimated = False
-            if tokens_input == 0 and tokens_output == 0 and response_text:
-                input_text = " ".join(m.get("content", "") for m in messages)
-                tokens_input = self._estimate_tokens(input_text)
-                tokens_output = self._estimate_tokens(response_text)
-                tokens_estimated = True
-            
-            agent_tokens = tokens_input + tokens_output
-            
-            # Log per-agent performance
-            if should_log_performance():
-                perf_data = {
-                    "duration_ms": round(duration_ms, 2),
-                    "tokens_input": tokens_input,
-                    "tokens_output": tokens_output,
-                    "tokens_total": agent_tokens
-                }
-                if tokens_estimated:
-                    perf_data["tokens_estimated"] = True
-                log_performance_summary(logger, f"aoai_concurrent_{agent.name}", perf_data)
-            
-            return AgentResponse(
-                agent_id=agent.name,
-                agent_name=agent.name,
-                content=response_text,
-                tokens_used=agent_tokens,
-                metadata={
-                    "pattern": "concurrent",
-                    "duration_ms": round(duration_ms, 2),
-                    "tokens_input": tokens_input,
-                    "tokens_output": tokens_output,
-                    "tokens_estimated": tokens_estimated
-                }
-            )
-        
-        tasks = [run_agent(agent) for agent in agents]
-        results = await asyncio.gather(*tasks)
-        
-        concurrent_duration = (time.perf_counter() - concurrent_start) * 1000
-        total_tokens = sum(r.tokens_used for r in results)
-        
-        # Log total concurrent execution
-        if should_log_performance():
-            log_performance_summary(logger, "concurrent_total", {
-                "wall_clock_ms": round(concurrent_duration, 2),
-                "total_tokens": total_tokens,
-                "agent_count": len(agents)
-            })
-        
-        for response in results:
-            yield response
-    
-    async def _execute_magentic(
-        self,
-        agents: list[ChatAgent],
-        messages: list[dict],
-        max_rounds: int
-    ) -> AsyncIterator[AgentResponse]:
-        """Execute using Magentic-One pattern with orchestrator and performance tracking."""
-        if len(agents) < 2:
-            raise ValueError("Magentic pattern requires at least 2 agents (1 orchestrator + workers)")
-        
-        orchestrator = agents[0]
-        workers = agents[1:]
-        current_messages = messages.copy()
-        total_duration_ms = 0
-        total_tokens = 0
-        
-        for round_num in range(max_rounds):
-            round_start = time.perf_counter()
-            
-            # Orchestrator decides what to do
-            orchestrator_response = []
-            tokens_input = 0
-            tokens_output = 0
-            last_update = None
-            
-            orch_start = time.perf_counter()
-            chat_messages = _convert_to_chat_messages(current_messages)
-            
-            async for update in orchestrator.run_stream(chat_messages):
-                last_update = update
-                if update.text:
-                    orchestrator_response.append(update.text)
-                tokens_input, tokens_output = self._extract_token_usage(
-                    update, tokens_input, tokens_output
-                )
-            
-            # Try final update if no tokens captured
-            if last_update and tokens_input == 0 and tokens_output == 0:
-                tokens_input, tokens_output = self._extract_token_usage_final(last_update)
-            
-            orch_duration = (time.perf_counter() - orch_start) * 1000
-            orch_tokens = tokens_input + tokens_output
-            total_duration_ms += orch_duration
-            total_tokens += orch_tokens
-            
-            orch_content = "".join(orchestrator_response)
-            
-            if should_log_performance():
-                log_performance_summary(logger, f"aoai_magentic_orchestrator_r{round_num}", {
-                    "duration_ms": round(orch_duration, 2),
-                    "tokens_input": tokens_input,
-                    "tokens_output": tokens_output,
-                    "tokens_total": orch_tokens
-                })
-            
-            yield AgentResponse(
-                agent_id=orchestrator.name,
-                agent_name=orchestrator.name,
-                content=orch_content,
-                tokens_used=orch_tokens,
-                metadata={
-                    "pattern": "magentic",
-                    "round": round_num,
-                    "role": "orchestrator",
-                    "duration_ms": round(orch_duration, 2)
-                }
-            )
-            
-            current_messages.append({"role": "assistant", "content": orch_content})
-            
-            # Check if orchestrator signals completion
-            if "TERMINATE" in orch_content or "DONE" in orch_content:
-                break
-            
-            # Workers respond in sequence
-            for worker in workers:
-                worker_response = []
-                w_tokens_input = 0
-                w_tokens_output = 0
-                w_last_update = None
-                
-                worker_start = time.perf_counter()
-                chat_messages = _convert_to_chat_messages(current_messages)
-                
-                async for update in worker.run_stream(chat_messages):
-                    w_last_update = update
-                    if update.text:
-                        worker_response.append(update.text)
-                    w_tokens_input, w_tokens_output = self._extract_token_usage(
-                        update, w_tokens_input, w_tokens_output
-                    )
-                
-                # Try final update if no tokens captured
-                if w_last_update and w_tokens_input == 0 and w_tokens_output == 0:
-                    w_tokens_input, w_tokens_output = self._extract_token_usage_final(w_last_update)
-                
-                worker_duration = (time.perf_counter() - worker_start) * 1000
-                worker_tokens = w_tokens_input + w_tokens_output
-                total_duration_ms += worker_duration
-                total_tokens += worker_tokens
-                
-                worker_content = "".join(worker_response)
-                
-                if should_log_performance():
-                    log_performance_summary(logger, f"aoai_magentic_worker_{worker.name}_r{round_num}", {
-                        "duration_ms": round(worker_duration, 2),
-                        "tokens_input": w_tokens_input,
-                        "tokens_output": w_tokens_output,
-                        "tokens_total": worker_tokens
-                    })
-                
-                yield AgentResponse(
-                    agent_id=worker.name,
-                    agent_name=worker.name,
-                    content=worker_content,
-                    tokens_used=worker_tokens,
-                    metadata={
-                        "pattern": "magentic",
-                        "round": round_num,
-                        "role": "worker",
-                        "duration_ms": round(worker_duration, 2)
-                    }
-                )
-                
-                current_messages.append({"role": "assistant", "content": f"[{worker.name}]: {worker_content}"})
-            
-            round_duration = (time.perf_counter() - round_start) * 1000
-            if should_log_performance():
-                log_performance_summary(logger, f"magentic_round_{round_num}", {
-                    "round_duration_ms": round(round_duration, 2)
-                })
-        
-        # Log total magentic execution
-        if should_log_performance():
-            log_performance_summary(logger, "magentic_total", {
-                "total_duration_ms": round(total_duration_ms, 2),
-                "total_tokens": total_tokens,
-                "rounds": round_num + 1
-            })
-    
-    async def _execute_group_chat(
-        self,
-        agents: list[ChatAgent],
-        messages: list[dict],
-        max_rounds: int
-    ) -> AsyncIterator[AgentResponse]:
-        """Execute using group chat pattern with performance tracking."""
-        # Run conversation
-        round_num = 0
-        current_messages = messages.copy()
-        total_duration_ms = 0
-        total_tokens = 0
-        
-        for _ in range(max_rounds):
-            for agent in agents:
-                response_content = []
-                tokens_input = 0
-                tokens_output = 0
-                last_update = None
-                
-                start_time = time.perf_counter()
-                chat_messages = _convert_to_chat_messages(current_messages)
-                
-                async for update in agent.run_stream(chat_messages):
-                    last_update = update
-                    if update.text:
-                        response_content.append(update.text)
-                    tokens_input, tokens_output = self._extract_token_usage(
-                        update, tokens_input, tokens_output
-                    )
-                
-                # Try final update if no tokens captured
-                if last_update and tokens_input == 0 and tokens_output == 0:
-                    tokens_input, tokens_output = self._extract_token_usage_final(last_update)
-                
-                duration_ms = (time.perf_counter() - start_time) * 1000
-                agent_tokens = tokens_input + tokens_output
-                total_duration_ms += duration_ms
-                total_tokens += agent_tokens
-                
-                full_response = "".join(response_content)
-                round_num += 1
-                
-                if should_log_performance():
-                    log_performance_summary(logger, f"aoai_groupchat_{agent.name}_r{round_num}", {
-                        "duration_ms": round(duration_ms, 2),
-                        "tokens_input": tokens_input,
-                        "tokens_output": tokens_output,
-                        "tokens_total": agent_tokens
-                    })
-                
-                yield AgentResponse(
-                    agent_id=agent.name,
-                    agent_name=agent.name,
-                    content=full_response,
-                    tokens_used=agent_tokens,
-                    metadata={
-                        "pattern": "group_chat",
-                        "round": round_num,
-                        "duration_ms": round(duration_ms, 2)
-                    }
-                )
-                
-                current_messages.append({
-                    "role": "assistant",
-                    "content": f"[{agent.name}]: {full_response}"
-                })
-                
-                # Check for termination signal
-                if "[DONE]" in full_response or "[END]" in full_response:
-                    # Log total group chat execution
-                    if should_log_performance():
-                        log_performance_summary(logger, "groupchat_total", {
-                            "total_duration_ms": round(total_duration_ms, 2),
-                            "total_tokens": total_tokens,
-                            "rounds": round_num
-                        })
-                    return
-        
-        # Log total group chat execution
-        if should_log_performance():
-            log_performance_summary(logger, "groupchat_total", {
-                "total_duration_ms": round(total_duration_ms, 2),
-                "total_tokens": total_tokens,
-                "rounds": round_num
-            })
     
     async def close(self) -> None:
         """Cleanup resources."""
