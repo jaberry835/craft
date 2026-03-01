@@ -77,3 +77,41 @@ class UserAccessRepository:
         except Exception as e:
             self.logger.error(f"Error querying Cosmos DB: {str(e)}", exc_info=True)
             raise
+
+    async def get_ss_tokens_by_login_async(self, login: str) -> Optional[list]:
+        """
+        Query Cosmos DB for ss_tokens by login ID
+        
+        Args:
+            login: User login ID (e.g., email)
+            
+        Returns:
+            List of ss_tokens if found, None otherwise
+        """
+        try:
+            database = self.client.get_database_client(self.database_name)
+            container = database.get_container_client(self.container_name)
+            
+            # Query for the user's ss_tokens
+            query = "SELECT c.ss_tokens FROM c WHERE c.LoginID = @login"
+            parameters = [{"name": "@login", "value": login}]
+            
+            # Use partition key for efficient query
+            items = list(container.query_items(
+                query=query,
+                parameters=parameters,
+                partition_key=login,
+                max_item_count=1
+            ))
+            
+            if items and len(items) > 0:
+                ss_tokens = items[0].get('ss_tokens')
+                self.logger.info(f"Found ss_tokens for {login}")
+                return ss_tokens
+            
+            self.logger.info(f"No ss_tokens found for {login}")
+            return None
+            
+        except Exception as e:
+            self.logger.error(f"Error querying Cosmos DB for ss_tokens: {str(e)}", exc_info=True)
+            raise

@@ -9,7 +9,6 @@
     "AZURE_COSMOS_DB_ENDPOINT": "https://chat-db.documents.azure.us:443/",
     "AZURE_COSMOS_DB_DATABASE": "ChatDatabase",
     "AZURE_COSMOS_DB_CONTAINER": "UserAccess",
-    "AZURE_COSMOS_DB_KEY": "",
     "COSMOS_PARTITION_KEY_PATH": "/LoginID",
     "RESPONSE_FORMAT": "text"
   }
