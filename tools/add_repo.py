@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import sys, subprocess, os, shutil, stat, tempfile, filecmp
+import sys, subprocess, os, shutil, stat, tempfile, filecmp, json
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -43,6 +43,7 @@ EXCLUDE_PATTERNS = [
 
 # Size threshold for binary detection (10MB)
 MAX_FILE_SIZE = 10 * 1024 * 1024
+SYNC_STATE_FILE = ".add_repo_sync_state.json"
 
 def handle_remove_readonly(func, path, exc):
     excvalue = exc[1]
@@ -65,6 +66,44 @@ def derive_repo_name(source: str) -> str:
 
     repo_name = os.path.splitext(source_tail)[0]
     return repo_name or "imported-repo"
+
+
+def make_sync_key(source: str, branch: str) -> str:
+    if os.path.exists(source):
+        return f"local::{Path(source).resolve()}::{branch}"
+    return f"remote::{source}::{branch}"
+
+
+def load_sync_state(state_path: Path) -> dict:
+    if not state_path.exists():
+        return {}
+    try:
+        with state_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {}
+
+
+def save_sync_state(state_path: Path, state: dict) -> None:
+    with state_path.open("w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2, sort_keys=True)
+        f.write("\n")
+
+
+def get_remote_branch_head(source: str, branch: str) -> str:
+    result = subprocess.run(
+        ["git", "ls-remote", source, f"refs/heads/{branch}"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    output = result.stdout.strip()
+    if not output:
+        raise ValueError(f"Branch '{branch}' not found for {source}")
+    return output.split()[0]
 
 
 def copy_local_source(source: str, target_dir: str) -> None:
@@ -198,6 +237,20 @@ def main():
     tmp_base = args.tmp_dir
     repo_name = derive_repo_name(source)
     target_dir = f"{repo_name}-{branch}"
+    state_path = Path(SYNC_STATE_FILE)
+    sync_state = load_sync_state(state_path)
+    sync_key = make_sync_key(source, branch)
+
+    remote_head = None
+    if not os.path.exists(source) and os.path.exists(target_dir):
+        try:
+            remote_head = get_remote_branch_head(source, branch)
+            last_synced_head = sync_state.get(sync_key)
+            if last_synced_head == remote_head:
+                print("✅ No remote changes detected — skipping clone and sync.")
+                return
+        except (subprocess.SubprocessError, ValueError) as e:
+            print(f"⚠️ Could not pre-check remote HEAD ({e}). Continuing with full sync...")
 
     # Clone/copy into a temp directory first
     if tmp_base:
@@ -243,12 +296,24 @@ def main():
 
     total_changes = stats['added'] + stats['updated'] + stats['removed']
     if total_changes == 0:
+        if remote_head:
+            sync_state[sync_key] = remote_head
+            save_sync_state(state_path, sync_state)
         print("\n✅ Already up to date — nothing to commit.")
         return
 
     subprocess.run(["git", "add", target_dir], check=True)
     subprocess.run(["git", "commit", "-m", f"Add/update {repo_name} ({branch})"], check=True)
     subprocess.run(["git", "push"], check=True)
+
+    if not remote_head and not os.path.exists(source):
+        try:
+            remote_head = get_remote_branch_head(source, branch)
+        except (subprocess.SubprocessError, ValueError):
+            remote_head = None
+    if remote_head:
+        sync_state[sync_key] = remote_head
+        save_sync_state(state_path, sync_state)
 
     print(f"✅ Synced {source} ({branch}) into curated repo as {target_dir}")
 
