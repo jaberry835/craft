@@ -80,6 +80,14 @@ npm run build       # outputs to dist/
 npm run preview     # preview the production build locally
 ```
 
+For static `dist/` hosting (no nginx/container), set backend URL at runtime in `dist/runtime-config.js`:
+
+```js
+window.__APP_CONFIG__ = {
+  API_URL: 'https://YOUR-BACKEND-APP.azurewebsites.net'
+};
+```
+
 ### 2. Backend
 
 ```bash
@@ -158,14 +166,15 @@ The policies directory is mounted as a read-only volume so the agent can load th
 
 ```bash
 docker build -t pixelpress-frontend .
-docker run -p 3000:80 pixelpress-frontend
+docker run -p 3000:80 \
+  -e BACKEND_UPSTREAM=https://YOUR-BACKEND-APP.azurewebsites.net \
+  pixelpress-frontend
 ```
 
 The frontend image uses a multi-stage build (Node → nginx). The included `nginx.conf` serves the SPA and proxies `/api/` requests to the backend.
 
-> **Note:** The nginx config uses `proxy_pass http://backend:8000`. When running
-> containers without a shared Docker network, update `nginx.conf` to point to the
-> backend's actual hostname or IP address.
+> **Note:** The nginx config reads `BACKEND_UPSTREAM` at container startup. In Azure
+> App Service (frontend), set `BACKEND_UPSTREAM` to your backend base URL.
 
 ---
 

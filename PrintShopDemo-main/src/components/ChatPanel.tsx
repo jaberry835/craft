@@ -10,7 +10,11 @@ import type { RequestFormData } from '../types/request';
 import PolicyModal from './PolicyModal';
 import './ChatPanel.css';
 
-const API_BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
+const runtimeApiBase = (globalThis as typeof globalThis & {
+  __APP_CONFIG__?: { API_URL?: string };
+}).__APP_CONFIG__?.API_URL;
+
+const API_BASE = runtimeApiBase ?? import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
 
 // ── Types ───────────────────────────────────────────────────
 interface ChatMessage {
