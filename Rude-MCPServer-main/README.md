@@ -40,6 +40,23 @@ A Python-based Model Context Protocol (MCP) server built with FastMCP, designed 
 - Optional Azure OpenAI generation for grounded answers
 - Tools: `rag_retrieve`, `rag_rag_answer`, `rag_health`
 
+### 🌐 Translation Tools
+- Text translation to one or multiple languages
+- Language detection with confidence scores
+- Script transliteration (e.g. Kanji → Latin)
+- Dictionary lookups with back-translations and example sentences
+- Supports key-based auth or identity-based auth via `DefaultAzureCredential`
+- Auto-detects Azure Government vs Commercial from `AZURE_AUTHORITY_HOST`
+- Tools: `translate_text`, `translate_text_multiple_languages`, `detect_language`, `get_supported_languages`, `transliterate_text`, `dictionary_lookup`, `dictionary_examples`, `translator_health`
+
+### 👁️ Computer Vision Tools
+- Image analysis with tags, object detection, people detection, OCR text extraction, and smart cropping
+- Defaults to tags + objects + OCR when no features specified — caller doesn't need to configure anything
+- Accepts images via public URL or base64-encoded data
+- Supports key-based auth or identity-based auth via `DefaultAzureCredential`
+- Auto-detects Azure Government vs Commercial from `AZURE_AUTHORITY_HOST`
+- Tools: `analyze_image`, `read_text_from_image`, `computer_vision_health`
+
 ## Architecture
 
 ```
@@ -143,6 +160,11 @@ curl https://your-app-service-name.azurewebsites.net/health
 | `MCP_SERVER_NAME` | No | Server display name |
 | `CORS_ENABLED` | No | Enable CORS (default: true) |
 | `CORS_ORIGINS` | No | Allowed CORS origins (default: *) |
+| `AZURE_TRANSLATOR_KEY` | No | Translator resource key (if set, uses key auth) |
+| `AZURE_TRANSLATOR_ENDPOINT` | No | Translator endpoint (auto-detected from cloud if not set) |
+| `AZURE_TRANSLATOR_REGION` | No | Azure region for Translator (required for key auth) |
+| `AZURE_CV_ENDPOINT` | No | Computer Vision resource endpoint URL |
+| `AZURE_CV_KEY` | No | Computer Vision resource key (if set, uses key auth) |
 
 
 *Automatically set by Azure App Service when using managed identity
@@ -156,6 +178,52 @@ curl https://your-app-service-name.azurewebsites.net/health
    .add database ['your-database'] users ('aadapp=your-managed-identity-id') 'MCP Server'
    ```
 3. **Set environment variables** in App Service configuration
+
+### Azure Translator Setup
+
+The translation tools support two authentication modes:
+
+#### Option 1: Key-Based Auth
+Set `AZURE_TRANSLATOR_KEY` and `AZURE_TRANSLATOR_REGION` in your `.env` or App Service configuration. The global endpoint is used automatically.
+
+#### Option 2: Identity-Based Auth (Recommended)
+Use `DefaultAzureCredential` (Managed Identity, az login, etc.) with a resource-specific custom-domain endpoint.
+
+**Required RBAC role**: The service principal or managed identity must have the **Cognitive Services User** role on the Translator resource:
+
+```bash
+# Get the service principal object ID
+sp=$(az ad sp show --id <YOUR_APP_CLIENT_ID> --query id -o tsv)
+
+# Assign Cognitive Services User role on the Translator resource
+az role assignment create \
+  --assignee $sp \
+  --role "Cognitive Services User" \
+  --scope "/subscriptions/<SUB_ID>/resourceGroups/<RG>/providers/Microsoft.CognitiveServices/accounts/<TRANSLATOR_RESOURCE_NAME>"
+```
+
+When using identity auth, set `AZURE_TRANSLATOR_ENDPOINT` to your resource-specific URL (e.g. `https://<resource>.cognitiveservices.azure.us/`).
+
+### Azure Computer Vision Setup
+
+The computer vision tools use Azure Cognitive Services Image Analysis 4.0.
+
+#### Option 1: Key-Based Auth
+Set `AZURE_CV_KEY` and `AZURE_CV_ENDPOINT` in your `.env` or App Service configuration.
+
+#### Option 2: Identity-Based Auth (Recommended)
+Use `DefaultAzureCredential` with the resource-specific endpoint.
+
+**Required RBAC role**: The service principal or managed identity must have the **Cognitive Services User** role on the Computer Vision resource:
+
+```bash
+az role assignment create \
+  --assignee $sp \
+  --role "Cognitive Services User" \
+  --scope "/subscriptions/<SUB_ID>/resourceGroups/<RG>/providers/Microsoft.CognitiveServices/accounts/<CV_RESOURCE_NAME>"
+```
+
+Set `AZURE_CV_ENDPOINT` to your resource URL (e.g. `https://<resource>.cognitiveservices.azure.us`).
 
 ### CORS Configuration
 

@@ -65,7 +65,7 @@ from starlette.middleware.cors import CORSMiddleware
 # Import tool registration functions
 try:
     logger.info("📦 Importing tool registration functions...")
-    from tools import register_adx_tools, register_fictional_api_tools, register_document_tools, register_rag_tools, register_company_and_device_tools, register_postgres_tools
+    from tools import register_adx_tools, register_fictional_api_tools, register_document_tools, register_rag_tools, register_company_and_device_tools, register_postgres_tools, register_translation_tools, register_computer_vision_tools
     logger.info("✅ Tool imports successful")
 except ImportError as e:
     logger.error(f"❌ Failed to import tools: {e}")
@@ -283,6 +283,10 @@ register_rag_tools(mcp)
 logger.info("✅ RAG tools registered")
 register_postgres_tools(mcp)
 logger.info("✅ PostgreSQL tools registered")
+register_translation_tools(mcp)
+logger.info("✅ Translation tools registered")
+register_computer_vision_tools(mcp)
+logger.info("✅ Computer Vision tools registered")
 logger.info("🎉 All tools registered successfully")
 
 
@@ -535,6 +539,8 @@ async def list_tools_endpoint(request):
             "fictional_api": [t for t in tool_list if any(x in t["name"] for x in ["company", "device", "fictional"])],
             "document": [t for t in tool_list if any(x in t["name"] for x in ["document", "search"])],
             "rag": [t for t in tool_list if t["name"].startswith("rag_")],
+            "translation": [t for t in tool_list if any(x in t["name"] for x in ["translate", "transliterate", "dictionary_", "detect_language", "supported_languages", "translator_health"])],
+            "computer_vision": [t for t in tool_list if any(x in t["name"] for x in ["analyze_image", "read_text_from_image", "computer_vision_health"])],
             "system": [t for t in tool_list if t["name"] in ["health_check"]]
         }
         
@@ -627,7 +633,9 @@ async def root(request):
             "adx_tools": ["kusto_list_databases", "kusto_list_tables", "kusto_describe_table", "kusto_query", "kusto_get_cluster_info"],
             "fictional_api_tools": ["get_ip_company_info", "get_company_devices", "get_company_summary", "fictional_api_health_check"],
                 "document_tools": ["list_documents", "get_document", "search_documents", "get_document_content_summary"],
-                "rag_tools": ["rag_retrieve", "rag_rag_answer", "rag_health"]
+                "rag_tools": ["rag_retrieve", "rag_rag_answer", "rag_health"],
+                "translation_tools": ["translate_text", "translate_text_multiple_languages", "detect_language", "get_supported_languages", "transliterate_text", "dictionary_lookup", "dictionary_examples", "translator_health"],
+                "computer_vision_tools": ["analyze_image", "read_text_from_image", "computer_vision_health"]
         }
     })
 
