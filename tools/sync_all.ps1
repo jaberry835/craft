@@ -13,7 +13,7 @@ $repos = @(
 $scriptDir = $PSScriptRoot
 if (-not $scriptDir) { $scriptDir = Get-Location }
 
-$addRepo = Join-Path $scriptDir "tools\add_repo.py"
+$addRepo = Join-Path $scriptDir "add_repo.py"
 
 foreach ($repo in $repos) {
     Write-Host "`n========================================" -ForegroundColor Cyan
