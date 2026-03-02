@@ -45,6 +45,51 @@ EXCLUDE_PATTERNS = [
 MAX_FILE_SIZE = 10 * 1024 * 1024
 SYNC_STATE_FILE = ".add_repo_sync_state.json"
 
+
+def get_github_token() -> str | None:
+    token = os.environ.get("ADD_REPO_GITHUB_TOKEN")
+    if token:
+        return token.strip()
+    return None
+
+
+def is_github_https_source(source: str) -> bool:
+    if os.path.exists(source):
+        return False
+    parsed = urlparse(source)
+    return parsed.scheme == "https" and parsed.hostname in {"github.com", "www.github.com"}
+
+
+def setup_gh_git_credentials() -> None:
+    try:
+        subprocess.run(
+            ["gh", "auth", "setup-git"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        pass
+
+
+def build_git_source_with_auth(source: str) -> str:
+    if not is_github_https_source(source):
+        return source
+
+    parsed = urlparse(source)
+
+    if parsed.username:
+        return source
+
+    token = get_github_token()
+    if not token:
+        return source
+
+    auth_netloc = f"x-access-token:{token}@{parsed.hostname}"
+    if parsed.port:
+        auth_netloc = f"{auth_netloc}:{parsed.port}"
+    return parsed._replace(netloc=auth_netloc).geturl()
+
 def handle_remove_readonly(func, path, exc):
     excvalue = exc[1]
     if func in (os.unlink, os.rmdir):
@@ -98,8 +143,10 @@ def get_remote_branch_head(source: str, branch: str) -> str:
         ["git", "ls-remote", source, f"refs/heads/{branch}"],
         capture_output=True,
         text=True,
-        check=True,
     )
+    if result.returncode != 0:
+        reason = (result.stderr or result.stdout or "git ls-remote failed").strip()
+        raise RuntimeError(reason)
     output = result.stdout.strip()
     if not output:
         raise ValueError(f"Branch '{branch}' not found for {source}")
@@ -234,6 +281,9 @@ def parse_args():
 def main():
     args = parse_args()
     source, branch = args.source, args.branch
+    if is_github_https_source(source):
+        setup_gh_git_credentials()
+    git_source = build_git_source_with_auth(source)
     tmp_base = args.tmp_dir
     repo_name = derive_repo_name(source)
     target_dir = f"{repo_name}-{branch}"
@@ -244,12 +294,12 @@ def main():
     remote_head = None
     if not os.path.exists(source) and os.path.exists(target_dir):
         try:
-            remote_head = get_remote_branch_head(source, branch)
+            remote_head = get_remote_branch_head(git_source, branch)
             last_synced_head = sync_state.get(sync_key)
             if last_synced_head == remote_head:
                 print("✅ No remote changes detected — skipping clone and sync.")
                 return
-        except (subprocess.SubprocessError, ValueError) as e:
+        except (RuntimeError, ValueError) as e:
             print(f"⚠️ Could not pre-check remote HEAD ({e}). Continuing with full sync...")
 
     # Clone/copy into a temp directory first
@@ -264,11 +314,20 @@ def main():
             copy_local_source(source, fresh_dir)
         else:
             print(f"📥 Cloning {source} ({branch})...")
-            subprocess.run([
-                "git", "clone", "--depth", "1",
-                "--branch", branch, "--single-branch",
-                source, fresh_dir
-            ], check=True)
+            try:
+                subprocess.run([
+                    "git", "clone", "--depth", "1",
+                    "--branch", branch, "--single-branch",
+                    git_source, fresh_dir
+                ], check=True)
+            except subprocess.CalledProcessError:
+                if is_github_https_source(source):
+                    print("❌ Clone failed for GitHub repo.")
+                    print("   If this is private, authenticate with a token that has repo read access,")
+                    print("   then either run `gh auth login --with-token` or set ADD_REPO_GITHUB_TOKEN.")
+                else:
+                    print("❌ Clone failed.")
+                sys.exit(1)
 
         # Remove .git folder from fresh clone
         git_dir = os.path.join(fresh_dir, ".git")
@@ -308,8 +367,8 @@ def main():
 
     if not remote_head and not os.path.exists(source):
         try:
-            remote_head = get_remote_branch_head(source, branch)
-        except (subprocess.SubprocessError, ValueError):
+            remote_head = get_remote_branch_head(git_source, branch)
+        except (RuntimeError, ValueError):
             remote_head = None
     if remote_head:
         sync_state[sync_key] = remote_head
