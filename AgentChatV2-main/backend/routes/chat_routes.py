@@ -244,6 +244,7 @@ async def send_message(request: Request, chat_request: ChatRequest):
         run_id = str(uuid.uuid4())
         message_id = str(uuid.uuid4())
         tool_call_counter = 0
+        tool_call_id_map: dict[str, str] = {}  # framework call_id -> AG-UI tc_id
 
         try:
             # --- AG-UI: RUN_STARTED ---
@@ -315,6 +316,8 @@ async def send_message(request: Request, chat_request: ChatRequest):
                     elif event.type == ChatterEventType.TOOL_CALL:
                         tool_call_counter += 1
                         tc_id = f"tc-{tool_call_counter}"
+                        if event.call_id:
+                            tool_call_id_map[event.call_id] = tc_id
                         yield _agui_sse(ToolCallStartEvent(
                             tool_call_id=tc_id,
                             tool_call_name=event.tool_name or "unknown",
@@ -334,7 +337,7 @@ async def send_message(request: Request, chat_request: ChatRequest):
                             }))
 
                     elif event.type == ChatterEventType.TOOL_RESULT:
-                        tc_id = f"tc-{tool_call_counter}"
+                        tc_id = tool_call_id_map.get(event.call_id, f"tc-{tool_call_counter}") if event.call_id else f"tc-{tool_call_counter}"
                         yield _agui_sse(ToolCallEndEvent(tool_call_id=tc_id))
                         yield _agui_sse(ToolCallResultEvent(
                             message_id=str(uuid.uuid4()),

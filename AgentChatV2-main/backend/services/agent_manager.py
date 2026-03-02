@@ -9,7 +9,7 @@ from enum import Enum
 import asyncio
 import time
 
-from agent_framework import Agent, Message
+from agent_framework import Agent, Message, Content
 from agent_framework.azure import AzureOpenAIChatClient
 
 from config import get_settings, get_azure_credential
@@ -157,6 +157,7 @@ class ChatterEvent:
     content: str = ""
     tool_name: Optional[str] = None
     tool_args: Optional[dict] = None
+    call_id: Optional[str] = None  # Underlying framework tool-call ID for correlation
     timestamp: float = field(default_factory=time.time)
     duration_ms: Optional[float] = None  # Duration of tool execution
     tokens_input: Optional[int] = None   # Input tokens used (for LLM calls)
@@ -209,6 +210,8 @@ class ChatterEvent:
             result["tool_name"] = self.tool_name
         if self.tool_args:
             result["tool_args"] = self.tool_args
+        if self.call_id:
+            result["call_id"] = self.call_id
         if self.duration_ms is not None:
             result["duration_ms"] = round(self.duration_ms, 1)
         if self.tokens_input is not None:
@@ -345,8 +348,7 @@ class AgentManager:
                 if cached_key:
                     api_key = cached_key
                     logger.info(f"[AOAI-CONFIG] Agent '{agent_name}': using API key from AOAI endpoint config "
-                                f"(endpoint_id={aoai_endpoint_id}, key_length={len(cached_key)}, "
-                                f"key_prefix={cached_key[:6]}...)")
+                                f"(endpoint_id={aoai_endpoint_id})")
                 else:
                     logger.info(f"[AOAI-CONFIG] Agent '{agent_name}': AOAI endpoint config has NO api_key "
                                 f"(endpoint_id={aoai_endpoint_id}), will use token auth")
@@ -372,8 +374,7 @@ class AgentManager:
         
         # Use API key if available, otherwise use token provider
         if api_key:
-            logger.info(f"[AOAI-CONFIG] Agent '{agent_name}': authenticating with API key "
-                        f"(length={len(api_key)}, prefix={api_key[:6]}...)")
+            logger.info(f"[AOAI-CONFIG] Agent '{agent_name}': authenticating with API key")
             return AzureOpenAIChatClient(
                 endpoint=endpoint_url,
                 deployment_name=deployment_name,
@@ -583,6 +584,7 @@ You are being called as a specialist by an orchestrator agent. The user's reques
                                     content=f"Calling {tool_name}",
                                     tool_name=tool_name,
                                     tool_args=args_dict,
+                                    call_id=call_id,
                                     friendly_message=friendly_msg
                                 )
                                 yield event
@@ -614,6 +616,7 @@ You are being called as a specialist by an orchestrator agent. The user's reques
                                     agent_name=agent.name,
                                     content=result_display or "Result received",
                                     tool_name=tool_name_result,
+                                    call_id=call_id,
                                     duration_ms=duration_ms,
                                     friendly_message=friendly_msg
                                 )
@@ -1084,178 +1087,6 @@ RESPOND WITH JSON:
             agent_id, agent_name, config, message, user_token, chatter_queue
         )
     
-    async def _call_specialist_with_vision(
-        self,
-        agent_config: dict,
-        agent_name: str,
-        message: str,
-        session_id: str,
-        user_id: str,
-        image_messages: list[dict],
-        chatter_queue: Optional[asyncio.Queue] = None,
-    ) -> dict:
-        """
-        Call a specialist using the direct Azure OpenAI vision API for
-        multimodal support.  Used when the session contains image attachments.
-
-        Bypasses the agent framework to construct multimodal messages with
-        ``image_url`` content parts that GPT-4-vision / GPT-4.1 can analyse.
-        Conversation history and images are loaded from Cosmos DB and included
-        directly in the chat completions request.
-        """
-        from openai import AsyncAzureOpenAI
-
-        start_time = time.time()
-        agent_id = agent_config.get("id", "")
-
-        # Emit chatter event
-        if chatter_queue:
-            await chatter_queue.put(ChatterEvent(
-                type=ChatterEventType.THINKING,
-                agent_name=agent_name,
-                content=f"Analysing with vision ({len(image_messages)} image(s))…",
-                friendly_message=f"{agent_name} is analysing images",
-            ))
-
-        # ── Resolve AOAI connection params (mirrors _create_chat_client) ──
-        deployment_name = agent_config.get("model")
-        if not deployment_name:
-            return {
-                "agent_id": agent_id, "agent_name": agent_name,
-                "response": "", "error": "No model configured for vision agent",
-            }
-
-        endpoint_url = settings.azure_openai_endpoint
-        api_key = settings.azure_openai_key
-        api_version = settings.azure_openai_api_version
-
-        aoai_ep_cfg = (agent_config.get("_aoai_endpoint_config") or {}) if agent_config.get("aoai_endpoint_id") else {}
-        if aoai_ep_cfg:
-            endpoint_url = aoai_ep_cfg.get("endpoint", endpoint_url)
-            if aoai_ep_cfg.get("api_key"):
-                api_key = aoai_ep_cfg["api_key"]
-            if aoai_ep_cfg.get("api_version"):
-                api_version = aoai_ep_cfg["api_version"]
-
-        # ── Create async Azure OpenAI client ──
-        client_kwargs: dict = {"azure_endpoint": endpoint_url, "api_version": api_version}
-        if api_key:
-            client_kwargs["api_key"] = api_key
-        else:
-            client_kwargs["azure_ad_token_provider"] = self._get_token_provider()
-
-        client = AsyncAzureOpenAI(**client_kwargs)
-
-        try:
-            # ── Build messages with multimodal content ──
-            oai_messages: list[dict] = []
-
-            # System prompt
-            system_prompt = agent_config.get("system_prompt", "You are a helpful assistant.")
-            system_prompt += (
-                "\n\nYou have vision capabilities. When the user shares images, "
-                "analyse them thoroughly and reference visual details in your response."
-            )
-            oai_messages.append({"role": "system", "content": system_prompt})
-
-            # Conversation history (oldest-first)
-            raw_msgs, _, _ = await cosmos_service.get_session_messages(
-                session_id=session_id, user_id=user_id,
-                page_size=50, oldest_first=True,
-            )
-
-            # Drop the most recent user message — it represents the current
-            # turn which chat_routes already saved before orchestration began.
-            if raw_msgs and raw_msgs[-1].get("role") == "user":
-                raw_msgs = raw_msgs[:-1]
-
-            image_ids = {m["id"] for m in image_messages}
-
-            for msg in raw_msgs:
-                role = msg.get("role", "user")
-                content_text = msg.get("content", "")
-                metadata = msg.get("metadata", {})
-
-                if msg["id"] in image_ids and "image_attachment" in metadata:
-                    img = metadata["image_attachment"]
-                    oai_messages.append({
-                        "role": role,
-                        "content": [
-                            {"type": "text", "text": content_text},
-                            {"type": "image_url", "image_url": {
-                                "url": f"data:{img['content_type']};base64,{img['base64']}",
-                                "detail": "auto",
-                            }},
-                        ],
-                    })
-                else:
-                    oai_messages.append({"role": role, "content": content_text})
-
-            # Current user turn
-            oai_messages.append({"role": "user", "content": message})
-
-            if should_log_agent():
-                logger.info(
-                    f"Vision call to {agent_name}: {len(oai_messages)} messages, "
-                    f"{len(image_messages)} image(s), model={deployment_name}"
-                )
-
-            # ── Call AOAI vision model (streaming) ──
-            stream = await client.chat.completions.create(
-                model=deployment_name,
-                messages=oai_messages,
-                stream=True,
-                max_tokens=agent_config.get("max_tokens") or 4096,
-                temperature=agent_config.get("temperature", 0.7),
-            )
-
-            response_parts: list[str] = []
-            async for chunk in stream:
-                if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-                    response_parts.append(chunk.choices[0].delta.content)
-
-            response_text = "".join(response_parts)
-            duration_ms = (time.time() - start_time) * 1000
-
-            if should_log_agent():
-                logger.info(
-                    f"VISION specialist {agent_name}: {len(response_text)} chars "
-                    f"in {duration_ms:.0f}ms ({len(image_messages)} images)"
-                )
-
-            if chatter_queue:
-                await chatter_queue.put(ChatterEvent(
-                    type=ChatterEventType.CONTENT,
-                    agent_name=agent_name,
-                    content=f"Completed ({len(response_text)} chars)",
-                    duration_ms=duration_ms,
-                    friendly_message=f"{agent_name} finished in {duration_ms / 1000:.1f}s",
-                ))
-
-            return {
-                "agent_id": agent_id,
-                "agent_name": agent_name,
-                "response": response_text,
-            }
-
-        except Exception as e:
-            logger.error(f"Vision call to {agent_name} failed: {e}", exc_info=True)
-            duration_ms = (time.time() - start_time) * 1000
-            if chatter_queue:
-                await chatter_queue.put(ChatterEvent(
-                    type=ChatterEventType.CONTENT,
-                    agent_name=agent_name,
-                    content=f"Vision call failed: {e}",
-                    duration_ms=duration_ms,
-                    friendly_message=f"{agent_name} encountered an error",
-                ))
-            return {
-                "agent_id": agent_id, "agent_name": agent_name,
-                "response": "", "error": str(e),
-            }
-        finally:
-            await client.close()
-
     async def _call_specialist_local(
         self,
         agent_id: str,
@@ -1294,7 +1125,11 @@ RESPOND WITH JSON:
             # ── Build context providers when session context is available ──
             has_session = bool(session_id and user_id)
 
-            # ── Check for image attachments → use vision path ──
+            # ── Check for image attachments → build multimodal input ──
+            # CosmosHistoryProvider already injects images in conversation
+            # history; we just need to build the *current* user message with
+            # any images attached to the session so the model sees them.
+            run_input: str | Message = message
             if has_session:
                 image_messages = await cosmos_service.get_session_image_messages(
                     session_id, user_id
@@ -1303,12 +1138,19 @@ RESPOND WITH JSON:
                     if should_log_agent():
                         logger.info(
                             f"Session {session_id} has {len(image_messages)} image(s), "
-                            f"using vision path for {agent_name}"
+                            f"building multimodal input for {agent_name}"
                         )
-                    return await self._call_specialist_with_vision(
-                        config, agent_name, message, session_id, user_id,
-                        image_messages, chatter_queue,
-                    )
+                    # Build a Message with text + all session images
+                    contents: list[Content | str] = [message]
+                    for img_msg in image_messages:
+                        img = img_msg.get("metadata", {}).get("image_attachment", {})
+                        if img.get("base64") and img.get("content_type"):
+                            data_uri = f"data:{img['content_type']};base64,{img['base64']}"
+                            contents.append(
+                                Content.from_uri(data_uri, media_type=img["content_type"])
+                            )
+                    if len(contents) > 1:
+                        run_input = Message("user", contents)
 
             providers = None
             if has_session:
@@ -1347,7 +1189,7 @@ RESPOND WITH JSON:
             total_tokens_input = 0
             total_tokens_output = 0
 
-            async for update in agent.run(message, session=session, stream=True):
+            async for update in agent.run(run_input, session=session, stream=True):
                 if update.text:
                     response_parts.append(update.text)
 
@@ -1369,6 +1211,7 @@ RESPOND WITH JSON:
                                     content=f"Calling {tool_name}",
                                     tool_name=tool_name,
                                     tool_args=args_dict,
+                                    call_id=call_id,
                                     friendly_message=friendly_msg,
                                 )
                                 if chatter_queue:
@@ -1393,6 +1236,7 @@ RESPOND WITH JSON:
                                     agent_name=agent_name,
                                     content=result_display or "Result received",
                                     tool_name=tool_name_result,
+                                    call_id=call_id,
                                     duration_ms=duration_ms,
                                     friendly_message=friendly_msg,
                                 )

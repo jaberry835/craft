@@ -1,7 +1,7 @@
 import { HttpInterceptorFn, HttpRequest, HttpHandlerFn } from '@angular/common/http';
 import { inject } from '@angular/core';
 import { MsalService } from '@azure/msal-angular';
-import { InteractionRequiredAuthError, SilentRequest } from '@azure/msal-browser';
+import { InteractionRequiredAuthError, BrowserAuthError, SilentRequest } from '@azure/msal-browser';
 import { from, switchMap, catchError, throwError, EMPTY } from 'rxjs';
 import { environment } from '@env/environment';
 import { AuthService } from '../services/auth.service';
@@ -75,9 +75,13 @@ export const authInterceptor: HttpInterceptorFn = (
     catchError(error => {
       console.error('[Auth] Token acquisition failed:', error.name);
       
-      // If interaction required, redirect to login
-      if (error instanceof InteractionRequiredAuthError) {
-        console.warn('[Auth] InteractionRequiredAuthError - triggering loginRedirect');
+      // If interaction required OR silent iframe timed out / was blocked,
+      // redirect to login so the user can re-authenticate.
+      if (
+        error instanceof InteractionRequiredAuthError ||
+        error instanceof BrowserAuthError
+      ) {
+        console.warn(`[Auth] ${error.name} - triggering loginRedirect`);
         msalService.loginRedirect({
           scopes: environment.apiScopes,
           account: account
