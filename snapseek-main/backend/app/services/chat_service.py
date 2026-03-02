@@ -49,16 +49,8 @@ class ChatService:
         self.search_service = search_service
         self.person_service = get_person_service(settings)
         
-        # Try identity-based auth first, fall back to API key
-        token_provider = get_openai_token_provider()
-        if token_provider:
-            logger.info("Using DefaultAzureCredential for Azure OpenAI (chat)")
-            self.client = AzureOpenAI(
-                azure_endpoint=settings.azure_openai_endpoint,
-                azure_ad_token_provider=token_provider,
-                api_version=settings.azure_openai_api_version
-            )
-        elif settings.azure_openai_key:
+        # Use API key first if available, fall back to identity-based auth
+        if settings.azure_openai_key:
             logger.info("Using API key for Azure OpenAI (chat)")
             self.client = AzureOpenAI(
                 azure_endpoint=settings.azure_openai_endpoint,
@@ -66,7 +58,16 @@ class ChatService:
                 api_version=settings.azure_openai_api_version
             )
         else:
-            raise ValueError("No valid credential available for Azure OpenAI")
+            token_provider = get_openai_token_provider(settings.azure_credential_scope)
+            if token_provider:
+                logger.info("Using DefaultAzureCredential for Azure OpenAI (chat)")
+                self.client = AzureOpenAI(
+                    azure_endpoint=settings.azure_openai_endpoint,
+                    azure_ad_token_provider=token_provider,
+                    api_version=settings.azure_openai_api_version
+                )
+            else:
+                raise ValueError("No valid credential available for Azure OpenAI")
         
         self.logger = logger.bind(component="chat_service")
     

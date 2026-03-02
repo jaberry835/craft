@@ -22,16 +22,17 @@ class PersonService(IFaceService):
         self.api_key = None
         
         if self.enabled:
-            credential = get_azure_credential()
-            if credential:
-                self.credential = credential
-                self.logger.info("Person service using identity-based authentication")
-            elif settings.azure_face_key:
+            if settings.azure_face_key:
                 self.api_key = settings.azure_face_key
                 self.logger.info("Person service using key-based authentication")
             else:
-                self.logger.warning("Face API not configured - no credentials")
-                self.enabled = False
+                credential = get_azure_credential()
+                if credential:
+                    self.credential = credential
+                    self.logger.info("Person service using identity-based authentication")
+                else:
+                    self.logger.warning("Face API not configured - no credentials")
+                    self.enabled = False
         
         if self.enabled:
             endpoint = settings.azure_face_endpoint.rstrip('/')
@@ -47,7 +48,7 @@ class PersonService(IFaceService):
         if self.api_key:
             headers["Ocp-Apim-Subscription-Key"] = self.api_key
         elif self.credential:
-            token = self.credential.get_token("https://cognitiveservices.azure.com/.default")
+            token = self.credential.get_token(self.settings.azure_credential_scope)
             headers["Authorization"] = f"Bearer {token.token}"
         
         return headers

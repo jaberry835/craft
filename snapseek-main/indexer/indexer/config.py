@@ -57,6 +57,12 @@ class Settings(BaseSettings):
     text_embedding_dimensions: int = Field(default=1536)
     image_embedding_dimensions: int = Field(default=768)
     
+    # Identity auth scope
+    azure_credential_scope: str = Field(
+        default="https://cognitiveservices.azure.com/.default",
+        description="Token scope for DefaultAzureCredential (e.g. OpenAI, Cognitive Services)"
+    )
+    
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
@@ -74,46 +80,46 @@ def get_azure_credential():
 
 
 def get_search_credential(settings: Settings):
-    """Get credential for Azure AI Search - tries identity first, falls back to key."""
+    """Get credential for Azure AI Search - uses key if available, falls back to identity."""
+    if settings.azure_search_key:
+        logger.info("Using API key for Azure AI Search")
+        return AzureKeyCredential(settings.azure_search_key)
     credential = get_azure_credential()
     if credential:
         logger.info("Using DefaultAzureCredential for Azure AI Search")
         return credential
-    if settings.azure_search_key:
-        logger.info("Using API key for Azure AI Search")
-        return AzureKeyCredential(settings.azure_search_key)
     raise ValueError("No valid credential available for Azure AI Search")
 
 
 def get_cognitive_credential(settings: Settings, key: str | None):
-    """Get credential for Cognitive Services - tries identity first, falls back to key."""
+    """Get credential for Cognitive Services - uses key if available, falls back to identity."""
+    if key:
+        logger.info("Using API key for Cognitive Services")
+        return AzureKeyCredential(key)
     credential = get_azure_credential()
     if credential:
         logger.info("Using DefaultAzureCredential for Cognitive Services")
         return credential
-    if key:
-        logger.info("Using API key for Cognitive Services")
-        return AzureKeyCredential(key)
     raise ValueError("No valid credential available for Cognitive Services")
 
 
-def get_openai_token_provider():
+def get_openai_token_provider(scope: str = "https://cognitiveservices.azure.com/.default"):
     """Get token provider for Azure OpenAI using identity."""
     credential = get_azure_credential()
     if credential:
-        return get_bearer_token_provider(credential, "https://cognitiveservices.azure.com/.default")
+        return get_bearer_token_provider(credential, scope)
     return None
 
 
 def get_storage_credential(settings: Settings):
-    """Get credential for Azure Storage - tries identity first, falls back to key."""
+    """Get credential for Azure Storage - uses key if available, falls back to identity."""
+    if settings.azure_storage_key:
+        logger.info("Using storage key for Azure Storage")
+        return settings.azure_storage_key
     credential = get_azure_credential()
     if credential:
         logger.info("Using DefaultAzureCredential for Azure Storage")
         return credential
-    if settings.azure_storage_key:
-        logger.info("Using connection string for Azure Storage")
-        return settings.azure_storage_key
     raise ValueError("No valid credential available for Azure Storage")
 
 

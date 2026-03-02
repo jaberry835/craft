@@ -1,4 +1,4 @@
-"""Azure Blob Storage service for retrieving images using identity auth."""
+"""Azure Blob Storage service for retrieving images."""
 
 from datetime import datetime, timedelta, timezone
 import structlog
@@ -11,7 +11,7 @@ logger = structlog.get_logger()
 
 
 class BlobService:
-    """Service for retrieving blob storage images using identity-based authentication."""
+    """Service for retrieving blob storage images."""
     
     def __init__(self, settings: Settings):
         """Initialize the blob service."""
@@ -20,16 +20,27 @@ class BlobService:
         
         if settings.azure_storage_account:
             try:
-                # Use cached credential for better performance
-                self.credential = get_azure_credential()
                 self.account_url = f"https://{settings.azure_storage_account}.blob.core.windows.net"
-                self.blob_service_client = BlobServiceClient(
-                    account_url=self.account_url,
-                    credential=self.credential
-                )
-                self.enabled = True
-                self.logger.info("Blob service initialized with identity auth", 
-                               account=settings.azure_storage_account)
+                
+                # Use storage key first if available, fall back to identity
+                if settings.azure_storage_key:
+                    self.credential = settings.azure_storage_key
+                    self.blob_service_client = BlobServiceClient(
+                        account_url=self.account_url,
+                        credential=self.credential
+                    )
+                    self.enabled = True
+                    self.logger.info("Blob service initialized with storage key",
+                                   account=settings.azure_storage_account)
+                else:
+                    self.credential = get_azure_credential()
+                    self.blob_service_client = BlobServiceClient(
+                        account_url=self.account_url,
+                        credential=self.credential
+                    )
+                    self.enabled = True
+                    self.logger.info("Blob service initialized with identity auth",
+                                   account=settings.azure_storage_account)
             except Exception as e:
                 self.logger.error("Failed to initialize blob service", error=str(e))
                 self.enabled = False

@@ -20,11 +20,25 @@ logger = logging.getLogger(__name__)
 # Initialize settings and tools
 settings = get_settings()
 search_tools = ImageSearchTools(settings)
-openai_client = AzureOpenAI(
-    azure_endpoint=settings.azure_openai_endpoint,
-    api_key=settings.azure_openai_key,
-    api_version=settings.azure_openai_api_version
-)
+
+# Use API key first if available, fall back to identity-based auth
+if settings.azure_openai_key:
+    openai_client = AzureOpenAI(
+        azure_endpoint=settings.azure_openai_endpoint,
+        api_key=settings.azure_openai_key,
+        api_version=settings.azure_openai_api_version
+    )
+else:
+    from shared.config import get_openai_token_provider
+    _token_provider = get_openai_token_provider(settings.azure_credential_scope)
+    if _token_provider:
+        openai_client = AzureOpenAI(
+            azure_endpoint=settings.azure_openai_endpoint,
+            azure_ad_token_provider=_token_provider,
+            api_version=settings.azure_openai_api_version
+        )
+    else:
+        raise ValueError("No valid credential available for Azure OpenAI - set AZURE_OPENAI_KEY or configure identity")
 
 SYSTEM_PROMPT = """You are Azure Snap Seek, an intelligent image search assistant. You help users find and discover images in their collection.
 
