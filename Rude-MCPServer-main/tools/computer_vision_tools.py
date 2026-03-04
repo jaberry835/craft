@@ -1,7 +1,10 @@
 """
 Azure Computer Vision Tools for Rude MCP Server
 Tools for analysing images (captions, tags, objects, OCR) using Azure
-Cognitive Services Computer Vision (Image Analysis 4.0).
+Cognitive Services Computer Vision (Image Analysis 3.2).
+
+Image Analysis 3.2 is used for broad sovereign / government cloud support
+(4.0 is not available in all regions).
 
 Authentication:
   - If AZURE_CV_KEY is set, key-based authentication is used.
@@ -21,6 +24,7 @@ import base64
 import json
 import os
 import logging
+import time
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -34,8 +38,8 @@ logger = logging.getLogger(__name__)
 CV_KEY = os.getenv("AZURE_CV_KEY", "")
 CV_ENDPOINT = os.getenv("AZURE_CV_ENDPOINT", "")
 
-# Image Analysis 4.0 API version
-_API_VERSION = "2024-02-01"
+# Image Analysis 3.2 API version – widely available in sovereign clouds
+_API_VERSION = "2022-04-01"
 
 # Detect cloud environment from AZURE_AUTHORITY_HOST (shared pattern)
 _AUTHORITY_HOST = os.getenv("AZURE_AUTHORITY_HOST", "")
@@ -170,10 +174,20 @@ def register_computer_vision_tools(mcp: FastMCP):
     """Register all Azure Computer Vision tools with the FastMCP server."""
 
     # ------------------------------------------------------------------
-    # analyze_image
+    # analyze_image  (Image Analysis 3.2)
     # ------------------------------------------------------------------
-    # Default features to request – universally supported across all clouds
-    _DEFAULT_FEATURES = "tags,objects,read"
+    # Map friendly names → 3.2 visualFeatures parameter values
+    _FEATURE_MAP = {
+        "tags": "Tags",
+        "objects": "Objects",
+        "description": "Description",
+        "faces": "Faces",
+        "categories": "Categories",
+        "color": "Color",
+        "imagetype": "ImageType",
+        "adult": "Adult",
+    }
+    _DEFAULT_FEATURES = "tags,objects,description"
 
     @mcp.tool
     def analyze_image(
@@ -181,20 +195,19 @@ def register_computer_vision_tools(mcp: FastMCP):
         image_base64: Optional[str] = None,
         features: Optional[str] = None,
         language: str = "en",
-        smart_crop_aspect_ratios: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Analyse an image using Azure Computer Vision Image Analysis 4.0.
+        """Analyse an image using Azure Computer Vision Image Analysis 3.2.
 
         You must provide exactly ONE of image_url or image_base64.
 
         Args:
             image_url: Public URL of the image to analyse.
             image_base64: Base64-encoded image data (JPEG, PNG, GIF, BMP, TIFF, or ICO).
-            features: Optional comma-separated visual features. Defaults to "tags,objects,read" which
-                returns image tags, detected objects, and OCR text. Other valid values: people, smartCrops.
-                Example: "tags,objects,read,people"
+            features: Optional comma-separated visual features (case-insensitive).
+                Defaults to "tags,objects,description".
+                Valid values: tags, objects, description, faces, categories, color, imagetype, adult.
+                Example: "tags,objects,description,faces"
             language: Language code for results (default "en").
-            smart_crop_aspect_ratios: Comma-separated aspect ratios for smart cropping, e.g. "0.9,1.33". Only used when "smartCrops" is in features.
 
         Returns:
             A dict with status and the analysis results including requested features.
@@ -208,21 +221,23 @@ def register_computer_vision_tools(mcp: FastMCP):
             features = _DEFAULT_FEATURES
 
         # Sanitise features: strip spaces, trailing commas, stray quotes
-        features = ",".join(
-            f.strip().strip('"').strip("'")
+        feature_list = [
+            f.strip().strip('"').strip("'").lower()
             for f in features.split(",")
             if f.strip().strip('"').strip("'")
-        )
+        ]
 
         # Validate feature names
-        _VALID_FEATURES = {"tags", "objects", "read", "people", "smartCrops"}
-        bad = [f for f in features.split(",") if f not in _VALID_FEATURES]
+        bad = [f for f in feature_list if f not in _FEATURE_MAP]
         if bad:
             return {
                 "status": "error",
-                "message": f"Invalid feature(s): {', '.join(bad)}. Valid values: {', '.join(sorted(_VALID_FEATURES))}",
+                "message": f"Invalid feature(s): {', '.join(bad)}. Valid values: {', '.join(sorted(_FEATURE_MAP.keys()))}",
                 "data": None,
             }
+
+        # Map to 3.2 API names (PascalCase)
+        visual_features = ",".join(_FEATURE_MAP[f] for f in feature_list)
 
         try:
             content_type, body = _resolve_image_input(image_url, image_base64)
@@ -230,17 +245,14 @@ def register_computer_vision_tools(mcp: FastMCP):
             return {"status": "error", "message": str(ve), "data": None}
 
         params: Dict[str, str] = {
-            "api-version": _API_VERSION,
-            "features": features,
+            "visualFeatures": visual_features,
             "language": language,
         }
-        if smart_crop_aspect_ratios and "smartCrops" in features:
-            params["smartcrops-aspect-ratios"] = smart_crop_aspect_ratios
 
         headers = _auth_headers()
         headers["Content-Type"] = content_type
 
-        url = f"{_base_url()}/computervision/imageanalysis:analyze"
+        url = f"{_base_url()}/vision/v3.2/analyze"
 
         try:
             resp = requests.post(url, params=params, headers=headers, data=body, timeout=30)
@@ -249,25 +261,36 @@ def register_computer_vision_tools(mcp: FastMCP):
 
             # Build a user-friendly summary alongside the raw result
             summary_parts: List[str] = []
-            if "tagsResult" in result:
-                tags = [f"{t['name']} ({t['confidence']:.2f})" for t in result["tagsResult"].get("values", [])]
+            if "tags" in result:
+                tags = [f"{t['name']} ({t['confidence']:.2f})" for t in result.get("tags", [])]
                 summary_parts.append(f"Tags: {', '.join(tags)}")
-            if "objectsResult" in result:
-                objs = [f"{o['tags'][0]['name']} ({o['tags'][0]['confidence']:.2f})" for o in result["objectsResult"].get("values", []) if o.get("tags")]
+            if "objects" in result:
+                objs = [
+                    f"{o['object']} ({o['confidence']:.2f})"
+                    for o in result.get("objects", [])
+                    if o.get("object")
+                ]
                 summary_parts.append(f"Objects: {', '.join(objs)}")
-            if "readResult" in result:
-                lines = []
-                for block in result["readResult"].get("blocks", []):
-                    for line in block.get("lines", []):
-                        lines.append(line.get("text", ""))
-                if lines:
-                    summary_parts.append(f"Text (OCR): {' | '.join(lines)}")
-            if "peopleResult" in result:
-                count = len(result["peopleResult"].get("values", []))
-                summary_parts.append(f"People detected: {count}")
-            if "smartCropsResult" in result:
-                crops = result["smartCropsResult"].get("values", [])
-                summary_parts.append(f"Smart crops: {len(crops)} region(s)")
+            if "description" in result:
+                captions = result["description"].get("captions", [])
+                if captions:
+                    cap_texts = [f"{c['text']} ({c['confidence']:.2f})" for c in captions]
+                    summary_parts.append(f"Description: {', '.join(cap_texts)}")
+                desc_tags = result["description"].get("tags", [])
+                if desc_tags:
+                    summary_parts.append(f"Description tags: {', '.join(desc_tags)}")
+            if "faces" in result:
+                count = len(result.get("faces", []))
+                summary_parts.append(f"Faces detected: {count}")
+            if "categories" in result:
+                cats = [f"{c['name']} ({c['score']:.2f})" for c in result.get("categories", [])]
+                summary_parts.append(f"Categories: {', '.join(cats)}")
+            if "color" in result:
+                color = result["color"]
+                summary_parts.append(
+                    f"Dominant colors: {', '.join(color.get('dominantColors', []))} | "
+                    f"Accent: {color.get('accentColor', 'N/A')}"
+                )
 
             return {
                 "status": "success",
@@ -290,7 +313,7 @@ def register_computer_vision_tools(mcp: FastMCP):
             return {"status": "error", "message": f"Request failed: {e}", "data": None}
 
     # ------------------------------------------------------------------
-    # read_text_from_image (OCR convenience)
+    # read_text_from_image (OCR — 3.2 async Read API)
     # ------------------------------------------------------------------
     @mcp.tool
     def read_text_from_image(
@@ -298,9 +321,10 @@ def register_computer_vision_tools(mcp: FastMCP):
         image_base64: Optional[str] = None,
         language: str = "en",
     ) -> Dict[str, Any]:
-        """Extract printed and handwritten text from an image using Azure Computer Vision OCR (Read).
+        """Extract printed and handwritten text from an image using Azure Computer Vision OCR (Read 3.2).
 
-        This is a convenience wrapper around the Image Analysis API with the "read" feature.
+        This uses the asynchronous Read API (v3.2). The tool submits the image,
+        polls for completion, and returns the extracted text.
         You must provide exactly ONE of image_url or image_base64.
 
         Args:
@@ -320,50 +344,16 @@ def register_computer_vision_tools(mcp: FastMCP):
         except ValueError as ve:
             return {"status": "error", "message": str(ve), "data": None}
 
-        params: Dict[str, str] = {
-            "api-version": _API_VERSION,
-            "features": "read",
-            "language": language,
-        }
-
         headers = _auth_headers()
         headers["Content-Type"] = content_type
 
-        url = f"{_base_url()}/computervision/imageanalysis:analyze"
+        # Step 1: Submit the read request
+        submit_url = f"{_base_url()}/vision/v3.2/read/analyze"
+        params: Dict[str, str] = {"language": language}
 
         try:
-            resp = requests.post(url, params=params, headers=headers, data=body, timeout=30)
+            resp = requests.post(submit_url, params=params, headers=headers, data=body, timeout=30)
             resp.raise_for_status()
-            result = resp.json()
-
-            # Extract text lines
-            lines: List[Dict[str, Any]] = []
-            raw_text_parts: List[str] = []
-            read_result = result.get("readResult", {})
-            for block in read_result.get("blocks", []):
-                for line in block.get("lines", []):
-                    text = line.get("text", "")
-                    raw_text_parts.append(text)
-                    words = []
-                    for word in line.get("words", []):
-                        words.append({
-                            "text": word.get("text", ""),
-                            "confidence": word.get("confidence", 0),
-                        })
-                    lines.append({
-                        "text": text,
-                        "bounding_polygon": line.get("boundingPolygon"),
-                        "words": words,
-                    })
-
-            return {
-                "status": "success",
-                "text": "\n".join(raw_text_parts),
-                "line_count": len(lines),
-                "lines": lines,
-                "data": result,
-            }
-
         except requests.exceptions.HTTPError as e:
             error_body = ""
             try:
@@ -372,11 +362,79 @@ def register_computer_vision_tools(mcp: FastMCP):
                 error_body = e.response.text
             return {
                 "status": "error",
-                "message": f"OCR API error (HTTP {e.response.status_code}): {error_body}",
+                "message": f"OCR submit error (HTTP {e.response.status_code}): {error_body}",
                 "data": None,
             }
         except Exception as e:
-            return {"status": "error", "message": f"Request failed: {e}", "data": None}
+            return {"status": "error", "message": f"OCR submit failed: {e}", "data": None}
+
+        # Step 2: Get the operation-location URL from the 202 response header
+        operation_url = resp.headers.get("Operation-Location")
+        if not operation_url:
+            return {
+                "status": "error",
+                "message": "Read API did not return an Operation-Location header.",
+                "data": None,
+            }
+
+        # Step 3: Poll for results (max ~60 seconds)
+        poll_headers = _auth_headers()
+        max_polls = 30
+        poll_interval = 2  # seconds
+        result = None
+
+        for _ in range(max_polls):
+            time.sleep(poll_interval)
+            try:
+                poll_resp = requests.get(operation_url, headers=poll_headers, timeout=15)
+                poll_resp.raise_for_status()
+                result = poll_resp.json()
+                status = result.get("status", "").lower()
+                if status == "succeeded":
+                    break
+                elif status == "failed":
+                    return {
+                        "status": "error",
+                        "message": f"OCR read operation failed: {result}",
+                        "data": result,
+                    }
+                # status is "running" or "notStarted" – keep polling
+            except Exception as e:
+                return {"status": "error", "message": f"OCR poll failed: {e}", "data": None}
+        else:
+            return {
+                "status": "error",
+                "message": "OCR read operation timed out after 60 seconds.",
+                "data": result,
+            }
+
+        # Step 4: Parse the results
+        lines: List[Dict[str, Any]] = []
+        raw_text_parts: List[str] = []
+        analyze_result = result.get("analyzeResult", {})
+        for page in analyze_result.get("readResults", []):
+            for line in page.get("lines", []):
+                text = line.get("text", "")
+                raw_text_parts.append(text)
+                words = []
+                for word in line.get("words", []):
+                    words.append({
+                        "text": word.get("text", ""),
+                        "confidence": word.get("confidence", 0),
+                    })
+                lines.append({
+                    "text": text,
+                    "bounding_box": line.get("boundingBox"),
+                    "words": words,
+                })
+
+        return {
+            "status": "success",
+            "text": "\n".join(raw_text_parts),
+            "line_count": len(lines),
+            "lines": lines,
+            "data": result,
+        }
 
     # ------------------------------------------------------------------
     # computer_vision_health
@@ -408,8 +466,8 @@ def register_computer_vision_tools(mcp: FastMCP):
         # but a connection/timeout error means the endpoint is unreachable.
         headers = _auth_headers()
         headers["Content-Type"] = "application/json"
-        url = f"{_base_url()}/computervision/imageanalysis:analyze"
-        params = {"api-version": _API_VERSION, "features": "caption"}
+        url = f"{_base_url()}/vision/v3.2/analyze"
+        params = {"visualFeatures": "Tags"}
 
         try:
             resp = requests.post(

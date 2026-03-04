@@ -3,7 +3,7 @@
 This guide walks you through creating an Azure AI Search index that reads a security tag from Azure Blob Storage metadata (allowedprincipals) and projects it into the index so queries can be trimmed at runtime using the caller's access principals.
 
 The Rude MCP Server RAG tools will call your USER_ACCESS_CHECK_URL with the user's bearer token and build a filter like:
-- search.in(<field>, 'principal', ',') OR'd for each principal
+- `<field>/any(t: search.in(t, 'hash1,hash2,...', ','))` for Collection(Edm.String) fields
 
 You can configure which index field to use via RAG_ALLOWED_PRINCIPALS_FIELD.
 
