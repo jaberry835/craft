@@ -6,6 +6,7 @@ A production-ready, ChatGPT-style interface for multi-agent orchestration using 
 
 - **Multi-Agent Orchestration**: Magentic pattern with A2A protocol for agent-to-agent communication
 - **A2A Protocol**: JSON-RPC over HTTP for inter-agent communication with chatter events
+- **External A2A Agents**: Connect to remote agents on other deployments with automatic OBO token exchange
 - **Dynamic Agent Configuration**: Admin UI to configure agents, prompts, and MCP tools
 - **Multiple AOAI Endpoints**: Configure multiple Azure OpenAI endpoints with model deployment discovery
 - **MCP Integration**: Connect agents to external tools via Model Context Protocol
@@ -456,6 +457,7 @@ AgentChatV2/
 │   │   ├── cosmos_service.py # CosmosDB operations
 │   │   ├── agent_manager.py  # Agent orchestration + A2A tools
 │   │   ├── a2a_client.py     # A2A client (call_agent_direct)
+│   │   ├── obo_token_service.py # OBO token exchange for cross-app A2A
 │   │   ├── search_service.py # Azure AI Search
 │   │   ├── mcp_client.py     # MCP tool connections
 │   │   ├── mcp_discovery.py  # MCP tool discovery
@@ -466,6 +468,8 @@ AgentChatV2/
 │   │   ├── admin_routes.py   # Agent management
 │   │   ├── document_routes.py# File upload
 │   │   └── health_routes.py  # Health checks
+│   ├── docs/                 # Feature documentation
+│   │   └── EXTERNAL_A2A_AGENTS.md  # External A2A agent setup & OBO
 │   ├── prompts/              # Agent prompt files
 │   │   ├── orchestrator.txt  # Orchestrator instructions
 │   │   ├── adx.txt          # ADX specialist prompt
@@ -633,7 +637,9 @@ The application automatically uses different Azure credentials based on the `ENV
 | Environment | Credential Type | How It Works |
 |-------------|-----------------|--------------|
 | `development` | `AzureCliCredential` | Uses your logged-in Azure CLI identity (`az login`) |
-| `production` | `ManagedIdentityCredential` | Uses App Service's system-assigned managed identity |
+| `production` | `ManagedIdentityCredential` | Uses App Service managed identity (system-assigned or user-assigned) |
+
+**User-Assigned Managed Identity**: If your App Service uses a **user-assigned** managed identity (e.g., shared across multiple apps), set `AZURE_MANAGED_IDENTITY_CLIENT_ID` to the identity's **client ID**. If not set, the system-assigned identity is used. When the App Service has **both** identity types, this variable is **required** to avoid ambiguity.
 
 **Important**: In development, you must be logged in via Azure CLI:
 ```bash
@@ -729,6 +735,7 @@ If non-admin users can't access admin features:
 1. Verify `Cognitive Services OpenAI User` role is assigned
 2. Check the endpoint URL matches your cloud (`.azure.us` for Government)
 3. Ensure `AZURE_COGNITIVE_SERVICES_SCOPE` uses correct cloud suffix
+4. If using a **user-assigned managed identity**, set `AZURE_MANAGED_IDENTITY_CLIENT_ID` to resolve identity ambiguity
 
 ## License
 

@@ -7,12 +7,29 @@ import { environment } from '@env/environment';
 import { AuthService } from '../services/auth.service';
 
 /**
+ * URL patterns that don't require authentication (public endpoints).
+ * Requests to these URLs will pass through without a token.
+ */
+const PUBLIC_URL_PATTERNS = [
+  '/api/settings/ui',
+  '/api/health',
+];
+
+/**
+ * Module-level flag to prevent multiple simultaneous login redirects.
+ * MSAL cannot handle concurrent redirect calls; only the first should proceed.
+ * Resets automatically on page reload (which happens after redirect).
+ */
+let loginRedirectActive = false;
+
+/**
  * Auth interceptor that attaches JWT tokens to API requests.
  * 
  * Key behavior:
- * 1. First checks MSAL's token cache for a valid cached token (fast, no iframe)
- * 2. Only calls acquireTokenSilent if no cached token exists
- * 3. Falls back to popup/redirect if silent fails
+ * 1. Skips public endpoints that don't need authentication
+ * 2. First checks MSAL's token cache for a valid cached token (fast, no iframe)
+ * 3. Only calls acquireTokenSilent if no cached token exists
+ * 4. Falls back to redirect if silent fails (with duplicate-redirect guard)
  */
 export const authInterceptor: HttpInterceptorFn = (
   req: HttpRequest<unknown>,
@@ -28,17 +45,22 @@ export const authInterceptor: HttpInterceptorFn = (
   if (!isApiRequest) {
     return next(req);
   }
+
+  // Skip auth for public endpoints that don't need a token
+  if (PUBLIC_URL_PATTERNS.some(pattern => req.url.includes(pattern))) {
+    return next(req);
+  }
   
   const account = msalService.instance.getActiveAccount();
   
   if (!account) {
-    // If a consent re-auth is pending, do NOT trigger a competing redirect here.
-    // Let MsalGuard handle the redirect so prompt=consent is included.
-    if (AuthService.isConsentPending()) {
-      console.log('[Auth] No active account but consent redirect pending - deferring to MsalGuard');
+    // If a redirect or consent re-auth is already in progress, don't trigger another.
+    if (loginRedirectActive || AuthService.isConsentPending()) {
+      console.log('[Auth] No active account but login/consent redirect already in progress');
       return EMPTY;
     }
     console.warn('[Auth] No active account - triggering loginRedirect');
+    loginRedirectActive = true;
     msalService.loginRedirect({ scopes: environment.loginScopes });
     return EMPTY;
   }
@@ -77,11 +99,17 @@ export const authInterceptor: HttpInterceptorFn = (
       
       // If interaction required OR silent iframe timed out / was blocked,
       // redirect to login so the user can re-authenticate.
+      // Guard against duplicate redirects — only the first concurrent failure triggers one.
       if (
         error instanceof InteractionRequiredAuthError ||
         error instanceof BrowserAuthError
       ) {
+        if (loginRedirectActive) {
+          console.warn(`[Auth] ${error.name} - redirect already in progress, skipping`);
+          return EMPTY;
+        }
         console.warn(`[Auth] ${error.name} - triggering loginRedirect`);
+        loginRedirectActive = true;
         msalService.loginRedirect({
           scopes: environment.apiScopes,
           account: account

@@ -56,21 +56,56 @@ User Token → Orchestrator → A2AAgent (with BearerAuthInterceptor) → Extern
 4. External agent validates token and executes on behalf of user
 5. Any MCP tools on the external agent use the same token
 
-### Different Audience
+### Different Audience (OBO Flow)
 
-If the external agent has its own App Registration with a different client ID, it may reject your tokens because the `aud` claim doesn't match.
+If the external agent has its own App Registration with a different client ID, the
+`aud` claim in the user's token won't match.  AgentChatV2 solves this automatically
+with the **On-Behalf-Of (OBO)** token exchange.
 
-**Solutions:**
+**How it works:**
+1. Admin sets the **Remote App Client ID** when adding the external A2A agent
+2. At call time, `BearerAuthInterceptor` detects the target client ID differs from
+   this app's `AZURE_CLIENT_ID`
+3. `OboTokenService` exchanges the user's token at the Entra ID token endpoint:
+   ```
+   POST {authority}/oauth2/v2.0/token
+     grant_type   = urn:ietf:params:oauth:grant-type:jwt-bearer
+     client_id    = <this app's client ID>
+     assertion    = <user's token>
+     scope        = api://<remote app client ID>/.default
+     requested_token_use = on_behalf_of
+   ```
+4. The exchanged token has `aud` = remote app, but preserves the user's identity
+5. `BearerAuthInterceptor` sends the exchanged token to the remote agent
 
-1. **Configure external app to accept your tokens**
-   - Add your app's client ID as an authorized client application
+**Requirements:**
+- Same Entra ID tenant
+- This app needs a **confidential client credential**:
+  - Development: set `AZURE_CLIENT_CERTIFICATE_PATH` to a `.pfx` file
+  - Production: set `AZURE_CLIENT_SECRET`
+- The remote app registration must expose an API scope and grant consent to this app
+- The remote app must have `api://{remote_client_id}` as an Application ID URI
 
-2. **Multi-tenant app registration**
-   - Configure the external agent's app registration as multi-tenant
-   - Accept tokens from any tenant in your organization
+**Configuration (`.env`):**
+```bash
+# Required for OBO (in addition to existing AZURE_TENANT_ID / AZURE_CLIENT_ID)
+# Development — PFX certificate:
+AZURE_CLIENT_CERTIFICATE_PATH=./certs/app.pfx
+AZURE_CLIENT_CERTIFICATE_PASSWORD=optional-password
 
-3. **On-Behalf-Of (OBO) flow** (not currently implemented)
-   - Exchange the user's token for a token with the external agent's audience
+# Production — client secret:
+AZURE_CLIENT_SECRET=your-secret-value
+```
+
+**Per-agent configuration:**
+When adding an external A2A agent in the Admin panel, set the **Remote App Client ID**
+field to the `client_id` of the remote app registration.  If left blank, direct token
+pass-through is used (same app registration scenario).
+
+**Token caching:**
+Exchanged tokens are cached per (user, target app) and automatically refreshed
+60 seconds before expiry so subsequent calls within a session avoid redundant
+token exchanges.
 
 ### Third-Party External Agents
 
@@ -92,7 +127,9 @@ For agents outside your organization (different tenant, different IdP), you'll n
 - `a2a_auth_token`: Token/API key (stored securely)
 - `a2a_auth_header`: Custom header name (default: `Authorization`)
 
-## Token Flow Diagram
+## Token Flow Diagrams
+
+### Same App Registration (direct pass-through)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -105,8 +142,8 @@ For agents outside your organization (different tenant, different IdP), you'll n
 │                                                   │              │
 └───────────────────────────────────────────────────┼──────────────┘
                                                     │
-                                    A2A Protocol    │
-                                    (via SDK)       │
+                                    A2A Protocol    │  (user token
+                                    (via SDK)       │   passed as-is)
                                                     ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                    External A2A Agent                            │
@@ -117,6 +154,47 @@ For agents outside your organization (different tenant, different IdP), you'll n
 │  └───────────────┘    └──────────────┘    └──────────────────┘  │
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
+```
+
+### Different App Registration (OBO exchange)
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                        AgentChatV2 (App A)                            │
+│                                                                       │
+│  ┌──────────┐   ┌──────────────┐   ┌───────────────────────────────┐ │
+│  │  User    │──▶│ Orchestrator │──▶│ BearerAuthInterceptor         │ │
+│  │  Token   │   │    Agent     │   │  ├── target_client_id ≠ ours  │ │
+│  │ (aud=A)  │   └──────────────┘   │  └── calls OboTokenService   │ │
+│  └──────────┘                      └──────────────┬────────────────┘ │
+│                                                    │                  │
+│                         ┌──────────────────────────┤                  │
+│                         │ OboTokenService           │                  │
+│                         │  POST /oauth2/v2.0/token  │                  │
+│                         │  grant_type=jwt-bearer    │                  │
+│                         │  assertion=user_token     │                  │
+│                         │  scope=api://App-B/.def   │                  │
+│                         └──────────┬───────────────┘                  │
+│                                    │ new token (aud=B)                │
+│                                    ▼                                  │
+│                         ┌──────────────────────┐                      │
+│                         │ A2AAgent (SDK)       │                      │
+│                         │ sends exchanged token│                      │
+│                         └──────────┬───────────┘                      │
+└────────────────────────────────────┼──────────────────────────────────┘
+                                     │
+                     A2A Protocol    │  (exchanged token
+                     (via SDK)       │   aud=App-B)
+                                     ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│                    External A2A Agent (App B)                         │
+│                                                                       │
+│  ┌───────────────┐   ┌──────────────┐   ┌──────────────────┐        │
+│  │ Token from    │──▶│   Agent      │──▶│   MCP Tools      │        │
+│  │ request.state │   │   Execution  │   │   (with token)   │        │
+│  │ (aud=B ✓)    │   └──────────────┘   └──────────────────┘        │
+│  └───────────────┘                                                   │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Exposing Your Agents to External Systems

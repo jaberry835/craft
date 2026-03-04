@@ -54,10 +54,10 @@ import { environment } from '../../../environments/environment';
                 }
               </div>
               <div class="agent-actions">
-                <button class="btn btn-icon" (click)="editAgent(agent)" title="Edit" [disabled]="agent.agent_type === 'a2a'">
+                <button class="btn btn-icon btn-edit" (click)="editAgent(agent)" title="Edit" [disabled]="agent.agent_type === 'a2a'">
                   <span class="material-icons">edit</span>
                 </button>
-                <button class="btn btn-icon" (click)="deleteAgent(agent.id!)" title="Delete">
+                <button class="btn btn-icon btn-delete" (click)="deleteAgent(agent.id!)" title="Delete">
                   <span class="material-icons">delete</span>
                 </button>
               </div>
@@ -152,13 +152,13 @@ import { environment } from '../../../environments/environment';
                 </div>
               </div>
               <div class="endpoint-actions">
-                <button class="btn btn-icon" (click)="refreshAoaiEndpoint(endpoint)" title="Refresh Deployments">
+                <button class="btn btn-icon btn-refresh" (click)="refreshAoaiEndpoint(endpoint)" title="Refresh Deployments">
                   <span class="material-icons">refresh</span>
                 </button>
-                <button class="btn btn-icon" (click)="editAoaiEndpoint(endpoint)" title="Edit">
+                <button class="btn btn-icon btn-edit" (click)="editAoaiEndpoint(endpoint)" title="Edit">
                   <span class="material-icons">edit</span>
                 </button>
-                <button class="btn btn-icon" (click)="deleteAoaiEndpoint(endpoint.id!)" title="Delete">
+                <button class="btn btn-icon btn-delete" (click)="deleteAoaiEndpoint(endpoint.id!)" title="Delete">
                   <span class="material-icons">delete</span>
                 </button>
               </div>
@@ -363,6 +363,50 @@ import { environment } from '../../../environments/environment';
                 </label>
               </div>
               <span class="field-hint">Choose where the branding logo appears in the app.</span>
+            </div>
+
+            <div class="form-group">
+              <label>Browser Icon (Favicon)</label>
+              <p class="field-hint" style="margin-bottom: 8px;">Custom icon shown in the browser tab. Recommended: 32×32 or 64×64 PNG or ICO.</p>
+              <div class="image-upload-area favicon-upload-area"
+                (dragover)="onFaviconDragOver($event)"
+                (dragleave)="onFaviconDragLeave($event)"
+                (drop)="onFaviconDrop($event)"
+              >
+                @if (faviconImagePreview) {
+                  <div class="image-preview favicon-preview">
+                    <img [src]="faviconImagePreview" alt="Favicon preview" class="favicon-img" />
+                    <button class="btn btn-icon remove-image" (click)="removeFaviconImage()" title="Remove favicon">
+                      <span class="material-icons">close</span>
+                    </button>
+                  </div>
+                } @else {
+                  <div class="upload-placeholder" [class.drag-over]="isFaviconDragging" (click)="faviconFileInput.click()">
+                    <span class="material-icons">tab</span>
+                    <p>{{ isFaviconDragging ? 'Drop icon here' : 'Click or drag & drop a favicon' }}</p>
+                    <span class="upload-hint">PNG, ICO, SVG — max 100KB, ideally 32×32 or 64×64</span>
+                  </div>
+                }
+                <input 
+                  type="file" 
+                  #faviconFileInput
+                  accept="image/png,image/x-icon,image/svg+xml,image/ico,image/vnd.microsoft.icon"
+                  (change)="onFaviconImageSelected($event)"
+                  style="display: none"
+                />
+                @if (faviconImagePreview) {
+                  <button class="btn btn-secondary btn-sm" (click)="faviconFileInput.click()">
+                    <span class="material-icons">swap_horiz</span>
+                    Change Icon
+                  </button>
+                }
+              </div>
+              @if (faviconImageError) {
+                <span class="field-error">{{ faviconImageError }}</span>
+              }
+              @if (uiSettings.favicon_image_filename) {
+                <span class="field-hint">Current file: {{ uiSettings.favicon_image_filename }}</span>
+              }
             </div>
           </div>
           
@@ -1029,6 +1073,19 @@ import { environment } from '../../../environments/environment';
                 </div>
               </div>
               
+              <div class="form-group">
+                <label>
+                  Remote App Client ID
+                  <span class="label-hint">(optional — only if the agent uses a different Entra ID app registration)</span>
+                </label>
+                <input 
+                  type="text" 
+                  class="input" 
+                  [(ngModel)]="a2aClientId"
+                  placeholder="e.g. 12345678-abcd-1234-efgh-123456789abc"
+                />
+              </div>
+              
               @if (a2aDiscoveryError) {
                 <div class="discovery-error">
                   <span class="material-icons">error</span>
@@ -1379,6 +1436,12 @@ import { environment } from '../../../environments/environment';
       button {
         white-space: nowrap;
       }
+    }
+    
+    .label-hint {
+      font-weight: 400;
+      font-size: 12px;
+      color: var(--text-secondary, #888);
     }
     
     .discovery-error {
@@ -2170,6 +2233,16 @@ import { environment } from '../../../environments/environment';
         }
       }
     }
+
+    .favicon-preview {
+      max-width: 80px;
+      
+      img.favicon-img {
+        max-width: 64px;
+        max-height: 64px;
+        image-rendering: pixelated;
+      }
+    }
     
     .field-error {
       display: block;
@@ -2278,6 +2351,7 @@ export class AdminComponent implements OnInit, OnDestroy {
   // A2A Agent Discovery state
   showA2AModal = false;
   a2aAgentUrl = '';
+  a2aClientId = '';  // Remote app registration client ID (for OBO)
   isDiscoveringA2A = false;
   a2aDiscoveryError = '';
   discoveredA2AAgent: A2ADiscoveryResponse | null = null;
@@ -2325,11 +2399,16 @@ export class AdminComponent implements OnInit, OnDestroy {
     branding_image: null,
     branding_image_filename: null,
     branding_image_position: 'sidebar',
-    app_title: null
+    app_title: null,
+    favicon_image: null,
+    favicon_image_filename: null
   };
   brandingImagePreview: string | null = null;
   brandingImageError = '';
   isDragging = false;
+  faviconImagePreview: string | null = null;
+  faviconImageError = '';
+  isFaviconDragging = false;
   isSavingSettings = false;
   settingsChanged = false;
   settingsSaveSuccess = false;
@@ -2588,6 +2667,7 @@ export class AdminComponent implements OnInit, OnDestroy {
   openA2AModal(): void {
     this.showA2AModal = true;
     this.a2aAgentUrl = '';
+    this.a2aClientId = '';
     this.a2aDiscoveryError = '';
     this.discoveredA2AAgent = null;
     this.isDiscoveringA2A = false;
@@ -2596,6 +2676,7 @@ export class AdminComponent implements OnInit, OnDestroy {
   closeA2AModal(): void {
     this.showA2AModal = false;
     this.a2aAgentUrl = '';
+    this.a2aClientId = '';
     this.a2aDiscoveryError = '';
     this.discoveredA2AAgent = null;
   }
@@ -2607,7 +2688,7 @@ export class AdminComponent implements OnInit, OnDestroy {
     this.a2aDiscoveryError = '';
     this.discoveredA2AAgent = null;
     
-    this.agentService.discoverA2AAgent({ url: this.a2aAgentUrl })
+    this.agentService.discoverA2AAgent({ url: this.a2aAgentUrl, a2a_client_id: this.a2aClientId || undefined })
       .pipe(takeUntil(this.destroy$))
       .subscribe({
         next: (response) => {
@@ -2629,7 +2710,7 @@ export class AdminComponent implements OnInit, OnDestroy {
   addDiscoveredA2AAgent(): void {
     if (!this.discoveredA2AAgent || !this.a2aAgentUrl) return;
     
-    this.agentService.addA2AAgent({ url: this.a2aAgentUrl })
+    this.agentService.addA2AAgent({ url: this.a2aAgentUrl, a2a_client_id: this.a2aClientId || undefined })
       .pipe(takeUntil(this.destroy$))
       .subscribe({
         next: () => {
@@ -3082,6 +3163,10 @@ export class AdminComponent implements OnInit, OnDestroy {
           if (settings.branding_image) {
             this.brandingImagePreview = settings.branding_image;
           }
+          // Set favicon preview from existing base64 data
+          if (settings.favicon_image) {
+            this.faviconImagePreview = settings.favicon_image;
+          }
           this.settingsChanged = false;
         },
         error: (err) => {
@@ -3160,6 +3245,74 @@ export class AdminComponent implements OnInit, OnDestroy {
     this.onSettingsChanged();
   }
 
+  // =========================================================================
+  // Favicon Upload
+  // =========================================================================
+
+  onFaviconImageSelected(event: Event): void {
+    const input = event.target as HTMLInputElement;
+    if (!input.files || input.files.length === 0) return;
+    this.processFaviconFile(input.files[0]);
+  }
+
+  onFaviconDragOver(event: DragEvent): void {
+    event.preventDefault();
+    event.stopPropagation();
+    this.isFaviconDragging = true;
+  }
+
+  onFaviconDragLeave(event: DragEvent): void {
+    event.preventDefault();
+    event.stopPropagation();
+    this.isFaviconDragging = false;
+  }
+
+  onFaviconDrop(event: DragEvent): void {
+    event.preventDefault();
+    event.stopPropagation();
+    this.isFaviconDragging = false;
+
+    const files = event.dataTransfer?.files;
+    if (!files || files.length === 0) return;
+    this.processFaviconFile(files[0]);
+  }
+
+  private processFaviconFile(file: File): void {
+    this.faviconImageError = '';
+
+    // Validate file size (100KB max for favicons)
+    const maxSize = 100 * 1024;
+    if (file.size > maxSize) {
+      this.faviconImageError = `Icon too large (${(file.size / 1024).toFixed(0)}KB). Max is 100KB.`;
+      return;
+    }
+
+    // Validate file type
+    const validTypes = ['image/png', 'image/x-icon', 'image/svg+xml', 'image/vnd.microsoft.icon', 'image/ico'];
+    if (!validTypes.includes(file.type)) {
+      this.faviconImageError = 'Invalid file type. Use PNG, ICO, or SVG.';
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const base64 = reader.result as string;
+      this.faviconImagePreview = base64;
+      this.uiSettings.favicon_image = base64;
+      this.uiSettings.favicon_image_filename = file.name;
+      this.onSettingsChanged();
+    };
+    reader.readAsDataURL(file);
+  }
+
+  removeFaviconImage(): void {
+    this.faviconImagePreview = null;
+    this.uiSettings.favicon_image = null;
+    this.uiSettings.favicon_image_filename = null;
+    this.faviconImageError = '';
+    this.onSettingsChanged();
+  }
+
   saveUISettings(): void {
     this.isSavingSettings = true;
     this.settingsSaveSuccess = false;
@@ -3177,6 +3330,10 @@ export class AdminComponent implements OnInit, OnDestroy {
           this.settingsChanged = false;
           this.settingsSaveSuccess = true;
 
+          // Apply browser title and favicon immediately
+          document.title = saved.app_title || 'Agent Chat';
+          this.applyFavicon(saved.favicon_image);
+
           // Auto-hide success after 3s
           setTimeout(() => this.settingsSaveSuccess = false, 3000);
         },
@@ -3186,5 +3343,15 @@ export class AdminComponent implements OnInit, OnDestroy {
           this.settingsSaveError = err.error?.detail || 'Failed to save settings';
         }
       });
+  }
+
+  private applyFavicon(faviconBase64: string | null | undefined): void {
+    let link: HTMLLinkElement | null = document.querySelector("link[rel~='icon']");
+    if (!link) {
+      link = document.createElement('link');
+      link.rel = 'icon';
+      document.head.appendChild(link);
+    }
+    link.href = faviconBase64 || 'favicon.ico';
   }
 }

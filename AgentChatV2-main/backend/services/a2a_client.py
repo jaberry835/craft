@@ -8,6 +8,10 @@ Key SDK features used:
 - A2ACardResolver: Discovers agent capabilities via agent cards
 - ClientCallInterceptor: Handles authentication for secured endpoints
 - Streaming: Real-time updates via Server-Sent Events
+
+Authentication:
+- Same app registration: passes the user's token through directly
+- Different app registration: uses OBO (On-Behalf-Of) to exchange the token
 """
 from typing import Optional, Any, AsyncIterator
 import httpx
@@ -35,12 +39,18 @@ class BearerAuthInterceptor(ClientCallInterceptor):
     """Auth interceptor that adds a Bearer token to A2A requests.
     
     Implements the SDK's ClientCallInterceptor interface to inject
-    the user's Bearer token into outgoing A2A HTTP requests for
-    on-behalf-of authentication pass-through.
+    authentication into outgoing A2A HTTP requests.
+    
+    Supports two modes:
+    - Same app registration: passes the user's token through directly
+    - Different app registration: uses OBO to exchange for a token
+      with the target app's audience before sending
     """
     
-    def __init__(self, token: str):
+    def __init__(self, token: str, target_client_id: Optional[str] = None):
         self.token = token
+        self.target_client_id = target_client_id
+        self._exchanged_token: Optional[str] = None
     
     async def intercept(
         self,
@@ -50,10 +60,45 @@ class BearerAuthInterceptor(ClientCallInterceptor):
         agent_card: Any = None,
         context: Any = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
+        token_to_use = await self._get_token()
         headers = http_kwargs.get("headers", {})
-        headers["Authorization"] = f"Bearer {self.token}"
+        headers["Authorization"] = f"Bearer {token_to_use}"
         http_kwargs["headers"] = headers
         return request_payload, http_kwargs
+    
+    async def _get_token(self) -> str:
+        """Return the appropriate token — OBO-exchanged if needed, else original."""
+        if not self._needs_obo():
+            return self.token
+        
+        # Lazy import to avoid circular dependency at module level
+        from services.obo_token_service import obo_token_service
+        
+        if not obo_token_service.is_available:
+            if should_log_a2a():
+                logger.warning(
+                    f"OBO required for target {self.target_client_id} but credentials "
+                    "not configured — falling back to direct token pass-through"
+                )
+            return self.token
+        
+        try:
+            self._exchanged_token = await obo_token_service.exchange_token(
+                user_token=self.token,
+                target_client_id=self.target_client_id,  # type: ignore[arg-type]
+            )
+            return self._exchanged_token
+        except Exception as e:
+            logger.error(f"OBO exchange failed for target {self.target_client_id}: {e}")
+            # Fall back to direct token — the remote might still accept it
+            return self.token
+    
+    def _needs_obo(self) -> bool:
+        """Check whether an OBO exchange is needed."""
+        if not self.target_client_id:
+            return False
+        # If the target is our own app registration, no exchange needed
+        return self.target_client_id != settings.azure_client_id
 
 
 class A2AClientService:
@@ -171,6 +216,10 @@ class A2AClientService:
         Handles both external A2A agents and local agents exposed via A2A endpoints.
         Uses the SDK's auth_interceptor for secured endpoints instead of custom HTTP clients.
         
+        For external agents with a different app registration (a2a_client_id set),
+        the interceptor will automatically perform an OBO token exchange so the
+        remote agent receives a token with the correct audience.
+        
         The returned agent can be used as a context manager for proper lifecycle:
             async with a2a_client.create_a2a_agent(config, token) as agent:
                 response = await agent.run("Hello")
@@ -193,11 +242,15 @@ class A2AClientService:
         name = config.get("name", "Agent").replace(" ", "_")
         description = config.get("description", "")
         
-        # Use SDK's auth_interceptor for token pass-through
-        auth = BearerAuthInterceptor(user_token) if user_token else None
+        # Determine target client_id for OBO (None = same app reg = direct pass-through)
+        target_client_id = config.get("a2a_client_id") or None
+        
+        # Use SDK's auth_interceptor for token pass-through (with optional OBO)
+        auth = BearerAuthInterceptor(user_token, target_client_id) if user_token else None
         
         if should_log_a2a():
-            logger.debug(f"Creating A2AAgent '{name}' at {url} (has_token={user_token is not None})")
+            obo_indicator = f", obo_target={target_client_id}" if target_client_id else ""
+            logger.debug(f"Creating A2AAgent '{name}' at {url} (has_token={user_token is not None}{obo_indicator})")
         
         return A2AAgent(
             name=name,

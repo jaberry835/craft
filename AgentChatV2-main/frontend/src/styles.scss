@@ -125,9 +125,25 @@ body.theme-light {
   &.btn-icon {
     padding: var(--spacing-sm);
     background: transparent;
+    color: var(--text-secondary);
     
     &:hover:not(:disabled) {
       background-color: var(--bg-hover);
+    }
+    
+    &.btn-edit {
+      color: #4dabf7;
+      &:hover:not(:disabled) { color: #339af0; }
+    }
+    
+    &.btn-delete {
+      color: #ff6b6b;
+      &:hover:not(:disabled) { color: #fa5252; }
+    }
+    
+    &.btn-refresh {
+      color: #51cf66;
+      &:hover:not(:disabled) { color: #40c057; }
     }
   }
 }

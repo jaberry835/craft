@@ -19,7 +19,7 @@ set -e
 
 # Default values
 CLOUD="AzureUSGovernment"
-IMAGE_TAG="latest"
+IMAGE_TAG=""
 SKIP_BUILD=false
 
 # Cloud configuration
@@ -112,6 +112,11 @@ fi
 # Get script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$(dirname "$SCRIPT_DIR")/backend"
+
+# Auto-generate unique tag if not specified (ensures App Service pulls fresh image)
+if [[ -z "$IMAGE_TAG" ]]; then
+    IMAGE_TAG=$(date +"%Y%m%d-%H%M%S")
+fi
 
 # Image configuration
 ACR_LOGIN_SERVER="${CONTAINER_REGISTRY}.${ACR_SUFFIX[$CLOUD]}"

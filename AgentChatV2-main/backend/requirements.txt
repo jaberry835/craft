@@ -33,6 +33,7 @@ azure-ai-textanalytics>=5.3.0
 # Authentication
 msal>=1.26.0
 PyJWT>=2.8.0
+cryptography>=41.0.0  # PFX certificate parsing for OBO token exchange
 
 # Observability
 azure-monitor-opentelemetry>=1.2.0

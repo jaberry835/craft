@@ -1,7 +1,7 @@
 import { Component, OnInit, OnDestroy } from '@angular/core';
 import { RouterOutlet } from '@angular/router';
 import { MsalService, MsalBroadcastService } from '@azure/msal-angular';
-import { InteractionStatus } from '@azure/msal-browser';
+import { InteractionStatus, InteractionRequiredAuthError, BrowserAuthError } from '@azure/msal-browser';
 import { Subject, filter, takeUntil } from 'rxjs';
 
 import { SidebarComponent } from './shared/components/sidebar/sidebar.component';
@@ -10,6 +10,7 @@ import { ClassificationBannerComponent } from './shared/components/classificatio
 import { SettingsService } from './core/services/settings.service';
 import { PreferencesService } from './core/services/preferences.service';
 import { AuthService } from './core/services/auth.service';
+import { environment } from '@env/environment';
 
 @Component({
   selector: 'app-root',
@@ -81,6 +82,7 @@ import { AuthService } from './core/services/auth.service';
 export class AppComponent implements OnInit, OnDestroy {
   isLoading = true;
   private readonly destroy$ = new Subject<void>();
+  private authInitialized = false;
 
   constructor(
     private authService: MsalService,
@@ -118,10 +120,62 @@ export class AppComponent implements OnInit, OnDestroy {
       )
       .subscribe(() => {
         this.checkAndSetActiveAccount();
-        this.isLoading = false;
-        // Load user preferences (theme) after auth is ready
-        this.preferencesService.loadPreferences().subscribe();
+
+        // Only run the API-token warm-up once per page load.
+        // This prevents the "double login prompt" when MsalGuard's initial login
+        // only grants loginScopes and the API scope token hasn't been cached yet.
+        if (!this.authInitialized) {
+          this.authInitialized = true;
+          this.initializeAuthAndRender();
+        }
       });
+  }
+
+  /**
+   * Proactively acquire an API-scope token before rendering the app.
+   * This ensures the MSAL token cache is warm so that component HTTP requests
+   * (which go through the auth interceptor) find a valid cached token instead
+   * of all racing to call acquireTokenSilent concurrently.
+   */
+  private async initializeAuthAndRender(): Promise<void> {
+    const account = this.authService.instance.getActiveAccount();
+
+    if (account) {
+      try {
+        await this.authService.instance.acquireTokenSilent({
+          scopes: environment.apiScopes,
+          account: account,
+          forceRefresh: false
+        });
+        console.log('[MSAL] API token cached successfully');
+      } catch (error: any) {
+        console.warn('[MSAL] Silent API token acquisition failed:', error?.message);
+
+        // If interaction is required (consent needed, expired refresh token, etc.),
+        // trigger a single redirect to acquire the API token.  The page will reload
+        // after the redirect, so we return early without setting isLoading = false.
+        if (
+          error instanceof InteractionRequiredAuthError ||
+          error instanceof BrowserAuthError
+        ) {
+          console.log('[MSAL] Interaction required - redirecting for API token');
+          try {
+            await this.authService.instance.acquireTokenRedirect({
+              scopes: environment.apiScopes,
+              account: account
+            });
+          } catch (redirectError) {
+            console.error('[MSAL] Redirect for API token failed:', redirectError);
+          }
+          return; // page will reload after redirect
+        }
+        // For other errors (transient / network), continue — interceptor will retry per-request
+      }
+    }
+
+    this.isLoading = false;
+    // Load user preferences (theme) after auth and API token are ready
+    this.preferencesService.loadPreferences().subscribe();
   }
 
   private checkAndSetActiveAccount(): void {

@@ -72,3 +72,5 @@ yarn-error.log*
 *.temp
 .cache/
 frontend/src/environments/environment.ts
+backend/MCPServerDevCert.pfx
+backend/MCPServerDevCert-protected.pfx

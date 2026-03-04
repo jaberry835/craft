@@ -50,6 +50,23 @@ async def get_agent_card_redirect(agent_id: str, request: Request):
     The SDK registers POST /a2a/{id} for JSON-RPC, but browsers send GET.
     This handler returns the agent card so the URL is browsable.
     """
+    return await _get_dynamic_agent_card(agent_id, request)
+
+
+@router.get("/a2a/{agent_id}/.well-known/agent.json")
+async def get_agent_card_wellknown(agent_id: str, request: Request):
+    """Serve agent card at the standard A2A well-known path.
+
+    The A2A SDK client (A2ACardResolver) fetches /.well-known/agent.json
+    for discovery, but the SDK server only registers agent-card.json.
+    This dynamic handler ensures discovery works for all agents
+    (including those added after startup).
+    """
+    return await _get_dynamic_agent_card(agent_id, request)
+
+
+async def _get_dynamic_agent_card(agent_id: str, request: Request):
+    """Build and return an agent card from Cosmos DB for any agent."""
     base_url = _get_base_url(request)
     agents = await cosmos_service.list_agents()
     agent_config = next((a for a in agents if a.get("id") == agent_id), None)
@@ -96,7 +113,7 @@ class ChatAgentExecutor(AgentExecutor):
         from services.agent_manager import agent_manager
 
         # Extract text from incoming A2A message parts
-        input_text = self._extract_text(context)
+        input_text = context.get_user_input()
         if not input_text:
             error_msg = Message(
                 role=Role.agent,
@@ -157,16 +174,7 @@ class ChatAgentExecutor(AgentExecutor):
     @staticmethod
     def _extract_text(context: RequestContext) -> str:
         """Extract text content from A2A message parts."""
-        if not context.request or not context.request.message:
-            return ""
-
-        parts_text = []
-        for part in context.request.message.parts:
-            # Part is a RootModel with .root being TextPart | FilePart | DataPart
-            actual = getattr(part, "root", part)
-            if hasattr(actual, "text"):
-                parts_text.append(actual.text)
-        return " ".join(parts_text).strip()
+        return context.get_user_input()
 
 
 # =============================================================================
@@ -176,11 +184,11 @@ class ChatAgentExecutor(AgentExecutor):
 def _get_base_url(request: Request = None) -> str:
     """Get base URL for agent card URLs.
 
-    Uses configured base_url if available, otherwise derives from request.
+    Uses configured backend_url if available, otherwise derives from request.
     Falls back to localhost for startup-time card generation.
     """
-    if hasattr(settings, "base_url") and settings.base_url:
-        return settings.base_url.rstrip("/")
+    if hasattr(settings, "backend_url") and settings.backend_url:
+        return settings.backend_url.rstrip("/")
 
     if request:
         scheme = request.headers.get("x-forwarded-proto", request.url.scheme)

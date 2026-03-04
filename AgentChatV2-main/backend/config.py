@@ -35,6 +35,15 @@ class Settings(BaseSettings):
     azure_tenant_id: str = Field(default="", alias="AZURE_TENANT_ID")
     azure_client_id: str = Field(default="", alias="AZURE_CLIENT_ID")
     
+    # Confidential client credentials for OBO (On-Behalf-Of) token exchange.
+    # Required when calling external A2A agents that use a different app registration.
+    # In production: set AZURE_CLIENT_SECRET
+    # In development: set AZURE_CLIENT_CERTIFICATE_PATH to a .pfx file
+    # If both are set, the certificate is preferred.
+    azure_client_secret: str = Field(default="", alias="AZURE_CLIENT_SECRET")
+    azure_client_certificate_path: str = Field(default="", alias="AZURE_CLIENT_CERTIFICATE_PATH")
+    azure_client_certificate_password: str = Field(default="", alias="AZURE_CLIENT_CERTIFICATE_PASSWORD")
+    
     # Azure OpenAI
     azure_openai_endpoint: str = Field(default="", alias="AZURE_OPENAI_ENDPOINT")
     azure_openai_key: str = Field(default="", alias="AZURE_OPENAI_KEY")
