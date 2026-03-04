@@ -1,12 +1,22 @@
 """Azure Blob Storage client for reading images."""
 
+import re
 import structlog
 from azure.storage.blob import BlobServiceClient, ContainerClient
 from azure.storage.blob.aio import BlobServiceClient as AsyncBlobServiceClient
+from azure.core.credentials import AzureNamedKeyCredential
 
-from ..config import Settings, get_storage_credential
+from ..config import Settings, get_azure_credential
 
 logger = structlog.get_logger()
+
+
+def _extract_account_name(blob_url: str) -> str:
+    """Extract storage account name from blob URL (supports all Azure clouds)."""
+    match = re.match(r"https://([^.]+)\.blob\.", blob_url)
+    if match:
+        return match.group(1)
+    raise ValueError(f"Cannot extract account name from URL: {blob_url}")
 
 
 class BlobStorageClient:
@@ -20,7 +30,18 @@ class BlobStorageClient:
         if not settings.azure_storage_blob_url:
             raise ValueError("AZURE_STORAGE_BLOB_URL is required for blob storage operations")
         
-        self.credential = get_storage_credential(settings)
+        # Build credential: prefer explicit key, fall back to identity
+        if settings.azure_storage_key:
+            account_name = _extract_account_name(settings.azure_storage_blob_url)
+            credential = AzureNamedKeyCredential(name=account_name, key=settings.azure_storage_key)
+            self.logger.info("Blob storage using account key", account=account_name)
+        else:
+            credential = get_azure_credential()
+            if credential is None:
+                raise ValueError("No valid credential for Azure Storage (set AZURE_STORAGE_KEY or configure identity)")
+            self.logger.info("Blob storage using DefaultAzureCredential")
+        
+        self.credential = credential
         
         # Create async blob service client
         self._service_client = AsyncBlobServiceClient(

@@ -18,9 +18,22 @@ class BlobService:
         self.settings = settings
         self.logger = logger.bind(component="blob_service")
         
-        if settings.azure_storage_account:
+        # Determine account URL: prefer explicit AZURE_STORAGE_BLOB_URL,
+        # fall back to constructing from AZURE_STORAGE_ACCOUNT
+        account_url = None
+        if settings.azure_storage_blob_url:
+            account_url = settings.azure_storage_blob_url.rstrip("/")
+        elif settings.azure_storage_account:
+            account_url = f"https://{settings.azure_storage_account}.blob.core.windows.net"
+            self.logger.warning(
+                "Constructing blob URL from account name assumes public Azure cloud. "
+                "Set AZURE_STORAGE_BLOB_URL for sovereign/gov clouds.",
+                account=settings.azure_storage_account
+            )
+        
+        if account_url:
             try:
-                self.account_url = f"https://{settings.azure_storage_account}.blob.core.windows.net"
+                self.account_url = account_url
                 
                 # Use storage key first if available, fall back to identity
                 if settings.azure_storage_key:
@@ -31,7 +44,7 @@ class BlobService:
                     )
                     self.enabled = True
                     self.logger.info("Blob service initialized with storage key",
-                                   account=settings.azure_storage_account)
+                                   account_url=self.account_url)
                 else:
                     self.credential = get_azure_credential()
                     self.blob_service_client = BlobServiceClient(
@@ -40,13 +53,13 @@ class BlobService:
                     )
                     self.enabled = True
                     self.logger.info("Blob service initialized with identity auth",
-                                   account=settings.azure_storage_account)
+                                   account_url=self.account_url)
             except Exception as e:
                 self.logger.error("Failed to initialize blob service", error=str(e))
                 self.enabled = False
         else:
             self.enabled = False
-            self.logger.warning("Blob service not configured - images may not be accessible")
+            self.logger.warning("Blob service not configured - set AZURE_STORAGE_BLOB_URL or AZURE_STORAGE_ACCOUNT")
     
     async def download_blob(self, container_name: str, blob_name: str) -> tuple[bytes, str]:
         """
