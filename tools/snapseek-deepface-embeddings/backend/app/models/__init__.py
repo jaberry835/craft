@@ -43,6 +43,7 @@ class ImageResult(BaseModel):
     has_faces: bool = False
     dominant_colors: list[str] = Field(default_factory=list)
     score: float | None = None
+    person_names: list[str] = Field(default_factory=list)
     
     # Additional metadata
     width: int | None = None
@@ -122,6 +123,7 @@ class ImageDetail(BaseModel):
     has_faces: bool = False
     face_details: list[FaceDetail] = Field(default_factory=list)
     person_ids: list[str] = Field(default_factory=list)
+    person_names: list[str] = Field(default_factory=list)
     
     # Colors
     dominant_colors: list[str] = Field(default_factory=list)
@@ -151,6 +153,10 @@ class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=2000, description="User message")
     history: list[ChatMessage] = Field(default_factory=list, max_length=20)
     include_images: bool = Field(default=True, description="Include relevant images in response")
+    image_context: list[str] = Field(
+        default_factory=list,
+        description="Image IDs from previous assistant responses (for ZIP downloads etc.)",
+    )
 
 
 class ChatImageReference(BaseModel):
@@ -162,10 +168,18 @@ class ChatImageReference(BaseModel):
     relevance_reason: str | None = None
 
 
+class ChatAction(BaseModel):
+    """An actionable button/card the frontend should render."""
+    type: str  # e.g. "zip_download"
+    label: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
 class ChatResponse(BaseModel):
-    """Chat response with optional images."""
+    """Chat response with optional images and actions."""
     message: str
     images: list[ChatImageReference] = Field(default_factory=list)
+    actions: list[ChatAction] = Field(default_factory=list)
     search_query: str | None = None
 
 

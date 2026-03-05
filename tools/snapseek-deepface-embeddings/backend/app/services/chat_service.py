@@ -1,256 +1,416 @@
-"""Chat service for conversational image search."""
+"""Chat service – local function-calling agent (Chat Completions API).
 
-import re
+Uses OpenAI tool/function calling on GPT-4o / GPT-5.2 via Azure OpenAI.
+No Foundry agents, no Responses API – just the standard Chat Completions
+endpoint with ``tools`` parameter.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
 import structlog
 from openai import AzureOpenAI
 
 from ..config import Settings, get_openai_token_provider
 from ..models import (
-    ChatRequest, ChatResponse, ChatImageReference, ChatMessage,
-    SearchRequest
+    ChatRequest, ChatResponse, ChatImageReference,
+    ChatAction, SearchRequest,
 )
 from .search_service import SearchService
-from .person_service import PersonService, get_person_service
+from .face_match_service import FaceMatchService, get_face_match_service
 
 logger = structlog.get_logger()
 
-SYSTEM_PROMPT = """You are Azure Snap Seek, an intelligent image search assistant. Your role is to help users find and discover images in their collection.
+# ---------------------------------------------------------------------------
+# System prompt
+# ---------------------------------------------------------------------------
+SYSTEM_PROMPT = """\
+You are **SnapSeek**, an intelligent image-search assistant.
 
-When users ask about images, you should:
-1. Understand their intent and what they're looking for
-2. Search for relevant images using the search capabilities
-3. Describe the images found and explain why they match
-4. Provide helpful suggestions for refining searches
+You have access to these tools — prefer calling them over guessing:
 
-**Person Search Capabilities:**
-- Users can search for images containing specific people by name (e.g., "show me photos of John Smith")
-- Users can search by person ID (e.g., "find images with person ID abc123")
-- If a person name is mentioned, search for images of that person
-- You can list known persons and their image counts
+• **find_person_images** – find images that contain a named person.
+  Accepts an optional similarity `threshold` (0–100 %).
+• **search_images** – general keyword / semantic image search.
+• **prepare_zip_download** – bundle a set of images into ZIP file(s)
+  for download (optionally split by date).
 
-When describing search results:
-- Be concise but informative
-- Mention key visual elements (objects, colors, text, people)
-- Explain why each image matches the query
-- If searching by person, mention the person's name and how many images were found
-- Suggest related searches if appropriate
+### Conversation rules
+1. When the user asks for images of a person, call `find_person_images`.
+2. After returning person results, **proactively offer** to create a ZIP
+   download.  Say something like:
+   "Would you like me to bundle these into a ZIP file for download?
+    I can also split them by date if you prefer."
+3. If the user mentions a threshold (e.g. "at least 80 %"), pass
+   `threshold=80` to `find_person_images`.
+4. When the user confirms a zip download, call `prepare_zip_download`
+   with the `image_ids` array from the `find_person_images` result —
+   these are hash strings like `22b2f2c7c7748cbead2c79466a78b2e1`.
+   **Never use filenames as IDs.**  If they want it grouped by date,
+   set `group_by_date=true`.
+5. Be concise but friendly.  Always mention how many images you found.
+6. If no images are found, suggest alternative searches.
+"""
 
-If no relevant images are found, suggest alternative search terms or broader categories.
+# ---------------------------------------------------------------------------
+# Tool definitions (OpenAI Chat Completions function-calling format)
+# ---------------------------------------------------------------------------
+TOOLS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "find_person_images",
+            "description": (
+                "Search for images containing a specific person by name. "
+                "Uses the face-similarity index to find matching images."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "person_name": {
+                        "type": "string",
+                        "description": "Name (or partial name) of the person.",
+                    },
+                    "threshold": {
+                        "type": "number",
+                        "description": (
+                            "Minimum similarity as a percentage 0–100. "
+                            "Default 70."
+                        ),
+                    },
+                    "top": {
+                        "type": "integer",
+                        "description": "Max images to return (default 20).",
+                    },
+                },
+                "required": ["person_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_images",
+            "description": "General keyword / semantic image search.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query text.",
+                    },
+                    "top": {
+                        "type": "integer",
+                        "description": "Max results (default 10).",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "prepare_zip_download",
+            "description": (
+                "Bundle the images from previous search results into a ZIP "
+                "file for download. Optionally group into sub-folders by date. "
+                "You do NOT need to pass image_ids — all images from previous "
+                "tool calls will be included automatically."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "group_by_date": {
+                        "type": "boolean",
+                        "description": "Group images into date sub-folders. Default false.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+]
 
-Always be helpful, friendly, and focused on helping users discover images in their collection."""
 
+# ---------------------------------------------------------------------------
+# Service
+# ---------------------------------------------------------------------------
 
 class ChatService:
-    """Service for conversational image search using Azure OpenAI."""
-    
+    """Local agent using OpenAI Chat Completions with tool calling."""
+
     def __init__(self, settings: Settings, search_service: SearchService):
-        """Initialize the chat service."""
         self.settings = settings
         self.search_service = search_service
-        self.person_service = get_person_service(settings)
-        
-        # Use API key first if available, fall back to identity-based auth
+        self.face_match_service: FaceMatchService = get_face_match_service(settings)
+
+        # Azure OpenAI client (Chat Completions API only)
         if settings.azure_openai_key:
-            logger.info("Using API key for Azure OpenAI (chat)")
             self.client = AzureOpenAI(
                 azure_endpoint=settings.azure_openai_endpoint,
                 api_key=settings.azure_openai_key,
-                api_version=settings.azure_openai_api_version
+                api_version=settings.azure_openai_api_version,
             )
         else:
             token_provider = get_openai_token_provider(settings.azure_credential_scope)
-            if token_provider:
-                logger.info("Using DefaultAzureCredential for Azure OpenAI (chat)")
-                self.client = AzureOpenAI(
-                    azure_endpoint=settings.azure_openai_endpoint,
-                    azure_ad_token_provider=token_provider,
-                    api_version=settings.azure_openai_api_version
-                )
-            else:
-                raise ValueError("No valid credential available for Azure OpenAI")
-        
-        self.logger = logger.bind(component="chat_service")
-    
-    async def _detect_person_query(self, message: str) -> tuple[str | None, str | None]:
-        """
-        Detect if the message is asking about a specific person.
-        
-        Returns:
-            Tuple of (person_id, person_name) - one or both may be set
-        """
-        message_lower = message.lower()
-        
-        # Check for person ID patterns
-        # Pattern: "person id abc123" or "person_id: abc123" or just a UUID-like pattern
-        id_patterns = [
-            r'person[_\s]?id[:\s]+([a-f0-9-]{8,36})',
-            r'\b([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\b',  # Full UUID
+            if not token_provider:
+                raise ValueError("No valid credential for Azure OpenAI")
+            self.client = AzureOpenAI(
+                azure_endpoint=settings.azure_openai_endpoint,
+                azure_ad_token_provider=token_provider,
+                api_version=settings.azure_openai_api_version,
+            )
+
+        self.logger = logger.bind(component="chat_agent")
+
+    # ------------------------------------------------------------------
+    # Tool implementations
+    # ------------------------------------------------------------------
+
+    async def _tool_find_person_images(
+        self,
+        person_name: str,
+        threshold: float = 70,
+        top: int = 20,
+    ) -> dict[str, Any]:
+        """Find images by person name via faces index → vector similarity."""
+        threshold_frac = max(0.0, min(1.0, threshold / 100.0))
+
+        # 1. Search faces index by person_name
+        face_hits = self.face_match_service.search_faces_by_name(
+            person_name, top=200
+        )
+        if not face_hits:
+            return {"images": [], "message": f"No person named '{person_name}' found."}
+
+        # 2. Pick rep face doc, run vector similarity search
+        rep_face_id = face_hits[0]["id"]
+        similar = self.face_match_service.find_similar_by_face_doc_id(
+            rep_face_id, top=top * 3, threshold=threshold_frac,
+        )
+
+        # 3. Collect unique image_ids with scores
+        image_ids: list[str] = []
+        seen: set[str] = set()
+        scores: dict[str, float] = {}
+        for m in similar:
+            img_id = m.get("image_id")
+            if img_id and img_id not in seen:
+                seen.add(img_id)
+                image_ids.append(img_id)
+                scores[img_id] = round(m.get("score", 0) * 100, 1)
+
+        # 4. Fetch image metadata from the main index
+        images: list[dict[str, Any]] = []
+        for img_id in image_ids[:top]:
+            try:
+                detail = await self.search_service.get_image(img_id)
+                if detail:
+                    images.append({
+                        "id": detail.id,
+                        "filename": detail.filename,
+                        "file_url": detail.file_url,
+                        "caption": detail.caption,
+                        "score": scores.get(img_id, 0),
+                        "indexed_at": (
+                            detail.indexed_at.isoformat()
+                            if detail.indexed_at else None
+                        ),
+                    })
+            except Exception:
+                pass
+
+        return {
+            "person_name": person_name,
+            "threshold": threshold,
+            "total_found": len(images),
+            "image_ids": [img["id"] for img in images],
+            "images": images,
+        }
+
+    async def _tool_search_images(
+        self, query: str, top: int = 10
+    ) -> dict[str, Any]:
+        """General image search."""
+        request = SearchRequest(
+            query=query,
+            top=min(top, 50),
+            use_vector_search=True,
+            use_semantic_search=self.settings.enable_semantic_search,
+        )
+        result = await self.search_service.search(request)
+        images = [
+            {
+                "id": img.id,
+                "filename": img.filename,
+                "file_url": img.file_url,
+                "caption": img.caption,
+                "score": round((img.score or 0) * 100, 1),
+            }
+            for img in result.results
         ]
-        
-        for pattern in id_patterns:
-            match = re.search(pattern, message_lower)
-            if match:
-                return (match.group(1), None)
-        
-        # Check for name-based queries
-        name_patterns = [
-            r"(?:show|find|search|get|display|photos?|images?|pictures?)\s+(?:me\s+)?(?:of|with|for|containing)?\s*['\"]?([a-z\s]+?)['\"]?\s*(?:photos?|images?|pictures?)?$",
-            r"(?:photos?|images?|pictures?)\s+(?:of|with|for)\s+['\"]?([a-z\s]+)['\"]?",
-            r"who\s+is\s+['\"]?([a-z\s]+)['\"]?",
-        ]
-        
-        for pattern in name_patterns:
-            match = re.search(pattern, message_lower)
-            if match:
-                potential_name = match.group(1).strip()
-                # Filter out common non-name words
-                skip_words = {'the', 'a', 'an', 'this', 'that', 'my', 'all', 'some', 'any'}
-                if potential_name and potential_name not in skip_words:
-                    return (None, potential_name)
-        
-        return (None, None)
-    
-    async def _find_person_by_name(self, name: str) -> str | None:
-        """Find a person ID by name (partial match)."""
-        persons = await self.person_service.list_persons()
-        name_lower = name.lower()
-        
-        for person in persons:
-            person_name = person.get("name", "")
-            if person_name and name_lower in person_name.lower():
-                return person.get("person_id")
-        
-        return None
-    
-    def _extract_search_query(self, user_message: str, assistant_response: str) -> str | None:
-        """Extract a search query from the conversation."""
-        # Simple extraction - use the user message as the search query
-        # In a more advanced implementation, this could use another LLM call
-        # to extract specific search terms
-        return user_message
-    
+        return {"query": query, "total_found": len(images), "images": images}
+
+    async def _tool_prepare_zip_download(
+        self,
+        image_ids: list[str] | None = None,
+        group_by_date: bool = False,
+    ) -> dict[str, Any]:
+        """Return a payload the frontend uses to trigger the ZIP endpoint.
+
+        ``image_ids`` is intentionally ignored — the agent loop injects the
+        real collected IDs so the model can never hallucinate them.
+        """
+        # Actual IDs are injected by _execute_tool; this is just a stub.
+        return {
+            "download_action": True,
+            "group_by_date": group_by_date,
+        }
+
+    # ------------------------------------------------------------------
+    # Tool dispatch
+    # ------------------------------------------------------------------
+
+    async def _execute_tool(
+        self, name: str, arguments: str
+    ) -> tuple[str, list[dict], list[dict]]:
+        """Run a tool and return (result_json, images, actions)."""
+        args: dict[str, Any] = json.loads(arguments)
+        images: list[dict] = []
+        actions: list[dict] = []
+
+        if name == "find_person_images":
+            result = await self._tool_find_person_images(**args)
+            images = result.get("images", [])
+        elif name == "search_images":
+            result = await self._tool_search_images(**args)
+            images = result.get("images", [])
+        elif name == "prepare_zip_download":
+            # Ignore model-supplied image_ids — use the real collected IDs
+            group_by_date = args.get("group_by_date", False)
+            result = await self._tool_prepare_zip_download(
+                group_by_date=group_by_date,
+            )
+            # Inject the real IDs
+            real_ids = self._collected_image_ids
+            result["image_ids"] = real_ids
+            result["total_images"] = len(real_ids)
+            actions.append({
+                "type": "zip_download",
+                "image_ids": real_ids,
+                "group_by_date": result["group_by_date"],
+                "label": (
+                    f"Download {len(real_ids)} images"
+                    + (" (by date)" if result["group_by_date"] else "")
+                ),
+            })
+        else:
+            result = {"error": f"Unknown tool: {name}"}
+
+        return json.dumps(result, default=str), images, actions
+
+    # ------------------------------------------------------------------
+    # Agent loop (Chat Completions + tool calling)
+    # ------------------------------------------------------------------
+
     async def chat(self, request: ChatRequest) -> ChatResponse:
-        """
-        Process a chat message and optionally search for images.
-        
-        Args:
-            request: Chat request with message and history
-            
-        Returns:
-            ChatResponse with message and optional images
-        """
-        self.logger.info("Processing chat message", message=request.message[:100])
-        
-        # Build messages for the chat
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT}
+        """Run the agent loop: model → tool calls → model → … → final text."""
+        self.logger.info("Agent chat", message=request.message[:120])
+
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": SYSTEM_PROMPT},
         ]
-        
-        # Add history
         for msg in request.history:
             messages.append({"role": msg.role, "content": msg.content})
-        
-        # Add current message
         messages.append({"role": "user", "content": request.message})
-        
-        # If including images, first search for relevant ones
-        images = []
-        search_query = None
-        person_context = None
-        
-        if request.include_images:
-            search_query = request.message
-            
-            # Check if this is a person-related query
-            person_id, person_name = await self._detect_person_query(request.message)
-            
-            # If we found a name but not ID, try to look up the person
-            if person_name and not person_id:
-                person_id = await self._find_person_by_name(person_name)
-                if person_id:
-                    person_context = f"Found person '{person_name}' (ID: {person_id[:8]}...)"
-                else:
-                    person_context = f"No person named '{person_name}' found in the collection."
-            
-            # Build search request
-            search_request = SearchRequest(
-                query=search_query,
-                top=5,
-                use_vector_search=True,
-                use_semantic_search=self.settings.enable_semantic_search,
-                person_ids=[person_id] if person_id else None
-            )
-            
-            search_results = await self.search_service.search(search_request)
-            
-            # Add search context to the prompt
-            if search_results.results:
-                image_context = "\n\nRelevant images found:\n"
-                for i, img in enumerate(search_results.results, 1):
-                    image_context += f"{i}. {img.filename}"
-                    if img.caption:
-                        image_context += f" - {img.caption}"
-                    if img.tags:
-                        image_context += f" (tags: {', '.join(img.tags[:5])})"
-                    image_context += "\n"
-                
-                context_msg = f"Search results for '{search_query}':"
-                if person_context:
-                    context_msg += f"\n{person_context}"
-                context_msg += f"{image_context}\nDescribe these results to the user."
-                
-                messages.append({
-                    "role": "system",
-                    "content": context_msg
-                })
-                
-                # Build image references
-                relevance = f"Matched search for: {search_query}"
-                if person_id:
-                    relevance = f"Shows person {person_name or person_id[:8]}"
-                    
-                for img in search_results.results:
-                    images.append(ChatImageReference(
-                        id=img.id,
-                        filename=img.filename,
-                        file_url=img.file_url,
-                        caption=img.caption,
-                        relevance_reason=relevance
-                    ))
-            else:
-                no_results_msg = f"No images found matching '{search_query}'."
-                if person_context:
-                    no_results_msg += f" {person_context}"
-                no_results_msg += " Help the user refine their search."
-                
-                messages.append({
-                    "role": "system",
-                    "content": no_results_msg
-                })
-        
-        # Generate response
-        try:
-            response = self.client.chat.completions.create(
+
+        all_images: list[dict] = []
+        all_actions: list[dict] = []
+        # Seed with IDs the frontend carried over from previous turns
+        collected_image_ids: list[str] = list(request.image_context or [])
+        max_turns = 6  # safety cap
+
+        for _turn in range(max_turns):
+            completion = self.client.chat.completions.create(
                 model=self.settings.azure_openai_chat_deployment,
                 messages=messages,
-                max_tokens=500,
-                temperature=0.7
+                tools=TOOLS,
+                tool_choice="auto",
+                max_tokens=800,
+                temperature=0.4,
             )
-            
-            assistant_message = response.choices[0].message.content
-            
-            self.logger.info(
-                "Chat response generated",
-                images_found=len(images),
-                response_length=len(assistant_message)
+
+            choice = completion.choices[0]
+
+            # --- If the model wants to call tool(s) ----------------------
+            if choice.message.tool_calls:
+                # Append the assistant message (contains tool_calls list)
+                messages.append(choice.message.model_dump())
+
+                for tc in choice.message.tool_calls:
+                    self.logger.info(
+                        "Tool call",
+                        tool=tc.function.name,
+                        args=tc.function.arguments[:300],
+                    )
+                    # Make collected IDs available to _execute_tool
+                    self._collected_image_ids = collected_image_ids
+
+                    result_json, imgs, acts = await self._execute_tool(
+                        tc.function.name, tc.function.arguments,
+                    )
+                    all_images.extend(imgs)
+                    all_actions.extend(acts)
+
+                    # Accumulate real image IDs from tool results
+                    for img in imgs:
+                        if img.get("id") and img["id"] not in collected_image_ids:
+                            collected_image_ids.append(img["id"])
+
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": result_json,
+                    })
+
+                continue  # let the model see tool results
+
+            # --- Final assistant text ------------------------------------
+            assistant_text = choice.message.content or ""
+            break
+        else:
+            assistant_text = "Sorry, I wasn't able to complete the request."
+
+        # Build ChatImageReference list
+        chat_images = [
+            ChatImageReference(
+                id=img["id"],
+                filename=img.get("filename", ""),
+                file_url=img.get("file_url"),
+                caption=img.get("caption"),
+                relevance_reason=(
+                    f"{img['score']}% match" if img.get("score") else None
+                ),
             )
-            
-            return ChatResponse(
-                message=assistant_message,
-                images=images,
-                search_query=search_query
+            for img in all_images
+        ]
+
+        # Build ChatAction list
+        chat_actions = [
+            ChatAction(
+                type=a["type"],
+                label=a.get("label", "Download"),
+                payload=a,
             )
-            
-        except Exception as e:
-            self.logger.error("Chat generation failed", error=str(e))
-            raise
+            for a in all_actions
+        ]
+
+        return ChatResponse(
+            message=assistant_text,
+            images=chat_images,
+            actions=chat_actions,
+            search_query=request.message,
+        )

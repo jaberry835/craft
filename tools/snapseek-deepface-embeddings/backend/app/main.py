@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import structlog
 
 from .config import get_settings
-from .routers import search_router, chat_router, persons_router
+from .routers import search_router, chat_router, persons_router, downloads_router
 from .routers.images import router as images_router
 from .models import HealthResponse, ServiceHealth
 from .services import SearchService
@@ -73,6 +73,7 @@ app.include_router(search_router)
 app.include_router(chat_router)
 app.include_router(images_router)
 app.include_router(persons_router)
+app.include_router(downloads_router)
 
 
 @app.get("/", tags=["root"])

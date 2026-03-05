@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect } from 'react';
-import { Send, Bot, User, Image as ImageIcon, Loader2 } from 'lucide-react';
+import { Send, Bot, User, Image as ImageIcon, Loader2, Download, FolderArchive } from 'lucide-react';
 import { useChat } from '../hooks/useApi';
-import type { ChatMessage, ChatImageReference } from '../types';
+import { createZipDownload } from '../services/api';
+import type { ChatMessage, ChatImageReference, ChatAction } from '../types';
 
 interface ChatInterfaceProps {
   onImageClick?: (imageId: string) => void;
@@ -9,6 +10,7 @@ interface ChatInterfaceProps {
 
 interface DisplayMessage extends ChatMessage {
   images?: ChatImageReference[];
+  actions?: ChatAction[];
 }
 
 export function ChatInterface({ onImageClick }: ChatInterfaceProps) {
@@ -47,17 +49,24 @@ export function ChatInterface({ onImageClick }: ChatInterfaceProps) {
         .filter((m) => m.role !== 'system')
         .map((m) => ({ role: m.role, content: m.content }));
 
+      // Collect image IDs from prior assistant messages for context
+      const imageContext = messages
+        .filter((m) => m.role === 'assistant' && m.images?.length)
+        .flatMap((m) => m.images!.map((img) => img.id));
+
       const response = await chatMutation.mutateAsync({
         message: userMessage,
         history,
         include_images: true,
+        image_context: imageContext,
       });
 
-      // Add assistant message with images
+      // Add assistant message with images and actions
       const assistantMessage: DisplayMessage = {
         role: 'assistant',
         content: response.message,
         images: response.images,
+        actions: response.actions,
       };
       setMessages((prev) => [...prev, assistantMessage]);
     } catch (error) {
@@ -133,6 +142,28 @@ interface MessageBubbleProps {
 
 function MessageBubble({ message, onImageClick }: MessageBubbleProps) {
   const isUser = message.role === 'user';
+  const [downloading, setDownloading] = useState<string | null>(null);
+
+  const handleDownload = async (action: ChatAction) => {
+    const payload = action.payload as { image_ids?: string[]; group_by_date?: boolean };
+    if (!payload.image_ids?.length) return;
+
+    const key = JSON.stringify(payload);
+    setDownloading(key);
+    try {
+      const result = await createZipDownload(
+        payload.image_ids,
+        !!payload.group_by_date
+      );
+      // Open the proxy URL — the blob proxy sets Content-Disposition: attachment
+      // so the browser will download it automatically.
+      window.open(result.download_url, '_blank');
+    } catch (err) {
+      console.error('Download failed:', err);
+    } finally {
+      setDownloading(null);
+    }
+  };
 
   return (
     <div className={`flex gap-3 ${isUser ? 'flex-row-reverse' : ''}`}>
@@ -188,6 +219,32 @@ function MessageBubble({ message, onImageClick }: MessageBubbleProps) {
                 </div>
               </button>
             ))}
+          </div>
+        )}
+
+        {/* Action buttons (e.g. ZIP download) */}
+        {message.actions && message.actions.length > 0 && (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {message.actions.map((action, idx) => {
+              const key = JSON.stringify(action.payload);
+              const isLoading = downloading === key;
+              const Icon = action.payload.group_by_date ? FolderArchive : Download;
+              return (
+                <button
+                  key={idx}
+                  onClick={() => handleDownload(action)}
+                  disabled={isLoading}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-800 disabled:cursor-wait text-white text-sm font-medium transition-colors"
+                >
+                  {isLoading ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Icon className="w-4 h-4" />
+                  )}
+                  {isLoading ? 'Preparing...' : action.label}
+                </button>
+              );
+            })}
           </div>
         )}
       </div>

@@ -183,7 +183,8 @@ class SearchService(ISearchService):
             "select": [
                 "id", "filename", "file_url", "caption", "tags", "objects",
                 "extracted_text", "has_text", "face_count", "has_faces",
-                "dominant_colors", "width", "height", "file_size"
+                "dominant_colors", "width", "height", "file_size",
+                "person_names"
             ]
         }
         
@@ -266,6 +267,7 @@ class SearchService(ISearchService):
                 has_faces=result.get("has_faces", False),
                 dominant_colors=result.get("dominant_colors", []),
                 score=normalized_score,
+                person_names=result.get("person_names", []),
                 width=result.get("width"),
                 height=result.get("height"),
                 file_size=result.get("file_size")
@@ -344,6 +346,7 @@ class SearchService(ISearchService):
                 has_faces=result.get("has_faces", False),
                 face_details=face_details,
                 person_ids=result.get("person_ids", []),
+                person_names=result.get("person_names", []),
                 dominant_colors=result.get("dominant_colors", []),
                 accent_color=result.get("accent_color"),
                 is_black_white=result.get("is_black_white", False),
@@ -583,9 +586,21 @@ class SearchService(ISearchService):
                     updated_face_details.append(fd)
             
             if modified:
+                # Rebuild top-level person_names from all face_details
+                all_names = set()
+                for fd_str in updated_face_details:
+                    try:
+                        fd_obj = json.loads(fd_str) if isinstance(fd_str, str) else fd_str
+                        pn = fd_obj.get("person_name")
+                        if pn:
+                            all_names.add(pn)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
                 batch.append({
                     "id": doc_id,
                     "face_details": updated_face_details,
+                    "person_names": list(all_names),
                     "@search.action": "merge"
                 })
                 updated_count += 1
@@ -596,6 +611,44 @@ class SearchService(ISearchService):
             self.logger.info("Document batch updated", count=len(batch))
         
         return updated_count
+
+    async def add_person_name_to_images(
+        self, image_ids: list[str], person_name: str
+    ) -> int:
+        """Add *person_name* to the top-level ``person_names`` collection
+        on each image document listed in *image_ids*.
+
+        Existing names on the document are preserved (set-union).
+        Returns the number of documents updated.
+        """
+        if not image_ids or not person_name:
+            return 0
+
+        unique_ids = list(set(image_ids))
+        batch: list[dict] = []
+
+        for img_id in unique_ids:
+            try:
+                doc = self.search_client.get_document(
+                    key=img_id, selected_fields=["id", "person_names"]
+                )
+                existing: list[str] = doc.get("person_names") or []
+                if person_name not in existing:
+                    existing.append(person_name)
+                    batch.append({
+                        "id": img_id,
+                        "person_names": existing,
+                        "@search.action": "merge",
+                    })
+            except Exception as exc:
+                self.logger.debug("Image doc not found for name merge",
+                                 image_id=img_id, error=str(exc))
+
+        if batch:
+            self.search_client.upload_documents(documents=batch)
+            self.logger.info("Added person_name to images",
+                           name=person_name, count=len(batch))
+        return len(batch)
 
     async def find_images_by_face_id(self, face_id: str) -> list[dict]:
         """Find images containing a specific persisted_face_id."""

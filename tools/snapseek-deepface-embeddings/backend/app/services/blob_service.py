@@ -110,6 +110,49 @@ class BlobService:
             self.logger.error("Failed to download blob", error=str(e), container=container_name, blob=blob_name)
             raise
     
+    async def upload_blob(
+        self,
+        container_name: str,
+        blob_name: str,
+        data: bytes,
+        content_type: str = "application/octet-stream",
+        overwrite: bool = True,
+    ) -> str:
+        """Upload data to a blob, creating the container if needed.
+
+        Returns:
+            The proxy URL for the uploaded blob.
+        """
+        if not self.enabled:
+            raise ValueError("Blob service not configured")
+
+        container_client = self.blob_service_client.get_container_client(container_name)
+        try:
+            container_client.get_container_properties()
+        except Exception:
+            container_client.create_container()
+            self.logger.info("Created container", container=container_name)
+
+        from azure.storage.blob import ContentSettings
+
+        blob_client = self.blob_service_client.get_blob_client(
+            container=container_name, blob=blob_name
+        )
+        blob_client.upload_blob(
+            data,
+            overwrite=overwrite,
+            content_settings=ContentSettings(content_type=content_type),
+        )
+        self.logger.info(
+            "Uploaded blob",
+            container=container_name,
+            blob=blob_name,
+            size_kb=round(len(data) / 1024),
+        )
+        return self.get_proxy_url(
+            f"https://{self.account_url.split('//')[1]}/{container_name}/{blob_name}"
+        )
+
     def parse_blob_url(self, blob_url: str) -> tuple[str, str] | None:
         """
         Parse a blob URL into container and blob name.

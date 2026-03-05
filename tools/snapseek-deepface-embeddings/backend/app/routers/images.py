@@ -107,17 +107,24 @@ async def get_image(
             throughput_kbps=round(size_kb / (elapsed_ms / 1000), 1) if elapsed_ms > 0 else 0
         )
         
-        # Return the image with aggressive caching headers
+        # Build response headers
+        headers: dict[str, str] = {
+            "Cache-Control": "public, max-age=86400, immutable",  # 24 hours, immutable
+            "ETag": etag,
+            "X-Content-Type-Options": "nosniff",
+            "X-Blob-Time-Ms": str(round(elapsed_ms, 1)),
+            "X-Cache": "MISS",
+        }
+
+        # Force download for non-image content (e.g. ZIP files)
+        if not content_type.startswith("image/"):
+            fname = blob_path.split("/")[-1]
+            headers["Content-Disposition"] = f'attachment; filename="{fname}"'
+
         return Response(
             content=blob_data,
             media_type=content_type,
-            headers={
-                "Cache-Control": "public, max-age=86400, immutable",  # 24 hours, immutable
-                "ETag": etag,
-                "X-Content-Type-Options": "nosniff",
-                "X-Blob-Time-Ms": str(round(elapsed_ms, 1)),
-                "X-Cache": "MISS",
-            }
+            headers=headers,
         )
         
     except Exception as e:

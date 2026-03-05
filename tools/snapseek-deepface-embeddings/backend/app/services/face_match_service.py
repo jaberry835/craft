@@ -108,7 +108,7 @@ class FaceMatchService:
         self,
         embedding: list[float],
         top: int = 50,
-        threshold: float = 0.5,
+        threshold: float = 0.75,
     ) -> list[dict[str, Any]]:
         """
         Search the faces index for vectors similar to *embedding*.
@@ -135,6 +135,7 @@ class FaceMatchService:
             matches: list[dict[str, Any]] = []
             for doc in results:
                 score = doc.get("@search.score", 0)
+                self.logger.debug("Face vector match", face_id=doc["id"], score=score, threshold=threshold)
                 if score < threshold:
                     continue
                 matches.append(
@@ -166,6 +167,48 @@ class FaceMatchService:
         embedding = self.generate_embedding(image_data)
         if embedding is None:
             return []
+        return self.find_similar_faces(embedding, top=top, threshold=threshold)
+
+    def get_face_document(self, face_doc_id: str) -> dict[str, Any] | None:
+        """
+        Retrieve a single face document by its ID from the faces index.
+
+        Returns the document dict or ``None`` if not found.
+        """
+        if not self.enabled:
+            return None
+        try:
+            doc = self.faces_client.get_document(key=face_doc_id)
+            return dict(doc)
+        except Exception as e:
+            self.logger.warning("Face document not found", face_doc_id=face_doc_id, error=str(e))
+            return None
+
+    def find_similar_by_face_doc_id(
+        self,
+        face_doc_id: str,
+        top: int = 50,
+        threshold: float = 0.75,
+    ) -> list[dict[str, Any]]:
+        """
+        Look up the embedding of *face_doc_id* and return similar faces.
+
+        This is the backend for "click a face → find all similar faces".
+        """
+        doc = self.get_face_document(face_doc_id)
+        if doc is None:
+            self.logger.warning("Face doc not found for similarity search", face_doc_id=face_doc_id)
+            return []
+
+        embedding = doc.get("face_embedding")
+        if not embedding:
+            self.logger.warning("Face document has no embedding", face_doc_id=face_doc_id)
+            return []
+
+        self.logger.info("Finding similar faces by doc ID",
+                        face_doc_id=face_doc_id,
+                        embedding_len=len(embedding),
+                        threshold=threshold)
         return self.find_similar_faces(embedding, top=top, threshold=threshold)
 
     def list_unique_persons(self) -> list[dict[str, Any]]:
@@ -244,6 +287,83 @@ class FaceMatchService:
         except Exception as e:
             self.logger.error("Failed to update person name", error=str(e))
             return 0
+
+    def name_face_cluster(
+        self, face_doc_id: str, name: str, threshold: float = 0.75
+    ) -> list[str]:
+        """Name a face and all its similar faces in the faces index.
+
+        1. Finds the base face doc.
+        2. Vector-searches for all similar faces above *threshold*.
+        3. Sets ``person_name`` = *name* on every match.
+
+        Returns the list of face doc IDs that were updated.
+        """
+        if not self.enabled:
+            return []
+
+        similar = self.find_similar_by_face_doc_id(
+            face_doc_id, top=200, threshold=threshold
+        )
+        if not similar:
+            # At minimum update just the base doc
+            try:
+                self.faces_client.merge_documents(
+                    documents=[{"id": face_doc_id, "person_name": name}]
+                )
+                return [face_doc_id]
+            except Exception as e:
+                self.logger.error("Failed to name base face", error=str(e))
+                return []
+
+        ids_updated: list[str] = []
+        batch = []
+        for m in similar:
+            fid = m.get("id")
+            if fid:
+                batch.append({"id": fid, "person_name": name})
+                ids_updated.append(fid)
+
+        # Ensure the base face is included
+        if face_doc_id not in ids_updated:
+            batch.append({"id": face_doc_id, "person_name": name})
+            ids_updated.append(face_doc_id)
+
+        try:
+            self.faces_client.merge_documents(documents=batch)
+            self.logger.info(
+                "Named face cluster",
+                base_face=face_doc_id,
+                name=name,
+                count=len(ids_updated),
+            )
+        except Exception as e:
+            self.logger.error("Failed to name cluster", error=str(e))
+
+        return ids_updated
+
+    def search_faces_by_name(self, name: str, top: int = 50) -> list[dict[str, Any]]:
+        """Search the faces index by ``person_name``.
+
+        Returns a list of dicts with face doc fields, de-duped to one
+        representative per unique ``person_name``.
+        """
+        if not self.enabled:
+            return []
+
+        try:
+            results = self.faces_client.search(
+                search_text=name,
+                search_fields=["person_name"],
+                select=["id", "image_id", "image_url", "filename",
+                        "person_id", "person_name", "confidence",
+                        "bounding_box", "face_index"],
+                top=top,
+            )
+            return [dict(doc) for doc in results]
+        except Exception as e:
+            self.logger.error("Failed to search faces by name", error=str(e))
+            return []
 
     def assign_person_to_face(self, face_doc_id: str, person_id: str, person_name: str | None = None) -> bool:
         """Assign a person identity to a single face document."""

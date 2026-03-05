@@ -68,6 +68,21 @@ export async function sendChatMessage(request: ChatRequest): Promise<ChatRespons
 }
 
 /**
+ * Request a ZIP of images — the backend uploads it to blob storage
+ * and returns a proxy URL the browser can open directly.
+ */
+export async function createZipDownload(
+  imageIds: string[],
+  groupByDate = false
+): Promise<{ download_url: string; filename: string; image_count: number; size_kb: number }> {
+  const response = await api.post('/downloads/zip', {
+    image_ids: imageIds,
+    group_by_date: groupByDate,
+  });
+  return response.data;
+}
+
+/**
  * Health check
  */
 export async function healthCheck(): Promise<{ status: string; version: string }> {
@@ -112,10 +127,11 @@ export async function updatePersonName(
 export async function getPersonImages(
   personId: string,
   top = 50,
-  skip = 0
+  skip = 0,
+  threshold = 0.70
 ): Promise<{ results: ImageResult[]; total_count: number; person_id: string }> {
   const response = await api.get(`/persons/${personId}/images`, {
-    params: { top, skip },
+    params: { top, skip, threshold },
   });
   return response.data;
 }

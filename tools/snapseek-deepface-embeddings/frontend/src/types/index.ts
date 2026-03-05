@@ -113,6 +113,7 @@ export interface ChatRequest {
   message: string;
   history?: ChatMessage[];
   include_images?: boolean;
+  image_context?: string[];
 }
 
 export interface ChatImageReference {
@@ -123,9 +124,16 @@ export interface ChatImageReference {
   relevance_reason: string | null;
 }
 
+export interface ChatAction {
+  type: string;
+  label: string;
+  payload: Record<string, unknown>;
+}
+
 export interface ChatResponse {
   message: string;
   images: ChatImageReference[];
+  actions: ChatAction[];
   search_query: string | null;
 }
 

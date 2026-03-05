@@ -17,6 +17,7 @@ router = APIRouter(prefix="/api/v1/persons", tags=["persons"])
 
 # Constants
 UUID_PATTERN = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.IGNORECASE)
+MD5_PATTERN = re.compile(r'^[0-9a-f]{32}$', re.IGNORECASE)  # face doc IDs from deepface indexer
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10MB
 
 
@@ -101,9 +102,67 @@ async def list_persons(
                any(search_lower in fid.lower() for fid in p.get("persisted_face_ids", []))
         ]
         
-        # If search looks like a UUID and no persons found, search by persisted_face_id in images
-        if not persons and UUID_PATTERN.match(search):
-            logger.info("Searching for face ID in images", face_id=search)
+        # If no matches yet, search faces index by person_name
+        if not persons and face_match_service.enabled:
+            name_hits = face_match_service.search_faces_by_name(search, top=50)
+            if name_hits:
+                # Group by person_name to build synthetic person entries
+                seen_names: dict[str, dict] = {}
+                for hit in name_hits:
+                    pname = hit.get("person_name") or ""
+                    if pname not in seen_names:
+                        seen_names[pname] = {
+                            "face_doc_id": hit["id"],
+                            "image_ids": set(),
+                            "count": 0,
+                        }
+                    seen_names[pname]["count"] += 1
+                    if hit.get("image_id"):
+                        seen_names[pname]["image_ids"].add(hit["image_id"])
+                
+                result_persons = []
+                for pname, info in seen_names.items():
+                    result_persons.append(PersonResponse(
+                        person_id=info["face_doc_id"],
+                        name=pname,
+                        user_data=f"face_doc_id:{info['face_doc_id']}",
+                        face_count=info["count"],
+                        image_count=len(info["image_ids"]),
+                    ))
+                return PersonListResponse(
+                    persons=result_persons,
+                    total_count=len(result_persons),
+                )
+
+        # If search looks like a face doc ID (md5 hash) or UUID, try face lookup
+        if not persons and (MD5_PATTERN.match(search) or UUID_PATTERN.match(search)):
+            logger.info("Searching for face ID", face_id=search)
+            
+            # Try local faces index first (deepface face doc IDs are md5 hashes)
+            if face_match_service.enabled:
+                face_doc = face_match_service.get_face_document(search)
+                if face_doc:
+                    # Found a face doc — return a synthetic person entry for it
+                    similar = face_match_service.find_similar_by_face_doc_id(search, top=50, threshold=0.75)
+                    unique_image_ids = set()
+                    for m in similar:
+                        img_id = m.get("image_id")
+                        if img_id:
+                            unique_image_ids.add(img_id)
+                    
+                    result_persons = [PersonResponse(
+                        person_id=search,
+                        name=face_doc.get("person_name") or "Unassigned Face",
+                        user_data=f"face_doc_id:{search}",
+                        face_count=len(similar),
+                        image_count=len(unique_image_ids)
+                    )]
+                    return PersonListResponse(
+                        persons=result_persons,
+                        total_count=len(result_persons)
+                    )
+            
+            # Fallback: search by persisted_face_id in the images index
             face_matches = await search_service.find_images_by_face_id(search)
             logger.info("Face search result", match_count=len(face_matches), matches=face_matches)
             if face_matches:
@@ -172,10 +231,44 @@ async def get_person(
     """Get a specific person by ID."""
     person_service = get_person_service(settings)
     search_service = get_search_service(settings)
+    face_match_service = get_face_match_service(settings)
     
     person = await person_service.get_person(person_id)
+    
     if not person:
-        raise HTTPException(status_code=404, detail="Person not found")
+        # Try face doc ID lookup (deepface md5 hashes)
+        if face_match_service.enabled and MD5_PATTERN.match(person_id):
+            face_doc = face_match_service.get_face_document(person_id)
+            if face_doc:
+                similar = face_match_service.find_similar_by_face_doc_id(person_id, top=50, threshold=0.75)
+                unique_image_ids = {m.get("image_id") for m in similar if m.get("image_id")}
+                return PersonResponse(
+                    person_id=person_id,
+                    name=face_doc.get("person_name") or "Unassigned Face",
+                    user_data=f"face_doc_id:{person_id}",
+                    face_count=len(similar),
+                    image_count=len(unique_image_ids)
+                )
+        
+        # Try persisted_face_id lookup in images index
+        if UUID_PATTERN.match(person_id) or MD5_PATTERN.match(person_id):
+            face_matches = await search_service.find_images_by_face_id(person_id)
+            if face_matches:
+                first_match = face_matches[0]
+                linked_person_id = first_match.get("person_id")
+                if linked_person_id:
+                    person = await person_service.get_person(linked_person_id)
+                if not person:
+                    return PersonResponse(
+                        person_id=person_id,
+                        name="Unassigned Face",
+                        user_data=f"persisted_face_id:{person_id}",
+                        face_count=1,
+                        image_count=len(face_matches)
+                    )
+        
+        if not person:
+            raise HTTPException(status_code=404, detail="Person not found")
     
     # Get image count
     image_count = 0
@@ -204,32 +297,77 @@ async def update_person(
     request: UpdatePersonRequest,
     settings: Settings = Depends(get_settings)
 ):
-    """Update a person's name."""
-    person_service = get_person_service(settings)
+    """Update a person's name.
+
+    Works for both Face API UUIDs and deepface md5 face-doc IDs.
+    For md5 IDs the name is propagated to the entire similar-face cluster
+    in the faces index so that subsequent name searches find them all.
+    """
+    face_match_service = get_face_match_service(settings)
     search_service = get_search_service(settings)
-    
-    # Update in Face API
-    success = await person_service.update_person_name(person_id, request.name)
-    if not success:
-        raise HTTPException(status_code=500, detail="Failed to update person in Face API")
-    
-    # Update face_details in all documents containing this person
+    person_service = get_person_service(settings)
+
+    face_ids_updated: list[str] = []
+
+    # --- Deepface path: md5 face doc ID --------------------------------
+    if MD5_PATTERN.match(person_id) and face_match_service.enabled:
+        face_ids_updated = face_match_service.name_face_cluster(
+            face_doc_id=person_id,
+            name=request.name,
+        )
+        if not face_ids_updated:
+            raise HTTPException(status_code=404, detail="Face document not found")
+
+        logger.info("Named face cluster via deepface",
+                   person_id=person_id,
+                   name=request.name,
+                   faces_updated=len(face_ids_updated))
+
+        # Propagate person_names to the main image index
+        # Look up face docs to collect their image_ids
+        try:
+            image_ids: list[str] = []
+            for fid in face_ids_updated:
+                fdoc = face_match_service.faces_client.get_document(
+                    key=fid, selected_fields=["image_id"]
+                )
+                img_id = fdoc.get("image_id")
+                if img_id:
+                    image_ids.append(img_id)
+            if image_ids:
+                await search_service.add_person_name_to_images(image_ids, request.name)
+        except Exception as e:
+            logger.warning("Failed to propagate person_names to images", error=str(e))
+
+    # --- Face API UUID path -------------------------------------------
+    elif UUID_PATTERN.match(person_id):
+        success = await person_service.update_person_name(person_id, request.name)
+        if not success:
+            logger.warning("Face API person update failed (may not exist)",
+                          person_id=person_id)
+
+        # Also update any matching face docs in the faces index
+        if face_match_service.enabled:
+            face_match_service.update_person_name_in_faces(person_id, request.name)
+
+    # --- Fallback: try faces index directly ----------------------------
+    else:
+        if face_match_service.enabled:
+            face_match_service.update_person_name_in_faces(person_id, request.name)
+
+    # Update face_details.person_name in all image documents
     try:
-        # Update each document's face_details with the new name
         updated_count = await search_service.update_person_name_in_documents(
             person_id=person_id,
             person_name=request.name
         )
-        
-        logger.info("Updated person name in documents", 
-                   person_id=person_id, 
+        logger.info("Updated person name in image documents",
+                   person_id=person_id,
                    name=request.name,
                    documents_updated=updated_count)
-        
     except Exception as e:
-        logger.warning("Failed to update documents", error=str(e))
-        # Don't fail the request - Face API was updated successfully
-    
+        logger.warning("Failed to update image documents", error=str(e))
+
     return {"status": "success", "person_id": person_id, "name": request.name}
 
 
@@ -238,12 +376,55 @@ async def get_person_images(
     person_id: str,
     top: int = Query(50, ge=1, le=100),
     skip: int = Query(0, ge=0),
+    threshold: float = Query(0.70, ge=0.0, le=1.0, description="Minimum similarity score (0-1)"),
     settings: Settings = Depends(get_settings)
 ):
     """Get all images containing a specific person or face."""
     search_service = get_search_service(settings)
+    face_match_service = get_face_match_service(settings)
     
-    # First try searching by person_id
+    # Helper to build vector-similarity response with scores as percentages
+    def _build_face_match_response(
+        similar: list[dict],
+        images: list,
+        person_id: str,
+    ) -> dict:
+        """Normalise scores to 0-100% relative to the best match and return."""
+        # The top match (self) has score ~1.0 = 100%
+        max_score = max((m["score"] for m in similar), default=1.0)
+        confidence_map: dict[str, float] = {}
+        seen: set[str] = set()
+        ordered_ids: list[str] = []
+        for m in similar:
+            img_id = m.get("image_id")
+            if img_id and img_id not in seen:
+                seen.add(img_id)
+                ordered_ids.append(img_id)
+                # Store best score per image and normalise: base face = 100%
+                raw = m["score"]
+                pct = (raw / max_score) if max_score else 0.0
+                if img_id not in confidence_map or pct > confidence_map[img_id]:
+                    confidence_map[img_id] = pct
+
+        for img in images:
+            img.score = confidence_map.get(img.id, 0.0)
+        images.sort(key=lambda x: x.score or 0, reverse=True)
+        return {
+            "results": images,
+            "total_count": len(ordered_ids),
+            "person_id": person_id,
+        }
+
+    # If this looks like a face doc ID (md5), try vector similarity search first
+    if MD5_PATTERN.match(person_id) and face_match_service.enabled:
+        similar = face_match_service.find_similar_by_face_doc_id(person_id, top=top * 2, threshold=threshold)
+        if similar:
+            doc_ids = list(dict.fromkeys(m.get("image_id") for m in similar if m.get("image_id")))
+            if doc_ids:
+                images = await search_service.get_images_by_ids(doc_ids[:top])
+                return _build_face_match_response(similar, images, person_id)
+    
+    # Try searching by person_id in the images index
     result = await search_service.search(SearchRequest(
         query="*",
         person_ids=[person_id],
@@ -255,7 +436,6 @@ async def get_person_images(
     if result.total_count == 0 and UUID_PATTERN.match(person_id):
         face_matches = await search_service.find_images_by_face_id(person_id)
         if face_matches:
-            # Fetch full ImageResult objects
             doc_ids = [m["id"] for m in face_matches]
             results = await search_service.get_images_by_ids(doc_ids[:top])
             return {
@@ -263,6 +443,17 @@ async def get_person_images(
                 "total_count": len(face_matches),
                 "person_id": person_id
             }
+    
+    # If still no results and we have face matching, try the face doc lookup as fallback
+    if result.total_count == 0 and face_match_service.enabled:
+        face_doc = face_match_service.get_face_document(person_id)
+        if face_doc:
+            similar = face_match_service.find_similar_by_face_doc_id(person_id, top=top * 2, threshold=threshold)
+            if similar:
+                doc_ids_list = list(dict.fromkeys(m.get("image_id") for m in similar if m.get("image_id")))
+                if doc_ids_list:
+                    images = await search_service.get_images_by_ids(doc_ids_list[:top])
+                    return _build_face_match_response(similar, images, person_id)
     
     return {
         "results": result.results,

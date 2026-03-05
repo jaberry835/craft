@@ -161,6 +161,9 @@ class FaceEmbedder:
         All-in-one: detect faces, compute embeddings, and build ``FaceDocument``s
         ready to be uploaded to the faces search index.
 
+        This uses DeepFace's own face detector.  Prefer ``embed_faces()`` when
+        Face API bounding boxes are available (more accurate locations).
+
         Returns:
             (face_analysis_result, list_of_face_documents)
         """
@@ -214,6 +217,122 @@ class FaceEmbedder:
             face_count=len(detected_faces),
         )
         return face_result, face_docs
+
+    def embed_faces(
+        self,
+        image_data: bytes,
+        face_regions: list[dict],
+        image_id: str,
+        image_url: str | None = None,
+        filename: str | None = None,
+        padding_pct: float = 0.30,
+    ) -> list[FaceDocument]:
+        """Generate embeddings for pre-detected face regions (e.g. from Face API).
+
+        Each entry in *face_regions* must contain a ``bounding_box`` dict with
+        keys ``x``, ``y``, ``width``, ``height``.
+
+        The face is cropped from the full image with *padding_pct* extra margin
+        (default 30 %) to give the recognition model surrounding context, then
+        passed to DeepFace with ``detector_backend="skip"`` so it generates an
+        embedding without re-detecting.
+
+        Falls back to ``detect_and_embed()`` if no *face_regions* are supplied.
+
+        Returns:
+            A list of ``FaceDocument`` objects ready to upload.
+        """
+        if not face_regions:
+            _, docs = self.detect_and_embed(
+                image_data, image_id, image_url, filename
+            )
+            return docs
+
+        from deepface import DeepFace
+
+        self._ensure_model()
+
+        full_img = Image.open(io.BytesIO(image_data)).convert("RGB")
+        img_w, img_h = full_img.size
+
+        face_docs: list[FaceDocument] = []
+
+        for idx, region in enumerate(face_regions):
+            bb = region.get("bounding_box") or {}
+            x, y = bb.get("x", 0), bb.get("y", 0)
+            w, h = bb.get("width", 0), bb.get("height", 0)
+            if w <= 0 or h <= 0:
+                continue
+
+            # Add padding so the recognition model gets some context
+            pad_x = int(w * padding_pct)
+            pad_y = int(h * padding_pct)
+            x1 = max(x - pad_x, 0)
+            y1 = max(y - pad_y, 0)
+            x2 = min(x + w + pad_x, img_w)
+            y2 = min(y + h + pad_y, img_h)
+
+            crop = full_img.crop((x1, y1, x2, y2))
+            # Resize to a standard face-input size that Facenet512 expects
+            crop = crop.resize((160, 160), Image.LANCZOS)
+            crop_array = np.array(crop)
+
+            try:
+                reps = DeepFace.represent(
+                    img_path=crop_array,
+                    model_name=self.model_name,
+                    enforce_detection=False,
+                    detector_backend="skip",
+                )
+            except Exception as e:
+                self.logger.warning(
+                    "Embedding failed for face crop",
+                    face_index=idx, error=str(e),
+                )
+                continue
+
+            if not reps:
+                continue
+
+            embedding = reps[0]["embedding"]
+            conf = reps[0].get("face_confidence", region.get("confidence", 0.0))
+            # When detector_backend="skip", confidence may be 0; use Face API's
+            if (conf is None or conf == 0) and region.get("confidence"):
+                conf = region["confidence"]
+
+            face_doc_id = hashlib.md5(
+                f"{image_id}_face_{idx}".encode()
+            ).hexdigest()
+
+            face_docs.append(
+                FaceDocument(
+                    id=face_doc_id,
+                    image_id=image_id,
+                    image_url=image_url,
+                    filename=filename,
+                    face_index=idx,
+                    bounding_box={"x": x, "y": y, "width": w, "height": h},
+                    confidence=float(conf) if conf else None,
+                    face_embedding=embedding,
+                )
+            )
+
+            self.logger.debug(
+                "Embedded face from Face API region",
+                face_index=idx,
+                bbox=f"{x},{y},{w},{h}",
+            )
+
+        if not face_docs:
+            self.logger.warning(
+                "No embeddings from Face API regions, falling back to detect_and_embed"
+            )
+            _, docs = self.detect_and_embed(
+                image_data, image_id, image_url, filename
+            )
+            return docs
+
+        return face_docs
 
     # ------------------------------------------------------------------
     # Helpers

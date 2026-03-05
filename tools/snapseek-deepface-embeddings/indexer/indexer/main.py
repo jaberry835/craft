@@ -206,22 +206,38 @@ class ImageIndexer:
         )
         
         # --- Local face embeddings (deepface) ---
+        # Use Face API bounding boxes for detection; DeepFace only for embeddings.
         face_documents: list[FaceDocument] = []
         if self.face_embedder and self.settings.enable_face_embeddings:
             try:
-                doc_id = document.id
-                _, face_documents = self.face_embedder.detect_and_embed(
+                face_documents = self.face_embedder.embed_faces(
                     image_data=image_data,
-                    image_id=doc_id,
+                    face_regions=document.face_details,  # Face API boxes
+                    image_id=document.id,
                     image_url=file_url,
                     filename=document.filename,
                 )
                 if face_documents:
-                    # Back-fill face count if Azure Face API was not used / found fewer
                     if len(face_documents) > document.face_count:
                         document.face_count = len(face_documents)
                         document.has_faces = True
-                    self.logger.info("Local face embeddings generated",
+
+                    # Enrich existing face_details with the deepface doc IDs
+                    # so the UI can link to the faces index for vector search.
+                    persisted_ids: list[str] = []
+                    for fd in face_documents:
+                        if fd.face_index < len(document.face_details):
+                            document.face_details[fd.face_index]["persisted_face_id"] = fd.id
+                        persisted_ids.append(fd.id)
+                    document.persisted_face_ids = persisted_ids
+
+                    existing_pids = set(document.person_ids or [])
+                    for fd in face_documents:
+                        if fd.person_id and fd.person_id not in existing_pids:
+                            document.person_ids.append(fd.person_id)
+                            existing_pids.add(fd.person_id)
+
+                    self.logger.info("Face embeddings generated (Face API boxes + DeepFace)",
                                      count=len(face_documents))
             except Exception as e:
                 self.logger.error("Local face embedding failed", error=str(e))
@@ -596,11 +612,13 @@ class ImageIndexer:
         )
         
         # --- Local face embeddings (deepface) ---
+        # Use Face API bounding boxes for detection; DeepFace only for embeddings.
         face_documents: list[FaceDocument] = []
         if self.face_embedder and self.settings.enable_face_embeddings:
             try:
-                _, face_documents = self.face_embedder.detect_and_embed(
+                face_documents = self.face_embedder.embed_faces(
                     image_data=image_data,
+                    face_regions=document.face_details,  # Face API boxes
                     image_id=document.id,
                     image_url=blob_url,
                     filename=document.filename,
@@ -609,7 +627,23 @@ class ImageIndexer:
                     if len(face_documents) > document.face_count:
                         document.face_count = len(face_documents)
                         document.has_faces = True
-                    self.logger.info("Local face embeddings generated",
+
+                    # Enrich existing face_details with the deepface doc IDs
+                    # so the UI can link to the faces index for vector search.
+                    persisted_ids: list[str] = []
+                    for fd in face_documents:
+                        if fd.face_index < len(document.face_details):
+                            document.face_details[fd.face_index]["persisted_face_id"] = fd.id
+                        persisted_ids.append(fd.id)
+                    document.persisted_face_ids = persisted_ids
+
+                    existing_pids = set(document.person_ids or [])
+                    for fd in face_documents:
+                        if fd.person_id and fd.person_id not in existing_pids:
+                            document.person_ids.append(fd.person_id)
+                            existing_pids.add(fd.person_id)
+
+                    self.logger.info("Face embeddings generated (Face API boxes + DeepFace)",
                                      count=len(face_documents))
             except Exception as e:
                 self.logger.error("Local face embedding failed", error=str(e))

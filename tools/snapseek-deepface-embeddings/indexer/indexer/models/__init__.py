@@ -136,6 +136,7 @@ class ImageDocument(BaseModel):
     face_details: list[dict[str, Any]] = Field(default_factory=list)
     person_ids: list[str] = Field(default_factory=list)  # Unique person IDs for filtering
     persisted_face_ids: list[str] = Field(default_factory=list)  # Unique persisted face IDs for filtering
+    person_names: list[str] = Field(default_factory=list)  # Named persons for search boosting
     
     # Colors and metadata
     dominant_colors: list[str] = Field(default_factory=list)
@@ -189,6 +190,7 @@ class ImageDocument(BaseModel):
             "face_details": [json.dumps(fd) for fd in self.face_details] if self.face_details else [],
             "person_ids": self.person_ids or [],
             "persisted_face_ids": self.persisted_face_ids or [],
+            "person_names": self.person_names or [],
             
             # Colors
             "dominant_colors": self.dominant_colors or [],

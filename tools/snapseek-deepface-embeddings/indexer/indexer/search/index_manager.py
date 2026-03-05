@@ -15,6 +15,8 @@ from azure.search.documents.indexes.models import (
     SemanticField,
     SemanticPrioritizedFields,
     SemanticSearch,
+    ScoringProfile,
+    TextWeights,
 )
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -91,12 +93,30 @@ class SearchIndexManager:
                 ],
                 keywords_fields=[
                     SemanticField(field_name="tags"),
-                    SemanticField(field_name="objects")
+                    SemanticField(field_name="objects"),
+                    SemanticField(field_name="person_names"),
                 ]
             )
         )
         
         semantic_search = SemanticSearch(configurations=[semantic_config])
+        
+        # Scoring profile – boost person_names so name queries rank highly
+        scoring_profiles = [
+            ScoringProfile(
+                name="boost-person-names",
+                text_weights=TextWeights(
+                    weights={
+                        "person_names": 10.0,
+                        "caption": 2.0,
+                        "tags": 1.5,
+                        "rich_description": 1.5,
+                        "objects": 1.0,
+                        "extracted_text": 1.0,
+                    }
+                ),
+            )
+        ]
         
         # Field definitions
         # Note: Use SearchField (not SearchableField) for Collection types
@@ -175,6 +195,13 @@ class SearchIndexManager:
                 filterable=True,
                 searchable=True
             ),
+            SearchField(
+                name="person_names",
+                type=SearchFieldDataType.Collection(SearchFieldDataType.String),
+                filterable=True,
+                facetable=True,
+                searchable=True,
+            ),
             
             # Colors
             SearchField(
@@ -219,7 +246,9 @@ class SearchIndexManager:
             name=self.settings.azure_search_index_name,
             fields=fields,
             vector_search=vector_search,
-            semantic_search=semantic_search
+            semantic_search=semantic_search,
+            scoring_profiles=scoring_profiles,
+            default_scoring_profile="boost-person-names",
         )
     
     def _create_faces_index_definition(self) -> SearchIndex:
@@ -265,6 +294,7 @@ class SearchIndexManager:
                 name="face_embedding",
                 type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
                 searchable=True,
+                hidden=False,  # Must be retrievable so we can look up embeddings for similarity search
                 vector_search_dimensions=self.settings.face_embedding_dimensions,
                 vector_search_profile_name="vector-profile-face",
             ),

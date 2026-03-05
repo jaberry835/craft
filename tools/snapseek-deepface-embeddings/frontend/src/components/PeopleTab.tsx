@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Search, Upload, Users, Image, Pencil, Check, X, Loader2 } from 'lucide-react';
+import { Search, Upload, Users, Image, Pencil, Check, X, Loader2, SlidersHorizontal } from 'lucide-react';
 import { listPersons, updatePersonName, findImagesByFace, getPersonImages } from '../services/api';
 import type { Person, ImageResult } from '../types';
 
@@ -23,6 +23,7 @@ export function PeopleTab({ onImageSelect, initialSearchQuery }: PeopleTabProps)
   const [uploadedImage, setUploadedImage] = useState<string | null>(null);
   const [editingPersonId, setEditingPersonId] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
+  const [similarityThreshold, setSimilarityThreshold] = useState(0.70);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Fetch persons list
@@ -34,8 +35,8 @@ export function PeopleTab({ onImageSelect, initialSearchQuery }: PeopleTabProps)
 
   // Fetch selected person's images
   const { data: personImages, isLoading: loadingImages } = useQuery({
-    queryKey: ['personImages', selectedPerson?.person_id],
-    queryFn: () => selectedPerson ? getPersonImages(selectedPerson.person_id) : null,
+    queryKey: ['personImages', selectedPerson?.person_id, similarityThreshold],
+    queryFn: () => selectedPerson ? getPersonImages(selectedPerson.person_id, 50, 0, similarityThreshold) : null,
     enabled: !!selectedPerson,
     staleTime: 30000,
   });
@@ -308,9 +309,37 @@ export function PeopleTab({ onImageSelect, initialSearchQuery }: PeopleTabProps)
         {/* Selected Person Images */}
         {selectedPerson && (
           <div>
-            <h3 className="text-sm font-medium text-gray-300 mb-3">
-              Images of {selectedPerson.name || 'Unknown'} ({personImages?.total_count || 0})
-            </h3>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-medium text-gray-300">
+                Images of {selectedPerson.name || 'Unknown'} ({personImages?.total_count || 0})
+              </h3>
+            </div>
+
+            {/* Similarity Threshold Slider */}
+            <div className="bg-slate-800 rounded-lg p-3 mb-3">
+              <div className="flex items-center gap-2 mb-2">
+                <SlidersHorizontal className="w-4 h-4 text-gray-400" />
+                <span className="text-xs font-medium text-gray-300">
+                  Similarity Threshold
+                </span>
+                <span className="ml-auto text-sm font-semibold text-blue-400">
+                  {Math.round(similarityThreshold * 100)}%
+                </span>
+              </div>
+              <input
+                type="range"
+                min={0.5}
+                max={1.0}
+                step={0.01}
+                value={similarityThreshold}
+                onChange={(e) => setSimilarityThreshold(parseFloat(e.target.value))}
+                className="w-full h-1.5 bg-slate-600 rounded-lg appearance-none cursor-pointer accent-blue-500"
+              />
+              <div className="flex justify-between mt-1">
+                <span className="text-[10px] text-gray-500">50% (loose)</span>
+                <span className="text-[10px] text-gray-500">100% (exact)</span>
+              </div>
+            </div>
             
             {loadingImages ? (
               <div className="flex items-center justify-center py-8">
@@ -324,13 +353,27 @@ export function PeopleTab({ onImageSelect, initialSearchQuery }: PeopleTabProps)
                   <div
                     key={img.id}
                     onClick={() => onImageSelect?.(img)}
-                    className="aspect-square rounded-lg overflow-hidden cursor-pointer hover:ring-2 hover:ring-blue-500"
+                    className="relative aspect-square rounded-lg overflow-hidden cursor-pointer hover:ring-2 hover:ring-blue-500 group"
                   >
                     <img
                       src={img.file_url || ''}
                       alt={img.filename}
                       className="w-full h-full object-cover"
                     />
+                    {/* Score Badge */}
+                    {img.score != null && (
+                      <div
+                        className={`absolute top-1 right-1 px-1.5 py-0.5 rounded text-[10px] font-bold shadow-md ${
+                          img.score >= 0.95
+                            ? 'bg-green-500/90 text-white'
+                            : img.score >= 0.80
+                            ? 'bg-blue-500/90 text-white'
+                            : 'bg-amber-500/90 text-white'
+                        }`}
+                      >
+                        {Math.round(img.score * 100)}%
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>

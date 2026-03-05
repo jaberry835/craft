@@ -2,6 +2,7 @@
 
 import io
 import structlog
+from PIL import Image
 from azure.cognitiveservices.vision.computervision import ComputerVisionClient
 from azure.cognitiveservices.vision.computervision.models import VisualFeatureTypes
 from msrest.authentication import CognitiveServicesCredentials
@@ -11,6 +12,9 @@ from ..config import Settings, get_azure_credential
 from ..models import ImageAnalysisResult, DetectedObject, BoundingBox
 
 logger = structlog.get_logger()
+
+# Azure CV v3.2 stream endpoint accepts a maximum of 4 MB.
+_CV_MAX_BYTES = 4 * 1024 * 1024  # 4 MB
 
 
 class _AzureIdentityCredentialAdapter:
@@ -87,6 +91,7 @@ class ComputerVisionAnalyzer:
         Returns:
             ImageAnalysisResult with all extracted features
         """
+        image_data = self._ensure_within_size_limit(image_data)
         self.logger.info("Analyzing image with Computer Vision v3.2")
         
         try:
@@ -235,3 +240,63 @@ class ComputerVisionAnalyzer:
         except Exception as e:
             self.logger.error("Computer Vision URL analysis failed", error=str(e))
             raise
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _ensure_within_size_limit(self, image_data: bytes) -> bytes:
+        """Downscale the image if it exceeds the CV v3.2 4 MB stream limit.
+
+        Progressively reduces quality (JPEG) and then resolution until the
+        payload fits.  Returns the original bytes when already under the limit.
+        """
+        if len(image_data) <= _CV_MAX_BYTES:
+            return image_data
+
+        img = Image.open(io.BytesIO(image_data))
+        fmt = img.format or "JPEG"
+        # Always re-encode as JPEG for size efficiency
+        if fmt.upper() in ("PNG", "BMP", "TIFF"):
+            fmt = "JPEG"
+            if img.mode in ("RGBA", "P", "LA"):
+                img = img.convert("RGB")
+
+        # Try reducing JPEG quality first (95 → 80 → 60)
+        for quality in (95, 80, 60):
+            buf = io.BytesIO()
+            img.save(buf, format=fmt, quality=quality)
+            data = buf.getvalue()
+            if len(data) <= _CV_MAX_BYTES:
+                self.logger.info(
+                    "Image resized for CV",
+                    original_bytes=len(image_data),
+                    new_bytes=len(data),
+                    method=f"quality={quality}",
+                )
+                return data
+
+        # Still too large — progressively halve the resolution
+        current = img
+        for _ in range(5):
+            w, h = current.size
+            current = current.resize((w // 2, h // 2), Image.LANCZOS)
+            buf = io.BytesIO()
+            current.save(buf, format="JPEG", quality=80)
+            data = buf.getvalue()
+            if len(data) <= _CV_MAX_BYTES:
+                self.logger.info(
+                    "Image resized for CV",
+                    original_bytes=len(image_data),
+                    new_bytes=len(data),
+                    new_dimensions=f"{current.size[0]}x{current.size[1]}",
+                    method="resolution_reduce",
+                )
+                return data
+
+        # Last resort — return whatever we have; the API will reject it
+        self.logger.warning(
+            "Could not shrink image below 4 MB",
+            final_bytes=len(data),
+        )
+        return data
