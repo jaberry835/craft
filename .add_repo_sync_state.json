@@ -1,8 +1,8 @@
 {
-  "remote::https://github.com/adamruderman/AgentChatV2::main": "52f1c3f078eef21b389dbc4234ffd8b686ac6ab3",
-  "remote::https://github.com/adamruderman/Rude-MCPServer::main": "1e5970904945104e5fca0fa300520a2bf346c37f",
+  "remote::https://github.com/adamruderman/AgentChatV2::main": "d6127a490cf857aa94e786684661babd8496ca45",
+  "remote::https://github.com/adamruderman/Rude-MCPServer::main": "49da30c53443e2850bf56e1bd3ff72c5bfddd6c6",
   "remote::https://github.com/adamruderman/UserAccessChecker-Python::main": "501c9f9f0da72aa8f0dcf2f35c2238fd5328543e",
   "remote::https://github.com/adamruderman/UserAccessCheckerApi::main": "94709ad66ce5ec8473d58850f816f80a34688c17",
   "remote::https://github.com/jaberry835/PrintShopDemo::main": "e57e3b549a85b782a6b58faf965ad351a51fd993",
-  "remote::https://github.com/jaberry835/snapseek::main": "e572fb1a70e94a6baf2125f84fd380c6359b2e14"
+  "remote::https://github.com/jaberry835/snapseek::main": "4ba86aac9136dfbd3b5316b3b8f4a0f7afdd8269"
 }
