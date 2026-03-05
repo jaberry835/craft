@@ -8,6 +8,7 @@ $repos = @(
     @{ Url = "https://github.com/adamruderman/UserAccessChecker-Python"; Branch = "main" }
     @{ Url = "https://github.com/jaberry835/snapseek";                  Branch = "main" }
     @{ Url = "https://github.com/jaberry835/PrintShopDemo";             Branch = "main" }
+     @{ Url = "https://github.com/jaberry835/snapseek";                  Branch = "deepface-embeddings" }
 )
 
 $scriptDir = $PSScriptRoot

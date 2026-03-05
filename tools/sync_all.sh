@@ -10,7 +10,6 @@ repos=(
   "https://github.com/adamruderman/UserAccessChecker-Python main"
   "https://github.com/jaberry835/snapseek main"
   "https://github.com/jaberry835/PrintShopDemo main"
-   "https://github.com/jaberry835/snapseek local-face"
 )
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
