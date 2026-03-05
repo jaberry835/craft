@@ -1,0 +1,44 @@
+{
+  "clouds": {
+    "AzureCloud": {
+      "name": "Azure Commercial",
+      "resourceManagerEndpoint": "https://management.azure.com/",
+      "activeDirectoryEndpoint": "https://login.microsoftonline.com/",
+      "containerRegistrySuffix": "azurecr.io",
+      "searchServiceSuffix": "search.windows.net",
+      "cosmosDbSuffix": "documents.azure.com",
+      "openAiSuffix": "openai.azure.com",
+      "cognitiveServicesSuffix": "cognitiveservices.azure.com"
+    },
+    "AzureUSGovernment": {
+      "name": "Azure Government",
+      "resourceManagerEndpoint": "https://management.usgovcloudapi.net/",
+      "activeDirectoryEndpoint": "https://login.microsoftonline.us/",
+      "containerRegistrySuffix": "azurecr.us",
+      "searchServiceSuffix": "search.windows.us",
+      "cosmosDbSuffix": "documents.azure.us",
+      "openAiSuffix": "openai.azure.us",
+      "cognitiveServicesSuffix": "cognitiveservices.azure.us"
+    },
+    "AzureChinaCloud": {
+      "name": "Azure China",
+      "resourceManagerEndpoint": "https://management.chinacloudapi.cn/",
+      "activeDirectoryEndpoint": "https://login.chinacloudapi.cn/",
+      "containerRegistrySuffix": "azurecr.cn",
+      "searchServiceSuffix": "search.azure.cn",
+      "cosmosDbSuffix": "documents.azure.cn",
+      "openAiSuffix": "openai.azure.cn",
+      "cognitiveServicesSuffix": "cognitiveservices.azure.cn"
+    },
+    "AzureGermanCloud": {
+      "name": "Azure Germany",
+      "resourceManagerEndpoint": "https://management.microsoftazure.de/",
+      "activeDirectoryEndpoint": "https://login.microsoftonline.de/",
+      "containerRegistrySuffix": "azurecr.de",
+      "searchServiceSuffix": "search.azure.de",
+      "cosmosDbSuffix": "documents.microsoftazure.de",
+      "openAiSuffix": "openai.azure.de",
+      "cognitiveServicesSuffix": "cognitiveservices.azure.de"
+    }
+  }
+}
