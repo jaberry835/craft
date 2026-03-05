@@ -107,7 +107,7 @@ def register_rag_tools(mcp: FastMCP):
 
     content_field = _env("RAG_CONTENT_FIELD", "content")
     vector_field = _env("RAG_VECTOR_FIELD", "contentVector")
-    allowed_principals_field = _env("RAG_ALLOWED_PRINCIPALS_FIELD", "allowedPrincipals")
+    allowed_principals_field = _env("RAG_ALLOWED_PRINCIPALS_FIELD", "ss_tokens")
     access_check_url = _env("USER_ACCESS_CHECK_URL")
 
     if AZURE_AVAILABLE:
@@ -159,7 +159,7 @@ def register_rag_tools(mcp: FastMCP):
         kwargs: Dict[str, Any] = {
             "search_text": query,
             "top": top_k,
-            "select": [content_field, "title", "parent_id"],
+            "select": [content_field, "title", "parent_id", allowed_principals_field],
             "highlight_fields": content_field,
         }
 
@@ -172,49 +172,33 @@ def register_rag_tools(mcp: FastMCP):
                     async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5, read=25, write=5, pool=5)) as client:
                         resp = await client.get(access_check_url, headers=headers)
                     if resp.is_success:
-                        raw = resp.text.strip()
-                        groups: List[str] = []
-                        # Try JSON first
+                        # Expect a JSON array of security-token hashes, e.g. ["hash1", "hash2"]
+                        tokens: List[str] = []
                         try:
                             data = resp.json()
-                            if isinstance(data, str):
-                                raw = data
-                            elif isinstance(data, dict):
-                                if isinstance(data.get("groups"), list):
-                                    groups = [str(g).strip() for g in data.get("groups") if str(g).strip()]
-                                elif isinstance(data.get("allowedPrincipals"), list):
-                                    groups = [str(g).strip() for g in data.get("allowedPrincipals") if str(g).strip()]
-                                elif data.get("group"):
-                                    groups = [str(data.get("group")).strip()]
-                                elif data.get("access"):
-                                    raw = str(data.get("access")).strip()
+                            if isinstance(data, list):
+                                tokens = [str(t).strip() for t in data if str(t).strip()]
+                            elif isinstance(data, str) and data.strip():
+                                tokens = [data.strip()]
                         except ValueError:
-                            # Not JSON; treat as plain text
-                            pass
+                            # Not JSON; treat entire body as a single token
+                            raw = resp.text.strip()
+                            if raw:
+                                tokens = [raw]
 
-                        if not groups and raw:
-                            # Split CSV or semicolon list
-                            sep = "," if "," in raw else ";" if ";" in raw else None
-                            groups = [raw.strip()] if not sep else [p.strip() for p in raw.split(sep)]
+                        logger.info(
+                            f"RAG access-check: url={access_check_url} status=OK "
+                            f"tokens_count={len(tokens)} tokens={tokens[:10]}{'...' if len(tokens) > 10 else ''}"
+                        )
 
-                        # Build filter expression if we have any identifiers
-                        groups = [g for g in groups if g]
-                        # Log the access-check outcome for visibility
-                        try:
-                            raw_preview = raw if raw is not None and len(raw) <= 500 else (raw[:500] + "...") if raw else ""
-                            logger.info(
-                                f"RAG access-check: url={access_check_url} status=OK principals_raw='{raw_preview}' parsed_groups={groups}"
-                            )
-                        except Exception:
-                            pass
-                        if groups:
-                            parts = [f"search.in({allowed_principals_field}, '{gid}', ',')" for gid in groups]
-                            filter_expr = " or ".join(parts)
-                            kwargs["filter"] = filter_expr
-                            logger.info(f"RAG retrieve: applied access filter with {len(groups)} principal(s)")
+                        if tokens:
+                            # Build a search.in() filter for Edm.String scalar fields
+                            token_csv = ",".join(tokens)
+                            kwargs["filter"] = f"search.in({allowed_principals_field}, '{token_csv}', ',')"
+                            logger.info(f"RAG retrieve: applied access filter with {len(tokens)} security token(s) — filter={kwargs['filter']}")
                         else:
-                            logger.warning("RAG retrieve: access check returned no principals; denying access")
-                            return {"success": False, "error": "Access denied: no valid principals found", "results": []}
+                            logger.warning("RAG retrieve: access check returned no tokens; denying access")
+                            return {"success": False, "error": "Access denied: no valid security tokens found", "results": []}
                     else:
                         logger.warning(f"RAG retrieve: access check failed HTTP {resp.status_code}; denying access")
                         return {"success": False, "error": f"Access denied: authentication service unavailable (HTTP {resp.status_code})", "results": []}
@@ -245,6 +229,9 @@ def register_rag_tools(mcp: FastMCP):
             score = getattr(r, "@search.score", None)
             source_url = _infer_source_url(doc)
             file_name = (doc.get("title") or "").strip() or None
+            # Log the security field value for debugging
+            sec_value = doc.get(allowed_principals_field)
+            logger.debug(f"RAG doc: title={file_name}, {allowed_principals_field}={sec_value!r} (type={type(sec_value).__name__})")
             results.append({
                 "content": content,
                 "score": score,
@@ -252,6 +239,9 @@ def register_rag_tools(mcp: FastMCP):
                 "file_name": file_name,
                 "metadata": {k: v for k, v in doc.items() if k not in [content_field, "content", "text", "page_content"]}
             })
+
+        if not results and kwargs.get("filter"):
+            logger.info(f"RAG retrieve: 0 results — no documents matched the user's access tokens")
 
         return {"success": True, "query": query, "count": len(results), "results": results}
 
