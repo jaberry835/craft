@@ -5,10 +5,13 @@ Production-ready multi-agent chat platform with Microsoft Agent Framework.
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
 from config import get_settings
 from observability import setup_telemetry, get_logger
 from auth.middleware import AuthMiddleware
+from rate_limit import limiter
 from routes import chat_router, admin_router, settings_router, document_router, health_router, a2a_router, a2a_server, preferences_router
 
 settings = get_settings()
@@ -42,6 +45,7 @@ async def lifespan(app: FastAPI):
     
     logger.info("Shutting down AgentChatV2...")
     await agent_manager.close()
+    await cosmos_service.close()
 
 
 app = FastAPI(
@@ -51,10 +55,17 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Rate limiting
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # CORS configuration
+# allow_origins=["*"] with allow_credentials=True is invalid per the CORS spec
+# and browsers will reject credentialed requests. Use explicit origins.
+_cors_origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure for production
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

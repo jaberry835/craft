@@ -41,9 +41,12 @@ from services.agent_manager import (
 )
 from auth.middleware import get_user_token
 from observability import get_logger, track_performance, should_log_performance, should_log_agent, log_performance_summary, MetricType
+from rate_limit import limiter
+from config import get_settings
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 logger = get_logger(__name__)
+_settings = get_settings()
 
 
 def _agui_sse(event) -> str:
@@ -202,6 +205,7 @@ async def list_messages(
 # =============================================================================
 
 @router.post("/send")
+@limiter.limit(lambda: _settings.rate_limit_chat)
 @track_performance("chat_send", MetricType.HTTP_REQUEST)
 async def send_message(request: Request, chat_request: ChatRequest):
     """
@@ -429,6 +433,7 @@ async def send_message(request: Request, chat_request: ChatRequest):
 
 
 @router.post("/send-sync", response_model=ChatResponse)
+@limiter.limit(lambda: _settings.rate_limit_chat)
 @track_performance("chat_send_sync", MetricType.HTTP_REQUEST)
 async def send_message_sync(request: Request, chat_request: ChatRequest):
     """

@@ -19,9 +19,12 @@ from services.grounding_service import grounding_service
 from services.security_token_service import security_token_service
 from services.document_intelligence_service import document_intelligence_service
 from observability import get_logger, track_performance, MetricType
+from rate_limit import limiter
+from config import get_settings
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
 logger = get_logger(__name__)
+_settings = get_settings()
 
 # Supported file types
 ALLOWED_TYPES = {
@@ -42,6 +45,7 @@ MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 
 
 @router.post("/upload", response_model=DocumentUploadResponse)
+@limiter.limit(lambda: _settings.rate_limit_upload)
 @track_performance("document_upload", MetricType.HTTP_REQUEST)
 async def upload_document(
     request: Request,
