@@ -1,0 +1,15 @@
+.git*
+.vscode
+local.settings.json
+.env
+.env.sample
+test
+.venv
+__pycache__
+.python_packages
+*.py[cod]
+*$py.class
+.coverage
+htmlcov
+README.md
+.gitignore
