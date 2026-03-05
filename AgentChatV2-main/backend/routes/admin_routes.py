@@ -397,6 +397,15 @@ class A2ADiscoveryRequest(BaseModel):
         default="/.well-known/agent.json",
         description="Path to agent card (defaults to well-known location)"
     )
+    a2a_client_id: str | None = Field(
+        default=None,
+        description="Entra ID client ID of the external agent's app registration. "
+                    "Set this when the remote agent uses a different app registration."
+    )
+    a2a_scope: str | None = Field(
+        default=None,
+        description="Custom scope for OBO exchange. Defaults to api://{a2a_client_id}/.default"
+    )
 
 
 class A2ADiscoveryResponse(BaseModel):
@@ -501,6 +510,8 @@ async def add_a2a_agent(
             agent_type=AgentType.A2A,
             a2a_url=discovery_request.url,
             a2a_card=A2AAgentCard(**card) if card else None,
+            a2a_client_id=discovery_request.a2a_client_id,  # For OBO token exchange
+            a2a_scope=discovery_request.a2a_scope,
             system_prompt=None,  # Not used for A2A agents
             is_orchestrator=False,
             a2a_enabled=False  # External agents aren't re-exposed via A2A
@@ -929,6 +940,8 @@ async def get_ui_settings_public(request: Request):
         branding_image_filename=settings_data.get("branding_image_filename"),
         branding_image_position=settings_data.get("branding_image_position", "sidebar"),
         app_title=settings_data.get("app_title"),
+        favicon_image=settings_data.get("favicon_image"),
+        favicon_image_filename=settings_data.get("favicon_image_filename"),
         updated_at=settings_data.get("updatedAt")
     )
 
@@ -947,6 +960,8 @@ async def get_ui_settings_admin(request: Request, admin=Depends(require_admin)):
         branding_image_filename=settings_data.get("branding_image_filename"),
         branding_image_position=settings_data.get("branding_image_position", "sidebar"),
         app_title=settings_data.get("app_title"),
+        favicon_image=settings_data.get("favicon_image"),
+        favicon_image_filename=settings_data.get("favicon_image_filename"),
         updated_at=settings_data.get("updatedAt")
     )
 
@@ -973,6 +988,16 @@ async def update_ui_settings(
                 detail=f"Branding image too large ({image_size:,} chars). Max is {max_size:,} chars (~500KB)."
             )
 
+    # Validate favicon image size (max ~100KB base64 string ~ 140KB encoded)
+    if settings_dict.get("favicon_image"):
+        favicon_size = len(settings_dict["favicon_image"])
+        favicon_max = 200_000  # ~100KB before base64
+        if favicon_size > favicon_max:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Favicon image too large ({favicon_size:,} chars). Max is {favicon_max:,} chars (~100KB)."
+            )
+
     # Convert classification_banner to dict if it's a model
     if "classification_banner" in settings_dict and hasattr(settings_dict["classification_banner"], "model_dump"):
         settings_dict["classification_banner"] = settings_dict["classification_banner"].model_dump()
@@ -987,5 +1012,7 @@ async def update_ui_settings(
         branding_image_filename=saved.get("branding_image_filename"),
         branding_image_position=saved.get("branding_image_position", "sidebar"),
         app_title=saved.get("app_title"),
+        favicon_image=saved.get("favicon_image"),
+        favicon_image_filename=saved.get("favicon_image_filename"),
         updated_at=saved.get("updatedAt")
     )

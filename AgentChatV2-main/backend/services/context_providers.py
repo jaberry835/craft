@@ -19,6 +19,7 @@ from agent_framework import (
     BaseHistoryProvider,
     BaseContextProvider,
     Message,
+    Content,
     AgentSession,
     SessionContext,
 )
@@ -121,10 +122,25 @@ class CosmosHistoryProvider(BaseHistoryProvider):
             oldest_first=True,
         )
 
-        messages = [
-            Message(role=m.get("role", "user"), text=m.get("content", ""))
-            for m in raw_messages
-        ]
+        messages = []
+        for m in raw_messages:
+            role = m.get("role", "user")
+            text = m.get("content", "")
+            metadata = m.get("metadata", {})
+            img = metadata.get("image_attachment") if metadata else None
+
+            if img and img.get("base64") and img.get("content_type"):
+                # Build a multimodal message with text + image content
+                contents: list[Content | str] = []
+                if text:
+                    contents.append(text)
+                data_uri = f"data:{img['content_type']};base64,{img['base64']}"
+                contents.append(
+                    Content.from_uri(data_uri, media_type=img["content_type"])
+                )
+                messages.append(Message(role=role, contents=contents))
+            else:
+                messages.append(Message(role=role, text=text))
 
         # The user message was already saved to Cosmos *before* agent.run()
         # (for durability).  The framework will also add it as the current

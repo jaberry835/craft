@@ -122,6 +122,10 @@ The backend container requires these environment variables:
 | AZURE_OPENAI_ENDPOINT | Azure OpenAI endpoint | `https://openai-xxx.openai.azure.us` |
 | MCP_SERVER_ENDPOINT | MCP server URL | `https://mcp-server.azurewebsites.us/mcp/` |
 | BACKEND_URL | **Required for A2A** - This backend's public URL | `https://app-agentchat-api.azurewebsites.us` |
+| AZURE_MANAGED_IDENTITY_CLIENT_ID | Client ID of user-assigned managed identity (if not using system-assigned) | `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` |
+| AZURE_COGNITIVE_SERVICES_SCOPE | Token scope for Azure OpenAI (defaults differ by cloud) | `https://cognitiveservices.azure.us/.default` |
+| AZURE_CLIENT_SECRET | **OBO only** - Client secret for On-Behalf-Of token exchange | `your-secret-value` |
+| AZURE_CLIENT_CERTIFICATE_PATH | **OBO only** - Path to PFX certificate (alternative to secret) | `/certs/app.pfx` |
 
 > **Important**: `BACKEND_URL` must be set to the deployed backend's public URL. This is used for agent-to-agent (A2A) communication where the orchestrator calls specialist agents via internal HTTP requests.
 
@@ -229,6 +233,14 @@ When deploying to Azure Government:
    - The orchestrator uses this URL to call specialist agents
 2. Check App Service can reach itself (no firewall blocking loopback)
 3. Enable `SHOW_A2A_LOGS=true` to debug
+
+### Azure OpenAI "PermissionDenied" (401) in Production
+
+1. If using a **user-assigned managed identity**, set `AZURE_MANAGED_IDENTITY_CLIENT_ID` to the identity's **client ID** (not principal ID)
+2. Verify the identity has `Cognitive Services OpenAI User` role on the AOAI resource
+3. If the App Service has **both** system-assigned and user-assigned identities, the `AZURE_MANAGED_IDENTITY_CLIENT_ID` is **required** to avoid ambiguity
+4. Wait 5-10 minutes for RBAC propagation after assigning the role
+5. Set `AZURE_COGNITIVE_SERVICES_SCOPE` for your cloud (e.g., `https://cognitiveservices.azure.us/.default` for Azure Government)
 
 ### Cosmos DB "Unauthorized" in Production
 

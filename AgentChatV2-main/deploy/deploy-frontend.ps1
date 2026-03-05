@@ -50,13 +50,18 @@ param(
     [string]$Cloud = "AzureUSGovernment",
 
     [Parameter(Mandatory = $false)]
-    [string]$ImageTag = "latest",
+    [string]$ImageTag,
 
     [Parameter(Mandatory = $false)]
     [switch]$SkipBuild
 )
 
 $ErrorActionPreference = "Stop"
+
+# Auto-generate unique tag if not specified (ensures App Service pulls fresh image)
+if (-not $ImageTag) {
+    $ImageTag = Get-Date -Format "yyyyMMdd-HHmmss"
+}
 
 # Load cloud configuration
 $scriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path

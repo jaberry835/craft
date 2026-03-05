@@ -17,6 +17,8 @@ export interface UISettings {
   branding_image_filename?: string | null;
   branding_image_position?: string;
   app_title?: string | null;
+  favicon_image?: string | null;
+  favicon_image_filename?: string | null;
   updated_at?: string | null;
 }
 
@@ -30,7 +32,9 @@ const DEFAULT_SETTINGS: UISettings = {
   branding_image: null,
   branding_image_filename: null,
   branding_image_position: 'sidebar',
-  app_title: null
+  app_title: null,
+  favicon_image: null,
+  favicon_image_filename: null
 };
 
 @Injectable({
@@ -50,6 +54,7 @@ export class SettingsService {
       tap(settings => {
         this.settingsSubject.next(settings);
         this.loaded = true;
+        this.applyBrowserBranding(settings);
       }),
       catchError(err => {
         console.warn('Failed to load UI settings, using defaults:', err);
@@ -58,6 +63,25 @@ export class SettingsService {
         return of(DEFAULT_SETTINGS);
       })
     );
+  }
+
+  /** Apply browser tab title and favicon from settings. */
+  private applyBrowserBranding(settings: UISettings): void {
+    // Update browser tab title
+    if (settings.app_title) {
+      document.title = settings.app_title;
+    }
+
+    // Update favicon if a custom one is set
+    if (settings.favicon_image) {
+      let link: HTMLLinkElement | null = document.querySelector("link[rel~='icon']");
+      if (!link) {
+        link = document.createElement('link');
+        link.rel = 'icon';
+        document.head.appendChild(link);
+      }
+      link.href = settings.favicon_image;
+    }
   }
 
   /** Get current settings synchronously. */
@@ -75,6 +99,7 @@ export class SettingsService {
     return this.http.put<UISettings>(`${environment.apiUrl}/admin/settings/ui`, settings).pipe(
       tap(saved => {
         this.settingsSubject.next(saved);
+        this.applyBrowserBranding(saved);
       })
     );
   }

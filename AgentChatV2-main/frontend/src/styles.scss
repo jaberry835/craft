@@ -26,6 +26,19 @@
   --border-color: #3c3c3c;
   --shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
   
+  // Markdown-specific colours (dark theme)
+  --md-link: #60a5fa;
+  --md-link-visited: #818cf8;
+  --md-link-hover: #93bbfc;
+  --md-link-border: rgba(96, 165, 250, 0.3);
+  --md-code-bg: rgba(255, 255, 255, 0.06);
+  --md-code-border: rgba(255, 255, 255, 0.08);
+  --md-code-color: #e2b86b;
+  --md-pre-bg: rgba(0, 0, 0, 0.25);
+  --md-table-head-bg: rgba(255, 255, 255, 0.04);
+  --md-table-stripe: rgba(255, 255, 255, 0.02);
+  --md-blockquote-bg: rgba(59, 130, 246, 0.04);
+  
   // Spacing
   --spacing-xs: 4px;
   --spacing-sm: 8px;
@@ -63,6 +76,19 @@ body.theme-light {
 
   --border-color: #d1d1d1;
   --shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+
+  // Markdown-specific colours (light theme)
+  --md-link: #0366d6;
+  --md-link-visited: #6f42c1;
+  --md-link-hover: #0550ae;
+  --md-link-border: rgba(3, 102, 214, 0.3);
+  --md-code-bg: rgba(0, 0, 0, 0.05);
+  --md-code-border: rgba(0, 0, 0, 0.08);
+  --md-code-color: #c7254e;
+  --md-pre-bg: rgba(0, 0, 0, 0.04);
+  --md-table-head-bg: rgba(0, 0, 0, 0.03);
+  --md-table-stripe: rgba(0, 0, 0, 0.02);
+  --md-blockquote-bg: rgba(3, 102, 214, 0.04);
 }
 
 // Scrollbar styling
@@ -125,9 +151,25 @@ body.theme-light {
   &.btn-icon {
     padding: var(--spacing-sm);
     background: transparent;
+    color: var(--text-secondary);
     
     &:hover:not(:disabled) {
       background-color: var(--bg-hover);
+    }
+    
+    &.btn-edit {
+      color: #4dabf7;
+      &:hover:not(:disabled) { color: #339af0; }
+    }
+    
+    &.btn-delete {
+      color: #ff6b6b;
+      &:hover:not(:disabled) { color: #fa5252; }
+    }
+    
+    &.btn-refresh {
+      color: #51cf66;
+      &:hover:not(:disabled) { color: #40c057; }
     }
   }
 }
@@ -233,6 +275,26 @@ textarea.input {
 .message-text a:active {
   color: #ffffff !important;
   text-decoration: underline !important;
+}
+
+// Global list styles for message markdown content
+// Overrides the * { margin: 0; padding: 0 } reset
+.message-text ul,
+.message-text ol {
+  margin: 0.4em 0 0.4em 0.5em !important;
+  padding-left: 1.5em !important;
+  list-style-position: outside !important;
+}
+.message-text ul ul,
+.message-text ul ol,
+.message-text ol ul,
+.message-text ol ol {
+  margin: 0.1em 0 0.1em 0.5em !important;
+  padding-left: 1.2em !important;
+}
+.message-text li {
+  margin: 0.2em 0 !important;
+  padding-left: 0.3em !important;
 }
 
 body.theme-light {

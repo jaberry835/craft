@@ -45,7 +45,7 @@ param(
     [string]$Cloud = "AzureUSGovernment",
 
     [Parameter(Mandatory = $false)]
-    [string]$ImageTag = "latest",
+    [string]$ImageTag,
 
     [Parameter(Mandatory = $false)]
     [switch]$SkipBuild
@@ -57,6 +57,11 @@ $ErrorActionPreference = "Stop"
 $scriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
 $cloudConfig = Get-Content -Path "$scriptPath\cloud-config.json" | ConvertFrom-Json
 $cloudSettings = $cloudConfig.clouds.$Cloud
+
+# Auto-generate unique tag if not specified (ensures App Service pulls fresh image)
+if (-not $ImageTag) {
+    $ImageTag = Get-Date -Format "yyyyMMdd-HHmmss"
+}
 
 if (-not $cloudSettings) {
     Write-Error "Unknown cloud: $Cloud"

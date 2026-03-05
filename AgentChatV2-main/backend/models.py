@@ -121,8 +121,8 @@ class A2AAgentSkill(BaseModel):
     id: str
     name: str
     description: Optional[str] = None
-    tags: list[str] = Field(default_factory=list)
-    examples: list[str] = Field(default_factory=list)
+    tags: Optional[list[str]] = Field(default_factory=list)
+    examples: Optional[list[str]] = Field(default_factory=list)
 
 
 class A2AAgentCard(BaseModel):
@@ -172,6 +172,16 @@ class AgentConfig(BaseModel):
     # For A2A agents only
     a2a_url: Optional[str] = None  # External A2A agent endpoint URL
     a2a_card: Optional[A2AAgentCard] = None  # Cached agent card from discovery
+    a2a_client_id: Optional[str] = Field(
+        default=None,
+        description="Entra ID client ID of the external agent's app registration. "
+                    "When set (and different from this app's AZURE_CLIENT_ID), "
+                    "OBO token exchange is used automatically."
+    )
+    a2a_scope: Optional[str] = Field(
+        default=None,
+        description="Custom scope for OBO exchange. Defaults to api://{a2a_client_id}/.default"
+    )
     
     # Common fields
     is_orchestrator: bool = False
@@ -488,6 +498,14 @@ class UISettings(BaseModel):
         default=None,
         max_length=100,
         description="Custom application title (shown in sidebar)"
+    )
+    favicon_image: Optional[str] = Field(
+        default=None,
+        description="Base64-encoded favicon image (max ~100KB before encoding)"
+    )
+    favicon_image_filename: Optional[str] = Field(
+        default=None,
+        description="Original filename of the favicon image"
     )
     updated_at: Optional[str] = None
 

@@ -13,7 +13,7 @@ import { AgentSelectorComponent } from './components/agent-selector/agent-select
 
 // Chatter event for displaying agent thought process
 export interface ChatterEvent {
-  type: 'thinking' | 'tool_call' | 'tool_result' | 'delegation' | 'content';
+  type: 'thinking' | 'tool_call' | 'tool_result' | 'delegation' | 'content' | 'reasoning';
   agentName: string;
   content: string;
   toolName?: string;
@@ -975,6 +975,44 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
         // Message complete — no additional action
         break;
 
+      // --- Reasoning tokens (chain-of-thought from reasoning models) ---
+      case 'REASONING_START': {
+        // Start of a reasoning block — create a reasoning chatter event
+        if (!this.streamingMessage.chatterEvents) {
+          this.streamingMessage.chatterEvents = [];
+        }
+        this.streamingMessage.chatterEvents = [
+          ...this.streamingMessage.chatterEvents,
+          {
+            type: 'reasoning',
+            agentName: 'Agent',
+            content: '',
+            timestamp: Date.now(),
+            friendlyMessage: 'Reasoning...',
+          }
+        ];
+        break;
+      }
+
+      case 'REASONING_MESSAGE_CONTENT': {
+        // Append reasoning text to the most recent reasoning event
+        const rEvents = this.streamingMessage.chatterEvents || [];
+        for (let i = rEvents.length - 1; i >= 0; i--) {
+          if (rEvents[i].type === 'reasoning') {
+            rEvents[i].content += event.delta || '';
+            this.streamingMessage.chatterEvents = [...rEvents];
+            break;
+          }
+        }
+        break;
+      }
+
+      case 'REASONING_MESSAGE_START':
+      case 'REASONING_MESSAGE_END':
+      case 'REASONING_END':
+        // Lifecycle events — no additional UI action needed
+        break;
+
       // --- Custom metadata (chatter enrichment) ---
       case 'CUSTOM': {
         if (event.name === 'chatter' && event.value) {
@@ -1017,7 +1055,7 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
     if (chatterType && agentName) {
       const typeMap: Record<string, ChatterEvent['type']> = {
         thinking: 'thinking', delegation: 'delegation', content: 'content',
-        tool_call: 'tool_call', tool_result: 'tool_result',
+        tool_call: 'tool_call', tool_result: 'tool_result', reasoning: 'reasoning',
       };
       const mappedType = typeMap[chatterType];
       if (mappedType) {
@@ -1029,7 +1067,7 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
           }
         }
         // If no matching event found for thinking/delegation, create one
-        if (mappedType === 'thinking' || mappedType === 'delegation') {
+        if (mappedType === 'thinking' || mappedType === 'delegation' || mappedType === 'reasoning') {
           const newEvent: ChatterEvent = {
             type: mappedType,
             agentName,

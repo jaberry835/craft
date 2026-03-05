@@ -35,6 +35,15 @@ class Settings(BaseSettings):
     azure_tenant_id: str = Field(default="", alias="AZURE_TENANT_ID")
     azure_client_id: str = Field(default="", alias="AZURE_CLIENT_ID")
     
+    # Confidential client credentials for OBO (On-Behalf-Of) token exchange.
+    # Required when calling external A2A agents that use a different app registration.
+    # In production: set AZURE_CLIENT_SECRET
+    # In development: set AZURE_CLIENT_CERTIFICATE_PATH to a .pfx file
+    # If both are set, the certificate is preferred.
+    azure_client_secret: str = Field(default="", alias="AZURE_CLIENT_SECRET")
+    azure_client_certificate_path: str = Field(default="", alias="AZURE_CLIENT_CERTIFICATE_PATH")
+    azure_client_certificate_password: str = Field(default="", alias="AZURE_CLIENT_CERTIFICATE_PASSWORD")
+    
     # Azure OpenAI
     azure_openai_endpoint: str = Field(default="", alias="AZURE_OPENAI_ENDPOINT")
     azure_openai_key: str = Field(default="", alias="AZURE_OPENAI_KEY")
@@ -77,6 +86,9 @@ class Settings(BaseSettings):
     # Endpoint that returns the list of SS tokens a user is authorized for.
     # Called with the user's bearer token to enforce document-level security filtering.
     access_checker_endpoint: str = Field(default="", alias="ACCESS_CHECKER_ENDPOINT")
+    # How long (in minutes) to cache a user's SS tokens before re-querying the
+    # access checker.  Set to 0 to always call the access checker (no caching).
+    access_checker_cache_ttl: int = Field(default=5, alias="ACCESS_CHECKER_CACHE_TTL")
     
     # MCP Server
     mcp_server_endpoint: str = Field(alias="MCP_SERVER_ENDPOINT")

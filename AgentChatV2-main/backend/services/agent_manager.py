@@ -9,7 +9,11 @@ from enum import Enum
 import asyncio
 import time
 
-from agent_framework import Agent, Message
+from agent_framework import (
+    Agent, AgentResponseUpdate, AgentSession, Message, Content,
+    WorkflowBuilder, Workflow, WorkflowEvent,
+    Executor, handler, WorkflowContext,
+)
 from agent_framework.azure import AzureOpenAIChatClient
 
 from config import get_settings, get_azure_credential
@@ -37,6 +41,23 @@ class OrchestrationPattern(str, Enum):
     GROUP_CHAT = "group_chat"   # Round-robin group chat
 
 
+class _PassthroughExecutor(Executor):
+    """
+    A no-op executor that simply forwards its input unchanged.
+
+    Used as the ``start_executor`` in concurrent fan-out workflows so that
+    all real specialist agents begin execution at the same time rather than
+    waiting for the first agent to finish.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("_passthrough_dispatcher")
+
+    @handler
+    async def handle(self, message: str, ctx: WorkflowContext[str, None]) -> None:
+        await ctx.send_message(message)
+
+
 class ChatterEventType(str, Enum):
     """Types of agent chatter events streamed to the UI."""
     THINKING = "thinking"           # Agent is processing
@@ -44,6 +65,7 @@ class ChatterEventType(str, Enum):
     TOOL_RESULT = "tool_result"     # Tool returned a result
     DELEGATION = "delegation"       # Orchestrator delegating to specialist
     CONTENT = "content"             # Actual content/text output
+    REASONING = "reasoning"         # Model reasoning/chain-of-thought tokens (o-series, gpt-5.x)
 
 
 def _get_friendly_tool_description(tool_name: str, tool_args: Optional[dict] = None) -> str:
@@ -122,7 +144,7 @@ def _get_friendly_tool_description(tool_name: str, tool_args: Optional[dict] = N
     return f"Running {readable_name.lower()}"
 
 
-def _get_friendly_result_summary(tool_name: str, result_text: str) -> str:
+def _get_friendly_result_summary(tool_name: str, result_text: str, original_length: int | None = None) -> str:
     """
     Generate a user-friendly summary of a tool result.
     """
@@ -143,10 +165,11 @@ def _get_friendly_result_summary(tool_name: str, result_text: str) -> str:
             return f"Retrieved approximately {comma_count + 1} items"
     
     # Short result - just say completed
-    if len(result_text) < 100:
+    char_count = original_length if original_length is not None else len(result_text)
+    if char_count < 100:
         return "Completed"
     
-    return f"Retrieved {len(result_text)} characters of data"
+    return f"Retrieved {char_count} characters of data"
 
 
 @dataclass
@@ -157,6 +180,7 @@ class ChatterEvent:
     content: str = ""
     tool_name: Optional[str] = None
     tool_args: Optional[dict] = None
+    call_id: Optional[str] = None  # Underlying framework tool-call ID for correlation
     timestamp: float = field(default_factory=time.time)
     duration_ms: Optional[float] = None  # Duration of tool execution
     tokens_input: Optional[int] = None   # Input tokens used (for LLM calls)
@@ -209,6 +233,8 @@ class ChatterEvent:
             result["tool_name"] = self.tool_name
         if self.tool_args:
             result["tool_args"] = self.tool_args
+        if self.call_id:
+            result["call_id"] = self.call_id
         if self.duration_ms is not None:
             result["duration_ms"] = round(self.duration_ms, 1)
         if self.tokens_input is not None:
@@ -249,16 +275,11 @@ def _convert_to_chat_messages(messages: list[dict]) -> list[Message]:
 class AgentManager:
     """Manages agent creation and orchestration."""
     
-    # Limit concurrent specialist agent executions to avoid overwhelming Azure OpenAI
-    # When the orchestrator calls multiple specialists in parallel, this serializes them
-    MAX_CONCURRENT_SPECIALISTS = 2
-    
     def __init__(self):
         self._credential = None
         self._agents_cache: dict[str, Agent] = {}
         self._configs_cache: dict[str, dict] = {}
         self._lock = asyncio.Lock()
-        self._specialist_semaphore = asyncio.Semaphore(self.MAX_CONCURRENT_SPECIALISTS)
     
     async def initialize(self) -> None:
         """Initialize the agent manager."""
@@ -345,8 +366,7 @@ class AgentManager:
                 if cached_key:
                     api_key = cached_key
                     logger.info(f"[AOAI-CONFIG] Agent '{agent_name}': using API key from AOAI endpoint config "
-                                f"(endpoint_id={aoai_endpoint_id}, key_length={len(cached_key)}, "
-                                f"key_prefix={cached_key[:6]}...)")
+                                f"(endpoint_id={aoai_endpoint_id})")
                 else:
                     logger.info(f"[AOAI-CONFIG] Agent '{agent_name}': AOAI endpoint config has NO api_key "
                                 f"(endpoint_id={aoai_endpoint_id}), will use token auth")
@@ -372,8 +392,7 @@ class AgentManager:
         
         # Use API key if available, otherwise use token provider
         if api_key:
-            logger.info(f"[AOAI-CONFIG] Agent '{agent_name}': authenticating with API key "
-                        f"(length={len(api_key)}, prefix={api_key[:6]}...)")
+            logger.info(f"[AOAI-CONFIG] Agent '{agent_name}': authenticating with API key")
             return AzureOpenAIChatClient(
                 endpoint=endpoint_url,
                 deployment_name=deployment_name,
@@ -550,106 +569,42 @@ You are being called as a specialist by an orchestrator agent. The user's reques
             if should_log_agent():
                 logger.debug(f"Starting run (stream=True) with {len(chat_messages)} messages")
             
-            # Track tool calls for timing
+            # Track tool calls for timing (shared helper state)
             seen_tool_calls: set[str] = set()
             seen_tool_results: set[str] = set()
-            pending_tool_calls: dict[str, tuple[float, str, Optional[dict]]] = {}  # call_id -> (start_time, tool_name, tool_args)
-            total_tokens_input = 0
-            total_tokens_output = 0
-            
+            pending_tool_calls: dict[str, tuple[float, str, Optional[dict]]] = {}
+            token_accumulator: dict[str, int] = {"input": 0, "output": 0}
+
+            # Emit a "working" thinking event at the start
+            if include_chatter:
+                yield ChatterEvent(
+                    type=ChatterEventType.THINKING,
+                    agent_name=agent.name,
+                    content="Starting execution",
+                    friendly_message=f"{agent.name} is working...",
+                )
+
             async for update in agent.run(chat_messages, stream=True):
                 if update.text:
                     yield update.text
                 
                 # Capture tool call/result events if requested
-                if include_chatter and hasattr(update, 'contents') and update.contents:
-                    for content_item in update.contents:
-                        if content_item.type == 'function_call':
-                            call_id = getattr(content_item, 'call_id', None)
-                            tool_name = getattr(content_item, 'name', None)
-                            tool_args = getattr(content_item, 'arguments', None)
-                            
-                            if call_id and tool_name and call_id not in seen_tool_calls:
-                                seen_tool_calls.add(call_id)
-                                args_dict = tool_args if isinstance(tool_args, dict) else None
-                                pending_tool_calls[call_id] = (time.time(), tool_name, args_dict)
-                                
-                                # Generate user-friendly description
-                                friendly_msg = _get_friendly_tool_description(tool_name, args_dict)
-                                
-                                event = ChatterEvent(
-                                    type=ChatterEventType.TOOL_CALL,
-                                    agent_name=agent.name,
-                                    content=f"Calling {tool_name}",
-                                    tool_name=tool_name,
-                                    tool_args=args_dict,
-                                    friendly_message=friendly_msg
-                                )
-                                yield event
-                        
-                        elif content_item.type == 'function_result':
-                            call_id = getattr(content_item, 'call_id', None)
-                            result = getattr(content_item, 'result', None)
-                            
-                            if call_id and call_id not in seen_tool_results:
-                                seen_tool_results.add(call_id)
-                                
-                                # Calculate duration
-                                duration_ms = None
-                                tool_name_result = None
-                                if call_id in pending_tool_calls:
-                                    start_time, tool_name_result, _ = pending_tool_calls[call_id]
-                                    duration_ms = (time.time() - start_time) * 1000
-                                
-                                # Format result for display - extract text from Content objects
-                                result_display = ChatterEvent.extract_result_text(result)
-                                if len(result_display) > 300:
-                                    result_display = result_display[:300] + "..."
-                                
-                                # Generate user-friendly result summary
-                                friendly_msg = _get_friendly_result_summary(tool_name_result or "", result_display)
-                                
-                                event = ChatterEvent(
-                                    type=ChatterEventType.TOOL_RESULT,
-                                    agent_name=agent.name,
-                                    content=result_display or "Result received",
-                                    tool_name=tool_name_result,
-                                    duration_ms=duration_ms,
-                                    friendly_message=friendly_msg
-                                )
-                                yield event
-                        
-                        # Handle usage content to capture token counts
-                        elif content_item.type == 'usage':
-                            details = getattr(content_item, 'usage_details', None)
-                            if details:
-                                uc_input = details.get('input_token_count') if isinstance(details, dict) else getattr(details, 'input_token_count', None)
-                                uc_output = details.get('output_token_count') if isinstance(details, dict) else getattr(details, 'output_token_count', None)
-                                if uc_input:
-                                    total_tokens_input += uc_input
-                                if uc_output:
-                                    total_tokens_output += uc_output
-                                
-                                # Emit token usage as a thinking event (with friendly message)
-                                if uc_input or uc_output:
-                                    event = ChatterEvent(
-                                        type=ChatterEventType.THINKING,
-                                        agent_name=agent.name,
-                                        content=f"LLM call: {uc_input or 0} input, {uc_output or 0} output tokens",
-                                        tokens_input=uc_input,
-                                        tokens_output=uc_output,
-                                        friendly_message="Analyzing information..."
-                                    )
-                                    yield event
+                if include_chatter:
+                    for ce in self._extract_chatter_from_update(
+                        update, agent.name,
+                        seen_tool_calls, seen_tool_results,
+                        pending_tool_calls, token_accumulator,
+                    ):
+                        yield ce
             
             # Yield a final summary event with total token usage if we have any
-            if include_chatter and (total_tokens_input > 0 or total_tokens_output > 0):
+            if include_chatter and (token_accumulator["input"] > 0 or token_accumulator["output"] > 0):
                 summary_event = ChatterEvent(
                     type=ChatterEventType.CONTENT,
                     agent_name=agent.name,
-                    content=f"Total tokens: {total_tokens_input} input, {total_tokens_output} output",
-                    tokens_input=total_tokens_input,
-                    tokens_output=total_tokens_output
+                    content=f"Total tokens: {token_accumulator['input']} input, {token_accumulator['output']} output",
+                    tokens_input=token_accumulator["input"],
+                    tokens_output=token_accumulator["output"],
                 )
                 yield summary_event
                     
@@ -995,6 +950,8 @@ RESPOND WITH JSON:
             # Normalize specialist IDs
             if decision.get("action") == "delegate":
                 specialists = decision.get("specialists", [])
+                # Collect the set of valid agent IDs for fuzzy matching
+                valid_agent_ids = {v for v in agent_id_map.values()}
                 normalized = []
                 for spec in specialists:
                     spec_lower = spec.lower()
@@ -1003,11 +960,28 @@ RESPOND WITH JSON:
                     elif spec in agent_id_map:
                         normalized.append(agent_id_map[spec])
                     else:
-                        # Try partial match
+                        # Try partial name match
+                        matched = False
                         for name, aid in agent_id_map.items():
                             if spec_lower in name or name in spec_lower:
                                 normalized.append(aid)
+                                matched = True
                                 break
+                        # Fuzzy UUID match: LLM sometimes gets 1-2 chars wrong
+                        if not matched and len(spec) >= 30:
+                            best_match = None
+                            best_distance = 3  # max 2 char differences allowed
+                            for valid_id in valid_agent_ids:
+                                if len(valid_id) == len(spec):
+                                    dist = sum(a != b for a, b in zip(spec.lower(), valid_id.lower()))
+                                    if dist < best_distance:
+                                        best_distance = dist
+                                        best_match = valid_id
+                            if best_match:
+                                logger.info(f"Fuzzy-matched specialist UUID '{spec}' -> '{best_match}' (distance={best_distance})")
+                                normalized.append(best_match)
+                            else:
+                                logger.warning(f"Could not match specialist '{spec}' to any known agent")
                 decision["specialists"] = normalized
                 
                 if not normalized and specialists:
@@ -1084,178 +1058,6 @@ RESPOND WITH JSON:
             agent_id, agent_name, config, message, user_token, chatter_queue
         )
     
-    async def _call_specialist_with_vision(
-        self,
-        agent_config: dict,
-        agent_name: str,
-        message: str,
-        session_id: str,
-        user_id: str,
-        image_messages: list[dict],
-        chatter_queue: Optional[asyncio.Queue] = None,
-    ) -> dict:
-        """
-        Call a specialist using the direct Azure OpenAI vision API for
-        multimodal support.  Used when the session contains image attachments.
-
-        Bypasses the agent framework to construct multimodal messages with
-        ``image_url`` content parts that GPT-4-vision / GPT-4.1 can analyse.
-        Conversation history and images are loaded from Cosmos DB and included
-        directly in the chat completions request.
-        """
-        from openai import AsyncAzureOpenAI
-
-        start_time = time.time()
-        agent_id = agent_config.get("id", "")
-
-        # Emit chatter event
-        if chatter_queue:
-            await chatter_queue.put(ChatterEvent(
-                type=ChatterEventType.THINKING,
-                agent_name=agent_name,
-                content=f"Analysing with vision ({len(image_messages)} image(s))…",
-                friendly_message=f"{agent_name} is analysing images",
-            ))
-
-        # ── Resolve AOAI connection params (mirrors _create_chat_client) ──
-        deployment_name = agent_config.get("model")
-        if not deployment_name:
-            return {
-                "agent_id": agent_id, "agent_name": agent_name,
-                "response": "", "error": "No model configured for vision agent",
-            }
-
-        endpoint_url = settings.azure_openai_endpoint
-        api_key = settings.azure_openai_key
-        api_version = settings.azure_openai_api_version
-
-        aoai_ep_cfg = (agent_config.get("_aoai_endpoint_config") or {}) if agent_config.get("aoai_endpoint_id") else {}
-        if aoai_ep_cfg:
-            endpoint_url = aoai_ep_cfg.get("endpoint", endpoint_url)
-            if aoai_ep_cfg.get("api_key"):
-                api_key = aoai_ep_cfg["api_key"]
-            if aoai_ep_cfg.get("api_version"):
-                api_version = aoai_ep_cfg["api_version"]
-
-        # ── Create async Azure OpenAI client ──
-        client_kwargs: dict = {"azure_endpoint": endpoint_url, "api_version": api_version}
-        if api_key:
-            client_kwargs["api_key"] = api_key
-        else:
-            client_kwargs["azure_ad_token_provider"] = self._get_token_provider()
-
-        client = AsyncAzureOpenAI(**client_kwargs)
-
-        try:
-            # ── Build messages with multimodal content ──
-            oai_messages: list[dict] = []
-
-            # System prompt
-            system_prompt = agent_config.get("system_prompt", "You are a helpful assistant.")
-            system_prompt += (
-                "\n\nYou have vision capabilities. When the user shares images, "
-                "analyse them thoroughly and reference visual details in your response."
-            )
-            oai_messages.append({"role": "system", "content": system_prompt})
-
-            # Conversation history (oldest-first)
-            raw_msgs, _, _ = await cosmos_service.get_session_messages(
-                session_id=session_id, user_id=user_id,
-                page_size=50, oldest_first=True,
-            )
-
-            # Drop the most recent user message — it represents the current
-            # turn which chat_routes already saved before orchestration began.
-            if raw_msgs and raw_msgs[-1].get("role") == "user":
-                raw_msgs = raw_msgs[:-1]
-
-            image_ids = {m["id"] for m in image_messages}
-
-            for msg in raw_msgs:
-                role = msg.get("role", "user")
-                content_text = msg.get("content", "")
-                metadata = msg.get("metadata", {})
-
-                if msg["id"] in image_ids and "image_attachment" in metadata:
-                    img = metadata["image_attachment"]
-                    oai_messages.append({
-                        "role": role,
-                        "content": [
-                            {"type": "text", "text": content_text},
-                            {"type": "image_url", "image_url": {
-                                "url": f"data:{img['content_type']};base64,{img['base64']}",
-                                "detail": "auto",
-                            }},
-                        ],
-                    })
-                else:
-                    oai_messages.append({"role": role, "content": content_text})
-
-            # Current user turn
-            oai_messages.append({"role": "user", "content": message})
-
-            if should_log_agent():
-                logger.info(
-                    f"Vision call to {agent_name}: {len(oai_messages)} messages, "
-                    f"{len(image_messages)} image(s), model={deployment_name}"
-                )
-
-            # ── Call AOAI vision model (streaming) ──
-            stream = await client.chat.completions.create(
-                model=deployment_name,
-                messages=oai_messages,
-                stream=True,
-                max_tokens=agent_config.get("max_tokens") or 4096,
-                temperature=agent_config.get("temperature", 0.7),
-            )
-
-            response_parts: list[str] = []
-            async for chunk in stream:
-                if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-                    response_parts.append(chunk.choices[0].delta.content)
-
-            response_text = "".join(response_parts)
-            duration_ms = (time.time() - start_time) * 1000
-
-            if should_log_agent():
-                logger.info(
-                    f"VISION specialist {agent_name}: {len(response_text)} chars "
-                    f"in {duration_ms:.0f}ms ({len(image_messages)} images)"
-                )
-
-            if chatter_queue:
-                await chatter_queue.put(ChatterEvent(
-                    type=ChatterEventType.CONTENT,
-                    agent_name=agent_name,
-                    content=f"Completed ({len(response_text)} chars)",
-                    duration_ms=duration_ms,
-                    friendly_message=f"{agent_name} finished in {duration_ms / 1000:.1f}s",
-                ))
-
-            return {
-                "agent_id": agent_id,
-                "agent_name": agent_name,
-                "response": response_text,
-            }
-
-        except Exception as e:
-            logger.error(f"Vision call to {agent_name} failed: {e}", exc_info=True)
-            duration_ms = (time.time() - start_time) * 1000
-            if chatter_queue:
-                await chatter_queue.put(ChatterEvent(
-                    type=ChatterEventType.CONTENT,
-                    agent_name=agent_name,
-                    content=f"Vision call failed: {e}",
-                    duration_ms=duration_ms,
-                    friendly_message=f"{agent_name} encountered an error",
-                ))
-            return {
-                "agent_id": agent_id, "agent_name": agent_name,
-                "response": "", "error": str(e),
-            }
-        finally:
-            await client.close()
-
     async def _call_specialist_local(
         self,
         agent_id: str,
@@ -1294,7 +1096,11 @@ RESPOND WITH JSON:
             # ── Build context providers when session context is available ──
             has_session = bool(session_id and user_id)
 
-            # ── Check for image attachments → use vision path ──
+            # ── Check for image attachments → build multimodal input ──
+            # CosmosHistoryProvider already injects images in conversation
+            # history; we just need to build the *current* user message with
+            # any images attached to the session so the model sees them.
+            run_input: str | Message = message
             if has_session:
                 image_messages = await cosmos_service.get_session_image_messages(
                     session_id, user_id
@@ -1303,12 +1109,19 @@ RESPOND WITH JSON:
                     if should_log_agent():
                         logger.info(
                             f"Session {session_id} has {len(image_messages)} image(s), "
-                            f"using vision path for {agent_name}"
+                            f"building multimodal input for {agent_name}"
                         )
-                    return await self._call_specialist_with_vision(
-                        config, agent_name, message, session_id, user_id,
-                        image_messages, chatter_queue,
-                    )
+                    # Build a Message with text + all session images
+                    contents: list[Content | str] = [message]
+                    for img_msg in image_messages:
+                        img = img_msg.get("metadata", {}).get("image_attachment", {})
+                        if img.get("base64") and img.get("content_type"):
+                            data_uri = f"data:{img['content_type']};base64,{img['base64']}"
+                            contents.append(
+                                Content.from_uri(data_uri, media_type=img["content_type"])
+                            )
+                    if len(contents) > 1:
+                        run_input = Message("user", contents)
 
             providers = None
             if has_session:
@@ -1340,85 +1153,34 @@ RESPOND WITH JSON:
             # ── Stream the response ──
             response_parts = []
 
-            # Track tool calls for timing
+            # Track tool calls for timing (shared helper state)
             seen_tool_calls: set[str] = set()
             seen_tool_results: set[str] = set()
             pending_tool_calls: dict[str, tuple[float, str, Optional[dict]]] = {}
-            total_tokens_input = 0
-            total_tokens_output = 0
+            token_accumulator: dict[str, int] = {"input": 0, "output": 0}
 
-            async for update in agent.run(message, session=session, stream=True):
+            # Emit a "working" event at the start so the UI shows immediate activity
+            if chatter_queue:
+                await chatter_queue.put(ChatterEvent(
+                    type=ChatterEventType.THINKING,
+                    agent_name=agent_name,
+                    content="Starting agent execution",
+                    friendly_message=f"{agent_name} is working...",
+                ))
+
+            async for update in agent.run(run_input, session=session, stream=True):
                 if update.text:
                     response_parts.append(update.text)
 
                 # Capture chatter events (tool calls, results, token usage)
-                if hasattr(update, 'contents') and update.contents:
-                    for content_item in update.contents:
-                        if content_item.type == 'function_call':
-                            call_id = getattr(content_item, 'call_id', None)
-                            tool_name = getattr(content_item, 'name', None)
-                            tool_args = getattr(content_item, 'arguments', None)
-                            if call_id and tool_name and call_id not in seen_tool_calls:
-                                seen_tool_calls.add(call_id)
-                                args_dict = tool_args if isinstance(tool_args, dict) else None
-                                pending_tool_calls[call_id] = (time.time(), tool_name, args_dict)
-                                friendly_msg = _get_friendly_tool_description(tool_name, args_dict)
-                                event = ChatterEvent(
-                                    type=ChatterEventType.TOOL_CALL,
-                                    agent_name=agent_name,
-                                    content=f"Calling {tool_name}",
-                                    tool_name=tool_name,
-                                    tool_args=args_dict,
-                                    friendly_message=friendly_msg,
-                                )
-                                if chatter_queue:
-                                    await chatter_queue.put(event)
-
-                        elif content_item.type == 'function_result':
-                            call_id = getattr(content_item, 'call_id', None)
-                            result = getattr(content_item, 'result', None)
-                            if call_id and call_id not in seen_tool_results:
-                                seen_tool_results.add(call_id)
-                                duration_ms = None
-                                tool_name_result = None
-                                if call_id in pending_tool_calls:
-                                    st, tool_name_result, _ = pending_tool_calls[call_id]
-                                    duration_ms = (time.time() - st) * 1000
-                                result_display = ChatterEvent.extract_result_text(result)
-                                if len(result_display) > 300:
-                                    result_display = result_display[:300] + "..."
-                                friendly_msg = _get_friendly_result_summary(tool_name_result or "", result_display)
-                                event = ChatterEvent(
-                                    type=ChatterEventType.TOOL_RESULT,
-                                    agent_name=agent_name,
-                                    content=result_display or "Result received",
-                                    tool_name=tool_name_result,
-                                    duration_ms=duration_ms,
-                                    friendly_message=friendly_msg,
-                                )
-                                if chatter_queue:
-                                    await chatter_queue.put(event)
-
-                        elif content_item.type == 'usage':
-                            details = getattr(content_item, 'usage_details', None)
-                            if details:
-                                uc_in = details.get('input_token_count') if isinstance(details, dict) else getattr(details, 'input_token_count', None)
-                                uc_out = details.get('output_token_count') if isinstance(details, dict) else getattr(details, 'output_token_count', None)
-                                if uc_in:
-                                    total_tokens_input += uc_in
-                                if uc_out:
-                                    total_tokens_output += uc_out
-                                if uc_in or uc_out:
-                                    event = ChatterEvent(
-                                        type=ChatterEventType.THINKING,
-                                        agent_name=agent_name,
-                                        content=f"LLM call: {uc_in or 0} input, {uc_out or 0} output tokens",
-                                        tokens_input=uc_in,
-                                        tokens_output=uc_out,
-                                        friendly_message="Analyzing information...",
-                                    )
-                                    if chatter_queue:
-                                        await chatter_queue.put(event)
+                if chatter_queue:
+                    chatter_events = self._extract_chatter_from_update(
+                        update, agent_name,
+                        seen_tool_calls, seen_tool_results,
+                        pending_tool_calls, token_accumulator,
+                    )
+                    for ce in chatter_events:
+                        await chatter_queue.put(ce)
 
             response_text = "".join(response_parts)
             duration_ms = (time.time() - start_time) * 1000
@@ -1463,24 +1225,63 @@ RESPOND WITH JSON:
         chatter_queue: Optional[asyncio.Queue]
     ) -> dict:
         """
-        Call an external A2A agent via HTTP protocol. Returns only final text
-        (no internal tool events available from remote agents).
+        Call an external A2A agent via HTTP protocol with streaming.
+
+        Uses the SDK's streaming mode so we receive incremental updates
+        instead of waiting for the full response.  Emits THINKING chatter
+        events as chunks arrive so the UI shows real-time progress.
         """
         if should_log_a2a():
             logger.info(f"A2A CALL (remote): {agent_name} <- {message[:100]}...")
-        
+
         start_time = time.time()
         try:
-            result = await a2a_client.call_agent(config, message, user_token)
+            agent = a2a_client.create_a2a_agent(config, user_token)
+
+            response_parts: list[str] = []
+            first_chunk_received = False
+            chunk_count = 0
+
+            # Emit a "working" event so the UI shows immediate activity
+            if chatter_queue:
+                await chatter_queue.put(ChatterEvent(
+                    type=ChatterEventType.THINKING,
+                    agent_name=agent_name,
+                    content="Connecting to remote agent...",
+                    friendly_message=f"{agent_name} is working...",
+                ))
+
+            async with agent:
+                # ResponseStream is an AsyncIterable but does NOT support
+                # `async with` — iterate directly per the Agent Framework pattern.
+                stream = agent.run(message, stream=True)
+                async for update in stream:
+                    for content_item in update.contents:
+                        if hasattr(content_item, 'text') and content_item.text:
+                            response_parts.append(content_item.text)
+                            chunk_count += 1
+
+                            # Emit a progress event on the first real chunk
+                            if not first_chunk_received and chatter_queue:
+                                first_chunk_received = True
+                                elapsed = (time.time() - start_time) * 1000
+                                await chatter_queue.put(ChatterEvent(
+                                    type=ChatterEventType.THINKING,
+                                    agent_name=agent_name,
+                                    content=f"Started receiving response after {elapsed:.0f}ms",
+                                    friendly_message=f"{agent_name} is responding...",
+                                ))
+
+            response_text = "".join(response_parts)
             duration_ms = (time.time() - start_time) * 1000
-            
-            if result.get("error"):
-                return {"agent_id": agent_id, "agent_name": agent_name, "response": "", "error": result["error"]}
-            
-            response_text = result.get("text", "")
+
             if should_log_a2a():
-                logger.info(f"A2A RESPONSE from {agent_name}: {response_text[:500]}{'...' if len(response_text) > 500 else ''}")
-            
+                logger.info(
+                    f"A2A RESPONSE from {agent_name}: "
+                    f"{response_text[:500]}{'...' if len(response_text) > 500 else ''} "
+                    f"({chunk_count} chunks)"
+                )
+
             # Emit completion event
             if chatter_queue:
                 await chatter_queue.put(ChatterEvent(
@@ -1490,17 +1291,321 @@ RESPOND WITH JSON:
                     duration_ms=duration_ms,
                     friendly_message=f"{agent_name} responded in {duration_ms/1000:.1f}s"
                 ))
-            
+
             return {
                 "agent_id": agent_id,
                 "agent_name": agent_name,
                 "response": response_text,
             }
-            
+
         except Exception as e:
             logger.error(f"A2A call to {agent_name} failed: {e}")
+            duration_ms = (time.time() - start_time) * 1000
+            if chatter_queue:
+                await chatter_queue.put(ChatterEvent(
+                    type=ChatterEventType.CONTENT,
+                    agent_name=agent_name,
+                    content=f"Error: {str(e)[:200]}",
+                    duration_ms=duration_ms,
+                    friendly_message=f"{agent_name} encountered an error",
+                ))
             return {"agent_id": agent_id, "agent_name": agent_name, "response": "", "error": str(e)}
     
+    # =========================================================================
+    # Shared helper: extract chatter from AgentResponseUpdate content items
+    # =========================================================================
+
+    def _extract_chatter_from_update(
+        self,
+        update,
+        agent_name: str,
+        seen_tool_calls: set[str],
+        seen_tool_results: set[str],
+        pending_tool_calls: dict[str, tuple[float, str, Optional[dict]]],
+        token_accumulator: dict[str, int],
+    ) -> list[ChatterEvent]:
+        """
+        Extract ChatterEvent objects from an AgentResponseUpdate's contents.
+
+        Shared by execute_single, _call_specialist_local, and the workflow
+        event processor so the logic is defined once.
+        """
+        events: list[ChatterEvent] = []
+        if not hasattr(update, 'contents') or not update.contents:
+            return events
+
+        for content_item in update.contents:
+            if content_item.type == 'function_call':
+                call_id = getattr(content_item, 'call_id', None)
+                tool_name = getattr(content_item, 'name', None)
+                tool_args = getattr(content_item, 'arguments', None)
+                if call_id and tool_name and call_id not in seen_tool_calls:
+                    seen_tool_calls.add(call_id)
+                    args_dict = tool_args if isinstance(tool_args, dict) else None
+                    pending_tool_calls[call_id] = (time.time(), tool_name, args_dict)
+                    friendly_msg = _get_friendly_tool_description(tool_name, args_dict)
+                    events.append(ChatterEvent(
+                        type=ChatterEventType.TOOL_CALL,
+                        agent_name=agent_name,
+                        content=f"Calling {tool_name}",
+                        tool_name=tool_name,
+                        tool_args=args_dict,
+                        call_id=call_id,
+                        friendly_message=friendly_msg,
+                    ))
+
+            elif content_item.type == 'function_result':
+                call_id = getattr(content_item, 'call_id', None)
+                result = getattr(content_item, 'result', None)
+                if call_id and call_id not in seen_tool_results:
+                    seen_tool_results.add(call_id)
+                    duration_ms = None
+                    tool_name_result = None
+                    if call_id in pending_tool_calls:
+                        st, tool_name_result, _ = pending_tool_calls[call_id]
+                        duration_ms = (time.time() - st) * 1000
+                    result_display = ChatterEvent.extract_result_text(result)
+                    original_length = len(result_display)
+                    if len(result_display) > 300:
+                        result_display = result_display[:300] + "..."
+                    friendly_msg = _get_friendly_result_summary(tool_name_result or "", result_display, original_length)
+                    events.append(ChatterEvent(
+                        type=ChatterEventType.TOOL_RESULT,
+                        agent_name=agent_name,
+                        content=result_display or "Result received",
+                        tool_name=tool_name_result,
+                        call_id=call_id,
+                        duration_ms=duration_ms,
+                        friendly_message=friendly_msg,
+                    ))
+
+            elif content_item.type == 'text_reasoning':
+                reasoning_text = getattr(content_item, 'text', None)
+                if reasoning_text:
+                    events.append(ChatterEvent(
+                        type=ChatterEventType.REASONING,
+                        agent_name=agent_name,
+                        content=reasoning_text,
+                        friendly_message="Reasoning...",
+                    ))
+
+            elif content_item.type == 'usage':
+                details = getattr(content_item, 'usage_details', None)
+                if details:
+                    uc_in = details.get('input_token_count') if isinstance(details, dict) else getattr(details, 'input_token_count', None)
+                    uc_out = details.get('output_token_count') if isinstance(details, dict) else getattr(details, 'output_token_count', None)
+                    if uc_in:
+                        token_accumulator["input"] = token_accumulator.get("input", 0) + uc_in
+                    if uc_out:
+                        token_accumulator["output"] = token_accumulator.get("output", 0) + uc_out
+                    if uc_in or uc_out:
+                        # Build a context-aware thinking message based on
+                        # what happened recently (tool results → analyzing,
+                        # tool calls pending → planning, otherwise generic)
+                        if seen_tool_results and not (pending_tool_calls.keys() - seen_tool_results):
+                            # All pending tool calls have results — agent
+                            # is analyzing the data it received
+                            friendly = "Analyzing results and forming response..."
+                        elif pending_tool_calls and (pending_tool_calls.keys() - seen_tool_results):
+                            # Still have tool calls without results
+                            friendly = "Processing information..."
+                        elif seen_tool_calls:
+                            friendly = "Planning next steps..."
+                        else:
+                            friendly = "Thinking..."
+                        events.append(ChatterEvent(
+                            type=ChatterEventType.THINKING,
+                            agent_name=agent_name,
+                            content=f"LLM call: {uc_in or 0} input, {uc_out or 0} output tokens",
+                            tokens_input=uc_in,
+                            tokens_output=uc_out,
+                            friendly_message=friendly,
+                        ))
+        return events
+
+    # =========================================================================
+    # WorkflowBuilder-based orchestration
+    # =========================================================================
+
+    async def _build_specialist_agents(
+        self,
+        specialist_ids: list[str],
+        user_token: Optional[str] = None,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> list[tuple[str, str, Agent]]:
+        """
+        Create Agent instances for a list of specialist IDs.
+
+        Returns:
+            list of (agent_id, agent_name, Agent) tuples.
+        """
+        agents: list[tuple[str, str, Agent]] = []
+        has_session = bool(session_id and user_id)
+
+        for agent_id in specialist_ids:
+            config = self._configs_cache.get(agent_id)
+            if not config:
+                config = await cosmos_service.get_agent(agent_id)
+                if config:
+                    self._configs_cache[agent_id] = config
+            if not config:
+                logger.warning(f"Specialist config not found for {agent_id}, skipping")
+                continue
+
+            agent_name = config.get("name", "Agent")
+            agent_type = config.get("agent_type", "local")
+
+            # External A2A agents are handled outside the workflow (remote HTTP)
+            if agent_type == "a2a":
+                # We'll handle A2A agents separately; skip them for workflow building
+                continue
+
+            providers = None
+            if has_session:
+                providers = [
+                    CosmosHistoryProvider(cosmos_service),
+                    DocumentRAGProvider(embedding_service, search_service),
+                ]
+
+            agent = await self._create_specialist_agent(
+                config, user_token, context_providers=providers
+            )
+            agents.append((agent_id, agent_name, agent))
+        return agents
+
+    async def _run_workflow_and_collect(
+        self,
+        workflow: Workflow,
+        user_message: str,
+        agent_id_map: dict[str, tuple[str, str]],
+        chatter_queue: Optional[asyncio.Queue] = None,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> list[dict]:
+        """
+        Run a WorkflowBuilder-produced Workflow with streaming, emitting chatter
+        events and collecting specialist results.
+
+        Args:
+            workflow: The built Workflow object.
+            user_message: The user's message to send to the workflow.
+            agent_id_map: Mapping of executor_id -> (agent_id, agent_name).
+            chatter_queue: Queue for real-time chatter events.
+            session_id / user_id: For context-provider state.
+
+        Returns:
+            list of dicts with agent_id, agent_name, response.
+        """
+        results_by_executor: dict[str, dict] = {}
+
+        # Per-executor tracking for chatter extraction
+        seen_tool_calls: dict[str, set[str]] = {}
+        seen_tool_results: dict[str, set[str]] = {}
+        pending_tool_calls: dict[str, dict[str, tuple[float, str, Optional[dict]]]] = {}
+        token_accumulators: dict[str, dict[str, int]] = {}
+        executor_start_times: dict[str, float] = {}
+
+        stream = workflow.run(user_message, stream=True)
+        async for event in stream:
+            etype = event.type
+
+            if etype == "executor_invoked":
+                executor_id = event.executor_id
+                executor_start_times[executor_id] = time.time()
+                seen_tool_calls.setdefault(executor_id, set())
+                seen_tool_results.setdefault(executor_id, set())
+                pending_tool_calls.setdefault(executor_id, {})
+                token_accumulators.setdefault(executor_id, {"input": 0, "output": 0})
+
+                agent_id, agent_name = agent_id_map.get(executor_id, (executor_id, executor_id))
+                if chatter_queue:
+                    await chatter_queue.put(ChatterEvent(
+                        type=ChatterEventType.DELEGATION,
+                        agent_name=agent_name,
+                        content=f"Running {agent_name}",
+                        friendly_message=f"Asking {agent_name}",
+                    ))
+                if should_log_agent():
+                    logger.info(f"Workflow: executor_invoked -> {executor_id} ({agent_name})")
+
+            elif etype == "output":
+                executor_id = event.executor_id or ""
+                data = event.data
+                agent_id, agent_name = agent_id_map.get(executor_id, (executor_id, executor_id))
+
+                # AgentResponseUpdate — extract chatter (tool calls, tokens, etc.)
+                if isinstance(data, AgentResponseUpdate):
+                    chatter_events = self._extract_chatter_from_update(
+                        data, agent_name,
+                        seen_tool_calls.get(executor_id, set()),
+                        seen_tool_results.get(executor_id, set()),
+                        pending_tool_calls.get(executor_id, {}),
+                        token_accumulators.get(executor_id, {"input": 0, "output": 0}),
+                    )
+                    if chatter_queue:
+                        for ce in chatter_events:
+                            await chatter_queue.put(ce)
+
+                    # Accumulate text for final result
+                    if data.text:
+                        results_by_executor.setdefault(executor_id, {
+                            "agent_id": agent_id,
+                            "agent_name": agent_name,
+                            "parts": [],
+                        })
+                        results_by_executor[executor_id]["parts"].append(data.text)
+
+            elif etype == "executor_completed":
+                executor_id = event.executor_id or ""
+                agent_id, agent_name = agent_id_map.get(executor_id, (executor_id, executor_id))
+                duration_ms = None
+                if executor_id in executor_start_times:
+                    duration_ms = (time.time() - executor_start_times[executor_id]) * 1000
+
+                if chatter_queue:
+                    await chatter_queue.put(ChatterEvent(
+                        type=ChatterEventType.CONTENT,
+                        agent_name=agent_name,
+                        content=f"Completed",
+                        duration_ms=duration_ms,
+                        friendly_message=f"{agent_name} finished" + (f" in {duration_ms/1000:.1f}s" if duration_ms else ""),
+                    ))
+                if should_log_agent():
+                    logger.info(f"Workflow: executor_completed -> {executor_id} ({agent_name})")
+
+            elif etype == "executor_failed":
+                executor_id = event.executor_id or ""
+                agent_id, agent_name = agent_id_map.get(executor_id, (executor_id, executor_id))
+                error_detail = str(event.details) if event.details else "Unknown error"
+                results_by_executor.setdefault(executor_id, {
+                    "agent_id": agent_id,
+                    "agent_name": agent_name,
+                    "parts": [],
+                    "error": error_detail,
+                })
+                if chatter_queue:
+                    await chatter_queue.put(ChatterEvent(
+                        type=ChatterEventType.CONTENT,
+                        agent_name=agent_name,
+                        content=f"Error: {error_detail[:200]}",
+                        friendly_message=f"{agent_name} encountered an error",
+                    ))
+
+        # Build final results list
+        results: list[dict] = []
+        for executor_id, data in results_by_executor.items():
+            response_text = "".join(data.get("parts", []))
+            entry: dict[str, Any] = {
+                "agent_id": data["agent_id"],
+                "agent_name": data["agent_name"],
+                "response": response_text,
+            }
+            if data.get("error"):
+                entry["error"] = data["error"]
+            results.append(entry)
+        return results
+
     async def _execute_specialists_with_pattern(
         self,
         pattern: OrchestrationPattern,
@@ -1514,169 +1619,180 @@ RESPOND WITH JSON:
         user_id: Optional[str] = None,
     ) -> list[dict]:
         """
-        Phase 2: Execute specialists according to the orchestration pattern.
-        
+        Phase 2: Execute specialists using Agent Framework WorkflowBuilder.
+
+        Builds a proper Workflow graph for each orchestration pattern instead of
+        manual loops.  The framework handles message passing, context
+        synchronization, and parallel execution.
+
         Returns:
             list of dicts with agent_id, agent_name, response
         """
-        results = []
-        
         if not specialist_ids:
-            return results
-        
-        if pattern == OrchestrationPattern.SINGLE or len(specialist_ids) == 1:
-            # Single: Call just the first specialist
-            result = await self._call_specialist_a2a(
-                specialist_ids[0], user_message, user_token, chatter_queue,
-                session_id=session_id, user_id=user_id,
-            )
-            results.append(result)
-        
-        elif pattern == OrchestrationPattern.SEQUENTIAL:
-            # Sequential: Call each in order, passing accumulated context
-            accumulated_context = user_message
-            for agent_id in specialist_ids:
-                result = await self._call_specialist_a2a(
-                    agent_id, accumulated_context, user_token, chatter_queue,
+            return []
+
+        # Separate local agents (workflow-capable) from external A2A agents
+        local_ids = []
+        a2a_ids = []
+        for sid in specialist_ids:
+            config = self._configs_cache.get(sid, {})
+            if config.get("agent_type") == "a2a":
+                a2a_ids.append(sid)
+            else:
+                local_ids.append(sid)
+
+        # Build Agent instances for local specialists
+        agent_tuples = await self._build_specialist_agents(
+            local_ids, user_token, session_id, user_id
+        )
+        # agent_tuples: list of (agent_id, agent_name, Agent)
+
+        # Map executor_id (agent.name) -> (agent_id, agent_name) for event processing
+        agent_id_map: dict[str, tuple[str, str]] = {}
+        agents_for_workflow: list[Agent] = []
+        for agent_id, agent_name, agent in agent_tuples:
+            agent_id_map[agent.name] = (agent_id, agent_name)
+            agents_for_workflow.append(agent)
+
+        results: list[dict] = []
+
+        # Handle external A2A agents with direct calls (not part of the workflow)
+        a2a_results = []
+        if a2a_ids:
+            a2a_tasks = [
+                self._call_specialist_a2a(
+                    aid, user_message, user_token, chatter_queue,
                     session_id=session_id, user_id=user_id,
                 )
-                results.append(result)
-                # Add this response to context for next agent
-                if result.get("response"):
-                    accumulated_context += f"\n\n[{result['agent_name']} said]: {result['response']}"
-        
-        elif pattern == OrchestrationPattern.CONCURRENT:
-            # Concurrent: Call all in parallel
-            tasks = [
-                self._call_specialist_a2a(agent_id, user_message, user_token, chatter_queue,
-                                         session_id=session_id, user_id=user_id)
-                for agent_id in specialist_ids
+                for aid in a2a_ids
             ]
-            results = await asyncio.gather(*tasks)
-        
+            a2a_results = list(await asyncio.gather(*a2a_tasks))
+
+        if not agents_for_workflow:
+            # Only A2A agents — return their results directly
+            return a2a_results
+
+        # -----------------------------------------------------------------
+        # Build the workflow graph based on pattern
+        # -----------------------------------------------------------------
+
+        if pattern == OrchestrationPattern.SINGLE or len(agents_for_workflow) == 1:
+            # Single agent: trivial one-node workflow
+            agent = agents_for_workflow[0]
+            workflow = WorkflowBuilder(start_executor=agent).build()
+
+        elif pattern == OrchestrationPattern.SEQUENTIAL:
+            # Sequential pipeline: each agent receives the full conversation
+            # from the previous agent via the framework's AgentExecutor chaining.
+            first = agents_for_workflow[0]
+            workflow = (
+                WorkflowBuilder(start_executor=first)
+                .add_chain(agents_for_workflow)
+                .build()
+            )
+
+        elif pattern == OrchestrationPattern.CONCURRENT:
+            # Concurrent fan-out: a no-op dispatcher fans out to ALL agents
+            # so they run truly in parallel on the original user message.
+            dispatcher = _PassthroughExecutor()
+            agent_id_map[dispatcher.id] = ("_dispatcher", "Dispatcher")
+            workflow = (
+                WorkflowBuilder(start_executor=dispatcher)
+                .add_fan_out_edges(dispatcher, agents_for_workflow)
+                .build()
+            )
+
         elif pattern == OrchestrationPattern.MAGENTIC:
-            # Magentic-One style: All agents participate with context accumulation
-            # Key insight: Order matters! Research/investigation agents should run first
-            # to gather info that data agents (ADX, SQL) can then use.
-            # 
-            # Strategy: Sort agents so "investigation/research" types run before "data" types
-            # This allows: Investigator finds "works at Zyphronix" → ADX queries Zyphronix employees
-            
-            # Reorder: put agents with research-like descriptions first
-            def agent_priority(agent_id: str) -> int:
-                """Lower number = runs first. Research agents before data agents."""
-                config = self._configs_cache.get(agent_id, {})
-                name_lower = config.get("name", "").lower()
-                desc_lower = config.get("description", "").lower()
-                
-                # Research/investigation agents run first (priority 0)
-                research_keywords = ["investigat", "research", "search", "find", "discover", "rag", "document"]
-                for kw in research_keywords:
-                    if kw in name_lower or kw in desc_lower:
-                        return 0
-                
-                # Data/query agents run second (priority 1) - they can use research results
-                data_keywords = ["adx", "kusto", "database", "sql", "query", "data"]
-                for kw in data_keywords:
-                    if kw in name_lower or kw in desc_lower:
-                        return 1
-                
-                # Other agents run last (priority 2)
-                return 2
-            
-            sorted_specialists = sorted(specialist_ids, key=agent_priority)
-            
-            if should_log_agent():
-                logger.info(f"Magentic execution order: {[self._configs_cache.get(sid, {}).get('name', sid) for sid in sorted_specialists]}")
-            
-            # Execute with accumulated context so later agents can use earlier findings
-            accumulated_context = user_message
-            for agent_id in sorted_specialists:
-                result = await self._call_specialist_a2a(
-                    agent_id, accumulated_context, user_token, chatter_queue,
-                    session_id=session_id, user_id=user_id,
+            # Magentic pattern: sequential chain (framework passes full conversation
+            # context between agents) + iterative evaluation rounds.
+            # The sequential chain lets later agents see earlier agents' full output.
+            first = agents_for_workflow[0]
+            workflow = (
+                WorkflowBuilder(start_executor=first)
+                .add_chain(agents_for_workflow)
+                .build()
+            )
+
+        elif pattern == OrchestrationPattern.GROUP_CHAT:
+            # Group Chat: sequential chain for each round; the framework
+            # passes the full conversation so each agent sees all prior turns.
+            first = agents_for_workflow[0]
+            workflow = (
+                WorkflowBuilder(
+                    start_executor=first,
+                    max_iterations=max_rounds * len(agents_for_workflow),
                 )
-                results.append(result)
-                # Add this response to context for next agent
-                if result.get("response"):
-                    accumulated_context += f"\n\n[{result['agent_name']} said]: {result['response']}"
-            
-            # Magentic iterative loop: Orchestrator evaluates if more investigation is needed
-            for round_num in range(1, max_rounds):  # Already did round 0 above
-                # Ask orchestrator if we need more investigation
+                .add_chain(agents_for_workflow)
+                .build()
+            )
+
+        else:
+            # Fallback: sequential chain
+            first = agents_for_workflow[0]
+            workflow = (
+                WorkflowBuilder(start_executor=first)
+                .add_chain(agents_for_workflow)
+                .build()
+            )
+
+        # -----------------------------------------------------------------
+        # Run the workflow with streaming and collect results + chatter
+        # -----------------------------------------------------------------
+
+        workflow_results = await self._run_workflow_and_collect(
+            workflow=workflow,
+            user_message=user_message,
+            agent_id_map=agent_id_map,
+            chatter_queue=chatter_queue,
+            session_id=session_id,
+            user_id=user_id,
+        )
+        results.extend(workflow_results)
+
+        # Magentic iterative evaluation loop (runs additional rounds if needed)
+        if pattern == OrchestrationPattern.MAGENTIC and orchestrator_config:
+            for round_num in range(1, max_rounds):
                 evaluation = await self._run_orchestrator_for_evaluation(
                     orchestrator_config,
-                    results,
+                    results + a2a_results,
                     user_message,
-                    [self._configs_cache.get(sid, {}) for sid in sorted_specialists]
+                    [self._configs_cache.get(sid, {}) for sid in specialist_ids],
                 )
-                
                 if should_log_agent():
-                    logger.info(f"Magentic round {round_num} evaluation: continue={evaluation.get('continue')}, follow_up={evaluation.get('follow_up_query', '')[:100]}")
-                
+                    logger.info(
+                        f"Magentic round {round_num} evaluation: "
+                        f"continue={evaluation.get('continue')}, "
+                        f"follow_up={(evaluation.get('follow_up_query') or '')[:100]}"
+                    )
                 if not evaluation.get("continue", False):
-                    # Orchestrator says we have enough information
                     break
-                
-                # Get follow-up query and which agents to ask
-                follow_up = evaluation.get("follow_up_query", "")
-                target_agents = evaluation.get("target_agents", sorted_specialists)
-                
+
+                follow_up = evaluation.get("follow_up_query") or ""
                 if not follow_up:
                     break
-                
-                # Emit thinking event for the follow-up round
+
                 if chatter_queue:
-                    followup_event = ChatterEvent(
+                    await chatter_queue.put(ChatterEvent(
                         type=ChatterEventType.THINKING,
                         agent_name="Orchestrator",
                         content=f"Round {round_num + 1}: Following up on new information...",
-                        friendly_message=f"Investigating further based on new findings"
-                    )
-                    await chatter_queue.put(followup_event)
-                
-                # Run another round with the follow-up query + accumulated context
-                round_context = f"{accumulated_context}\n\n[Orchestrator follow-up]: {follow_up}"
-                
-                for agent_id in target_agents:
-                    if agent_id not in [r.get("agent_id") for r in results[-len(sorted_specialists):]]:
-                        # Only call agents that might have new info
-                        continue
-                    
-                    result = await self._call_specialist_a2a(
-                        agent_id, round_context, user_token, chatter_queue,
-                        session_id=session_id, user_id=user_id,
-                    )
-                    results.append(result)
-                    
-                    if result.get("response"):
-                        accumulated_context += f"\n\n[{result['agent_name']} (round {round_num + 1})]: {result['response']}"
-        
-        elif pattern == OrchestrationPattern.GROUP_CHAT:
-            # Group Chat: Round-robin with context accumulation
-            current_context = user_message
-            for round_num in range(max_rounds):
-                round_had_output = False
-                for agent_id in specialist_ids:
-                    result = await self._call_specialist_a2a(
-                        agent_id, current_context, user_token, chatter_queue,
-                        session_id=session_id, user_id=user_id,
-                    )
-                    results.append(result)
-                    
-                    if result.get("response"):
-                        round_had_output = True
-                        current_context += f"\n\n[{result['agent_name']} said]: {result['response']}"
-                        
-                        # Check for termination signal
-                        if "[DONE]" in result["response"] or "[END]" in result["response"]:
-                            return results
-                
-                # If no agent produced output in a round, stop
-                if not round_had_output:
-                    break
-        
-        return list(results) if not isinstance(results, list) else results
+                        friendly_message="Investigating further based on new findings",
+                    ))
+
+                # Re-run the workflow with the follow-up query
+                follow_up_results = await self._run_workflow_and_collect(
+                    workflow=workflow,
+                    user_message=follow_up,
+                    agent_id_map=agent_id_map,
+                    chatter_queue=chatter_queue,
+                    session_id=session_id,
+                    user_id=user_id,
+                )
+                results.extend(follow_up_results)
+
+        # Append A2A results
+        results.extend(a2a_results)
+        return results
     
     async def _run_orchestrator_for_synthesis(
         self,

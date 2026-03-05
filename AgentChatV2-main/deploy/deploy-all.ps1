@@ -54,7 +54,7 @@ param(
     [string]$Cloud = "AzureUSGovernment",
 
     [Parameter(Mandatory = $false)]
-    [string]$ImageTag = "latest",
+    [string]$ImageTag,
 
     [Parameter(Mandatory = $false)]
     [switch]$BackendOnly,
@@ -66,9 +66,15 @@ param(
 $ErrorActionPreference = "Stop"
 $scriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
 
+# Auto-generate unique tag if not specified (ensures App Service pulls fresh image)
+if (-not $ImageTag) {
+    $ImageTag = Get-Date -Format "yyyyMMdd-HHmmss"
+}
+
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "AgentChatV2 Full Deployment" -ForegroundColor Cyan
 Write-Host "Target Cloud: $Cloud" -ForegroundColor Cyan
+Write-Host "Image Tag: $ImageTag" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 
 # Deploy Backend

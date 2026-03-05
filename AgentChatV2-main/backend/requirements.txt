@@ -20,7 +20,7 @@ uvicorn[standard]>=0.27.0
 python-multipart>=0.0.6
 sse-starlette>=1.8.0
 # Pin watchfiles and websockets to versions with prebuilt wheels
-watchfiles>=1.0.0graham
+watchfiles>=1.0.0
 websockets>=13.0
 
 # Azure SDKs (use DefaultAzureCredential for managed identity)
@@ -33,6 +33,7 @@ azure-ai-textanalytics>=5.3.0
 # Authentication
 msal>=1.26.0
 PyJWT>=2.8.0
+cryptography>=41.0.0  # PFX certificate parsing for OBO token exchange
 
 # Observability
 azure-monitor-opentelemetry>=1.2.0

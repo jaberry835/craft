@@ -30,9 +30,13 @@ from azure.search.documents.indexes.models import (
     HnswAlgorithmConfiguration,
     VectorSearchProfile,
     SearchableField,
-    SimpleField
+    SimpleField,
+    SemanticConfiguration,
+    SemanticSearch,
+    SemanticPrioritizedFields,
+    SemanticField,
 )
-from azure.search.documents.models import VectorizedQuery
+from azure.search.documents.models import VectorizedQuery, QueryType
 
 from config import get_settings, get_azure_credential
 from observability import get_logger
@@ -64,6 +68,7 @@ class GroundingService:
     VECTOR_DIMENSIONS = 1536  # text-embedding-ada-002
     CHUNK_SIZE = 1000  # Characters per chunk
     CHUNK_OVERLAP = 200  # Overlap between chunks
+    MARKDOWN_MAX_SECTION_CHARS = 1500  # Max chars per markdown section before sub-chunking
     EXCEL_ROWS_PER_CHUNK = 20  # Rows per chunk for Excel (smaller = better entity-level precision)
     EMBEDDING_BATCH_SIZE = 16  # Chunks per embedding API call
     SEARCH_UPLOAD_BATCH_SIZE = 100  # Documents per search upload call
@@ -184,10 +189,17 @@ class GroundingService:
         
         try:
             existing_index = self._index_client.get_index(index_name)
-            # Check if schema is current – ssToken must be present
+            # Check if schema is current – ssToken and semantic config must be present
             existing_field_names = {f.name for f in existing_index.fields}
-            if "ssToken" not in existing_field_names:
-                logger.warning(f"Index {index_name} is missing 'ssToken' field – recreating index")
+            has_semantic = (existing_index.semantic_search is not None
+                           and existing_index.semantic_search.configurations)
+            if "ssToken" not in existing_field_names or not has_semantic:
+                reason = []
+                if "ssToken" not in existing_field_names:
+                    reason.append("missing 'ssToken' field")
+                if not has_semantic:
+                    reason.append("missing semantic configuration")
+                logger.warning(f"Index {index_name} outdated ({', '.join(reason)}) – recreating index")
                 self._index_client.delete_index(index_name)
                 raise Exception("Schema outdated – recreate")
             logger.debug(f"Grounding index {index_name} exists with current schema")
@@ -223,6 +235,19 @@ class GroundingService:
                             algorithm_configuration_name="hnsw-config"
                         )
                     ]
+                ),
+                semantic_search=SemanticSearch(
+                    configurations=[
+                        SemanticConfiguration(
+                            name="default-semantic",
+                            prioritized_fields=SemanticPrioritizedFields(
+                                content_fields=[SemanticField(field_name="content")],
+                                title_fields=[SemanticField(field_name="fileName")],
+                                keywords_fields=[SemanticField(field_name="sourceName")],
+                            )
+                        )
+                    ],
+                    default_configuration_name="default-semantic",
                 )
             )
             
@@ -241,6 +266,95 @@ class GroundingService:
             if chunk.strip():
                 chunks.append(chunk)
             start = end - self.CHUNK_OVERLAP
+        return chunks
+
+    # ---- Heading-aware Markdown chunking (for DI output) ----
+    # Regex that matches Markdown headings (# … ######)
+    _HEADING_RE = re.compile(r'^(#{1,6})\s+(.+)', re.MULTILINE)
+
+    def _chunk_markdown_text(self, text: str, file_name: str = "") -> list[str]:
+        """
+        Split DI-extracted Markdown into heading-aware chunks.
+
+        Strategy:
+        1. Split the document on heading boundaries (``# …`` through ``###### …``).
+        2. Each section becomes a candidate chunk that includes the heading path
+           (e.g. "filename > Section > Subsection") prepended for embedding context.
+        3. If a section exceeds MARKDOWN_MAX_SECTION_CHARS it is sub-chunked with
+           the standard overlapping character splitter, still retaining the heading
+           prefix so every chunk carries its structural context.
+        4. If the document contains *no* headings (rare for DI Markdown output but
+           possible) we fall back to the basic ``_chunk_text`` splitter.
+        """
+        headings = list(self._HEADING_RE.finditer(text))
+
+        # No headings → fall back to plain chunking
+        if not headings:
+            return self._chunk_text(text)
+
+        # Build sections: list of (heading_level, heading_text, body)
+        sections: list[tuple[int, str, str]] = []
+
+        # Text before the first heading (preamble)
+        preamble = text[:headings[0].start()].strip()
+        if preamble:
+            sections.append((0, "", preamble))
+
+        for idx, match in enumerate(headings):
+            level = len(match.group(1))  # number of '#' chars
+            heading_text = match.group(2).strip()
+            body_start = match.end()
+            body_end = headings[idx + 1].start() if idx + 1 < len(headings) else len(text)
+            body = text[body_start:body_end].strip()
+            sections.append((level, heading_text, body))
+
+        # Build a heading-path stack so each section knows its ancestor headings
+        # e.g. level-1 "Introduction" > level-2 "Background" > level-3 "History"
+        heading_stack: list[tuple[int, str]] = []  # (level, text)
+        chunks: list[str] = []
+
+        for level, heading_text, body in sections:
+            # Update heading stack: pop anything at this level or deeper
+            if heading_text:
+                heading_stack = [(l, t) for l, t in heading_stack if l < level]
+                heading_stack.append((level, heading_text))
+
+            # Build context prefix: "filename > Heading1 > Heading2"
+            path_parts = []
+            if file_name:
+                path_parts.append(file_name)
+            path_parts.extend(t for _, t in heading_stack)
+            context_prefix = " > ".join(path_parts)
+
+            # Full section text with heading prefix
+            if heading_text:
+                section_text = f"[{context_prefix}]\n{heading_text}\n{body}" if body else f"[{context_prefix}]\n{heading_text}"
+            else:
+                # Preamble (no heading)
+                section_text = f"[{context_prefix}]\n{body}" if context_prefix else body
+
+            if not section_text.strip():
+                continue
+
+            # If section fits in one chunk, keep it whole
+            if len(section_text) <= self.MARKDOWN_MAX_SECTION_CHARS:
+                chunks.append(section_text)
+            else:
+                # Sub-chunk large sections but keep the heading prefix on each
+                prefix = f"[{context_prefix}]\n" if context_prefix else ""
+                # Sub-chunk just the body to avoid splitting the prefix
+                sub_body = body if body else section_text
+                sub_chunks = self._chunk_text(sub_body)
+                for sc in sub_chunks:
+                    chunks.append(f"{prefix}{sc}" if prefix else sc)
+
+        if not chunks:
+            return self._chunk_text(text)
+
+        logger.info(
+            f"Markdown chunking: {len(sections)} sections → {len(chunks)} chunks "
+            f"(file={file_name})"
+        )
         return chunks
 
     def _chunk_tabular_text(self, text: str) -> list[str]:
@@ -358,9 +472,11 @@ class GroundingService:
                     # Parse content based on file type
                     # Try Document Intelligence first for supported binary files (especially PDFs)
                     text = None
+                    used_di = False  # Track whether DI produced the text (Markdown with headings)
                     if self._is_binary_document(blob.name) and document_intelligence_service.is_available and document_intelligence_service.supports_file(blob.name):
                         text = await document_intelligence_service.extract_text_or_none(content, blob.name)
                         if text:
+                            used_di = True
                             logger.info(f"DI extracted {len(text)} chars from {blob.name}")
                     
                     # Fallback to local parsers for binary docs when DI is unavailable or failed
@@ -375,10 +491,16 @@ class GroundingService:
                         except UnicodeDecodeError:
                             text = content.decode('latin-1')
                     
-                    # Use tabular chunking for spreadsheet files, standard chunking otherwise
+                    # Choose chunking strategy based on file type and extraction source
                     ext = self._get_ext(blob.name)
                     if ext in self._EXCEL_EXTENSIONS or ext in {'.csv', '.tsv'}:
                         chunks = self._chunk_tabular_text(text)
+                    elif used_di:
+                        # DI returns structured Markdown — use heading-aware chunking
+                        chunks = self._chunk_markdown_text(text, file_name=blob.name)
+                    elif ext == '.md':
+                        # Native Markdown files also benefit from heading-aware chunking
+                        chunks = self._chunk_markdown_text(text, file_name=blob.name)
                     else:
                         chunks = self._chunk_text(text)
                     return (blob.name, blob_ss_token, chunks)
@@ -790,20 +912,25 @@ class GroundingService:
                         # User has zero tokens – they have no access to any documents
                         logger.warning("User has no SS tokens – returning empty results")
                         return []
-                # If ss_tokens is None the API call failed – fall through without filter
-                # (fail-open; change to fail-closed by returning [] if desired)
+                else:
+                    # Access checker call failed – fail-closed: do not return
+                    # unfiltered results when security is configured but unavailable.
+                    logger.warning("Access checker unavailable – returning empty results (fail-closed)")
+                    return []
             
             odata_filter = " and ".join(filter_parts) if filter_parts else None
             
             select_fields = ["id", "fileName", "content", "sourceName", "chunkIndex"]
 
-            # -- Pass 1: Hybrid search (vector + BM25 via RRF fusion) --
+            # -- Pass 1: Hybrid search (vector + BM25 + semantic reranking) --
             hybrid_results = search_client.search(
                 search_text=query,
                 vector_queries=[vector_query],
                 filter=odata_filter,
                 select=select_fields,
-                top=top_k
+                top=top_k,
+                query_type=QueryType.SEMANTIC,
+                semantic_configuration_name="default-semantic",
             )
 
             # -- Pass 2: Pure keyword / BM25 search (no vector) --

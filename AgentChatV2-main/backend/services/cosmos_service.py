@@ -32,17 +32,17 @@ class CosmosDBService:
     async def initialize(self) -> None:
         """Initialize Cosmos DB client - uses managed identity (DefaultAzureCredential) by default."""
         try:
-            # Prefer managed identity / Azure CLI credentials (works with AAD-only Cosmos DB)
-            if settings.cosmos_endpoint:
+            # Prefer connection string for debug purposes, use identity credential otherwise
+            if settings.cosmos_connection_string:
+                # Fallback to connection string if endpoint not set (requires local auth enabled)
+                logger.info("Using Cosmos DB connection string")
+                self.client = CosmosClient.from_connection_string(settings.cosmos_connection_string)
+            elif settings.cosmos_endpoint:
                 # Use centralized credential helper (AzureCliCredential for dev, ManagedIdentityCredential for prod)
                 credential = get_azure_credential()
                 env_mode = "dev" if settings.environment == "development" else "prod"
                 logger.info(f"Using Cosmos DB with {type(credential).__name__} ({env_mode} mode)")
                 self.client = CosmosClient(settings.cosmos_endpoint, credential)
-            elif settings.cosmos_connection_string:
-                # Fallback to connection string if endpoint not set (requires local auth enabled)
-                logger.info("Using Cosmos DB connection string")
-                self.client = CosmosClient.from_connection_string(settings.cosmos_connection_string)
             else:
                 raise ValueError("Either AZURE_COSMOS_DB_ENDPOINT or AZURE_COSMOS_DB_CONNECTION_STRING must be set")
             

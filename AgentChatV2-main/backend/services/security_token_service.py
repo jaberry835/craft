@@ -11,10 +11,9 @@ Architecture:
   OData `search.in` filter so unauthorized chunks never leave the index.
 
 Caching:
-- Results are cached per-user for the lifetime of the process (in-memory dict
-  with a configurable TTL, default 5 minutes).  This avoids hitting the access
-  checker API on every search query while still picking up permission changes
-  within a reasonable window.
+- Results are cached per-user in an in-memory dict.  The TTL is controlled by
+  the ACCESS_CHECKER_CACHE_TTL env var (in minutes, default 5).
+  Set to 0 to disable caching and always call the access checker.
 """
 from typing import Optional
 import time
@@ -27,10 +26,6 @@ from observability import get_logger
 settings = get_settings()
 logger = get_logger(__name__)
 
-# Cache TTL in seconds – how long we reuse a user's SS token set before
-# re-querying the access checker.
-_CACHE_TTL_SECONDS = 300  # 5 minutes
-
 
 class SecurityTokenService:
     """Manages retrieval and caching of per-user SS tokens."""
@@ -38,6 +33,9 @@ class SecurityTokenService:
     def __init__(self):
         # Cache: { user_token_hash -> (timestamp, [tokens]) }
         self._cache: dict[str, tuple[float, list[str]]] = {}
+        # TTL in seconds from config (ACCESS_CHECKER_CACHE_TTL is in minutes)
+        self._cache_ttl_seconds: int = settings.access_checker_cache_ttl * 60
+        logger.info(f"Security token cache TTL: {settings.access_checker_cache_ttl} minute(s) ({self._cache_ttl_seconds}s)")
 
     @property
     def is_available(self) -> bool:
@@ -63,16 +61,17 @@ class SecurityTokenService:
             logger.warning("No user token provided – cannot fetch SS tokens")
             return None
 
-        # --- Cache lookup ---
+        # --- Cache lookup (skip entirely when TTL is 0) ---
         cache_key = self._token_hash(user_token)
-        cached = self._cache.get(cache_key)
-        if cached:
-            ts, tokens = cached
-            if time.time() - ts < _CACHE_TTL_SECONDS:
-                logger.debug(f"SS token cache hit – {len(tokens)} tokens")
-                return tokens
-            else:
-                del self._cache[cache_key]
+        if self._cache_ttl_seconds > 0:
+            cached = self._cache.get(cache_key)
+            if cached:
+                ts, tokens = cached
+                if time.time() - ts < self._cache_ttl_seconds:
+                    logger.debug(f"SS token cache hit – {len(tokens)} tokens (TTL {self._cache_ttl_seconds}s)")
+                    return tokens
+                else:
+                    del self._cache[cache_key]
 
         # --- Call the access checker API ---
         try:
@@ -89,8 +88,9 @@ class SecurityTokenService:
                 logger.error(f"Access checker returned unexpected type: {type(tokens)}")
                 return None
 
-            # Store in cache
-            self._cache[cache_key] = (time.time(), tokens)
+            # Store in cache (skip when TTL is 0)
+            if self._cache_ttl_seconds > 0:
+                self._cache[cache_key] = (time.time(), tokens)
             logger.info(f"Fetched {len(tokens)} SS tokens from access checker")
             return tokens
 

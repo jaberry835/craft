@@ -1,12 +1,13 @@
-import { Component, Input, DoCheck, ViewChild, ElementRef, AfterViewChecked, HostListener } from '@angular/core';
+import { Component, Input, DoCheck, ViewChild, ElementRef, AfterViewChecked, HostListener, OnInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { HttpClient } from '@angular/common/http';
+import { marked } from 'marked';
 
 import { Message } from '../../../../core/services/chat.service';
 
 // Import chatter event type from parent
 interface ChatterEvent {
-  type: 'thinking' | 'tool_call' | 'tool_result' | 'delegation' | 'content';
+  type: 'thinking' | 'tool_call' | 'tool_result' | 'delegation' | 'content' | 'reasoning';
   agentName: string;
   content: string;
   toolName?: string;
@@ -104,6 +105,11 @@ interface DisplayMessage extends Message {
                     @if (event.content && event.type === 'tool_result') {
                       <div class="chatter-event-content">
                         <div class="tool-result">{{ truncateContent(event.content, 300) }}</div>
+                      </div>
+                    }
+                    @if (event.content && event.type === 'reasoning') {
+                      <div class="chatter-event-content">
+                        <div class="reasoning-content">{{ truncateContent(event.content, 500) }}</div>
                       </div>
                     }
                   </div>
@@ -248,6 +254,12 @@ interface DisplayMessage extends Message {
         }
       }
       
+      &.activity-reasoning {
+        .activity-icon {
+          color: #06b6d4;
+        }
+      }
+      
       &.activity-working {
         color: var(--text-muted);
         font-style: italic;
@@ -382,6 +394,26 @@ interface DisplayMessage extends Message {
           color: #8b5cf6;
         }
       }
+      
+      &.chatter-reasoning {
+        background-color: rgba(6, 182, 212, 0.05);
+        
+        .chatter-event-header .material-icons {
+          color: #06b6d4;
+        }
+      }
+    }
+    
+    .reasoning-content {
+      font-size: 12px;
+      color: var(--text-secondary);
+      font-style: italic;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      background-color: rgba(6, 182, 212, 0.05);
+      border-left: 3px solid #06b6d4;
+      padding: var(--spacing-xs) var(--spacing-sm);
+      border-radius: 0 4px 4px 0;
     }
     
     .chatter-event-header {
@@ -504,34 +536,77 @@ interface DisplayMessage extends Message {
 
     .message-text {
       font-size: 14px;
-      line-height: 1.6;
-      white-space: pre-wrap;
+      line-height: 1.7;
       word-break: break-word;
-      
+
+      /* Paragraphs */
+      :deep(p) {
+        margin: 0 0 0.6em 0;
+        &:last-child { margin-bottom: 0; }
+      }
+
+      /* Headings — kept compact for chat context */
+      :deep(h1), :deep(h2), :deep(h3), :deep(h4), :deep(h5), :deep(h6) {
+        line-height: 1.35;
+        color: var(--text-primary);
+        &:first-child { margin-top: 0; }
+      }
+      :deep(h1) {
+        font-size: 1.15em;
+        font-weight: 700;
+        margin: 1.1em 0 0.5em 0;
+        padding-bottom: 0.3em;
+        border-bottom: 1px solid var(--border-color);
+      }
+      :deep(h2) {
+        font-size: 1.05em;
+        font-weight: 700;
+        margin: 1em 0 0.4em 0;
+        padding-bottom: 0.25em;
+        border-bottom: 1px solid var(--border-color);
+      }
+      :deep(h3) {
+        font-size: 0.95em;
+        font-weight: 600;
+        margin: 0.85em 0 0.3em 0;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        color: var(--text-secondary);
+      }
+      :deep(h4), :deep(h5), :deep(h6) {
+        font-size: 0.9em;
+        font-weight: 600;
+        margin: 0.75em 0 0.25em 0;
+        color: var(--text-secondary);
+      }
+
+      /* Links */
       :deep(a) {
-        color: #ffffff !important;
-        text-decoration: underline;
-        text-underline-offset: 2px;
-        transition: opacity 0.2s ease;
+        color: var(--md-link) !important;
+        text-decoration: none;
+        border-bottom: 1px solid var(--md-link-border);
+        transition: border-color 0.2s ease, color 0.2s ease;
         
         &:visited {
-          color: #ffffff !important;
+          color: var(--md-link-visited) !important;
         }
         
         &:hover {
-          opacity: 0.8;
+          color: var(--md-link-hover) !important;
+          border-bottom-color: var(--md-link);
         }
         
         &::after {
           content: '↗';
-          font-size: 0.75em;
+          font-size: 0.7em;
           margin-left: 2px;
-          opacity: 0.7;
+          opacity: 0.5;
+          vertical-align: super;
         }
         
         &.doc-citation {
           color: #90caf9 !important;
-          text-decoration-style: dotted;
+          border-bottom-style: dotted;
           
           &:visited {
             color: #90caf9 !important;
@@ -543,26 +618,128 @@ interface DisplayMessage extends Message {
           }
         }
       }
-      
+
+      /* Inline code */
       :deep(code) {
-        background-color: var(--bg-primary);
-        padding: 2px 6px;
+        background-color: var(--md-code-bg);
+        border: 1px solid var(--md-code-border);
+        padding: 1px 5px;
         border-radius: 4px;
         font-family: 'Consolas', 'Monaco', monospace;
-        font-size: 13px;
+        font-size: 0.9em;
+        color: var(--md-code-color);
       }
-      
+
+      /* Code blocks */
       :deep(pre) {
-        background-color: var(--bg-primary);
+        background-color: var(--md-pre-bg);
+        border: 1px solid var(--border-color);
         padding: var(--spacing-md);
-        border-radius: 6px;
+        border-radius: 8px;
         overflow-x: auto;
-        margin: var(--spacing-sm) 0;
+        margin: 0.75em 0;
         
         code {
           background: none;
+          border: none;
           padding: 0;
+          font-size: 13px;
+          line-height: 1.5;
+          color: var(--text-secondary);
         }
+      }
+
+      /* Lists — main spacing handled in global styles.scss to override * reset */
+      :deep(li) {
+        &::marker {
+          color: var(--text-muted);
+        }
+      }
+      /* Tighter lists: remove paragraph margins inside li */
+      :deep(li > p) {
+        margin: 0;
+      }
+
+      /* Blockquotes */
+      :deep(blockquote) {
+        margin: 0.6em 0;
+        padding: 0.4em 0.8em;
+        border-left: 3px solid var(--primary);
+        background-color: var(--md-blockquote-bg);
+        border-radius: 0 6px 6px 0;
+        color: var(--text-secondary);
+        font-style: italic;
+        
+        p {
+          margin: 0.2em 0;
+        }
+      }
+
+      /* Tables */
+      :deep(table) {
+        width: max-content;
+        max-width: 100%;
+        border-collapse: collapse;
+        margin: 0.75em 0;
+        font-size: 13px;
+        border: 1px solid var(--border-color);
+        border-radius: 6px;
+        overflow: hidden;
+        display: table;
+      }
+      :deep(thead) {
+        background-color: var(--md-table-head-bg);
+      }
+      :deep(th) {
+        padding: 8px 14px;
+        text-align: left;
+        font-weight: 600;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--text-secondary);
+        border-bottom: 1px solid var(--border-color);
+      }
+      :deep(td) {
+        padding: 6px 14px;
+        border-bottom: 1px solid var(--border-color);
+      }
+      :deep(tbody tr):last-child td {
+        border-bottom: none;
+      }
+      :deep(tbody tr):hover {
+        background-color: var(--md-table-stripe);
+      }
+
+      /* Horizontal rule — subtle separator in chat */
+      :deep(hr) {
+        border: none;
+        height: 1px;
+        background: linear-gradient(
+          to right,
+          transparent,
+          var(--border-color) 20%,
+          var(--border-color) 80%,
+          transparent
+        );
+        margin: 0.8em 0;
+      }
+
+      /* Strong / emphasis */
+      :deep(strong) {
+        font-weight: 600;
+        color: var(--text-primary);
+      }
+      :deep(em) {
+        font-style: italic;
+        color: var(--text-secondary);
+      }
+
+      /* Images */
+      :deep(img) {
+        max-width: 100%;
+        border-radius: 8px;
+        border: 1px solid var(--border-color);
       }
     }
     
@@ -600,7 +777,7 @@ interface DisplayMessage extends Message {
     }
   `]
 })
-export class MessageComponent implements DoCheck {
+export class MessageComponent implements DoCheck, OnInit {
   @Input() message!: DisplayMessage;
   @Input() isStreaming = false;
   /** IDs of selected agents that have document grounding — used for auto-linking filenames */
@@ -611,8 +788,17 @@ export class MessageComponent implements DoCheck {
   chatterExpanded = false;  // Technical details are collapsed by default
   private previousChatterCount = 0;
   private shouldScrollToBottom = false;
+  private md!: ReturnType<typeof marked.use>;
   
   constructor(private http: HttpClient) {}
+
+  ngOnInit(): void {
+    // Configure marked with sensible defaults
+    this.md = marked.use({
+      breaks: true,
+      gfm: true,
+    });
+  }
   
   /**
    * Intercept clicks on .doc-citation links.
@@ -685,18 +871,11 @@ export class MessageComponent implements DoCheck {
   }
   
   formatContent(content: string): string {
-    // Basic markdown-like formatting
-    let result = content
-      // Code blocks
-      .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>')
-      // Inline code
-      .replace(/`([^`]+)`/g, '<code>$1</code>')
-      // Markdown links: [text](url) -> clickable link that opens in new tab
-      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
-      // Bold
-      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-      // Italic
-      .replace(/\*([^*]+)\*/g, '<em>$1</em>');
+    // Use marked for full markdown rendering
+    let result = (this.md ? this.md.parse(content) : marked.parse(content)) as string;
+    
+    // Open all links in new tabs
+    result = result.replace(/<a\s+href="/g, '<a target="_blank" rel="noopener noreferrer" href="');
     
     // Rewrite Azure Blob Storage URLs to use the backend blob proxy.
     // This applies to ALL assistant messages — MCP tools often return direct
@@ -723,10 +902,11 @@ export class MessageComponent implements DoCheck {
       const docExtensions = 'md|txt|json|csv|pdf';
       const fileNameRe = `[\\w][\\w.-]*\\.(?:${docExtensions})`;
       
-      // Step 1: Rewrite any existing <a href="bare-filename.ext"> links created by the
-      // markdown converter (LLM wrote [file.md](file.md)) — redirect them to the proxy.
+      // Step 1: Rewrite any existing <a href="...filename.ext"> links created by the
+      // markdown converter (LLM wrote [file.md](file.md) or [file.md](sandbox:/file.md))
+      // — redirect them to the grounding proxy.  Strip any scheme/path prefix before the filename.
       const existingLinkPattern = new RegExp(
-        `(<a\\s[^>]*href=")(?:(?:https?://[^"]*/)?)?(${fileNameRe})("[^>]*>)`, 'gi'
+        `(<a\\s[^>]*href=")(?:[^"]*/)?(${fileNameRe})("[^>]*>)`, 'gi'
       );
       result = result.replace(existingLinkPattern, (_m, prefix, fileName, suffix) => {
         const url = `/api/documents/grounding/${agentId}/${encodeURIComponent(fileName)}`;
@@ -805,6 +985,7 @@ export class MessageComponent implements DoCheck {
       case 'tool_result': return 'check_circle';
       case 'delegation': return 'forward';
       case 'thinking': return 'psychology';
+      case 'reasoning': return 'neurology';
       default: return 'info';
     }
   }
@@ -815,6 +996,7 @@ export class MessageComponent implements DoCheck {
       case 'tool_result': return 'got result';
       case 'delegation': return 'delegating';
       case 'thinking': return 'thinking';
+      case 'reasoning': return 'reasoning';
       default: return type;
     }
   }
@@ -869,6 +1051,7 @@ export class MessageComponent implements DoCheck {
       case 'tool_result': return 'check_circle';
       case 'delegation': return 'arrow_forward';
       case 'thinking': return 'lightbulb';
+      case 'reasoning': return 'neurology';
       case 'content': return 'done_all';
       default: return 'info';
     }
@@ -894,6 +1077,8 @@ export class MessageComponent implements DoCheck {
         return event.content ? `Asking: "${this.truncateContent(event.content, 60)}"` : 'Delegating task...';
       case 'thinking':
         return 'Processing...';
+      case 'reasoning':
+        return event.content ? this.truncateContent(event.content, 80) : 'Reasoning...';
       case 'content':
         return event.content || 'Completed';
       default:

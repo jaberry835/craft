@@ -66,6 +66,8 @@ export interface A2AAgentCard {
 export interface A2ADiscoveryRequest {
   url: string;
   card_path?: string;
+  a2a_client_id?: string;
+  a2a_scope?: string;
 }
 
 export interface A2ADiscoveryResponse {
@@ -191,6 +193,8 @@ export interface AgentConfig {
   // For A2A agents
   a2a_url?: string;
   a2a_card?: A2AAgentCard;
+  a2a_client_id?: string;  // Remote app registration client ID (triggers OBO when different)
+  a2a_scope?: string;      // Custom OBO scope (defaults to api://{a2a_client_id}/.default)
   
   // Common
   is_orchestrator?: boolean;

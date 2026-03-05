@@ -21,6 +21,9 @@ from ag_ui.core import (
     StepStartedEvent, StepFinishedEvent,
     TextMessageStartEvent, TextMessageContentEvent, TextMessageEndEvent,
     ToolCallStartEvent, ToolCallArgsEvent, ToolCallEndEvent, ToolCallResultEvent,
+    ReasoningStartEvent, ReasoningMessageStartEvent,
+    ReasoningMessageContentEvent, ReasoningMessageEndEvent,
+    ReasoningEndEvent,
     CustomEvent,
 )
 
@@ -244,6 +247,7 @@ async def send_message(request: Request, chat_request: ChatRequest):
         run_id = str(uuid.uuid4())
         message_id = str(uuid.uuid4())
         tool_call_counter = 0
+        tool_call_id_map: dict[str, str] = {}  # framework call_id -> AG-UI tc_id
 
         try:
             # --- AG-UI: RUN_STARTED ---
@@ -315,6 +319,8 @@ async def send_message(request: Request, chat_request: ChatRequest):
                     elif event.type == ChatterEventType.TOOL_CALL:
                         tool_call_counter += 1
                         tc_id = f"tc-{tool_call_counter}"
+                        if event.call_id:
+                            tool_call_id_map[event.call_id] = tc_id
                         yield _agui_sse(ToolCallStartEvent(
                             tool_call_id=tc_id,
                             tool_call_name=event.tool_name or "unknown",
@@ -334,7 +340,7 @@ async def send_message(request: Request, chat_request: ChatRequest):
                             }))
 
                     elif event.type == ChatterEventType.TOOL_RESULT:
-                        tc_id = f"tc-{tool_call_counter}"
+                        tc_id = tool_call_id_map.get(event.call_id, f"tc-{tool_call_counter}") if event.call_id else f"tc-{tool_call_counter}"
                         yield _agui_sse(ToolCallEndEvent(tool_call_id=tc_id))
                         yield _agui_sse(ToolCallResultEvent(
                             message_id=str(uuid.uuid4()),
@@ -352,6 +358,22 @@ async def send_message(request: Request, chat_request: ChatRequest):
                         if event.friendly_message:
                             metadata["friendly_message"] = event.friendly_message
                         yield _agui_sse(CustomEvent(name="chatter", value=metadata))
+
+                    elif event.type == ChatterEventType.REASONING:
+                        # AG-UI REASONING events for model chain-of-thought tokens
+                        reasoning_msg_id = str(uuid.uuid4())
+                        yield _agui_sse(ReasoningStartEvent(messageId=reasoning_msg_id))
+                        yield _agui_sse(ReasoningMessageStartEvent(messageId=reasoning_msg_id, role="assistant"))
+                        yield _agui_sse(ReasoningMessageContentEvent(messageId=reasoning_msg_id, delta=event.content))
+                        yield _agui_sse(ReasoningMessageEndEvent(messageId=reasoning_msg_id))
+                        yield _agui_sse(ReasoningEndEvent(messageId=reasoning_msg_id))
+                        # Also emit CUSTOM so the activity feed gets enriched
+                        yield _agui_sse(CustomEvent(name="chatter", value={
+                            "chatter_type": event.type.value,
+                            "agent_name": event.agent_name,
+                            "content": event.content,
+                            "friendly_message": event.friendly_message or "Reasoning...",
+                        }))
 
                     elif event.type == ChatterEventType.CONTENT:
                         step_name = f"delegate:{event.agent_name}"
