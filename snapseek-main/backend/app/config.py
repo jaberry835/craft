@@ -3,13 +3,24 @@
 import os
 import threading
 import structlog
-from pydantic_settings import BaseSettings
+from pathlib import Path
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 from functools import lru_cache
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from azure.core.credentials import AzureKeyCredential
 
 logger = structlog.get_logger()
+
+# Resolve .env relative to this file's directory (backend/app/),
+# then check the backend/ root and workspace root as fallbacks.
+_THIS_DIR = Path(__file__).resolve().parent
+_ENV_CANDIDATES = [
+    _THIS_DIR.parent / ".env",        # backend/.env
+    _THIS_DIR.parent.parent / ".env", # workspace root .env
+    Path(".env"),                       # cwd
+]
+_ENV_FILE = next((p for p in _ENV_CANDIDATES if p.is_file()), ".env")
 
 
 def is_running_on_azure() -> bool:
@@ -30,6 +41,12 @@ def is_running_on_azure() -> bool:
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
     
+    model_config = SettingsConfigDict(
+        env_file=str(_ENV_FILE),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+    
     # Azure AI Search
     azure_search_endpoint: str = Field(..., description="Azure AI Search endpoint URL")
     azure_search_key: str | None = Field(default=None, description="Azure AI Search key (optional if using identity)")
@@ -48,6 +65,7 @@ class Settings(BaseSettings):
     # Azure Storage (for SAS token generation)
     azure_storage_account: str | None = Field(default=None, description="Azure Storage account name")
     azure_storage_blob_url: str | None = Field(default=None, description="Azure Blob Storage URL")
+    azure_storage_key: str | None = Field(default=None, description="Azure Storage key (optional if using identity)")
     
     # Server settings
     host: str = Field(default="0.0.0.0")
@@ -68,16 +86,17 @@ class Settings(BaseSettings):
     text_embedding_dimensions: int = Field(default=1536)
     image_embedding_dimensions: int = Field(default=768)
     
+    # Identity auth scope
+    azure_credential_scope: str = Field(
+        default="https://cognitiveservices.azure.com/.default",
+        description="Token scope for DefaultAzureCredential (e.g. OpenAI, Cognitive Services)"
+    )
+    
     @property
     def cors_origins_list(self) -> list[str]:
         """Parse CORS origins as list."""
         return [origin.strip() for origin in self.cors_origins.split(",")]
     
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        extra = "ignore"
-
 
 # Cached credential instance (module-level singleton)
 _azure_credential = None
@@ -121,14 +140,14 @@ def get_azure_credential():
 
 
 def get_search_credential(settings: Settings):
-    """Get credential for Azure AI Search - tries identity first, falls back to key."""
+    """Get credential for Azure AI Search - uses key if available, falls back to identity."""
+    if settings.azure_search_key:
+        logger.info("Using API key for Azure AI Search")
+        return AzureKeyCredential(settings.azure_search_key)
     credential = get_azure_credential()
     if credential:
         logger.info("Using DefaultAzureCredential for Azure AI Search")
         return credential
-    if settings.azure_search_key:
-        logger.info("Using API key for Azure AI Search")
-        return AzureKeyCredential(settings.azure_search_key)
     raise ValueError("No valid credential available for Azure AI Search")
 
 
@@ -137,7 +156,7 @@ _openai_token_provider = None
 _openai_token_provider_lock = threading.Lock()
 
 
-def get_openai_token_provider():
+def get_openai_token_provider(scope: str = "https://cognitiveservices.azure.com/.default"):
     """Get cached token provider for Azure OpenAI using identity."""
     global _openai_token_provider
 
@@ -153,7 +172,7 @@ def get_openai_token_provider():
         credential = get_azure_credential()
         if credential:
             _openai_token_provider = get_bearer_token_provider(
-                credential, "https://cognitiveservices.azure.com/.default"
+                credential, scope
             )
             return _openai_token_provider
         return None

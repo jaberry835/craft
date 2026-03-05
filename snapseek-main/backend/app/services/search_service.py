@@ -48,16 +48,8 @@ class SearchService(ISearchService):
         # Initialize blob service for proxy URL generation
         self.blob_service = BlobService(settings)
         
-        # Try identity-based auth first, fall back to API key
-        token_provider = get_openai_token_provider()
-        if token_provider:
-            logger.info("Using DefaultAzureCredential for Azure OpenAI")
-            self.openai_client = AzureOpenAI(
-                azure_endpoint=settings.azure_openai_endpoint,
-                azure_ad_token_provider=token_provider,
-                api_version=settings.azure_openai_api_version
-            )
-        elif settings.azure_openai_key:
+        # Use API key first if available, fall back to identity-based auth
+        if settings.azure_openai_key:
             logger.info("Using API key for Azure OpenAI")
             self.openai_client = AzureOpenAI(
                 azure_endpoint=settings.azure_openai_endpoint,
@@ -65,7 +57,16 @@ class SearchService(ISearchService):
                 api_version=settings.azure_openai_api_version
             )
         else:
-            raise ValueError("No valid credential available for Azure OpenAI")
+            token_provider = get_openai_token_provider(settings.azure_credential_scope)
+            if token_provider:
+                logger.info("Using DefaultAzureCredential for Azure OpenAI")
+                self.openai_client = AzureOpenAI(
+                    azure_endpoint=settings.azure_openai_endpoint,
+                    azure_ad_token_provider=token_provider,
+                    api_version=settings.azure_openai_api_version
+                )
+            else:
+                raise ValueError("No valid credential available for Azure OpenAI")
         
         self.logger = logger.bind(component="search_service")
     

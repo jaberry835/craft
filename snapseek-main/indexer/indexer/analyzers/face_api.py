@@ -52,16 +52,17 @@ class FaceAnalyzer:
         self._person_group_initialized = False
         
         if self.enabled:
-            credential = get_azure_credential()
-            if credential:
-                self.credential = credential
-                self.logger.info("Face API using identity-based authentication")
-            elif settings.azure_face_key:
+            if settings.azure_face_key:
                 self.api_key = settings.azure_face_key
                 self.logger.info("Face API using key-based authentication")
             else:
-                self.logger.warning("Face API not configured - no credentials available")
-                self.enabled = False
+                credential = get_azure_credential()
+                if credential:
+                    self.credential = credential
+                    self.logger.info("Face API using identity-based authentication")
+                else:
+                    self.logger.warning("Face API not configured - no credentials available")
+                    self.enabled = False
         
         if self.enabled:
             endpoint = settings.azure_face_endpoint.rstrip('/')
@@ -78,10 +79,60 @@ class FaceAnalyzer:
         if self.api_key:
             headers["Ocp-Apim-Subscription-Key"] = self.api_key
         elif self.credential:
-            token = self.credential.get_token("https://cognitiveservices.azure.com/.default")
+            token = self.credential.get_token(self.settings.azure_credential_scope)
             headers["Authorization"] = f"Bearer {token.token}"
         
         return headers
+
+    async def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict | None = None,
+        json: dict | None = None,
+        content: bytes | None = None,
+        params: dict | None = None,
+        max_retries: int = 5,
+        timeout: float = 30.0,
+    ) -> httpx.Response:
+        """
+        Make an HTTP request with automatic 429 (rate limit) retry and backoff.
+        
+        Respects the Retry-After header when present, otherwise uses exponential backoff.
+        """
+        for attempt in range(max_retries + 1):
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.request(
+                    method, url, headers=headers, json=json, content=content, params=params
+                )
+            
+            if response.status_code != 429:
+                return response
+            
+            if attempt == max_retries:
+                self.logger.error("Face API rate limit exceeded after max retries", url=url, attempts=max_retries)
+                return response
+            
+            # Get wait time from Retry-After header, or use exponential backoff
+            retry_after = response.headers.get("Retry-After")
+            if retry_after:
+                try:
+                    wait_seconds = float(retry_after)
+                except ValueError:
+                    wait_seconds = 2 ** attempt
+            else:
+                wait_seconds = min(2 ** attempt, 60)  # exponential backoff, max 60s
+            
+            self.logger.warning(
+                "Face API rate limited (429), backing off",
+                url=url,
+                attempt=attempt + 1,
+                wait_seconds=wait_seconds,
+            )
+            await asyncio.sleep(wait_seconds)
+        
+        return response  # should not reach here
 
     # =========================================================================
     # FaceList Management (for Pass 1 - persistent face storage)
@@ -95,38 +146,38 @@ class FaceAnalyzer:
         try:
             headers = await self._get_headers("application/json")
             
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(self.face_list_url, headers=headers)
-                
-                if response.status_code == 200:
-                    self.logger.info("FaceList exists", face_list_id=self.face_list_id)
+            response = await self._request("GET", self.face_list_url, headers=headers)
+            
+            if response.status_code == 200:
+                self.logger.info("FaceList exists", face_list_id=self.face_list_id)
+                self._face_list_initialized = True
+                return True
+            elif response.status_code == 404:
+                self.logger.info("Creating FaceList", face_list_id=self.face_list_id)
+                create_response = await self._request(
+                    "PUT",
+                    self.face_list_url,
+                    headers=headers,
+                    json={
+                        "name": "Azure Snap Seek Face Collection",
+                        "userData": "Persistent face storage for two-pass clustering",
+                        "recognitionModel": "recognition_04"
+                    }
+                )
+                    
+                if create_response.status_code == 200:
+                    self.logger.info("FaceList created successfully")
                     self._face_list_initialized = True
                     return True
-                elif response.status_code == 404:
-                    self.logger.info("Creating FaceList", face_list_id=self.face_list_id)
-                    create_response = await client.put(
-                        self.face_list_url,
-                        headers=headers,
-                        json={
-                            "name": "Azure Snap Seek Face Collection",
-                            "userData": "Persistent face storage for two-pass clustering",
-                            "recognitionModel": "recognition_04"
-                        }
-                    )
-                    
-                    if create_response.status_code == 200:
-                        self.logger.info("FaceList created successfully")
-                        self._face_list_initialized = True
-                        return True
-                    else:
-                        self.logger.error("Failed to create FaceList", 
-                                        status=create_response.status_code, 
-                                        body=create_response.text[:500])
-                        return False
                 else:
-                    self.logger.error("Failed to check FaceList", 
-                                    status=response.status_code)
+                    self.logger.error("Failed to create FaceList", 
+                                    status=create_response.status_code, 
+                                    body=create_response.text[:500])
                     return False
+            else:
+                self.logger.error("Failed to check FaceList", 
+                                status=response.status_code)
+                return False
                     
         except Exception as e:
             self.logger.error("FaceList initialization failed", error=str(e))
@@ -145,23 +196,23 @@ class FaceAnalyzer:
             if user_data:
                 params["userData"] = user_data
             
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    f"{self.face_list_url}/persistedFaces",
-                    headers=headers,
-                    params=params,
-                    content=image_data
-                )
-                
-                if response.status_code == 200:
-                    persisted_face_id = response.json().get("persistedFaceId")
-                    self.logger.debug("Added face to FaceList", persisted_face_id=persisted_face_id)
-                    return persisted_face_id
-                else:
-                    self.logger.error("Failed to add face to FaceList",
-                                    status=response.status_code,
-                                    body=response.text[:500])
-                    return None
+            response = await self._request(
+                "POST",
+                f"{self.face_list_url}/persistedFaces",
+                headers=headers,
+                params=params,
+                content=image_data
+            )
+            
+            if response.status_code == 200:
+                persisted_face_id = response.json().get("persistedFaceId")
+                self.logger.debug("Added face to FaceList", persisted_face_id=persisted_face_id)
+                return persisted_face_id
+            else:
+                self.logger.error("Failed to add face to FaceList",
+                                status=response.status_code,
+                                body=response.text[:500])
+                return None
                     
         except Exception as e:
             self.logger.error("Add face to FaceList failed", error=str(e))
@@ -172,13 +223,12 @@ class FaceAnalyzer:
         try:
             headers = await self._get_headers("application/json")
             
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(self.face_list_url, headers=headers)
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    return data.get("persistedFaces", [])
-                return []
+            response = await self._request("GET", self.face_list_url, headers=headers)
+            
+            if response.status_code == 200:
+                data = response.json()
+                return data.get("persistedFaces", [])
+            return []
                 
         except Exception as e:
             self.logger.error("Failed to list faces", error=str(e))
@@ -189,14 +239,13 @@ class FaceAnalyzer:
         try:
             headers = await self._get_headers("application/json")
             
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.delete(self.face_list_url, headers=headers)
-                
-                if response.status_code == 200:
-                    self.logger.info("FaceList deleted", face_list_id=self.face_list_id)
-                    self._face_list_initialized = False
-                    return True
-                return False
+            response = await self._request("DELETE", self.face_list_url, headers=headers)
+            
+            if response.status_code == 200:
+                self.logger.info("FaceList deleted", face_list_id=self.face_list_id)
+                self._face_list_initialized = False
+                return True
+            return False
                 
         except Exception as e:
             self.logger.error("Failed to delete FaceList", error=str(e))
@@ -214,31 +263,31 @@ class FaceAnalyzer:
         try:
             headers = await self._get_headers("application/json")
             
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(self.person_group_url, headers=headers)
+            response = await self._request("GET", self.person_group_url, headers=headers)
+            
+            if response.status_code == 200:
+                self.logger.info("PersonGroup exists", person_group_id=self.person_group_id)
+                self._person_group_initialized = True
+                return True
+            elif response.status_code == 404:
+                self.logger.info("Creating PersonGroup", person_group_id=self.person_group_id)
+                create_response = await self._request(
+                    "PUT",
+                    self.person_group_url,
+                    headers=headers,
+                    json={
+                        "name": "Azure Snap Seek Persons",
+                        "userData": "Clustered face identities",
+                        "recognitionModel": "recognition_04"
+                    }
+                )
                 
-                if response.status_code == 200:
-                    self.logger.info("PersonGroup exists", person_group_id=self.person_group_id)
+                if create_response.status_code == 200:
+                    self.logger.info("PersonGroup created successfully")
                     self._person_group_initialized = True
                     return True
-                elif response.status_code == 404:
-                    self.logger.info("Creating PersonGroup", person_group_id=self.person_group_id)
-                    create_response = await client.put(
-                        self.person_group_url,
-                        headers=headers,
-                        json={
-                            "name": "Azure Snap Seek Persons",
-                            "userData": "Clustered face identities",
-                            "recognitionModel": "recognition_04"
-                        }
-                    )
-                    
-                    if create_response.status_code == 200:
-                        self.logger.info("PersonGroup created successfully")
-                        self._person_group_initialized = True
-                        return True
-                    return False
                 return False
+            return False
                     
         except Exception as e:
             self.logger.error("PersonGroup initialization failed", error=str(e))
@@ -250,18 +299,18 @@ class FaceAnalyzer:
             headers = await self._get_headers("application/json")
             person_name = name or f"Person-{str(uuid.uuid4())[:8]}"
             
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    f"{self.person_group_url}/persons",
-                    headers=headers,
-                    json={"name": person_name}
-                )
-                
-                if response.status_code == 200:
-                    person_id = response.json().get("personId")
-                    self.logger.info("Created Person", person_id=person_id)
-                    return person_id
-                return None
+            response = await self._request(
+                "POST",
+                f"{self.person_group_url}/persons",
+                headers=headers,
+                json={"name": person_name}
+            )
+            
+            if response.status_code == 200:
+                person_id = response.json().get("personId")
+                self.logger.info("Created Person", person_id=person_id)
+                return person_id
+            return None
                     
         except Exception as e:
             self.logger.error("Person creation failed", error=str(e))
@@ -272,16 +321,16 @@ class FaceAnalyzer:
         try:
             headers = await self._get_headers("application/json")
             
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    f"{self.person_group_url}/train",
-                    headers=headers
-                )
-                
-                if response.status_code == 202:
-                    self.logger.info("PersonGroup training started")
-                    return True
-                return False
+            response = await self._request(
+                "POST",
+                f"{self.person_group_url}/train",
+                headers=headers
+            )
+            
+            if response.status_code == 202:
+                self.logger.info("PersonGroup training started")
+                return True
+            return False
                     
         except Exception as e:
             self.logger.error("PersonGroup training failed", error=str(e))
@@ -293,20 +342,20 @@ class FaceAnalyzer:
             headers = await self._get_headers("application/json")
             
             for _ in range(timeout // 2):
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    response = await client.get(
-                        f"{self.person_group_url}/training",
-                        headers=headers
-                    )
-                    
-                    if response.status_code == 200:
-                        status = response.json().get("status")
-                        if status == "succeeded":
-                            self.logger.info("PersonGroup training completed")
-                            return True
-                        elif status == "failed":
-                            self.logger.error("PersonGroup training failed")
-                            return False
+                response = await self._request(
+                    "GET",
+                    f"{self.person_group_url}/training",
+                    headers=headers
+                )
+                
+                if response.status_code == 200:
+                    status = response.json().get("status")
+                    if status == "succeeded":
+                        self.logger.info("PersonGroup training completed")
+                        return True
+                    elif status == "failed":
+                        self.logger.error("PersonGroup training failed")
+                        return False
                 
                 await asyncio.sleep(2)
             
@@ -348,19 +397,19 @@ class FaceAnalyzer:
                 "detectionModel": "detection_03",
             }
             
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    self.detect_url,
-                    headers=headers,
-                    params=params,
-                    content=image_data,
-                )
-                
-                if response.status_code != 200:
-                    self.logger.error("Face detection failed", status=response.status_code)
-                    return FaceAnalysisResult(faces=[], face_count=0)
-                
-                detected_faces = response.json()
+            response = await self._request(
+                "POST",
+                self.detect_url,
+                headers=headers,
+                params=params,
+                content=image_data,
+            )
+            
+            if response.status_code != 200:
+                self.logger.error("Face detection failed", status=response.status_code)
+                return FaceAnalysisResult(faces=[], face_count=0)
+            
+            detected_faces = response.json()
             
             if not detected_faces:
                 return FaceAnalysisResult(faces=[], face_count=0)
@@ -415,27 +464,27 @@ class FaceAnalyzer:
         try:
             headers = await self._get_headers("application/json")
             
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    self.find_similar_url,
-                    headers=headers,
-                    json={
-                        "faceId": face_id,
-                        "faceListId": self.face_list_id,
-                        "maxNumOfCandidatesReturned": max_results,
-                        "mode": "matchPerson"
-                    }
-                )
-                
-                if response.status_code == 200:
-                    results = []
-                    for item in response.json():
-                        if item.get("confidence", 0) >= threshold:
-                            results.append((item["persistedFaceId"], item["confidence"]))
-                    return results
-                else:
-                    self.logger.error("Find similar failed", status=response.status_code)
-                    return []
+            response = await self._request(
+                "POST",
+                self.find_similar_url,
+                headers=headers,
+                json={
+                    "faceId": face_id,
+                    "faceListId": self.face_list_id,
+                    "maxNumOfCandidatesReturned": max_results,
+                    "mode": "matchPerson"
+                }
+            )
+            
+            if response.status_code == 200:
+                results = []
+                for item in response.json():
+                    if item.get("confidence", 0) >= threshold:
+                        results.append((item["persistedFaceId"], item["confidence"]))
+                return results
+            else:
+                self.logger.error("Find similar failed", status=response.status_code)
+                return []
                     
         except Exception as e:
             self.logger.error("Find similar error", error=str(e))
@@ -514,18 +563,18 @@ class FaceAnalyzer:
             }
 
             try:
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    response = await client.post(
-                        self.detect_url,
-                        headers=headers,
-                        params=params,
-                        content=image_data,
-                    )
+                response = await self._request(
+                    "POST",
+                    self.detect_url,
+                    headers=headers,
+                    params=params,
+                    content=image_data,
+                )
 
-                    if response.status_code != 200:
-                        return doc_id, {}
+                if response.status_code != 200:
+                    return doc_id, {}
 
-                    detected = response.json()
+                detected = response.json()
 
                 # Build map of face_index -> temp_face_id
                 face_map = {}
@@ -611,6 +660,9 @@ class FaceAnalyzer:
                     temp_face_id,
                     threshold=similarity_threshold
                 )
+                
+                # Small delay between FindSimilar calls to avoid 429 rate limits
+                await asyncio.sleep(0.5)
 
                 cluster_id = str(uuid.uuid4())
                 cluster_faces = [(pf_id, doc_id)]
@@ -714,18 +766,18 @@ class FaceAnalyzer:
                 "detectionModel": "detection_03",
             }
             
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    self.detect_url,
-                    headers=headers,
-                    params=params,
-                    content=image_data,
-                )
-                
-                if response.status_code != 200:
-                    return FaceAnalysisResult(faces=[], face_count=0)
-                
-                detected_faces = response.json()
+            response = await self._request(
+                "POST",
+                self.detect_url,
+                headers=headers,
+                params=params,
+                content=image_data,
+            )
+            
+            if response.status_code != 200:
+                return FaceAnalysisResult(faces=[], face_count=0)
+            
+            detected_faces = response.json()
             
             faces = []
             for face in detected_faces:
@@ -753,15 +805,15 @@ class FaceAnalyzer:
         try:
             headers = await self._get_headers("application/json")
             
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(
-                    f"{self.person_group_url}/persons",
-                    headers=headers
-                )
-                
-                if response.status_code == 200:
-                    return response.json()
-                return []
+            response = await self._request(
+                "GET",
+                f"{self.person_group_url}/persons",
+                headers=headers
+            )
+            
+            if response.status_code == 200:
+                return response.json()
+            return []
                 
         except Exception as e:
             self.logger.error("Failed to list Persons", error=str(e))

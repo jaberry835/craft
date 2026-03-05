@@ -1,27 +1,34 @@
-"""Azure Computer Vision analyzer for image analysis."""
+"""Azure Computer Vision analyzer for image analysis (v3.2 API)."""
 
+import io
 import structlog
-from azure.ai.vision.imageanalysis import ImageAnalysisClient
-from azure.ai.vision.imageanalysis.models import VisualFeatures
+from azure.cognitiveservices.vision.computervision import ComputerVisionClient
+from azure.cognitiveservices.vision.computervision.models import VisualFeatureTypes
+from msrest.authentication import CognitiveServicesCredentials
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from ..config import Settings, get_cognitive_credential
+from ..config import Settings
 from ..models import ImageAnalysisResult, DetectedObject, BoundingBox
 
 logger = structlog.get_logger()
 
 
 class ComputerVisionAnalyzer:
-    """Analyzer using Azure Computer Vision 4.0 for rich image analysis."""
+    """Analyzer using Azure Computer Vision v3.2 for rich image analysis."""
     
     def __init__(self, settings: Settings):
         """Initialize the Computer Vision client."""
         self.settings = settings
-        self.client = ImageAnalysisClient(
-            endpoint=settings.azure_cv_endpoint,
-            credential=get_cognitive_credential(settings, settings.azure_cv_key)
-        )
         self.logger = logger.bind(component="computer_vision")
+        
+        if not settings.azure_cv_key:
+            raise ValueError("AZURE_CV_KEY is required for Computer Vision v3.2")
+        
+        self.logger.info("CV endpoint configured (v3.2)", endpoint=settings.azure_cv_endpoint)
+        self.client = ComputerVisionClient(
+            endpoint=settings.azure_cv_endpoint,
+            credentials=CognitiveServicesCredentials(settings.azure_cv_key)
+        )
     
     @retry(
         stop=stop_after_attempt(3),
@@ -29,7 +36,7 @@ class ComputerVisionAnalyzer:
     )
     async def analyze_image(self, image_data: bytes) -> ImageAnalysisResult:
         """
-        Analyze an image using Azure Computer Vision.
+        Analyze an image using Azure Computer Vision v3.2.
         
         Args:
             image_data: Raw image bytes
@@ -37,55 +44,51 @@ class ComputerVisionAnalyzer:
         Returns:
             ImageAnalysisResult with all extracted features
         """
-        self.logger.info("Analyzing image with Computer Vision")
+        self.logger.info("Analyzing image with Computer Vision v3.2")
         
         try:
-            # Request all visual features
-            result = self.client.analyze(
-                image_data=image_data,
+            stream = io.BytesIO(image_data)
+            
+            result = self.client.analyze_image_in_stream(
+                image=stream,
                 visual_features=[
-                    VisualFeatures.CAPTION,
-                    VisualFeatures.DENSE_CAPTIONS,
-                    VisualFeatures.TAGS,
-                    VisualFeatures.OBJECTS,
-                    VisualFeatures.SMART_CROPS,
-                    VisualFeatures.PEOPLE,
-                    VisualFeatures.READ,
+                    VisualFeatureTypes.description,
+                    VisualFeatureTypes.tags,
+                    VisualFeatureTypes.objects,
+                    VisualFeatureTypes.categories,
                 ]
             )
             
-            # Extract caption
+            # Extract caption from description
             caption = None
             caption_confidence = None
-            if result.caption:
-                caption = result.caption.text
-                caption_confidence = result.caption.confidence
-            
-            # Extract dense captions
             dense_captions = []
-            if result.dense_captions:
-                dense_captions = [dc.text for dc in result.dense_captions.list]
+            if result.description:
+                if result.description.captions:
+                    caption = result.description.captions[0].text
+                    caption_confidence = result.description.captions[0].confidence
+                    dense_captions = [c.text for c in result.description.captions]
             
             # Extract tags
             tags = []
             if result.tags:
-                tags = [tag.name for tag in result.tags.list if tag.confidence > 0.5]
+                tags = [tag.name for tag in result.tags if tag.confidence > 0.5]
             
             # Extract objects
             objects = []
             if result.objects:
-                for obj in result.objects.list:
+                for obj in result.objects:
                     bbox = None
-                    if obj.bounding_box:
+                    if obj.rectangle:
                         bbox = BoundingBox(
-                            x=obj.bounding_box.x,
-                            y=obj.bounding_box.y,
-                            width=obj.bounding_box.width,
-                            height=obj.bounding_box.height
+                            x=obj.rectangle.x,
+                            y=obj.rectangle.y,
+                            width=obj.rectangle.w,
+                            height=obj.rectangle.h
                         )
                     objects.append(DetectedObject(
-                        name=obj.tags[0].name if obj.tags else "unknown",
-                        confidence=obj.tags[0].confidence if obj.tags else 0.0,
+                        name=obj.object_property,
+                        confidence=obj.confidence,
                         bounding_box=bbox
                     ))
             
@@ -121,7 +124,7 @@ class ComputerVisionAnalyzer:
     
     async def analyze_image_from_url(self, image_url: str) -> ImageAnalysisResult:
         """
-        Analyze an image from URL using Azure Computer Vision.
+        Analyze an image from URL using Azure Computer Vision v3.2.
         
         Args:
             image_url: Public URL of the image
@@ -132,39 +135,41 @@ class ComputerVisionAnalyzer:
         self.logger.info("Analyzing image from URL", url=image_url)
         
         try:
-            result = self.client.analyze_from_url(
-                image_url=image_url,
+            result = self.client.analyze_image(
+                url=image_url,
                 visual_features=[
-                    VisualFeatures.CAPTION,
-                    VisualFeatures.DENSE_CAPTIONS,
-                    VisualFeatures.TAGS,
-                    VisualFeatures.OBJECTS,
-                    VisualFeatures.SMART_CROPS,
-                    VisualFeatures.PEOPLE,
-                    VisualFeatures.READ,
+                    VisualFeatureTypes.description,
+                    VisualFeatureTypes.tags,
+                    VisualFeatureTypes.objects,
+                    VisualFeatureTypes.categories,
                 ]
             )
             
-            # Process results same as above
-            caption = result.caption.text if result.caption else None
-            caption_confidence = result.caption.confidence if result.caption else None
-            dense_captions = [dc.text for dc in result.dense_captions.list] if result.dense_captions else []
-            tags = [tag.name for tag in result.tags.list if tag.confidence > 0.5] if result.tags else []
+            caption = None
+            caption_confidence = None
+            dense_captions = []
+            if result.description:
+                if result.description.captions:
+                    caption = result.description.captions[0].text
+                    caption_confidence = result.description.captions[0].confidence
+                    dense_captions = [c.text for c in result.description.captions]
+            
+            tags = [tag.name for tag in result.tags if tag.confidence > 0.5] if result.tags else []
             
             objects = []
             if result.objects:
-                for obj in result.objects.list:
+                for obj in result.objects:
                     bbox = None
-                    if obj.bounding_box:
+                    if obj.rectangle:
                         bbox = BoundingBox(
-                            x=obj.bounding_box.x,
-                            y=obj.bounding_box.y,
-                            width=obj.bounding_box.width,
-                            height=obj.bounding_box.height
+                            x=obj.rectangle.x,
+                            y=obj.rectangle.y,
+                            width=obj.rectangle.w,
+                            height=obj.rectangle.h
                         )
                     objects.append(DetectedObject(
-                        name=obj.tags[0].name if obj.tags else "unknown",
-                        confidence=obj.tags[0].confidence if obj.tags else 0.0,
+                        name=obj.object_property,
+                        confidence=obj.confidence,
                         bounding_box=bbox
                     ))
             

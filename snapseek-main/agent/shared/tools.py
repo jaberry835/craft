@@ -25,16 +25,8 @@ class ImageSearchTools:
             credential=get_search_credential(self.settings)
         )
         
-        # Try identity-based auth first, fall back to API key
-        token_provider = get_openai_token_provider()
-        if token_provider:
-            logger.info("Using DefaultAzureCredential for Azure OpenAI")
-            self.openai_client = AzureOpenAI(
-                azure_endpoint=self.settings.azure_openai_endpoint,
-                azure_ad_token_provider=token_provider,
-                api_version=self.settings.azure_openai_api_version
-            )
-        elif self.settings.azure_openai_key:
+        # Use API key first if available, fall back to identity-based auth
+        if self.settings.azure_openai_key:
             logger.info("Using API key for Azure OpenAI")
             self.openai_client = AzureOpenAI(
                 azure_endpoint=self.settings.azure_openai_endpoint,
@@ -42,7 +34,16 @@ class ImageSearchTools:
                 api_version=self.settings.azure_openai_api_version
             )
         else:
-            raise ValueError("No valid credential available for Azure OpenAI")
+            token_provider = get_openai_token_provider(self.settings.azure_credential_scope)
+            if token_provider:
+                logger.info("Using DefaultAzureCredential for Azure OpenAI")
+                self.openai_client = AzureOpenAI(
+                    azure_endpoint=self.settings.azure_openai_endpoint,
+                    azure_ad_token_provider=token_provider,
+                    api_version=self.settings.azure_openai_api_version
+                )
+            else:
+                raise ValueError("No valid credential available for Azure OpenAI")
         
         self.logger = logger.bind(component="image_search_tools")
     
