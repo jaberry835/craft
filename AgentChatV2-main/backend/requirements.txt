@@ -55,6 +55,9 @@ azure-ai-documentintelligence>=1.0.0
 # Image processing (resize/compress images for vision API storage in Cosmos DB)
 Pillow>=10.0.0
 
+# Rate limiting
+slowapi>=0.1.9
+
 # Utilities
 pydantic>=2.5.0
 pydantic-settings>=2.1.0

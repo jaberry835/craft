@@ -4,6 +4,7 @@ import { HttpClient } from '@angular/common/http';
 import { marked } from 'marked';
 
 import { Message } from '../../../../core/services/chat.service';
+import { SettingsService } from '../../../../core/services/settings.service';
 
 // Import chatter event type from parent
 interface ChatterEvent {
@@ -42,7 +43,7 @@ interface DisplayMessage extends Message {
       
       <div class="message-content">
         <div class="message-header">
-          <span class="message-role">{{ message.role === 'user' ? 'You' : 'Assistant' }}</span>
+          <span class="message-role">{{ getDisplayRole() }}</span>
           <span class="message-time">{{ formatTime(message.timestamp) }}</span>
         </div>
         
@@ -790,7 +791,16 @@ export class MessageComponent implements DoCheck, OnInit {
   private shouldScrollToBottom = false;
   private md!: ReturnType<typeof marked.use>;
   
-  constructor(private http: HttpClient) {}
+  constructor(
+    private http: HttpClient,
+    private settingsService: SettingsService
+  ) {}
+
+  getDisplayRole(): string {
+    if (this.message.role === 'user') return 'You';
+    const configured = this.settingsService.currentSettings.assistant_display_name?.trim();
+    return configured || 'Assistant';
+  }
 
   ngOnInit(): void {
     // Configure marked with sensible defaults

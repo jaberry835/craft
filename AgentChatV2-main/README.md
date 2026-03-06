@@ -143,6 +143,102 @@ npm start
 
 Open http://localhost:4200 to access the application.
 
+## Testing
+
+### Backend Unit Tests (pytest)
+
+The backend test suite lives under `backend/tests` and is configured by `backend/pytest.ini`.
+
+Always run tests from the `backend` directory so imports like `routes` and `services` resolve correctly.
+
+```bash
+cd backend
+python -m pytest -q
+```
+
+### Smoke Test Modes
+
+Run fast smoke checks (no external Azure dependencies):
+
+```bash
+cd backend
+python -m pytest -q -m smoke
+```
+
+Run all non-live tests (recommended for local + CI):
+
+```bash
+cd backend
+python -m pytest -q -m "not live"
+```
+
+Run live backend smoke tests (opt-in):
+
+```bash
+cd backend
+# PowerShell
+$env:LIVE_SMOKE_ENABLED="1"
+$env:LIVE_BACKEND_URL="http://127.0.0.1:5000"
+# Optional when auth is required:
+# $env:LIVE_BEARER_TOKEN="<access-token>"
+python -m pytest -q -m live
+```
+
+For easier diagnostics (explicit reasons for skipped/failed tests), add `-rA`:
+
+```bash
+cd backend
+python -m pytest -q -m live -rA
+```
+
+Live tests include both availability checks and behavioral contracts for chat:
+- Streaming lifecycle events (`RUN_STARTED` -> `RUN_FINISHED`)
+- Presence of chatter custom events (`CUSTOM` with `name=chatter`)
+- Tool-call ordering checks when tool events are emitted
+- Non-empty `/api/chat/send-sync` response content
+
+### Install Test Dependencies
+
+If your active interpreter does not have dependencies installed yet:
+
+```bash
+cd backend
+python -m pip install -r requirements.txt -r requirements-dev.txt
+```
+
+### Interpreter Consistency (important)
+
+If tests fail with errors like `ModuleNotFoundError: No module named 'fastapi'` or `No module named 'azure'`, pytest is running under an interpreter that does not have backend dependencies installed.
+
+Use the same interpreter for install and test commands.
+
+Example without virtual environment:
+
+```bash
+cd backend
+c:/python313/python.exe -m pip install -r requirements.txt -r requirements-dev.txt
+c:/python313/python.exe -m pytest -q
+```
+
+Example with virtual environment:
+
+```bash
+cd backend
+python -m pip install -r requirements.txt -r requirements-dev.txt
+python -m pytest -q
+```
+
+### Health Endpoint Testing
+
+`/api/health` is protected by auth in normal configurations. For local unauthenticated smoke testing only, you can temporarily enable explicit dev bypass:
+
+```bash
+ENVIRONMENT=development
+ALLOW_DEV_AUTH_BYPASS=true
+```
+
+Do not enable `ALLOW_DEV_AUTH_BYPASS` in production.
+
 ### Environment Variables
 
 See `backend/.env.example` for required configuration.

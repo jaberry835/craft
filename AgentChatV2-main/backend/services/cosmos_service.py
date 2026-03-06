@@ -1,6 +1,7 @@
 """
-Cosmos DB Service
+Cosmos DB Service (async)
 Handles sessions, messages, and agent configurations with continuation token pagination.
+Uses the async azure-cosmos SDK to avoid blocking the FastAPI event loop.
 Uses connection string for local dev, DefaultAzureCredential for production.
 """
 from typing import Any, Optional
@@ -8,10 +9,11 @@ from datetime import datetime, timezone
 import uuid
 import time
 
-from azure.cosmos import CosmosClient, PartitionKey
+from azure.cosmos.aio import CosmosClient
+from azure.cosmos import PartitionKey
 from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
-from config import get_settings, get_azure_credential
+from config import get_settings, get_azure_credential_async
 from observability import get_logger, PerformanceTracker, should_log_performance, log_performance_summary, MetricType
 
 settings = get_settings()
@@ -39,7 +41,7 @@ class CosmosDBService:
                 self.client = CosmosClient.from_connection_string(settings.cosmos_connection_string)
             elif settings.cosmos_endpoint:
                 # Use centralized credential helper (AzureCliCredential for dev, ManagedIdentityCredential for prod)
-                credential = get_azure_credential()
+                credential = get_azure_credential_async()
                 env_mode = "dev" if settings.environment == "development" else "prod"
                 logger.info(f"Using Cosmos DB with {type(credential).__name__} ({env_mode} mode)")
                 self.client = CosmosClient(settings.cosmos_endpoint, credential)
@@ -47,22 +49,22 @@ class CosmosDBService:
                 raise ValueError("Either AZURE_COSMOS_DB_ENDPOINT or AZURE_COSMOS_DB_CONNECTION_STRING must be set")
             
             # Create database if it doesn't exist
-            self.database = self.client.create_database_if_not_exists(id=settings.cosmos_database)
+            self.database = await self.client.create_database_if_not_exists(id=settings.cosmos_database)
             
             # Create containers if they don't exist
-            self.agents_container = self.database.create_container_if_not_exists(
+            self.agents_container = await self.database.create_container_if_not_exists(
                 id=settings.cosmos_agents_container,
                 partition_key=PartitionKey(path="/id")
             )
-            self.sessions_container = self.database.create_container_if_not_exists(
+            self.sessions_container = await self.database.create_container_if_not_exists(
                 id=settings.cosmos_sessions_container,
                 partition_key=PartitionKey(path="/userId")
             )
-            self.messages_container = self.database.create_container_if_not_exists(
+            self.messages_container = await self.database.create_container_if_not_exists(
                 id=settings.cosmos_messages_container,
                 partition_key=PartitionKey(path="/sessionId")
             )
-            self.preferences_container = self.database.create_container_if_not_exists(
+            self.preferences_container = await self.database.create_container_if_not_exists(
                 id=settings.cosmos_preferences_container,
                 partition_key=PartitionKey(path="/user_id")
             )
@@ -81,7 +83,7 @@ class CosmosDBService:
         query = "SELECT * FROM c WHERE c.type = 'agent' ORDER BY c.name"
         
         start_time = time.perf_counter()
-        items = list(self.agents_container.query_items(query, enable_cross_partition_query=True))
+        items = [item async for item in self.agents_container.query_items(query)]
         duration_ms = (time.perf_counter() - start_time) * 1000
         
         if should_log_performance():
@@ -98,7 +100,7 @@ class CosmosDBService:
         """Get a single agent configuration with performance tracking."""
         try:
             start_time = time.perf_counter()
-            result = self.agents_container.read_item(item=agent_id, partition_key=agent_id)
+            result = await self.agents_container.read_item(item=agent_id, partition_key=agent_id)
             duration_ms = (time.perf_counter() - start_time) * 1000
             
             if should_log_performance():
@@ -125,7 +127,7 @@ class CosmosDBService:
             agent_config["createdAt"] = agent_config["updatedAt"]
         
         start_time = time.perf_counter()
-        result = self.agents_container.upsert_item(agent_config)
+        result = await self.agents_container.upsert_item(agent_config)
         duration_ms = (time.perf_counter() - start_time) * 1000
         
         if should_log_performance():
@@ -142,7 +144,7 @@ class CosmosDBService:
         """Delete an agent configuration with performance tracking."""
         try:
             start_time = time.perf_counter()
-            self.agents_container.delete_item(item=agent_id, partition_key=agent_id)
+            await self.agents_container.delete_item(item=agent_id, partition_key=agent_id)
             duration_ms = (time.perf_counter() - start_time) * 1000
             
             if should_log_performance():
@@ -164,13 +166,13 @@ class CosmosDBService:
     async def list_mcp_servers(self) -> list[dict]:
         """Get all registered MCP servers."""
         query = "SELECT * FROM c WHERE c.type = 'mcp_server' ORDER BY c.name"
-        items = list(self.agents_container.query_items(query, enable_cross_partition_query=True))
+        items = [item async for item in self.agents_container.query_items(query)]
         return items
     
     async def get_mcp_server(self, server_id: str) -> Optional[dict]:
         """Get a single MCP server configuration."""
         try:
-            item = self.agents_container.read_item(item=server_id, partition_key=server_id)
+            item = await self.agents_container.read_item(item=server_id, partition_key=server_id)
             if item.get("type") == "mcp_server":
                 return item
             return None
@@ -188,12 +190,12 @@ class CosmosDBService:
         if "createdAt" not in server_config:
             server_config["createdAt"] = server_config["updatedAt"]
         
-        return self.agents_container.upsert_item(server_config)
+        return await self.agents_container.upsert_item(server_config)
     
     async def delete_mcp_server(self, server_id: str) -> bool:
         """Delete an MCP server registration."""
         try:
-            self.agents_container.delete_item(item=server_id, partition_key=server_id)
+            await self.agents_container.delete_item(item=server_id, partition_key=server_id)
             return True
         except CosmosResourceNotFoundError:
             return False
@@ -205,13 +207,13 @@ class CosmosDBService:
     async def list_aoai_endpoints(self) -> list[dict]:
         """Get all registered Azure OpenAI endpoints."""
         query = "SELECT * FROM c WHERE c.type = 'aoai_endpoint' ORDER BY c.name"
-        items = list(self.agents_container.query_items(query, enable_cross_partition_query=True))
+        items = [item async for item in self.agents_container.query_items(query)]
         return items
     
     async def get_aoai_endpoint(self, endpoint_id: str) -> Optional[dict]:
         """Get a single AOAI endpoint configuration."""
         try:
-            item = self.agents_container.read_item(item=endpoint_id, partition_key=endpoint_id)
+            item = await self.agents_container.read_item(item=endpoint_id, partition_key=endpoint_id)
             if item.get("type") == "aoai_endpoint":
                 return item
             return None
@@ -229,12 +231,12 @@ class CosmosDBService:
         if "createdAt" not in endpoint_config:
             endpoint_config["createdAt"] = endpoint_config["updatedAt"]
         
-        return self.agents_container.upsert_item(endpoint_config)
+        return await self.agents_container.upsert_item(endpoint_config)
     
     async def delete_aoai_endpoint(self, endpoint_id: str) -> bool:
         """Delete an Azure OpenAI endpoint registration."""
         try:
-            self.agents_container.delete_item(item=endpoint_id, partition_key=endpoint_id)
+            await self.agents_container.delete_item(item=endpoint_id, partition_key=endpoint_id)
             return True
         except CosmosResourceNotFoundError:
             return False
@@ -247,7 +249,7 @@ class CosmosDBService:
         """Get UI settings (classification banner, branding, etc.)."""
         try:
             start_time = time.perf_counter()
-            result = self.agents_container.read_item(item="ui_settings", partition_key="ui_settings")
+            result = await self.agents_container.read_item(item="ui_settings", partition_key="ui_settings")
             duration_ms = (time.perf_counter() - start_time) * 1000
             
             if should_log_performance():
@@ -267,7 +269,7 @@ class CosmosDBService:
         settings_data["updatedAt"] = datetime.now(timezone.utc).isoformat()
         
         start_time = time.perf_counter()
-        result = self.agents_container.upsert_item(settings_data)
+        result = await self.agents_container.upsert_item(settings_data)
         duration_ms = (time.perf_counter() - start_time) * 1000
         
         if should_log_performance():
@@ -312,7 +314,8 @@ class CosmosDBService:
         
         # Use by_page() to get a single page of results with continuation token support
         pager = response.by_page(continuation_token if continuation_token else None)
-        page = list(next(pager, []))
+        first_page = await anext(pager, None)
+        page = [item async for item in first_page] if first_page is not None else []
         
         # Get continuation token for next page
         next_token = pager.continuation_token
@@ -369,7 +372,7 @@ class CosmosDBService:
         }
         
         start_time = time.perf_counter()
-        self.sessions_container.create_item(session)
+        await self.sessions_container.create_item(session)
         duration_ms = (time.perf_counter() - start_time) * 1000
         
         if should_log_performance():
@@ -387,7 +390,7 @@ class CosmosDBService:
         """Get a session by ID with performance tracking."""
         try:
             start_time = time.perf_counter()
-            result = self.sessions_container.read_item(item=session_id, partition_key=user_id)
+            result = await self.sessions_container.read_item(item=session_id, partition_key=user_id)
             duration_ms = (time.perf_counter() - start_time) * 1000
             
             if should_log_performance():
@@ -416,7 +419,7 @@ class CosmosDBService:
     async def get_session_raw(self, session_id: str, user_id: str) -> dict | None:
         """Get raw session data from CosmosDB without transformation."""
         try:
-            result = self.sessions_container.read_item(item=session_id, partition_key=user_id)
+            result = await self.sessions_container.read_item(item=session_id, partition_key=user_id)
             return result
         except CosmosResourceNotFoundError:
             return None
@@ -432,7 +435,7 @@ class CosmosDBService:
         session["lastMessageAt"] = datetime.now(timezone.utc).isoformat()
         
         start_time = time.perf_counter()
-        result = self.sessions_container.replace_item(item=session_id, body=session)
+        result = await self.sessions_container.replace_item(item=session_id, body=session)
         duration_ms = (time.perf_counter() - start_time) * 1000
         
         if should_log_performance():
@@ -452,7 +455,7 @@ class CosmosDBService:
             # Delete messages first
             await self.delete_session_messages(session_id, user_id)
             # Delete session
-            self.sessions_container.delete_item(item=session_id, partition_key=user_id)
+            await self.sessions_container.delete_item(item=session_id, partition_key=user_id)
             duration_ms = (time.perf_counter() - start_time) * 1000
             
             if should_log_performance():
@@ -505,7 +508,8 @@ class CosmosDBService:
             
             # Use by_page() to get a single page of results with continuation token support
             pager = response.by_page(continuation_token if continuation_token else None)
-            page = list(next(pager, []))
+            first_page = await anext(pager, None)
+            page = [item async for item in first_page] if first_page is not None else []
             
             # Get continuation token for next page
             next_token = pager.continuation_token
@@ -530,11 +534,11 @@ class CosmosDBService:
             {"name": "@session_id", "value": session_id},
             {"name": "@user_id", "value": user_id},
         ]
-        items = list(self.messages_container.query_items(
+        items = [item async for item in self.messages_container.query_items(
             query=query,
             parameters=params,
             partition_key=session_id,
-        ))
+        )]
         return items
 
     async def save_message(
@@ -559,14 +563,15 @@ class CosmosDBService:
             "metadata": metadata or {}
         }
         
-        self.messages_container.create_item(message)
+        await self.messages_container.create_item(message)
         
         # Update session message count and timestamp
         try:
             session = await self.get_session(session_id, user_id)
             if session:
+                current_count = session.get("message_count", session.get("messageCount", 0))
                 await self.update_session(session_id, user_id, {
-                    "messageCount": session.get("messageCount", 0) + 1
+                    "messageCount": current_count + 1
                 })
         except Exception as e:
             logger.warning(f"Failed to update session stats: {e}")
@@ -578,14 +583,14 @@ class CosmosDBService:
         query = "SELECT c.id FROM c WHERE c.sessionId = @session_id"
         params = [{"name": "@session_id", "value": session_id}]
         
-        items = list(self.messages_container.query_items(
+        items = [item async for item in self.messages_container.query_items(
             query=query,
             parameters=params,
             partition_key=session_id  # Partition key is sessionId
-        ))
+        )]
         
         for item in items:
-            self.messages_container.delete_item(item=item["id"], partition_key=session_id)
+            await self.messages_container.delete_item(item=item["id"], partition_key=session_id)
 
     # =========================================================================
     # User Preferences
@@ -595,7 +600,7 @@ class CosmosDBService:
         """Get preferences for a user. Returns None if not found."""
         try:
             start_time = time.perf_counter()
-            result = self.preferences_container.read_item(item=user_id, partition_key=user_id)
+            result = await self.preferences_container.read_item(item=user_id, partition_key=user_id)
             duration_ms = (time.perf_counter() - start_time) * 1000
             if should_log_performance():
                 log_performance_summary(logger, "cosmos_get_user_preferences", {
@@ -614,7 +619,7 @@ class CosmosDBService:
         prefs_data["updated_at"] = datetime.now(timezone.utc).isoformat()
 
         start_time = time.perf_counter()
-        result = self.preferences_container.upsert_item(prefs_data)
+        result = await self.preferences_container.upsert_item(prefs_data)
         duration_ms = (time.perf_counter() - start_time) * 1000
         if should_log_performance():
             log_performance_summary(logger, "cosmos_save_user_preferences", {
@@ -622,6 +627,12 @@ class CosmosDBService:
                 "user_id": user_id
             })
         return result
+
+    async def close(self) -> None:
+        """Close the Cosmos DB client connection."""
+        if self.client:
+            await self.client.close()
+            self.client = None
 
 
 # Global service instance

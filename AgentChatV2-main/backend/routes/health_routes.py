@@ -45,7 +45,7 @@ async def check_search() -> ServiceHealth:
     try:
         # Verify index exists
         if search_service.index_client:
-            search_service.index_client.get_index(search_service.INDEX_NAME)
+            search_service.index_client.get_index(search_service.index_name)
             latency = (time.time() - start) * 1000
             return ServiceHealth(
                 name="azure_search",

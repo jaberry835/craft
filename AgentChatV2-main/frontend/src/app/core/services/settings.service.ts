@@ -17,6 +17,7 @@ export interface UISettings {
   branding_image_filename?: string | null;
   branding_image_position?: string;
   app_title?: string | null;
+  assistant_display_name?: string | null;
   favicon_image?: string | null;
   favicon_image_filename?: string | null;
   updated_at?: string | null;
@@ -33,6 +34,7 @@ const DEFAULT_SETTINGS: UISettings = {
   branding_image_filename: null,
   branding_image_position: 'sidebar',
   app_title: null,
+  assistant_display_name: null,
   favicon_image: null,
   favicon_image_filename: null
 };

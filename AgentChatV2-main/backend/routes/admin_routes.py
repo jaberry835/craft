@@ -3,7 +3,7 @@ Admin API Routes
 Agent configuration and system administration.
 Requires admin role.
 """
-from fastapi import APIRouter, Request, HTTPException, Depends
+from fastapi import APIRouter, Request, HTTPException, Depends, Response
 from pydantic import BaseModel, Field
 
 from models import (
@@ -31,9 +31,9 @@ def require_admin(request: Request):
     """Dependency to require admin role."""
     user = request.state.user
     
-    # In development mode, skip role check
-    if settings.environment == "development":
-        logger.debug(f"Dev mode: skipping admin role check for {user.email}")
+    # In explicit development bypass mode, skip role check.
+    if settings.environment == "development" and settings.allow_dev_auth_bypass:
+        logger.warning(f"DEV AUTH BYPASS ENABLED: skipping admin role check for {user.email}")
         return user
     
     # Check for admin role (case-insensitive)
@@ -924,11 +924,15 @@ settings_router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 
 @settings_router.get("/ui", response_model=UISettings)
-async def get_ui_settings_public(request: Request):
+async def get_ui_settings_public(request: Request, response: Response):
     """
     Get UI settings (classification banner, branding image, etc.).
     This endpoint is public so all users can load the banner/branding on app start.
     """
+    # Revalidate settings on navigation/reload to avoid stale UI branding/name.
+    response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+
     settings_data = await cosmos_service.get_ui_settings()
     if not settings_data:
         return UISettings()  # Return defaults
@@ -940,6 +944,7 @@ async def get_ui_settings_public(request: Request):
         branding_image_filename=settings_data.get("branding_image_filename"),
         branding_image_position=settings_data.get("branding_image_position", "sidebar"),
         app_title=settings_data.get("app_title"),
+        assistant_display_name=settings_data.get("assistant_display_name"),
         favicon_image=settings_data.get("favicon_image"),
         favicon_image_filename=settings_data.get("favicon_image_filename"),
         updated_at=settings_data.get("updatedAt")
@@ -960,6 +965,7 @@ async def get_ui_settings_admin(request: Request, admin=Depends(require_admin)):
         branding_image_filename=settings_data.get("branding_image_filename"),
         branding_image_position=settings_data.get("branding_image_position", "sidebar"),
         app_title=settings_data.get("app_title"),
+        assistant_display_name=settings_data.get("assistant_display_name"),
         favicon_image=settings_data.get("favicon_image"),
         favicon_image_filename=settings_data.get("favicon_image_filename"),
         updated_at=settings_data.get("updatedAt")
@@ -1012,6 +1018,7 @@ async def update_ui_settings(
         branding_image_filename=saved.get("branding_image_filename"),
         branding_image_position=saved.get("branding_image_position", "sidebar"),
         app_title=saved.get("app_title"),
+        assistant_display_name=saved.get("assistant_display_name"),
         favicon_image=saved.get("favicon_image"),
         favicon_image_filename=saved.get("favicon_image_filename"),
         updated_at=saved.get("updatedAt")

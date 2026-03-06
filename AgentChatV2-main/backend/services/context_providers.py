@@ -77,6 +77,9 @@ class CosmosHistoryProvider(BaseHistoryProvider):
         load_messages: bool = True,
         store_inputs: bool = False,
         store_outputs: bool = False,
+        default_session_id: str | None = None,
+        default_user_id: str | None = None,
+        default_query: str | None = None,
     ) -> None:
         super().__init__(
             source_id,
@@ -85,6 +88,9 @@ class CosmosHistoryProvider(BaseHistoryProvider):
             store_outputs=store_outputs,
         )
         self._cosmos = cosmos_service
+        self._default_session_id = default_session_id
+        self._default_user_id = default_user_id
+        self._default_query = default_query
 
     # --------------------------------------------------------------------- #
     # BaseHistoryProvider abstract methods
@@ -103,7 +109,16 @@ class CosmosHistoryProvider(BaseHistoryProvider):
         (``session.state[self.source_id]``).
         """
         if state is None:
-            return []
+            state = {}
+
+        # Auto-populate state from defaults when the caller (e.g. a Workflow)
+        # did not pass an explicit session with pre-set state.
+        if not state.get("session_id") and self._default_session_id:
+            state["session_id"] = self._default_session_id
+        if not state.get("user_id") and self._default_user_id:
+            state["user_id"] = self._default_user_id
+        if not state.get("current_query") and self._default_query:
+            state["current_query"] = self._default_query
 
         cosmos_session_id = state.get("session_id")
         cosmos_user_id = state.get("user_id")
@@ -244,11 +259,17 @@ class DocumentRAGProvider(BaseContextProvider):
         source_id: str = "document-rag",
         *,
         top_k: int = 3,
+        default_session_id: str | None = None,
+        default_user_id: str | None = None,
+        default_query: str | None = None,
     ) -> None:
         super().__init__(source_id)
         self._embedding = embedding_service
         self._search = search_service
         self._top_k = top_k
+        self._default_session_id = default_session_id
+        self._default_user_id = default_user_id
+        self._default_query = default_query
 
     async def before_run(
         self,
@@ -259,6 +280,15 @@ class DocumentRAGProvider(BaseContextProvider):
         state: dict[str, Any],
     ) -> None:
         """Retrieve and inject relevant document context before the agent runs."""
+        # Auto-populate state from defaults when used inside a Workflow
+        # that doesn't pass an explicit session with pre-set state.
+        if not state.get("session_id") and self._default_session_id:
+            state["session_id"] = self._default_session_id
+        if not state.get("user_id") and self._default_user_id:
+            state["user_id"] = self._default_user_id
+        if not state.get("user_query") and self._default_query:
+            state["user_query"] = self._default_query
+
         cosmos_session_id = state.get("session_id")
         cosmos_user_id = state.get("user_id")
         user_query = state.get("user_query", "")

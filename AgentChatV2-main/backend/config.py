@@ -5,17 +5,24 @@ Uses Pydantic Settings for type-safe environment configuration.
 import os
 from functools import lru_cache
 from typing import Union
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 from azure.identity import AzureCliCredential, ManagedIdentityCredential
+from azure.identity.aio import AzureCliCredential as AzureCliCredentialAsync, ManagedIdentityCredential as ManagedIdentityCredentialAsync
 
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
     
     # Environment
-    environment: str = Field(default="development", alias="ENVIRONMENT")
+    environment: str = Field(default="production", alias="ENVIRONMENT")
+    # Explicitly opt-in to auth/admin bypass for local development only.
+    allow_dev_auth_bypass: bool = Field(default=False, alias="ALLOW_DEV_AUTH_BYPASS")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    
+    # CORS - comma-separated origins allowed for credentialed requests
+    # e.g. "http://localhost:4200,https://app-agentchat.azurewebsites.us"
+    cors_origins: str = Field(default="http://localhost:4200", alias="CORS_ORIGINS")
     
     # Logging Toggles - enable verbose logging for specific categories
     show_performance_logs: bool = Field(default=False, alias="SHOW_PERFORMANCE_LOGS")
@@ -90,9 +97,7 @@ class Settings(BaseSettings):
     # access checker.  Set to 0 to always call the access checker (no caching).
     access_checker_cache_ttl: int = Field(default=5, alias="ACCESS_CHECKER_CACHE_TTL")
     
-    # MCP Server
-    mcp_server_endpoint: str = Field(alias="MCP_SERVER_ENDPOINT")
-    
+     
     # Backend URL for A2A (Agent-to-Agent) communication
     # In production, set this to the deployed backend URL (e.g., https://app-agentchat-api.azurewebsites.us)
     # Defaults to localhost:5000 for local development
@@ -114,9 +119,15 @@ class Settings(BaseSettings):
     default_max_output_tokens: int = Field(default=4000, alias="DEFAULT_MAX_OUTPUT_TOKENS")
     token_cost_warning_threshold: int = Field(default=10000, alias="TOKEN_COST_WARNING_THRESHOLD")
     
-    class Config:
-        env_file = ".env"
-        case_sensitive = False
+    # Rate Limiting (slowapi format, e.g. "60/minute")
+    rate_limit_default: str = Field(default="60/minute", alias="RATE_LIMIT_DEFAULT")
+    rate_limit_chat: str = Field(default="10/minute", alias="RATE_LIMIT_CHAT")
+    rate_limit_upload: str = Field(default="20/minute", alias="RATE_LIMIT_UPLOAD")
+    
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        case_sensitive=False,
+    )
 
 
 @lru_cache()
@@ -153,3 +164,18 @@ def get_azure_credential() -> Union[AzureCliCredential, ManagedIdentityCredentia
             # System-assigned managed identity (default)
             return ManagedIdentityCredential()
 
+
+def get_azure_credential_async() -> Union[AzureCliCredentialAsync, ManagedIdentityCredentialAsync]:
+    """
+    Get the appropriate async Azure credential based on the environment.
+    Required by async SDK clients (e.g. azure.cosmos.aio) whose get_token() is a coroutine.
+    """
+    settings = get_settings()
+
+    if settings.environment == "development":
+        return AzureCliCredentialAsync()
+    else:
+        if settings.azure_managed_identity_client_id:
+            return ManagedIdentityCredentialAsync(client_id=settings.azure_managed_identity_client_id)
+        else:
+            return ManagedIdentityCredentialAsync()

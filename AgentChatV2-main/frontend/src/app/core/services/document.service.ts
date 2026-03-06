@@ -1,6 +1,7 @@
 import { Injectable } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { Observable } from 'rxjs';
+import { HttpResponse } from '@angular/common/http';
 import { environment } from '@env/environment';
 
 export interface DocumentMetadata {
@@ -75,10 +76,12 @@ export class DocumentService {
   }
 
   /**
-   * Get the URL to view document content.
-   * Opens as plain text in a new tab.
+   * Fetch document content as a Blob with auth headers applied by interceptor.
    */
-  getDocumentContentUrl(documentId: string): string {
-    return `${this.apiUrl}/${documentId}/content`;
+  fetchDocumentContent(documentId: string): Observable<HttpResponse<Blob>> {
+    return this.http.get(`${this.apiUrl}/${documentId}/content`, {
+      responseType: 'blob',
+      observe: 'response'
+    });
   }
 }
