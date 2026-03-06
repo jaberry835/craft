@@ -4,6 +4,7 @@
   "remote::https://github.com/adamruderman/UserAccessChecker-Python::main": "501c9f9f0da72aa8f0dcf2f35c2238fd5328543e",
   "remote::https://github.com/adamruderman/UserAccessCheckerApi::main": "94709ad66ce5ec8473d58850f816f80a34688c17",
   "remote::https://github.com/jaberry835/PrintShopDemo::main": "e57e3b549a85b782a6b58faf965ad351a51fd993",
+  "remote::https://github.com/jaberry835/snapseek::deepface-embeddings": "8977de3e8c1c4506295a86f88283b5434f390604",
   "remote::https://github.com/jaberry835/snapseek::main": "c1348f8d4b3f04558f5c5905a7a9a3ee6d4a8a0f",
   "remote::https://github.com/microsoft/simplechat::main": "fdaa3f1eef4acd5ad875f1eef2a87499b5c7f544"
 }
