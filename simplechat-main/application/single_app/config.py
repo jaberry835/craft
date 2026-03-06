@@ -15,6 +15,12 @@ import docx
 import fitz # PyMuPDF
 import math
 import mimetypes
+# Register font MIME types so Flask serves them correctly (required for
+# X-Content-Type-Options: nosniff to not block Bootstrap Icons)
+mimetypes.add_type('font/woff', '.woff')
+mimetypes.add_type('font/woff2', '.woff2')
+mimetypes.add_type('font/ttf', '.ttf')
+mimetypes.add_type('font/otf', '.otf')
 import openpyxl
 import xlrd
 import traceback
@@ -88,8 +94,7 @@ load_dotenv()
 EXECUTOR_TYPE = 'thread'
 EXECUTOR_MAX_WORKERS = 30
 SESSION_TYPE = 'filesystem'
-VERSION = "0.235.003"
-
+VERSION = "0.239.002"
 
 SECRET_KEY = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
 
@@ -123,11 +128,49 @@ HSTS_MAX_AGE = int(os.getenv('HSTS_MAX_AGE', '31536000'))  # 1 year default
 CLIENTS = {}
 CLIENTS_LOCK = threading.Lock()
 
-ALLOWED_EXTENSIONS = {
-    'txt', 'pdf', 'doc', 'docm', 'docx', 'xlsx', 'xlsm', 'xls', 'csv', 'pptx', 'html', 'jpg', 'jpeg', 'png', 'bmp', 'tiff', 'tif', 'heif', 'md', 'json', 
-    'mp4', 'mov', 'avi', 'mkv', 'flv', 'mxf', 'gxf', 'ts', 'ps', '3gp', '3gpp', 'mpg', 'wmv', 'asf', 'm4a', 'm4v', 'isma', 'ismv', 
-    'dvr-ms', 'wav', 'xml', 'yaml', 'yml', 'log'
+# Base allowed extensions (always available)
+BASE_ALLOWED_EXTENSIONS = {'txt', 'doc', 'docm', 'html', 'md', 'json', 'xml', 'yaml', 'yml', 'log'}
+DOCUMENT_EXTENSIONS = {'pdf', 'docx', 'pptx', 'ppt'}
+TABULAR_EXTENSIONS = {'csv', 'xlsx', 'xls', 'xlsm'}
+
+# Updates to image, video, or audio extensions should also be made in static/js/chat/chat-enhanced-citations.js if the new file types can be natively rendered in the browser.
+IMAGE_EXTENSIONS = {'jpg', 'jpeg', 'png', 'bmp', 'tiff', 'tif', 'heif', 'heic'}
+
+# Optional extensions by feature
+VIDEO_EXTENSIONS = {
+    'mp4', 'mov', 'avi', 'mkv', 'flv', 'mxf', 'gxf', 'ts', 'ps', '3gp', '3gpp',
+    'mpg', 'wmv', 'asf', 'm4v', 'isma', 'ismv', 'dvr-ms', 'webm', 'mpeg'
 }
+
+AUDIO_EXTENSIONS = {'mp3', 'wav', 'ogg', 'aac', 'flac', 'm4a'}
+
+def get_allowed_extensions(enable_video=False, enable_audio=False):
+    """
+    Get allowed file extensions based on feature flags.
+    
+    Args:
+        enable_video: Whether video file support is enabled
+        enable_audio: Whether audio file support is enabled
+        
+    Returns:
+        set: Allowed file extensions
+    """
+    extensions = BASE_ALLOWED_EXTENSIONS.copy()
+    extensions.update(DOCUMENT_EXTENSIONS)
+    extensions.update(IMAGE_EXTENSIONS)
+    extensions.update(TABULAR_EXTENSIONS)
+
+    if enable_video:
+        extensions.update(VIDEO_EXTENSIONS)
+
+    if enable_audio:
+        extensions.update(AUDIO_EXTENSIONS)
+
+    return extensions
+
+ALLOWED_EXTENSIONS = get_allowed_extensions(enable_video=True, enable_audio=True)
+
+# Admin UI specific extensions (for logo/favicon uploads)
 ALLOWED_EXTENSIONS_IMG = {'png', 'jpg', 'jpeg'}
 MAX_CONTENT_LENGTH = 5000 * 1024 * 1024  # 5000 MB AKA 5 GB
 
@@ -176,6 +219,7 @@ if AZURE_ENVIRONMENT == "usgovernment":
 elif AZURE_ENVIRONMENT == "custom":
     resource_manager = CUSTOM_RESOURCE_MANAGER_URL_VALUE
     authority = CUSTOM_IDENTITY_URL_VALUE
+    video_indexer_endpoint = os.getenv("CUSTOM_VIDEO_INDEXER_ENDPOINT", "https://api.videoindexer.ai")
     credential_scopes=[resource_manager + "/.default"]
     cognitive_services_scope = CUSTOM_COGNITIVE_SERVICES_URL_VALUE  
     search_resource_manager = CUSTOM_SEARCH_RESOURCE_MANAGER_URL_VALUE
@@ -374,6 +418,12 @@ cosmos_global_agents_container = cosmos_database.create_container_if_not_exists(
 cosmos_global_actions_container_name = "global_actions"
 cosmos_global_actions_container = cosmos_database.create_container_if_not_exists(
     id=cosmos_global_actions_container_name,
+    partition_key=PartitionKey(path="/id")
+)
+
+cosmos_agent_templates_container_name = "agent_templates"
+cosmos_agent_templates_container = cosmos_database.create_container_if_not_exists(
+    id=cosmos_agent_templates_container_name,
     partition_key=PartitionKey(path="/id")
 )
 
@@ -645,7 +695,7 @@ def initialize_clients(settings):
             azure_apim_content_safety_endpoint = settings.get("azure_apim_content_safety_endpoint")
             azure_apim_content_safety_subscription_key = settings.get("azure_apim_content_safety_subscription_key")
 
-            if safety_endpoint and safety_key:
+            if safety_endpoint:
                 try:
                     if enable_content_safety_apim:
                         content_safety_client = ContentSafetyClient(

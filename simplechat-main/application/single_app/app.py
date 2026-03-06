@@ -4,6 +4,20 @@ import logging
 import pickle
 import json
 import os
+import sys
+
+# Fix Windows encoding issue with Unicode characters (emojis, IPA symbols, etc.)
+# Must be done before any print statements that might contain Unicode
+if sys.platform == 'win32':
+    try:
+        # Reconfigure stdout and stderr to use UTF-8 encoding
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except AttributeError:
+        # Python < 3.7 doesn't have reconfigure, try alternative
+        import codecs
+        sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+        sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
 
 import app_settings_cache
 from config import *
@@ -55,9 +69,12 @@ from route_backend_notifications import *
 from route_backend_retention_policy import *
 from route_backend_plugins import bpap as admin_plugins_bp, bpdp as dynamic_plugins_bp
 from route_backend_agents import bpa as admin_agents_bp
+from route_backend_agent_templates import bp_agent_templates
 from route_backend_public_workspaces import *
 from route_backend_public_documents import *
 from route_backend_public_prompts import *
+from route_backend_user_agreement import register_route_backend_user_agreement
+from route_backend_conversation_export import register_route_backend_conversation_export
 from route_backend_speech import register_route_backend_speech
 from route_backend_tts import register_route_backend_tts
 from route_enhanced_citations import register_enhanced_citations_routes
@@ -90,12 +107,14 @@ if SESSION_TYPE == 'filesystem':
         os.makedirs(app.config['SESSION_FILE_DIR'], exist_ok=True)
     except Exception as e:
         print(f"WARNING: Unable to create session directory {app.config.get('SESSION_FILE_DIR')}: {e}")
+        log_event(f"Unable to create session directory {app.config.get('SESSION_FILE_DIR')}: {e}", level=logging.ERROR)
 
 Session(app)
 
 app.register_blueprint(admin_plugins_bp)
 app.register_blueprint(dynamic_plugins_bp)
 app.register_blueprint(admin_agents_bp)
+app.register_blueprint(bp_agent_templates)
 app.register_blueprint(plugin_validation_bp)
 app.register_blueprint(bp_migration)
 app.register_blueprint(plugin_logging_bp)
@@ -186,6 +205,7 @@ def configure_sessions(settings):
             app.config['SESSION_TYPE'] = 'filesystem'
     except Exception as e:
         print(f"⚠️  WARNING: Session configuration error; falling back to filesystem: {e}")
+        log_event(f"Session configuration error; falling back to filesystem: {e}", level=logging.ERROR)
         app.config['SESSION_TYPE'] = 'filesystem'
 
     # Initialize session interface
@@ -266,6 +286,7 @@ def before_first_request():
                 
             except Exception as e:
                 print(f"Error in logging timer check: {e}")
+                log_event(f"Error in logging timer check: {e}", level=logging.ERROR)
             
             # Check every 60 seconds
             time.sleep(60)
@@ -286,6 +307,7 @@ def before_first_request():
                     print(f"Auto-denied {denied_count} expired approval request(s).")
             except Exception as e:
                 print(f"Error in approval expiration check: {e}")
+                log_event(f"Error in approval expiration check: {e}", level=logging.ERROR)
             
             # Check every 6 hours (21600 seconds)
             time.sleep(21600)
@@ -309,14 +331,34 @@ def before_first_request():
                 
                 if personal_enabled or group_enabled or public_enabled:
                     current_time = datetime.now(timezone.utc)
-                    execution_hour = settings.get('retention_policy_execution_hour', 2)
                     
-                    # Check if we're in the execution hour
-                    if current_time.hour == execution_hour:
-                        # Check if we haven't run today yet
+                    # Check if next scheduled run time has passed
+                    next_run = settings.get('retention_policy_next_run')
+                    should_run = False
+                    
+                    if next_run:
+                        try:
+                            next_run_dt = datetime.fromisoformat(next_run)
+                            # Run if we've passed the scheduled time
+                            if current_time >= next_run_dt:
+                                should_run = True
+                        except Exception as parse_error:
+                            print(f"Error parsing next_run timestamp: {parse_error}")
+                            # If we can't parse, fall back to checking last_run
+                            last_run = settings.get('retention_policy_last_run')
+                            if last_run:
+                                try:
+                                    last_run_dt = datetime.fromisoformat(last_run)
+                                    # Run if last run was more than 23 hours ago
+                                    if (current_time - last_run_dt).total_seconds() > (23 * 3600):
+                                        should_run = True
+                                except:
+                                    should_run = True
+                            else:
+                                should_run = True
+                    else:
+                        # No next_run set, check last_run instead
                         last_run = settings.get('retention_policy_last_run')
-                        should_run = False
-                        
                         if last_run:
                             try:
                                 last_run_dt = datetime.fromisoformat(last_run)
@@ -326,29 +368,31 @@ def before_first_request():
                             except:
                                 should_run = True
                         else:
+                            # Never run before, execute now
                             should_run = True
+                    
+                    if should_run:
+                        print(f"Executing scheduled retention policy at {current_time.isoformat()}")
+                        from functions_retention_policy import execute_retention_policy
+                        results = execute_retention_policy(manual_execution=False)
                         
-                        if should_run:
-                            print(f"Executing scheduled retention policy at {current_time.isoformat()}")
-                            from functions_retention_policy import execute_retention_policy
-                            results = execute_retention_policy(manual_execution=False)
-                            
-                            if results.get('success'):
-                                print(f"Retention policy execution completed: "
-                                     f"{results['personal']['conversations']} personal conversations, "
-                                     f"{results['personal']['documents']} personal documents, "
-                                     f"{results['group']['conversations']} group conversations, "
-                                     f"{results['group']['documents']} group documents, "
-                                     f"{results['public']['conversations']} public conversations, "
-                                     f"{results['public']['documents']} public documents deleted.")
-                            else:
-                                print(f"Retention policy execution failed: {results.get('errors')}")
+                        if results.get('success'):
+                            print(f"Retention policy execution completed: "
+                                 f"{results['personal']['conversations']} personal conversations, "
+                                 f"{results['personal']['documents']} personal documents, "
+                                 f"{results['group']['conversations']} group conversations, "
+                                 f"{results['group']['documents']} group documents, "
+                                 f"{results['public']['conversations']} public conversations, "
+                                 f"{results['public']['documents']} public documents deleted.")
+                        else:
+                            print(f"Retention policy execution failed: {results.get('errors')}")
                 
             except Exception as e:
                 print(f"Error in retention policy check: {e}")
+                log_event(f"Error in retention policy check: {e}", level=logging.ERROR)
             
-            # Check every hour
-            time.sleep(3600)
+            # Check every 5 minutes for more responsive scheduling
+            time.sleep(300)
 
     # Start the retention policy check thread
     retention_thread = threading.Thread(target=check_retention_policy, daemon=True)
@@ -377,6 +421,8 @@ def inject_settings():
             from functions_settings import get_user_settings
             user_settings = get_user_settings(user_id) or {}
     except Exception as e:
+        print(f"Error injecting user settings: {e}")
+        log_event(f"Error injecting user settings: {e}", level=logging.ERROR)
         user_settings = {}
     return dict(app_settings=public_settings, user_settings=user_settings)
 
@@ -583,11 +629,17 @@ register_route_backend_retention_policy(app)
 # ------------------- API Public Workspaces Routes -------
 register_route_backend_public_workspaces(app)
 
+# ------------------- API Conversation Export Routes -----
+register_route_backend_conversation_export(app)
+
 # ------------------- API Public Documents Routes --------
 register_route_backend_public_documents(app)
 
 # ------------------- API Public Prompts Routes ----------
 register_route_backend_public_prompts(app)
+
+# ------------------- API User Agreement Routes ----------
+register_route_backend_user_agreement(app)
 
 # ------------------- Extenral Health Routes ----------
 register_route_external_health(app)

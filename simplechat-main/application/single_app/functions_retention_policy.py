@@ -6,8 +6,11 @@ Retention Policy Management
 This module handles automated deletion of aged conversations and documents
 based on configurable retention policies for personal, group, and public workspaces.
 
-Version: 0.234.067
+Version: 0.237.005
 Implemented in: 0.234.067
+Updated in: 0.236.012 - Fixed race condition handling for NotFound errors during deletion
+Updated in: 0.237.004 - Fixed critical bug where conversations with null/undefined last_activity_at were deleted regardless of age
+Updated in: 0.237.005 - Fixed field name: use last_updated (actual field) instead of last_activity_at (non-existent)
 """
 
 from config import *
@@ -18,6 +21,7 @@ from functions_documents import delete_document, delete_document_chunks
 from functions_activity_logging import log_conversation_deletion, log_conversation_archival
 from functions_notifications import create_notification, create_group_notification, create_public_workspace_notification
 from functions_debug import debug_print
+from functions_appinsights import log_event
 from datetime import datetime, timezone, timedelta
 
 
@@ -36,6 +40,7 @@ def get_all_user_settings():
         ))
         return users
     except Exception as e:
+        log_event("get_all_user_settings_error", {"error": str(e)})
         debug_print(f"Error fetching all user settings: {e}")
         return []
 
@@ -55,6 +60,7 @@ def get_all_groups():
         ))
         return groups
     except Exception as e:
+        log_event("get_all_groups_error", {"error": str(e)})
         debug_print(f"Error fetching all groups: {e}")
         return []
 
@@ -74,8 +80,50 @@ def get_all_public_workspaces():
         ))
         return workspaces
     except Exception as e:
+        log_event("get_all_public_workspaces_error", {"error": str(e)})
         debug_print(f"Error fetching all public workspaces: {e}")
         return []
+
+
+def resolve_retention_value(value, workspace_type, retention_type, settings=None):
+    """
+    Resolve a retention value, handling 'default' by looking up organization defaults.
+    
+    Args:
+        value: The retention value ('none', 'default', or a number/string of days)
+        workspace_type: 'personal', 'group', or 'public'
+        retention_type: 'conversation' or 'document'
+        settings: Optional pre-loaded settings dict (to avoid repeated lookups)
+        
+    Returns:
+        str or int: 'none' if no deletion, or the number of days as int
+    """
+    if value is None or value == 'default' or value == '':
+        # Look up the organization default
+        if settings is None:
+            settings = get_settings()
+        
+        setting_key = f'default_retention_{retention_type}_{workspace_type}'
+        default_value = settings.get(setting_key, 'none')
+        
+        # If the org default is also 'none', return 'none'
+        if default_value == 'none' or default_value is None:
+            return 'none'
+        
+        # Return the org default as the effective value
+        try:
+            return int(default_value)
+        except (ValueError, TypeError):
+            return 'none'
+    
+    # User/workspace has their own explicit value
+    if value == 'none':
+        return 'none'
+    
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return 'none'
 
 
 def execute_retention_policy(workspace_scopes=None, manual_execution=False):
@@ -156,6 +204,7 @@ def execute_retention_policy(workspace_scopes=None, manual_execution=False):
         return results
         
     except Exception as e:
+        log_event("execute_retention_policy_error", {"error": str(e), "workspace_scopes": workspace_scopes, "manual_execution": manual_execution})
         debug_print(f"Error executing retention policy: {e}")
         results['success'] = False
         results['errors'].append(str(e))
@@ -180,6 +229,9 @@ def process_personal_retention():
         # Get all user settings
         all_users = get_all_user_settings()
         
+        # Pre-load settings once for efficiency
+        settings = get_settings()
+        
         for user in all_users:
             user_id = user.get('id')
             if not user_id:
@@ -189,12 +241,19 @@ def process_personal_retention():
             user_settings = user.get('settings', {})
             retention_settings = user_settings.get('retention_policy', {})
             
-            conversation_retention_days = retention_settings.get('conversation_retention_days', 'none')
-            document_retention_days = retention_settings.get('document_retention_days', 'none')
+            # Get raw values (may be 'default', 'none', or a number)
+            raw_conversation_days = retention_settings.get('conversation_retention_days')
+            raw_document_days = retention_settings.get('document_retention_days')
             
-            # Skip if both are set to "none"
+            # Resolve to effective values (handles 'default' -> org default lookup)
+            conversation_retention_days = resolve_retention_value(raw_conversation_days, 'personal', 'conversation', settings)
+            document_retention_days = resolve_retention_value(raw_document_days, 'personal', 'document', settings)
+            
+            # Skip if both resolve to "none"
             if conversation_retention_days == 'none' and document_retention_days == 'none':
                 continue
+            
+            debug_print(f"Processing retention for user {user_id}: conversations={conversation_retention_days} days, documents={document_retention_days} days")
             
             user_deletion_summary = {
                 'user_id': user_id,
@@ -216,6 +275,7 @@ def process_personal_retention():
                     user_deletion_summary['conversation_details'] = conv_results['details']
                     results['conversations'] += conv_results['count']
                 except Exception as e:
+                    log_event("process_personal_retention_conversations_error", {"error": str(e), "user_id": user_id})
                     debug_print(f"Error processing conversations for user {user_id}: {e}")
             
             # Process documents
@@ -230,6 +290,7 @@ def process_personal_retention():
                     user_deletion_summary['document_details'] = doc_results['details']
                     results['documents'] += doc_results['count']
                 except Exception as e:
+                    log_event("process_personal_retention_documents_error", {"error": str(e), "user_id": user_id})
                     debug_print(f"Error processing documents for user {user_id}: {e}")
             
             # Send notification if anything was deleted
@@ -241,6 +302,7 @@ def process_personal_retention():
         return results
         
     except Exception as e:
+        log_event("process_personal_retention_error", {"error": str(e)})
         debug_print(f"Error in process_personal_retention: {e}")
         return results
 
@@ -263,6 +325,9 @@ def process_group_retention():
         # Get all groups
         all_groups = get_all_groups()
         
+        # Pre-load settings once for efficiency
+        settings = get_settings()
+        
         for group in all_groups:
             group_id = group.get('id')
             if not group_id:
@@ -271,10 +336,15 @@ def process_group_retention():
             # Get group's retention settings
             retention_settings = group.get('retention_policy', {})
             
-            conversation_retention_days = retention_settings.get('conversation_retention_days', 'none')
-            document_retention_days = retention_settings.get('document_retention_days', 'none')
+            # Get raw values (may be 'default', 'none', or a number)
+            raw_conversation_days = retention_settings.get('conversation_retention_days')
+            raw_document_days = retention_settings.get('document_retention_days')
             
-            # Skip if both are set to "none"
+            # Resolve to effective values (handles 'default' -> org default lookup)
+            conversation_retention_days = resolve_retention_value(raw_conversation_days, 'group', 'conversation', settings)
+            document_retention_days = resolve_retention_value(raw_document_days, 'group', 'document', settings)
+            
+            # Skip if both resolve to "none"
             if conversation_retention_days == 'none' and document_retention_days == 'none':
                 continue
             
@@ -299,6 +369,7 @@ def process_group_retention():
                     group_deletion_summary['conversation_details'] = conv_results['details']
                     results['conversations'] += conv_results['count']
                 except Exception as e:
+                    log_event("process_group_retention_conversations_error", {"error": str(e), "group_id": group_id})
                     debug_print(f"Error processing conversations for group {group_id}: {e}")
             
             # Process documents
@@ -313,6 +384,7 @@ def process_group_retention():
                     group_deletion_summary['document_details'] = doc_results['details']
                     results['documents'] += doc_results['count']
                 except Exception as e:
+                    log_event("process_group_retention_documents_error", {"error": str(e), "group_id": group_id})
                     debug_print(f"Error processing documents for group {group_id}: {e}")
             
             # Send notification if anything was deleted
@@ -324,6 +396,7 @@ def process_group_retention():
         return results
         
     except Exception as e:
+        log_event("process_group_retention_error", {"error": str(e)})
         debug_print(f"Error in process_group_retention: {e}")
         return results
 
@@ -346,6 +419,9 @@ def process_public_retention():
         # Get all public workspaces
         all_workspaces = get_all_public_workspaces()
         
+        # Pre-load settings once for efficiency
+        settings = get_settings()
+        
         for workspace in all_workspaces:
             workspace_id = workspace.get('id')
             if not workspace_id:
@@ -354,10 +430,15 @@ def process_public_retention():
             # Get workspace's retention settings
             retention_settings = workspace.get('retention_policy', {})
             
-            conversation_retention_days = retention_settings.get('conversation_retention_days', 'none')
-            document_retention_days = retention_settings.get('document_retention_days', 'none')
+            # Get raw values (may be 'default', 'none', or a number)
+            raw_conversation_days = retention_settings.get('conversation_retention_days')
+            raw_document_days = retention_settings.get('document_retention_days')
             
-            # Skip if both are set to "none"
+            # Resolve to effective values (handles 'default' -> org default lookup)
+            conversation_retention_days = resolve_retention_value(raw_conversation_days, 'public', 'conversation', settings)
+            document_retention_days = resolve_retention_value(raw_document_days, 'public', 'document', settings)
+            
+            # Skip if both resolve to "none"
             if conversation_retention_days == 'none' and document_retention_days == 'none':
                 continue
             
@@ -370,19 +451,11 @@ def process_public_retention():
                 'document_details': []
             }
             
-            # Process conversations
-            if conversation_retention_days != 'none':
-                try:
-                    conv_results = delete_aged_conversations(
-                        public_workspace_id=workspace_id,
-                        retention_days=int(conversation_retention_days),
-                        workspace_type='public'
-                    )
-                    workspace_deletion_summary['conversations_deleted'] = conv_results['count']
-                    workspace_deletion_summary['conversation_details'] = conv_results['details']
-                    results['conversations'] += conv_results['count']
-                except Exception as e:
-                    debug_print(f"Error processing conversations for public workspace {workspace_id}: {e}")
+            # Note: Public workspaces do not have a separate conversations container.
+            # Conversations are only stored in personal (cosmos_conversations_container) or 
+            # group (cosmos_group_conversations_container) workspaces.
+            # Therefore, we skip conversation processing for public workspaces.
+            # Only documents are processed for public workspace retention.
             
             # Process documents
             if document_retention_days != 'none':
@@ -396,6 +469,7 @@ def process_public_retention():
                     workspace_deletion_summary['document_details'] = doc_results['details']
                     results['documents'] += doc_results['count']
                 except Exception as e:
+                    log_event("process_public_retention_documents_error", {"error": str(e), "public_workspace_id": workspace_id})
                     debug_print(f"Error processing documents for public workspace {workspace_id}: {e}")
             
             # Send notification if anything was deleted
@@ -407,13 +481,14 @@ def process_public_retention():
         return results
         
     except Exception as e:
+        log_event("process_public_retention_error", {"error": str(e)})
         debug_print(f"Error in process_public_retention: {e}")
         return results
 
 
 def delete_aged_conversations(retention_days, workspace_type='personal', user_id=None, group_id=None, public_workspace_id=None):
     """
-    Delete conversations that exceed the retention period based on last_activity_at.
+    Delete conversations that exceed the retention period based on last_updated.
     
     Args:
         retention_days (int): Number of days to retain conversations
@@ -447,11 +522,16 @@ def delete_aged_conversations(retention_days, workspace_type='personal', user_id
     cutoff_iso = cutoff_date.isoformat()
     
     # Query for aged conversations
+    # ONLY delete conversations that have a valid last_updated that is older than the cutoff
+    # Conversations with null/undefined last_updated should be SKIPPED (not deleted)
+    # This prevents accidentally deleting new conversations that haven't had their timestamp set
     query = f"""
-        SELECT c.id, c.title, c.last_activity_at, c.{partition_field}
+        SELECT c.id, c.title, c.last_updated, c.{partition_field}
         FROM c
         WHERE c.{partition_field} = @partition_value
-        AND (c.last_activity_at < @cutoff_date OR IS_NULL(c.last_activity_at))
+        AND IS_DEFINED(c.last_updated) 
+        AND NOT IS_NULL(c.last_updated)
+        AND c.last_updated < @cutoff_date
     """
     
     parameters = [
@@ -459,24 +539,43 @@ def delete_aged_conversations(retention_days, workspace_type='personal', user_id
         {"name": "@cutoff_date", "value": cutoff_iso}
     ]
     
-    aged_conversations = list(container.query_items(
-        query=query,
-        parameters=parameters,
-        enable_cross_partition_query=True
-    ))
+    debug_print(f"Querying aged conversations: workspace_type={workspace_type}, partition_field={partition_field}, partition_value={partition_value}, cutoff_date={cutoff_iso}, retention_days={retention_days}")
+    
+    try:
+        aged_conversations = list(container.query_items(
+            query=query,
+            parameters=parameters,
+            enable_cross_partition_query=True
+        ))
+        debug_print(f"Found {len(aged_conversations)} aged conversations for {workspace_type} workspace")
+    except Exception as query_error:
+        log_event("delete_aged_conversations_query_error", {"error": str(query_error), "workspace_type": workspace_type, "partition_value": partition_value})
+        debug_print(f"Error querying aged conversations for {workspace_type} (partition_value={partition_value}): {query_error}")
+        return {'count': 0, 'details': []}
     
     deleted_details = []
     
     for conv in aged_conversations:
-        conversation_id = conv.get('id')
-        conversation_title = conv.get('title', 'Untitled')
-        
         try:
+            conversation_id = conv.get('id')
+            conversation_title = conv.get('title', 'Untitled')
+            
             # Read full conversation for archiving/logging
-            conversation_item = container.read_item(
-                item=conversation_id,
-                partition_key=conversation_id
-            )
+            try:
+                conversation_item = container.read_item(
+                    item=conversation_id,
+                    partition_key=conversation_id
+                )
+            except CosmosResourceNotFoundError:
+                # Conversation was already deleted (race condition) - this is fine, skip to next
+                debug_print(f"Conversation {conversation_id} already deleted (not found during read), skipping")
+                deleted_details.append({
+                    'id': conversation_id,
+                    'title': conversation_title,
+                    'last_updated': conv.get('last_updated'),
+                    'already_deleted': True
+                })
+                continue
             
             # Archive if enabled
             if archiving_enabled:
@@ -521,7 +620,11 @@ def delete_aged_conversations(retention_days, workspace_type='personal', user_id
                     archived_msg["archived_by_retention_policy"] = True
                     cosmos_archived_messages_container.upsert_item(archived_msg)
                 
-                messages_container.delete_item(msg['id'], partition_key=conversation_id)
+                try:
+                    messages_container.delete_item(msg['id'], partition_key=conversation_id)
+                except CosmosResourceNotFoundError:
+                    # Message was already deleted - this is fine, continue
+                    debug_print(f"Message {msg['id']} already deleted (not found), skipping")
             
             # Log deletion
             log_conversation_deletion(
@@ -535,25 +638,31 @@ def delete_aged_conversations(retention_days, workspace_type='personal', user_id
                 is_bulk_operation=True,
                 group_id=conversation_item.get('group_id'),
                 public_workspace_id=conversation_item.get('public_workspace_id'),
-                deletion_reason='retention_policy'
+                additional_context={'deletion_reason': 'retention_policy'}
             )
             
             # Delete conversation
-            container.delete_item(
-                item=conversation_id,
-                partition_key=conversation_id
-            )
+            try:
+                container.delete_item(
+                    item=conversation_id,
+                    partition_key=conversation_id
+                )
+            except CosmosResourceNotFoundError:
+                # Conversation was already deleted after we read it (race condition) - this is fine
+                debug_print(f"Conversation {conversation_id} already deleted (not found during delete)")
             
             deleted_details.append({
                 'id': conversation_id,
                 'title': conversation_title,
-                'last_activity_at': conv.get('last_activity_at')
+                'last_updated': conv.get('last_updated')
             })
             
             debug_print(f"Deleted conversation {conversation_id} ({conversation_title}) due to retention policy")
             
         except Exception as e:
-            debug_print(f"Error deleting conversation {conversation_id}: {e}")
+            conv_id = conv.get('id', 'unknown') if conv else 'unknown'
+            log_event("delete_aged_conversations_deletion_error", {"error": str(e), "conversation_id": conv_id, "workspace_type": workspace_type})
+            debug_print(f"Error deleting conversation {conv_id}: {e}")
     
     return {
         'count': len(deleted_details),
@@ -593,15 +702,18 @@ def delete_aged_documents(retention_days, workspace_type='personal', user_id=Non
         deletion_user_id = user_id
     
     # Calculate cutoff date
+    # Documents use format like '2026-01-08T21:49:15Z' so we match that format
     cutoff_date = datetime.now(timezone.utc) - timedelta(days=retention_days)
-    cutoff_iso = cutoff_date.isoformat()
+    cutoff_iso = cutoff_date.strftime('%Y-%m-%dT%H:%M:%SZ')
     
     # Query for aged documents
+    # Documents use 'last_updated' field (not 'last_activity_at' like conversations)
+    # Use simple date comparison - documents always have last_updated field
     query = f"""
-        SELECT c.id, c.file_name, c.title, c.last_activity_at, c.{partition_field}, c.user_id
+        SELECT c.id, c.file_name, c.title, c.last_updated, c.user_id
         FROM c
         WHERE c.{partition_field} = @partition_value
-        AND (c.last_activity_at < @cutoff_date OR IS_NULL(c.last_activity_at))
+        AND c.last_updated < @cutoff_date
     """
     
     parameters = [
@@ -609,38 +721,70 @@ def delete_aged_documents(retention_days, workspace_type='personal', user_id=Non
         {"name": "@cutoff_date", "value": cutoff_iso}
     ]
     
-    aged_documents = list(container.query_items(
-        query=query,
-        parameters=parameters,
-        enable_cross_partition_query=True
-    ))
+    debug_print(f"Querying aged documents: workspace_type={workspace_type}, partition_field={partition_field}, partition_value={partition_value}, cutoff_date={cutoff_iso}, retention_days={retention_days}")
+    
+    try:
+        aged_documents = list(container.query_items(
+            query=query,
+            parameters=parameters,
+            enable_cross_partition_query=True
+        ))
+        debug_print(f"Found {len(aged_documents)} aged documents for {workspace_type} workspace")
+    except Exception as query_error:
+        log_event("delete_aged_documents_query_error", {"error": str(query_error), "workspace_type": workspace_type, "partition_value": partition_value})
+        debug_print(f"Error querying aged documents for {workspace_type} (partition_value={partition_value}): {query_error}")
+        return {'count': 0, 'details': []}
     
     deleted_details = []
     
     for doc in aged_documents:
-        document_id = doc.get('id')
-        file_name = doc.get('file_name', 'Unknown')
-        title = doc.get('title', file_name)
-        doc_user_id = doc.get('user_id') or deletion_user_id
-        
         try:
+            document_id = doc.get('id')
+            file_name = doc.get('file_name', 'Unknown')
+            title = doc.get('title', file_name)
+            doc_user_id = doc.get('user_id') or deletion_user_id
+            
             # Delete document chunks from search index
-            delete_document_chunks(document_id, group_id, public_workspace_id)
+            try:
+                delete_document_chunks(document_id, group_id, public_workspace_id)
+            except CosmosResourceNotFoundError:
+                # Document chunks already deleted - this is fine
+                debug_print(f"Document chunks for {document_id} already deleted (not found)")
+            except Exception as chunk_error:
+                # Log chunk deletion errors but continue with document deletion
+                debug_print(f"Error deleting chunks for document {document_id}: {chunk_error}")
             
             # Delete document from Cosmos DB and blob storage
-            delete_document(doc_user_id, document_id, group_id, public_workspace_id)
+            try:
+                delete_document(doc_user_id, document_id, group_id, public_workspace_id)
+            except CosmosResourceNotFoundError:
+                # Document was already deleted (race condition) - this is fine
+                debug_print(f"Document {document_id} already deleted (not found)")
             
             deleted_details.append({
                 'id': document_id,
                 'file_name': file_name,
                 'title': title,
-                'last_activity_at': doc.get('last_activity_at')
+                'last_updated': doc.get('last_updated')
             })
             
             debug_print(f"Deleted document {document_id} ({file_name}) due to retention policy")
             
+        except CosmosResourceNotFoundError:
+            # Document was already deleted - count as success
+            doc_id = doc.get('id', 'unknown') if doc else 'unknown'
+            debug_print(f"Document {doc_id} already deleted (not found)")
+            deleted_details.append({
+                'id': doc_id,
+                'file_name': doc.get('file_name', 'Unknown'),
+                'title': doc.get('title', doc.get('file_name', 'Unknown')),
+                'last_updated': doc.get('last_updated'),
+                'already_deleted': True
+            })
         except Exception as e:
-            debug_print(f"Error deleting document {document_id}: {e}")
+            doc_id = doc.get('id', 'unknown') if doc else 'unknown'
+            log_event("delete_aged_documents_deletion_error", {"error": str(e), "document_id": doc_id, "workspace_type": workspace_type})
+            debug_print(f"Error deleting document {doc_id}: {e}")
     
     return {
         'count': len(deleted_details),
@@ -701,7 +845,7 @@ def send_retention_notification(workspace_id, deletion_summary, workspace_type):
             notification_type='system_announcement',
             title='Retention Policy Cleanup',
             message=full_message,
-            link_url='/chat',
+            link_url='/chats',
             metadata={
                 'conversations_deleted': conversations_deleted,
                 'documents_deleted': documents_deleted,
@@ -714,7 +858,7 @@ def send_retention_notification(workspace_id, deletion_summary, workspace_type):
             notification_type='system_announcement',
             title='Retention Policy Cleanup',
             message=full_message,
-            link_url='/chat',
+            link_url='/chats',
             metadata={
                 'conversations_deleted': conversations_deleted,
                 'documents_deleted': documents_deleted,
@@ -727,7 +871,7 @@ def send_retention_notification(workspace_id, deletion_summary, workspace_type):
             notification_type='system_announcement',
             title='Retention Policy Cleanup',
             message=full_message,
-            link_url='/chat',
+            link_url='/chats',
             metadata={
                 'conversations_deleted': conversations_deleted,
                 'documents_deleted': documents_deleted,

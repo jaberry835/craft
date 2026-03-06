@@ -1,8 +1,8 @@
 // chat-onload.js
 
-import { loadConversations } from "./chat-conversations.js";
+import { loadConversations, selectConversation, ensureConversationPresent } from "./chat-conversations.js";
 // Import handleDocumentSelectChange
-import { loadAllDocs, populateDocumentSelectScope, handleDocumentSelectChange } from "./chat-documents.js";
+import { loadAllDocs, populateDocumentSelectScope, handleDocumentSelectChange, loadTagsForScope, filterDocumentsBySelectedTags, setScopeFromUrlParam } from "./chat-documents.js";
 import { getUrlParameter } from "./chat-utils.js"; // Assuming getUrlParameter is in chat-utils.js now
 import { loadUserPrompts, loadGroupPrompts, initializePromptInteractions } from "./chat-prompts.js";
 import { loadUserSettings } from "./chat-layout.js";
@@ -12,10 +12,11 @@ import { initializeStreamingToggle } from "./chat-streaming.js";
 import { initializeReasoningToggle } from "./chat-reasoning.js";
 import { initializeSpeechInput } from "./chat-speech-input.js";
 
-window.addEventListener('DOMContentLoaded', () => {
+window.addEventListener('DOMContentLoaded', async () => {
   console.log("DOM Content Loaded. Starting initializations."); // Log start
 
-  loadConversations(); // Load conversations immediately
+    // Load conversations immediately (awaitable so deep-link can run after)
+    await loadConversations();
 
   // Initialize the conversation info button
   initConversationInfoButton();
@@ -78,13 +79,13 @@ window.addEventListener('DOMContentLoaded', () => {
   }
 
   // Load documents, prompts, and user settings
-  Promise.all([
-      loadAllDocs(),
-      loadUserPrompts(),
-      loadGroupPrompts(),
-      loadUserSettings()
-  ])
-  .then(([docsResult, userPromptsResult, groupPromptsResult, userSettings]) => {
+  try {
+      const [docsResult, userPromptsResult, groupPromptsResult, userSettings] = await Promise.all([
+          loadAllDocs(),
+          loadUserPrompts(),
+          loadGroupPrompts(),
+          loadUserSettings()
+      ]);
       console.log("Initial data (Docs, Prompts, Settings) loaded successfully."); // Log success
       
       // Set the preferred model if available
@@ -101,9 +102,13 @@ window.addEventListener('DOMContentLoaded', () => {
       const localSearchDocsParam = getUrlParameter("search_documents") === "true";
       const localDocScopeParam = getUrlParameter("doc_scope") || "";
       const localDocumentIdParam = getUrlParameter("document_id") || "";
+      const localDocumentIdsParam = getUrlParameter("document_ids") || "";
+      const tagsParam = getUrlParameter("tags") || "";
       const workspaceParam = getUrlParameter("workspace") || "";
       const openSearchParam = getUrlParameter("openSearch") === "1";
       const scopeParam = getUrlParameter("scope") || "";
+      const groupIdParam = getUrlParameter("group_id") || "";
+      const workspaceIdParam = getUrlParameter("workspace_id") || "";
       const localSearchDocsBtn = document.getElementById("search-documents-btn");
       const localDocScopeSel = document.getElementById("doc-scope-select");
       const localDocSelectEl = document.getElementById("document-select");
@@ -133,11 +138,12 @@ window.addEventListener('DOMContentLoaded', () => {
                   searchDocumentsContainer.style.display = "block";
                   
                   // Set scope to public
-                  localDocScopeSel.value = "public";
-                  
+                  setScopeFromUrlParam("public", { workspaceId: workspaceParam });
+
                   // Populate documents for public scope
                   populateDocumentSelectScope();
-                  
+                  loadTagsForScope();
+
                   // Trigger change to update UI
                   handleDocumentSelectChange();
                   
@@ -160,32 +166,112 @@ window.addEventListener('DOMContentLoaded', () => {
           localSearchDocsBtn.classList.add("active");
           searchDocumentsContainer.style.display = "block";
           if (localDocScopeParam) {
-              localDocScopeSel.value = localDocScopeParam;
+              setScopeFromUrlParam(localDocScopeParam, { groupId: groupIdParam, workspaceId: workspaceIdParam });
           }
           populateDocumentSelectScope(); // Populate based on scope (might be default or from URL)
 
-          if (localDocumentIdParam) {
-               // Wait a tiny moment for populateDocumentSelectScope potentially async operations
-               // This delay is necessary to ensure the document options are fully populated
-               setTimeout(() => {
-                   if ([...localDocSelectEl.options].some(option => option.value === localDocumentIdParam)) {
-                       localDocSelectEl.value = localDocumentIdParam;
-                   } else {
-                       console.warn(`Document ID "${localDocumentIdParam}" not found for scope "${localDocScopeSel.value}".`);
-                   }
-                   // Ensure classification updates after setting document
-                   handleDocumentSelectChange();
-               }, 100); // Small delay to ensure options are populated
+          // Pre-select tags from URL parameter
+          if (tagsParam) {
+              await loadTagsForScope();
+              const chatTagsFilter = document.getElementById("chat-tags-filter");
+              const tagsDropdownItems = document.getElementById("tags-dropdown-items");
+              const tagsDropdownButton = document.getElementById("tags-dropdown-button");
+              if (chatTagsFilter) {
+                  const tagValues = tagsParam.split(",").map(t => t.trim());
+                  // Select matching options in hidden select
+                  Array.from(chatTagsFilter.options).forEach(opt => {
+                      if (tagValues.includes(opt.value)) {
+                          opt.selected = true;
+                      }
+                  });
+                  // Also check matching checkboxes in custom dropdown
+                  if (tagsDropdownItems) {
+                      tagsDropdownItems.querySelectorAll('.dropdown-item').forEach(item => {
+                          const tagVal = item.getAttribute('data-tag-value');
+                          const cb = item.querySelector('.tag-checkbox');
+                          if (cb && tagVal && tagValues.includes(tagVal)) {
+                              cb.checked = true;
+                          }
+                      });
+                  }
+                  // Update button text
+                  if (tagsDropdownButton) {
+                      const textEl = tagsDropdownButton.querySelector('.selected-tags-text');
+                      if (textEl) {
+                          if (tagValues.length === 1) {
+                              textEl.textContent = tagValues[0];
+                          } else {
+                              textEl.textContent = `${tagValues.length} tags selected`;
+                          }
+                      }
+                  }
+                  filterDocumentsBySelectedTags();
+              }
           } else {
-              // If no specific doc ID, still might need to trigger change if scope changed
+              // Load tags for current scope even without URL tag param
+              await loadTagsForScope();
+          }
+
+          // Pre-select documents from URL parameters
+          const docIdsToSelect = localDocumentIdsParam
+              ? localDocumentIdsParam.split(",").map(id => id.trim()).filter(Boolean)
+              : localDocumentIdParam
+                  ? [localDocumentIdParam]
+                  : [];
+
+          if (docIdsToSelect.length > 0) {
+               // Small delay to ensure document options are fully populated
+               setTimeout(() => {
+                   const docDropdownItems = document.getElementById("document-dropdown-items");
+                   const docDropdownButton = document.getElementById("document-dropdown-button");
+
+                   // Check matching checkboxes in custom dropdown
+                   if (docDropdownItems) {
+                       docDropdownItems.querySelectorAll('.dropdown-item').forEach(item => {
+                           const docId = item.getAttribute('data-document-id');
+                           const cb = item.querySelector('.doc-checkbox');
+                           if (cb && docId && docIdsToSelect.includes(docId)) {
+                               cb.checked = true;
+                           }
+                       });
+                   }
+
+                   // Select matching options in hidden select
+                   Array.from(localDocSelectEl.options).forEach(opt => {
+                       if (docIdsToSelect.includes(opt.value)) {
+                           opt.selected = true;
+                       }
+                   });
+
+                   // Update dropdown button text
+                   if (docDropdownButton) {
+                       const textEl = docDropdownButton.querySelector('.selected-document-text');
+                       if (textEl) {
+                           if (docIdsToSelect.length === 1) {
+                               // Find the label from the dropdown item
+                               const matchItem = docDropdownItems
+                                   ? docDropdownItems.querySelector(`.dropdown-item[data-document-id="${docIdsToSelect[0]}"] span`)
+                                   : null;
+                               textEl.textContent = matchItem ? matchItem.textContent : "1 document selected";
+                           } else {
+                               textEl.textContent = `${docIdsToSelect.length} documents selected`;
+                           }
+                       }
+                   }
+
+                   handleDocumentSelectChange();
+               }, 100);
+          } else {
+              // If no specific doc IDs, still might need to trigger change if scope changed
                handleDocumentSelectChange();
           }
       } else if (openSearchParam && scopeParam === "public" && localSearchDocsBtn && localDocScopeSel && searchDocumentsContainer) {
           // Handle openSearch=1&scope=public from public directory chat button
           localSearchDocsBtn.classList.add("active");
           searchDocumentsContainer.style.display = "block";
-          localDocScopeSel.value = "public";
+          setScopeFromUrlParam("public");
           populateDocumentSelectScope();
+          loadTagsForScope();
           handleDocumentSelectChange();
       } else {
           // If not loading from URL params, maybe still populate default scope?
@@ -199,13 +285,24 @@ window.addEventListener('DOMContentLoaded', () => {
       initializePromptInteractions();
 
 
+      // Deep-link: conversationId query param
+      const conversationId = getUrlParameter("conversationId") || getUrlParameter("conversation_id");
+      if (conversationId) {
+          try {
+              await ensureConversationPresent(conversationId);
+              await selectConversation(conversationId);
+          } catch (err) {
+              console.error('Failed to load conversation from URL param:', err);
+              showToast('Could not open that conversation.', 'danger');
+          }
+      }
+
       console.log("All initializations complete."); // Log end
 
-  })
-  .catch((err) => {
+  } catch (err) {
       console.error("Error during initial data loading or setup:", err);
       // Maybe try to initialize prompts even if doc loading fails? Depends on requirements.
       // console.log("Attempting to initialize prompts despite data load error...");
       // initializePromptInteractions();
-  });
+  }
 });

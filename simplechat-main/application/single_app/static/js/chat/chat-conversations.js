@@ -5,11 +5,13 @@ import { loadMessages } from "./chat-messages.js";
 import { isColorLight, toBoolean } from "./chat-utils.js";
 import { loadSidebarConversations, setActiveConversation as setSidebarActiveConversation } from "./chat-sidebar-conversations.js";
 import { toggleConversationInfoButton } from "./chat-conversation-info-button.js";
+import { restoreScopeLockState, resetScopeLock } from "./chat-documents.js";
 
 const newConversationBtn = document.getElementById("new-conversation-btn");
 const deleteSelectedBtn = document.getElementById("delete-selected-btn");
 const pinSelectedBtn = document.getElementById("pin-selected-btn");
 const hideSelectedBtn = document.getElementById("hide-selected-btn");
+const exportSelectedBtn = document.getElementById("export-selected-btn");
 const conversationsList = document.getElementById("conversations-list");
 const currentConversationTitleEl = document.getElementById("current-conversation-title");
 const currentConversationClassificationsEl = document.getElementById("current-conversation-classifications");
@@ -95,6 +97,9 @@ function enterSelectionMode() {
   if (hideSelectedBtn) {
     hideSelectedBtn.style.display = "block";
   }
+  if (exportSelectedBtn) {
+    exportSelectedBtn.style.display = "block";
+  }
   
   // Only reload conversations if we're transitioning from inactive to active
   // This shows hidden conversations in selection mode
@@ -127,6 +132,9 @@ function exitSelectionMode() {
   }
   if (hideSelectedBtn) {
     hideSelectedBtn.style.display = "none";
+  }
+  if (exportSelectedBtn) {
+    exportSelectedBtn.style.display = "none";
   }
   
   // Clear any selections
@@ -242,7 +250,7 @@ export function loadConversations() {
   isLoadingConversations = true;
   conversationsList.innerHTML = '<div class="text-center p-3 text-muted">Loading conversations...</div>'; // Loading state
 
-  fetch("/api/get_conversations")
+  return fetch("/api/get_conversations")
     .then(response => response.ok ? response.json() : response.json().then(err => Promise.reject(err)))
     .then(data => {
       conversationsList.innerHTML = ""; // Clear loading state
@@ -308,6 +316,48 @@ export function loadConversations() {
       conversationsList.innerHTML = `<div class="text-center p-3 text-danger">Error loading conversations: ${error.error || 'Unknown error'}</div>`;
       isLoadingConversations = false; // Reset flag on error too
     });
+}
+
+// Ensure a conversation exists in the list; fetch metadata if missing
+export async function ensureConversationPresent(conversationId) {
+  if (!conversationId) throw new Error('No conversationId provided');
+
+  // Already in list
+  const existing = document.querySelector(`.conversation-item[data-conversation-id="${conversationId}"]`);
+  if (existing) return existing;
+
+  // Fetch metadata to validate ownership and get details
+  const res = await fetch(`/api/conversations/${conversationId}/metadata`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Failed to load conversation ${conversationId}`);
+  }
+  const metadata = await res.json();
+
+  // Build a conversation object compatible with createConversationItem
+  const convo = {
+    id: conversationId,
+    title: metadata.title || 'Conversation',
+    last_updated: metadata.last_updated || new Date().toISOString(),
+    classification: metadata.classification || [],
+    context: metadata.context || [],
+    chat_type: metadata.chat_type || null,
+    is_pinned: metadata.is_pinned || false,
+    is_hidden: metadata.is_hidden || false,
+  };
+
+  // Keep allConversations in sync
+  allConversations = [convo, ...allConversations.filter(c => c.id !== conversationId)];
+
+  const convoItem = createConversationItem(convo);
+  conversationsList.prepend(convoItem);
+
+  // Refresh sidebar so it appears there too
+  if (window.chatSidebarConversations && window.chatSidebarConversations.loadSidebarConversations) {
+    window.chatSidebarConversations.loadSidebarConversations();
+  }
+
+  return convoItem;
 }
 
 export function createConversationItem(convo) {
@@ -460,6 +510,14 @@ export function createConversationItem(convo) {
   selectA.href = "#";
   selectA.innerHTML = '<i class="bi bi-check-square me-2"></i>Select';
   selectLi.appendChild(selectA);
+  
+  // Add Export option
+  const exportLi = document.createElement("li");
+  const exportA = document.createElement("a");
+  exportA.classList.add("dropdown-item", "export-btn");
+  exportA.href = "#";
+  exportA.innerHTML = '<i class="bi bi-download me-2"></i>Export';
+  exportLi.appendChild(exportA);
 
   const editLi = document.createElement("li");
   const editA = document.createElement("a");
@@ -479,6 +537,8 @@ export function createConversationItem(convo) {
   dropdownMenu.appendChild(pinLi);
   dropdownMenu.appendChild(hideLi);
   dropdownMenu.appendChild(selectLi);
+  dropdownMenu.appendChild(exportLi);
+
   dropdownMenu.appendChild(editLi);
   dropdownMenu.appendChild(deleteLi);
   rightDiv.appendChild(dropdownBtn);
@@ -526,6 +586,16 @@ export function createConversationItem(convo) {
     event.stopPropagation();
     closeDropdownMenu(dropdownBtn);
     enterSelectionMode();
+  });
+
+  // Add event listener for the Export button
+  exportA.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    closeDropdownMenu(dropdownBtn);
+    if (window.chatExport && window.chatExport.openExportWizard) {
+      window.chatExport.openExportWizard([convo.id], true);
+    }
   });
 
   // Add event listener for the Pin button
@@ -745,6 +815,7 @@ export function addConversationToList(conversationId, title = null, classificati
 // Select a conversation, load messages, update UI
 export async function selectConversation(conversationId) {
   currentConversationId = conversationId;
+  window.currentConversationId = conversationId;
 
   const convoItem = document.querySelector(`.conversation-item[data-conversation-id="${conversationId}"]`);
   if (!convoItem) {
@@ -849,6 +920,11 @@ export async function selectConversation(conversationId) {
           console.log(`selectConversation: No context - model-only conversation (no badges)`);
         }
       }
+
+      // Restore scope lock state from metadata
+      const metaScopeLocked = metadata.scope_locked !== undefined ? metadata.scope_locked : null;
+      const metaLockedContexts = metadata.locked_contexts || [];
+      restoreScopeLockState(metaScopeLocked, metaLockedContexts);
     }
   } catch (error) {
     console.warn('Failed to fetch conversation metadata:', error);
@@ -921,6 +997,8 @@ export async function selectConversation(conversationId) {
   if (setSidebarActiveConversation) {
     setSidebarActiveConversation(conversationId);
   }
+
+  updateConversationUrl(conversationId);
 
   // Clear any "edit mode" state if switching conversations
   if (currentlyEditingId && currentlyEditingId !== conversationId) {
@@ -1018,6 +1096,8 @@ export async function createNewConversation(callback) {
     }
 
     currentConversationId = data.conversation_id;
+    // Reset scope lock for new conversation
+    resetScopeLock();
     // Add to list (pass empty classifications for new convo)
     addConversationToList(data.conversation_id, data.title /* Use title from API if provided */, []);
     
@@ -1030,6 +1110,11 @@ export async function createNewConversation(callback) {
     if (titleEl) {
       titleEl.textContent = data.title || "New Conversation";
     }
+    // Clear classification/tag badges from previous conversation
+    if (currentConversationClassificationsEl) {
+      currentConversationClassificationsEl.innerHTML = "";
+    }
+    updateConversationUrl(data.conversation_id);
     console.log('[createNewConversation] Created conversation without reload:', data.conversation_id);
 
     // Execute callback if provided (e.g., to send the first message)
@@ -1366,6 +1451,17 @@ if (hideSelectedBtn) {
   hideSelectedBtn.addEventListener("click", bulkHideConversations);
 }
 
+if (exportSelectedBtn) {
+  exportSelectedBtn.addEventListener("click", () => {
+    if (window.chatExport && window.chatExport.openExportWizard) {
+      const selectedIds = Array.from(selectedConversations);
+      if (selectedIds.length > 0) {
+        window.chatExport.openExportWizard(selectedIds, false);
+      }
+    }
+  });
+}
+
 // Helper function to set show hidden conversations state and return a promise
 export function setShowHiddenConversations(value) {
   showHiddenConversations = value;
@@ -1566,5 +1662,17 @@ function addChatTypeBadges(convoItem, classificationsEl) {
   } else {
     // If chatType is unknown/null or model-only, don't add any workspace badges
     console.log(`addChatTypeBadges: No badges added for chatType="${chatType}" (likely model-only conversation)`);
+  }
+}
+
+function updateConversationUrl(conversationId) {
+  if (!conversationId) return;
+
+  try {
+    const url = new URL(window.location.href);
+    url.searchParams.set('conversationId', conversationId);
+    window.history.replaceState({}, '', url.toString());
+  } catch (error) {
+    console.warn('Failed to update conversation URL:', error);
   }
 }

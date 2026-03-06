@@ -1575,19 +1575,155 @@ function setupToggles() {
     }
 
     const enableWebSearch = document.getElementById('enable_web_search');
-    if (enableWebSearch) {
+    const webSearchFoundrySettings = document.getElementById('web_search_foundry_settings');
+    const webSearchConsentInput = document.getElementById('web_search_consent_accepted');
+    const webSearchConsentModalEl = document.getElementById('web-search-consent-modal');
+    const webSearchConsentAcceptBtn = document.getElementById('web-search-consent-accept');
+    const webSearchConsentDeclineBtn = document.getElementById('web-search-consent-decline');
+    let webSearchConsentModal = null;
+    const toggleVisibility = (element, isVisible) => {
+        if (!element) {
+            return;
+        }
+        element.classList.toggle('d-none', !isVisible);
+    };
+    if (enableWebSearch && webSearchFoundrySettings) {
+        const setConsentAccepted = (value) => {
+            if (webSearchConsentInput) {
+                webSearchConsentInput.value = value ? 'true' : 'false';
+            }
+        };
+
+        const showConsentModal = () => {
+            if (!webSearchConsentModalEl) {
+                showToast('Consent modal could not be loaded.', 'warning');
+                return;
+            }
+
+            if (!webSearchConsentModal) {
+                webSearchConsentModal = new bootstrap.Modal(webSearchConsentModalEl, {
+                    backdrop: 'static',
+                    keyboard: false
+                });
+            }
+
+            webSearchConsentModal.show();
+        };
+
+        const hasConsent = () => webSearchConsentInput?.value === 'true';
+
+        if (enableWebSearch.checked && !hasConsent()) {
+            enableWebSearch.checked = false;
+        }
+        toggleVisibility(webSearchFoundrySettings, enableWebSearch.checked && hasConsent());
+
         enableWebSearch.addEventListener('change', function () {
-            document.getElementById('web_search_settings').style.display = this.checked ? 'block' : 'none';
+            if (this.checked && !hasConsent()) {
+                this.checked = false;
+                toggleVisibility(webSearchFoundrySettings, false);
+                showConsentModal();
+                return;
+            }
+
+            toggleVisibility(webSearchFoundrySettings, this.checked);
+            markFormAsModified();
+        });
+
+        if (webSearchConsentAcceptBtn) {
+            webSearchConsentAcceptBtn.addEventListener('click', () => {
+                setConsentAccepted(true);
+                enableWebSearch.checked = true;
+                toggleVisibility(webSearchFoundrySettings, true);
+                markFormAsModified();
+                if (webSearchConsentModal) {
+                    webSearchConsentModal.hide();
+                }
+            });
+        }
+
+        if (webSearchConsentDeclineBtn) {
+            webSearchConsentDeclineBtn.addEventListener('click', () => {
+                setConsentAccepted(false);
+                enableWebSearch.checked = false;
+                toggleVisibility(webSearchFoundrySettings, false);
+                markFormAsModified();
+                if (webSearchConsentModal) {
+                    webSearchConsentModal.hide();
+                }
+            });
+        }
+    }
+
+    // Web Search User Notice toggle
+    const enableWebSearchUserNotice = document.getElementById('enable_web_search_user_notice');
+    const webSearchUserNoticeSettings = document.getElementById('web_search_user_notice_settings');
+    if (enableWebSearchUserNotice && webSearchUserNoticeSettings) {
+        enableWebSearchUserNotice.addEventListener('change', function() {
+            toggleVisibility(webSearchUserNoticeSettings, this.checked);
             markFormAsModified();
         });
     }
 
-    const enableWebSearchApim = document.getElementById('enable_web_search_apim');
-    if (enableWebSearchApim) {
-        enableWebSearchApim.addEventListener('change', function () {
-            document.getElementById('non_apim_web_search_settings').style.display = this.checked ? 'none' : 'block';
-            document.getElementById('apim_web_search_settings').style.display = this.checked ? 'block' : 'none';
+    const foundryAuthType = document.getElementById('web_search_foundry_auth_type');
+    const foundryMiType = document.getElementById('web_search_foundry_managed_identity_type');
+    const foundryCloud = document.getElementById('web_search_foundry_cloud');
+    const foundrySpFields = document.getElementById('web_search_foundry_service_principal_fields');
+    const foundryMiTypeContainer = document.getElementById('web_search_foundry_managed_identity_type_container');
+    const foundryMiClientIdContainer = document.getElementById('web_search_foundry_managed_identity_client_id_container');
+    const foundryCloudContainer = document.getElementById('web_search_foundry_cloud_container');
+    const foundryAuthorityContainer = document.getElementById('web_search_foundry_authority_container');
+
+    function updateFoundryAuthVisibility() {
+        const authType = foundryAuthType?.value || 'managed_identity';
+        const cloudValue = foundryCloud?.value || '';
+
+        toggleVisibility(foundrySpFields, authType === 'service_principal');
+        toggleVisibility(foundryCloudContainer, authType === 'service_principal');
+        toggleVisibility(
+            foundryAuthorityContainer,
+            authType === 'service_principal' && cloudValue === 'custom'
+        );
+        toggleVisibility(foundryMiTypeContainer, authType === 'managed_identity');
+        if (foundryMiClientIdContainer) {
+            const miType = foundryMiType?.value || 'system_assigned';
+            toggleVisibility(
+                foundryMiClientIdContainer,
+                authType === 'managed_identity' && miType === 'user_assigned'
+            );
+        }
+    }
+
+    if (foundryAuthType || foundryMiType || foundryCloud) {
+        updateFoundryAuthVisibility();
+    }
+
+    if (foundryMiType) {
+        foundryMiType.addEventListener('change', () => {
+            updateFoundryAuthVisibility();
             markFormAsModified();
+        });
+    }
+
+    if (foundryCloud) {
+        foundryCloud.addEventListener('change', () => {
+            updateFoundryAuthVisibility();
+            markFormAsModified();
+        });
+    }
+
+    if (foundryAuthType) {
+        foundryAuthType.addEventListener('change', () => {
+            updateFoundryAuthVisibility();
+            markFormAsModified();
+        });
+    }
+
+    const toggleFoundrySecret = document.getElementById('toggle_web_search_foundry_client_secret');
+    const foundrySecretInput = document.getElementById('web_search_foundry_client_secret');
+    if (toggleFoundrySecret && foundrySecretInput) {
+        toggleFoundrySecret.addEventListener('click', () => {
+            foundrySecretInput.type = foundrySecretInput.type === 'password' ? 'text' : 'password';
+            toggleFoundrySecret.textContent = foundrySecretInput.type === 'password' ? 'Show' : 'Hide';
         });
     }
 
@@ -2615,8 +2751,34 @@ document.addEventListener('DOMContentLoaded', () => {
         return r.json();
       })
       .then(response => {
-        if (response.missingFields && response.missingFields.length > 0) {
+        if (response.autoFixed) {
+          // Fields were automatically fixed
+          console.log(`✅ Auto-fixed ${type} index: added ${response.fieldsAdded.length} field(s):`, response.fieldsAdded.join(', '));
+          if (warnDiv) {
+            warnDiv.className = 'alert alert-success';
+            missingSpan.textContent = `Automatically added ${response.fieldsAdded.length} field(s): ${response.fieldsAdded.join(', ')}`;
+            warnDiv.style.display = 'block';
+            if (fixBtn) fixBtn.style.display = 'none';
+            
+            // Hide success message after 5 seconds
+            setTimeout(() => {
+              warnDiv.style.display = 'none';
+            }, 5000);
+          }
+        } else if (response.autoFixFailed) {
+          // Auto-fix failed, show manual button
+          console.warn(`Auto-fix failed for ${type} index:`, response.error);
+          missingSpan.textContent = response.missingFields.join(', ') + ' (Auto-fix failed - please fix manually)';
+          warnDiv.className = 'alert alert-warning';
+          warnDiv.style.display = 'block';
+          if (fixBtn) {
+            fixBtn.textContent = `Fix ${type} Index Fields`;
+            fixBtn.style.display = 'inline-block';
+          }
+        } else if (response.missingFields && response.missingFields.length > 0) {
+          // Missing fields but auto-fix was disabled
           missingSpan.textContent = response.missingFields.join(', ');
+          warnDiv.className = 'alert alert-warning';
           warnDiv.style.display = 'block';
           if (fixBtn) {
             fixBtn.textContent = `Fix ${type} Index Fields`;

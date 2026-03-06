@@ -8,21 +8,24 @@ from semantic_kernel.connectors.ai.chat_completion_client_base import ChatComple
 from semantic_kernel_fact_memory_store import FactMemoryStore
 from semantic_kernel_loader import initialize_semantic_kernel
 from semantic_kernel_plugins.plugin_invocation_logger import get_plugin_logger
+from foundry_agent_runtime import FoundryAgentInvocationError, execute_foundry_agent
 import builtins
 import asyncio, types
+import ast
 import json
-from typing import Any, Dict, List
+import re
+from typing import Any, Dict, List, Mapping, Optional
 from config import *
 from flask import g
 from functions_authentication import *
 from functions_search import *
 from functions_settings import *
 from functions_agents import get_agent_id_by_name
-from functions_group import find_group_by_id
+from functions_group import find_group_by_id, get_user_role_in_group
 from functions_chat import *
 from functions_conversation_metadata import collect_conversation_metadata, update_conversation_with_metadata
 from functions_debug import debug_print
-from functions_activity_logging import log_chat_activity, log_conversation_creation
+from functions_activity_logging import log_chat_activity, log_conversation_creation, log_token_usage
 from flask import current_app
 from swagger_wrapper import swagger_route, get_auth_security
 
@@ -55,9 +58,15 @@ def register_route_backend_chats(app):
             user_message = data.get('message', '')
             conversation_id = data.get('conversation_id')
             hybrid_search_enabled = data.get('hybrid_search')
+            web_search_enabled = data.get('web_search_enabled')
             selected_document_id = data.get('selected_document_id')
+            selected_document_ids = data.get('selected_document_ids', [])
+            # Backwards compat: if no multi-select but single ID is set, wrap in list
+            if not selected_document_ids and selected_document_id:
+                selected_document_ids = [selected_document_id]
             image_gen_enabled = data.get('image_generation')
             document_scope = data.get('doc_scope')
+            tags_filter = data.get('tags', [])  # Extract tags filter
             reload_messages_required = False
 
             def parse_json_string(candidate: str) -> Any:
@@ -119,6 +128,19 @@ def register_route_backend_chats(app):
                     return dict_requires_reload(result)
                 return False
             active_group_id = data.get('active_group_id')
+            active_group_ids = data.get('active_group_ids', [])
+            # Backwards compat: if new list not provided, wrap single ID
+            if not active_group_ids and active_group_id:
+                active_group_ids = [active_group_id]
+            # Permission validation: only keep groups user is a member of
+            validated_group_ids = []
+            for gid in active_group_ids:
+                g_doc = find_group_by_id(gid)
+                if g_doc and get_user_role_in_group(g_doc, user_id):
+                    validated_group_ids.append(gid)
+            active_group_ids = validated_group_ids
+            # Keep single ID for backwards compat in metadata/context
+            active_group_id = active_group_ids[0] if active_group_ids else data.get('active_group_id')
             active_public_workspace_id = data.get('active_public_workspace_id')  # Extract active public workspace ID
             frontend_gpt_model = data.get('model_deployment')
             top_n_results = data.get('top_n')  # Extract top_n parameter from request
@@ -153,6 +175,7 @@ def register_route_backend_chats(app):
             search_query = user_message # <--- ADD THIS LINE (Initialize search_query)
             hybrid_citations_list = [] # <--- ADD THIS LINE (Initialize hybrid list)
             agent_citations_list = [] # <--- ADD THIS LINE (Initialize agent citations list)
+            web_search_citations_list = []
             system_messages_for_augmentation = [] # Collect system messages from search
             search_results = []
             selected_agent = None  # Initialize selected_agent early to prevent NameError
@@ -172,6 +195,8 @@ def register_route_backend_chats(app):
             # Convert toggles from string -> bool if needed
             if isinstance(hybrid_search_enabled, str):
                 hybrid_search_enabled = hybrid_search_enabled.lower() == 'true'
+            if isinstance(web_search_enabled, str):
+                web_search_enabled = web_search_enabled.lower() == 'true'
             if isinstance(image_gen_enabled, str):
                 image_gen_enabled = image_gen_enabled.lower() == 'true'
 
@@ -262,7 +287,7 @@ def register_route_backend_chats(app):
                 debug_print(f"Error initializing GPT client/model: {e}")
                 # Handle error appropriately - maybe return 500 or default behavior
                 return jsonify({'error': f'Failed to initialize AI model: {str(e)}'}), 500
-
+        # region 1 - Load or Create Conversation
             # ---------------------------------------------------------------------
             # 1) Load or create conversation
             # ---------------------------------------------------------------------
@@ -356,7 +381,7 @@ def register_route_backend_chats(app):
                 elif document_scope == 'public':
                     actual_chat_type = 'public'
                 debug_print(f"New conversation - using legacy logic: {actual_chat_type}")
-
+        # region 2 - Append User Message
             # ---------------------------------------------------------------------
             # 2) Append the user message to conversation immediately (or use existing for retry)
             # ---------------------------------------------------------------------
@@ -406,7 +431,8 @@ def register_route_backend_chats(app):
                 # Button states and selections
                 user_metadata['button_states'] = {
                     'image_generation': image_gen_enabled,
-                    'document_search': hybrid_search_enabled
+                    'document_search': hybrid_search_enabled,
+                    'web_search': bool(web_search_enabled)
                 }
                 
                 # Document search scope and selections
@@ -434,7 +460,7 @@ def register_route_backend_chats(app):
                         doc_results = list(cosmos_container.query_items(
                             query=doc_query, parameters=doc_params, enable_cross_partition_query=True
                         ))
-                        if doc_results:
+                        if doc_results and 'workspace_search' in user_metadata:
                             doc_info = doc_results[0]
                             user_metadata['workspace_search']['document_name'] = doc_info.get('title') or doc_info.get('file_name')
                             user_metadata['workspace_search']['document_filename'] = doc_info.get('file_name')
@@ -457,18 +483,22 @@ def register_route_backend_chats(app):
                             
                             if group_doc.get('name'):
                                 group_name = group_doc.get('name')
-                                user_metadata['workspace_search']['group_name'] = group_name
-                                debug_print(f"Workspace search - set group_name to: {group_name}")
+                                if 'workspace_search' in user_metadata:
+                                    user_metadata['workspace_search']['group_name'] = group_name
+                                    debug_print(f"Workspace search - set group_name to: {group_name}")
                             else:
                                 debug_print(f"Workspace search - no name for group: {active_group_id}")
-                                user_metadata['workspace_search']['group_name'] = None
+                                if 'workspace_search' in user_metadata:
+                                    user_metadata['workspace_search']['group_name'] = None
                         else:
                             debug_print(f"Workspace search - no group found for id: {active_group_id}")
-                            user_metadata['workspace_search']['group_name'] = None
+                            if 'workspace_search' in user_metadata:
+                                user_metadata['workspace_search']['group_name'] = None
                             
                     except Exception as e:
                         debug_print(f"Error retrieving group details: {e}")
-                        user_metadata['workspace_search']['group_name'] = None
+                        if 'workspace_search' in user_metadata:
+                            user_metadata['workspace_search']['group_name'] = None
                         import traceback
                         traceback.print_exc()
                 
@@ -484,8 +514,11 @@ def register_route_backend_chats(app):
                     except Exception as e:
                         debug_print(f"Error checking public workspace status: {e}")
                     
-                    user_metadata['workspace_search']['active_public_workspace_id'] = active_public_workspace_id
-                else:
+                    if 'workspace_search' in user_metadata:
+                        user_metadata['workspace_search']['active_public_workspace_id'] = active_public_workspace_id
+                
+                # Ensure workspace_search key always exists for consistency
+                if 'workspace_search' not in user_metadata:
                     user_metadata['workspace_search'] = {
                         'search_enabled': False
                     }
@@ -635,7 +668,7 @@ def register_route_backend_chats(app):
 
                 conversation_item['last_updated'] = datetime.utcnow().isoformat()
                 cosmos_conversations_container.upsert_item(conversation_item) # Update timestamp and potentially title
-
+        # region 3 - Content Safety
             # ---------------------------------------------------------------------
             # 3) Check Content Safety (but DO NOT return 403).
             #    If blocked, add a "safety" role message & skip GPT.
@@ -741,7 +774,7 @@ def register_route_backend_chats(app):
                     debug_print(f"[Content Safety Error] {e}")
                 except Exception as ex:
                     debug_print(f"[Content Safety] Unexpected error: {ex}")
-
+        # region 4 - Augmentation
             # ---------------------------------------------------------------------
             # 4) Augmentation (Search, etc.) - Run *before* final history prep
             # ---------------------------------------------------------------------
@@ -831,11 +864,11 @@ def register_route_backend_chats(app):
                         "doc_scope": document_scope,
                     }
                     
-                    # Add active_group_id when:
+                    # Add active_group_ids when:
                     # 1. Document scope is 'group' or chat_type is 'group', OR
                     # 2. Document scope is 'all' and groups are enabled (so group search can be included)
-                    if active_group_id and (document_scope == 'group' or document_scope == 'all' or chat_type == 'group'):
-                        search_args["active_group_id"] = active_group_id
+                    if active_group_ids and (document_scope == 'group' or document_scope == 'all' or chat_type == 'group'):
+                        search_args["active_group_ids"] = active_group_ids
     
                     # Add active_public_workspace_id when:
                     # 1. Document scope is 'public' or
@@ -843,8 +876,14 @@ def register_route_backend_chats(app):
                     if active_public_workspace_id and (document_scope == 'public' or document_scope == 'all'):
                         search_args["active_public_workspace_id"] = active_public_workspace_id
                         
-                    if selected_document_id:
+                    if selected_document_ids:
+                        search_args["document_ids"] = selected_document_ids
+                    elif selected_document_id:
                         search_args["document_id"] = selected_document_id
+                    
+                    # Add tags filter if provided
+                    if tags_filter and isinstance(tags_filter, list) and len(tags_filter) > 0:
+                        search_args["tags_filter"] = tags_filter
                     
                     # Log if a non-default top_n value is being used
                     if top_n != default_top_n:
@@ -1449,6 +1488,24 @@ def register_route_backend_chats(app):
                         'error': user_friendly_message
                     }), status_code
 
+            if web_search_enabled:
+                perform_web_search(
+                    settings=settings,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    user_message=user_message,
+                    user_message_id=user_message_id,
+                    chat_type=chat_type,
+                    document_scope=document_scope,
+                    active_group_id=active_group_id,
+                    active_public_workspace_id=active_public_workspace_id,
+                    search_query=search_query,
+                    system_messages_for_augmentation=system_messages_for_augmentation,
+                    agent_citations_list=agent_citations_list,
+                    web_search_citations_list=web_search_citations_list,
+                )
+            
+        # region 5 - FINAL conversation history preparation
             # ---------------------------------------------------------------------
             # 5) Prepare FINAL conversation history for GPT (including summarization)
             # ---------------------------------------------------------------------
@@ -1728,6 +1785,7 @@ def register_route_backend_chats(app):
                 debug_print(f"Error preparing conversation history: {e}")
                 return jsonify({'error': f'Error preparing conversation history: {str(e)}'}), 500
 
+        # region 6 - Final GPT Call
             # ---------------------------------------------------------------------
             # 6) Final GPT Call
             # ---------------------------------------------------------------------
@@ -2153,12 +2211,101 @@ def register_route_backend_chats(app):
                             level=logging.ERROR,
                             exceptionTraceback=True
                         )
-                    fallback_steps.append({
-                        'name': 'agent',
-                        'func': invoke_selected_agent,
-                        'on_success': agent_success,
-                        'on_error': agent_error
-                    })
+
+                    selected_agent_type = getattr(selected_agent, 'agent_type', 'local') or 'local'
+                    if isinstance(selected_agent_type, str):
+                        selected_agent_type = selected_agent_type.lower()
+
+                    if selected_agent_type == 'aifoundry':
+                        def invoke_foundry_agent():
+                            foundry_metadata = {
+                                'conversation_id': conversation_id,
+                                'user_id': user_id,
+                                'message_id': user_message_id,
+                                'chat_type': chat_type,
+                                'document_scope': document_scope,
+                                'group_id': active_group_id if chat_type == 'group' else None,
+                                'hybrid_search_enabled': hybrid_search_enabled,
+                                'selected_document_id': selected_document_id,
+                                'search_query': search_query,
+                            }
+                            return selected_agent.invoke(
+                                agent_message_history,
+                                metadata={k: v for k, v in foundry_metadata.items() if v is not None}
+                            )
+
+                        def foundry_agent_success(result):
+                            msg = str(result)
+                            notice = None
+                            agent_used = getattr(selected_agent, 'name', 'Azure AI Foundry Agent')
+                            actual_model_deployment = (
+                                getattr(selected_agent, 'last_run_model', None)
+                                or getattr(selected_agent, 'deployment_name', None)
+                                or agent_used
+                            )
+
+                            foundry_citations = getattr(selected_agent, 'last_run_citations', []) or []
+                            if foundry_citations:
+                                for citation in foundry_citations:
+                                    try:
+                                        serializable = json.loads(json.dumps(citation, default=str))
+                                    except (TypeError, ValueError):
+                                        serializable = {'value': str(citation)}
+                                    agent_citations_list.append({
+                                        'tool_name': agent_used,
+                                        'function_name': 'azure_ai_foundry_citation',
+                                        'plugin_name': 'azure_ai_foundry',
+                                        'function_arguments': serializable,
+                                        'function_result': serializable,
+                                        'timestamp': datetime.utcnow().isoformat(),
+                                        'success': True
+                                    })
+
+                            if enable_multi_agent_orchestration and not per_user_semantic_kernel:
+                                notice = (
+                                    "[SK Fallback]: The AI assistant is running in single agent fallback mode. "
+                                    "Some advanced features may not be available. "
+                                    "Please contact your administrator to configure Semantic Kernel for richer responses."
+                                )
+
+                            log_event(
+                                f"[Foundry Agent] Invocation complete for {agent_used}",
+                                extra={
+                                    'conversation_id': conversation_id,
+                                    'user_id': user_id,
+                                    'agent_id': getattr(selected_agent, 'id', None),
+                                    'model_used': actual_model_deployment,
+                                    'citation_count': len(foundry_citations),
+                                }
+                            )
+
+                            return (msg, actual_model_deployment, 'agent', notice)
+
+                        def foundry_agent_error(e):
+                            log_event(
+                                f"Error during Azure AI Foundry agent invocation: {str(e)}",
+                                extra={
+                                    'conversation_id': conversation_id,
+                                    'user_id': user_id,
+                                    'agent_id': getattr(selected_agent, 'id', None)
+                                },
+                                level=logging.ERROR,
+                                exceptionTraceback=True
+                            )
+
+                        fallback_steps.append({
+                            'name': 'foundry_agent',
+                            'func': invoke_foundry_agent,
+                            'on_success': foundry_agent_success,
+                            'on_error': foundry_agent_error
+                        })
+                    else:
+                        fallback_steps.append({
+                            'name': 'agent',
+                            'func': invoke_selected_agent,
+                            'on_success': agent_success,
+                            'on_error': agent_error
+                        })
 
                 if kernel:
                     def invoke_kernel():
@@ -2342,7 +2489,7 @@ def register_route_backend_chats(app):
                         exceptionTraceback=True
                     )
 
-
+        # region 7 - Save GPT Response
             # ---------------------------------------------------------------------
             # 7) Save GPT response (or error message)
             # ---------------------------------------------------------------------
@@ -2390,6 +2537,7 @@ def register_route_backend_chats(app):
                 'timestamp': datetime.utcnow().isoformat(),
                 'augmented': bool(system_messages_for_augmentation),
                 'hybrid_citations': hybrid_citations_list, # <--- SIMPLIFIED: Directly use the list
+                'web_search_citations': web_search_citations_list,
                 'hybridsearch_query': search_query if hybrid_search_enabled and search_results else None, # Log query only if hybrid search ran and found results
                 'agent_citations': agent_citations_list, # <--- NEW: Store agent tool invocation results
                 'user_message': user_message,
@@ -2521,6 +2669,7 @@ def register_route_backend_chats(app):
                 'blocked': False, # Explicitly false if we got this far
                 'augmented': bool(system_messages_for_augmentation),
                 'hybrid_citations': hybrid_citations_list,
+                'web_search_citations': web_search_citations_list,
                 'agent_citations': agent_citations_list,
                 'reload_messages': reload_messages_required,
                 'kernel_fallback_notice': kernel_fallback_notice
@@ -2580,10 +2729,29 @@ def register_route_backend_chats(app):
                 user_message = data.get('message', '')
                 conversation_id = data.get('conversation_id')
                 hybrid_search_enabled = data.get('hybrid_search')
+                web_search_enabled = data.get('web_search_enabled')
                 selected_document_id = data.get('selected_document_id')
+                selected_document_ids = data.get('selected_document_ids', [])
+                # Backwards compat: if no multi-select but single ID is set, wrap in list
+                if not selected_document_ids and selected_document_id:
+                    selected_document_ids = [selected_document_id]
                 image_gen_enabled = data.get('image_generation')
                 document_scope = data.get('doc_scope')
+                tags_filter = data.get('tags', [])  # Extract tags filter
                 active_group_id = data.get('active_group_id')
+                active_group_ids = data.get('active_group_ids', [])
+                # Backwards compat: if new list not provided, wrap single ID
+                if not active_group_ids and active_group_id:
+                    active_group_ids = [active_group_id]
+                # Permission validation: only keep groups user is a member of
+                validated_group_ids = []
+                for gid in active_group_ids:
+                    g_doc = find_group_by_id(gid)
+                    if g_doc and get_user_role_in_group(g_doc, user_id):
+                        validated_group_ids.append(gid)
+                active_group_ids = validated_group_ids
+                # Keep single ID for backwards compat in metadata/context
+                active_group_id = active_group_ids[0] if active_group_ids else data.get('active_group_id')
                 active_public_workspace_id = data.get('active_public_workspace_id')  # Extract active public workspace ID
                 frontend_gpt_model = data.get('model_deployment')
                 classifications_to_send = data.get('classifications')
@@ -2657,6 +2825,7 @@ def register_route_backend_chats(app):
                 search_query = user_message
                 hybrid_citations_list = []
                 agent_citations_list = []
+                web_search_citations_list = []
                 system_messages_for_augmentation = []
                 search_results = []
                 selected_agent = None
@@ -2670,6 +2839,8 @@ def register_route_backend_chats(app):
                 # Convert toggles
                 if isinstance(hybrid_search_enabled, str):
                     hybrid_search_enabled = hybrid_search_enabled.lower() == 'true'
+                if isinstance(web_search_enabled, str):
+                    web_search_enabled = web_search_enabled.lower() == 'true'
                 
                 # Initialize GPT client (simplified version)
                 gpt_model = ""
@@ -2716,7 +2887,7 @@ def register_route_backend_chats(app):
                             credential = DefaultAzureCredential()
                             token_provider = get_bearer_token_provider(
                                 credential,
-                                "https://cognitiveservices.azure.com/.default"
+                                cognitive_services_scope
                             )
                             gpt_client = AzureOpenAI(
                                 api_version=api_version,
@@ -2789,7 +2960,8 @@ def register_route_backend_chats(app):
                 
                 user_metadata['button_states'] = {
                     'image_generation': False,
-                    'document_search': hybrid_search_enabled
+                    'document_search': hybrid_search_enabled,
+                    'web_search': bool(web_search_enabled)
                 }
                 
                 # Document search scope and selections
@@ -2951,8 +3123,8 @@ def register_route_backend_chats(app):
                             "doc_scope": document_scope,
                         }
                         
-                        if active_group_id and (document_scope == 'group' or document_scope == 'all' or chat_type == 'group'):
-                            search_args['active_group_id'] = active_group_id
+                        if active_group_ids and (document_scope == 'group' or document_scope == 'all' or chat_type == 'group'):
+                            search_args['active_group_ids'] = active_group_ids
                         
                         # Add active_public_workspace_id when:
                         # 1. Document scope is 'public' or
@@ -2960,8 +3132,14 @@ def register_route_backend_chats(app):
                         if active_public_workspace_id and (document_scope == 'public' or document_scope == 'all'):
                             search_args['active_public_workspace_id'] = active_public_workspace_id
                         
-                        if selected_document_id:
+                        if selected_document_ids:
+                            search_args['document_ids'] = selected_document_ids
+                        elif selected_document_id:
                             search_args['document_id'] = selected_document_id
+                        
+                        # Add tags filter if provided
+                        if tags_filter and isinstance(tags_filter, list) and len(tags_filter) > 0:
+                            search_args['tags_filter'] = tags_filter
                         
                         search_results = hybrid_search(**search_args)
                     except Exception as e:
@@ -3126,16 +3304,15 @@ def register_route_backend_chats(app):
                         
                         retrieved_content = "\n\n".join(retrieved_texts)
                         system_prompt_search = f"""You are an AI assistant. Use the following retrieved document excerpts to answer the user's question. Cite sources using the format (Source: filename, Page: page number).
+                                                Retrieved Excerpts:
+                                                {retrieved_content}
 
-Retrieved Excerpts:
-{retrieved_content}
+                                                Based *only* on the information provided above, answer the user's query. If the answer isn't in the excerpts, say so.
 
-Based *only* on the information provided above, answer the user's query. If the answer isn't in the excerpts, say so.
-
-Example
-User: What is the policy on double dipping?
-Assistant: The policy prohibits entities from using federal funds received through one program to apply for additional funds through another program, commonly known as 'double dipping' (Source: PolicyDocument.pdf, Page: 12)
-"""
+                                                Example
+                                                User: What is the policy on double dipping?
+                                                Assistant: The policy prohibits entities from using federal funds received through one program to apply for additional funds through another program, commonly known as 'double dipping' (Source: PolicyDocument.pdf, Page: 12)
+                                                """
                         
                         system_messages_for_augmentation.append({
                             'role': 'system',
@@ -3146,6 +3323,23 @@ Assistant: The policy prohibits entities from using federal funds received throu
                         # Reorder hybrid citations list in descending order based on page_number
                         hybrid_citations_list.sort(key=lambda x: x.get('page_number', 0), reverse=True)
                 
+                if web_search_enabled:
+                    perform_web_search(
+                        settings=settings,
+                        conversation_id=conversation_id,
+                        user_id=user_id,
+                        user_message=user_message,
+                        user_message_id=user_message_id,
+                        chat_type=chat_type,
+                        document_scope=document_scope,
+                        active_group_id=active_group_id,
+                        active_public_workspace_id=active_public_workspace_id,
+                        search_query=search_query,
+                        system_messages_for_augmentation=system_messages_for_augmentation,
+                        agent_citations_list=agent_citations_list,
+                        web_search_citations_list=web_search_citations_list,
+                    )
+
                 # Update message chat type
                 message_chat_type = None
                 if hybrid_search_enabled and search_results and len(search_results) > 0:
@@ -3529,6 +3723,7 @@ Assistant: The policy prohibits entities from using federal funds received throu
                         'timestamp': datetime.utcnow().isoformat(),
                         'augmented': bool(system_messages_for_augmentation),
                         'hybrid_citations': hybrid_citations_list,
+                        'web_search_citations': web_search_citations_list,
                         'hybridsearch_query': search_query if hybrid_search_enabled and search_results else None,
                         'agent_citations': agent_citations_list,
                         'user_message': user_message,
@@ -3619,6 +3814,7 @@ Assistant: The policy prohibits entities from using federal funds received throu
                         'user_message_id': user_message_id,
                         'augmented': bool(system_messages_for_augmentation),
                         'hybrid_citations': hybrid_citations_list,
+                        'web_search_citations': web_search_citations_list,
                         'agent_citations': agent_citations_list,
                         'agent_display_name': agent_display_name_used if use_agent_streaming else None,
                         'agent_name': agent_name_used if use_agent_streaming else None,
@@ -3642,6 +3838,7 @@ Assistant: The policy prohibits entities from using federal funds received throu
                             'timestamp': datetime.utcnow().isoformat(),
                             'augmented': bool(system_messages_for_augmentation),
                             'hybrid_citations': hybrid_citations_list,
+                            'web_search_citations': web_search_citations_list,
                             'hybridsearch_query': search_query if hybrid_search_enabled and search_results else None,
                             'agent_citations': agent_citations_list,
                             'user_message': user_message,
@@ -3890,3 +4087,413 @@ def remove_masked_content(content, masked_ranges):
             result = result[:start] + result[end:]
     
     return result
+
+
+def _extract_web_search_citations_from_content(content: str) -> List[Dict[str, str]]:
+    if not content:
+        return []
+    debug_print(f"[Citation Extraction] Extracting citations from:\n{content}\n")
+
+    citations: List[Dict[str, str]] = []
+
+    markdown_pattern = re.compile(r"\[([^\]]+)\]\((https?://[^\s\)]+)(?:\s+\"([^\"]+)\")?\)")
+    html_pattern = re.compile(
+        r"<a[^>]+href=\"(https?://[^\"]+)\"([^>]*)>(.*?)</a>",
+        re.IGNORECASE | re.DOTALL,
+    )
+    title_pattern = re.compile(r"title=\"([^\"]+)\"", re.IGNORECASE)
+    url_pattern = re.compile(r"https?://[^\s\)\]\">]+")
+
+    occupied_spans: List[range] = []
+
+    for match in markdown_pattern.finditer(content):
+        text, url, title = match.groups()
+        url = (url or "").strip().rstrip(".,)")
+        if not url:
+            continue
+        display_title = (title or text or url).strip()
+        citations.append({"url": url, "title": display_title})
+        occupied_spans.append(range(match.start(), match.end()))
+
+    for match in html_pattern.finditer(content):
+        url, attrs, inner = match.groups()
+        url = (url or "").strip().rstrip(".,)")
+        if not url:
+            continue
+        title_match = title_pattern.search(attrs or "")
+        title = title_match.group(1) if title_match else None
+        inner_text = re.sub(r"<[^>]+>", "", inner or "").strip()
+        display_title = (title or inner_text or url).strip()
+        citations.append({"url": url, "title": display_title})
+        occupied_spans.append(range(match.start(), match.end()))
+
+    for match in url_pattern.finditer(content):
+        if any(match.start() in span for span in occupied_spans):
+            continue
+        url = (match.group(0) or "").strip().rstrip(".,)")
+        if not url:
+            continue
+        citations.append({"url": url, "title": url})
+    debug_print(f"[Citation Extraction] Extracted {len(citations)} citations. - {citations}\n")
+
+    return citations
+
+
+def _extract_token_usage_from_metadata(metadata: Dict[str, Any]) -> Dict[str, int]:
+    if not isinstance(metadata, Mapping):
+        debug_print(
+            "[Web Search][Token Usage Extraction] Metadata is not a mapping. "
+            f"type={type(metadata)}"
+        )
+        return {}
+
+    usage = metadata.get("usage")
+    if not usage:
+        debug_print("[Web Search][Token Usage Extraction] No usage field found in metadata.")
+        return {}
+
+    if isinstance(usage, str):
+        raw_usage = usage.strip()
+        if not raw_usage:
+            debug_print("[Web Search][Token Usage Extraction] Usage string was empty.")
+            return {}
+        try:
+            usage = json.loads(raw_usage)
+        except json.JSONDecodeError:
+            try:
+                usage = ast.literal_eval(raw_usage)
+            except (ValueError, SyntaxError):
+                debug_print(
+                    "[Web Search][Token Usage Extraction] Failed to parse usage string."
+                )
+                return {}
+
+    if not isinstance(usage, Mapping):
+        debug_print(
+            "[Web Search][Token Usage Extraction] Usage is not a mapping. "
+            f"type={type(usage)}"
+        )
+        return {}
+
+    def to_int(value: Any) -> Optional[int]:
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
+
+    total_tokens = to_int(usage.get("total_tokens"))
+    if total_tokens is None:
+        debug_print(
+            "[Web Search][Token Usage Extraction] total_tokens missing or invalid. "
+            f"usage={usage}"
+        )
+        return {}
+
+    prompt_tokens = to_int(usage.get("prompt_tokens")) or 0
+    completion_tokens = to_int(usage.get("completion_tokens")) or 0
+    debug_print(
+        "[Web Search][Token Usage Extraction] Extracted token usage - "
+        f"prompt: {prompt_tokens}, completion: {completion_tokens}, total: {total_tokens}"
+    )
+
+    return {
+        "total_tokens": int(total_tokens),
+        "prompt_tokens": int(prompt_tokens),
+        "completion_tokens": int(completion_tokens),
+    }
+
+def perform_web_search(
+    *,
+    settings,
+    conversation_id,
+    user_id,
+    user_message,
+    user_message_id,
+    chat_type,
+    document_scope,
+    active_group_id,
+    active_public_workspace_id,
+    search_query,
+    system_messages_for_augmentation,
+    agent_citations_list,
+    web_search_citations_list,
+):
+    debug_print("[WebSearch] ========== ENTERING perform_web_search ==========")
+    debug_print(f"[WebSearch] Parameters received:")
+    debug_print(f"[WebSearch]   conversation_id: {conversation_id}")
+    debug_print(f"[WebSearch]   user_id: {user_id}")
+    debug_print(f"[WebSearch]   user_message: {user_message[:100] if user_message else None}...")
+    debug_print(f"[WebSearch]   user_message_id: {user_message_id}")
+    debug_print(f"[WebSearch]   chat_type: {chat_type}")
+    debug_print(f"[WebSearch]   document_scope: {document_scope}")
+    debug_print(f"[WebSearch]   active_group_id: {active_group_id}")
+    debug_print(f"[WebSearch]   active_public_workspace_id: {active_public_workspace_id}")
+    debug_print(f"[WebSearch]   search_query: {search_query[:100] if search_query else None}...")
+    
+    enable_web_search = settings.get("enable_web_search")
+    debug_print(f"[WebSearch] enable_web_search setting: {enable_web_search}")
+    
+    if not enable_web_search:
+        debug_print("[WebSearch] Web search is DISABLED in settings, returning early")
+        return True  # Not an error, just disabled
+
+    debug_print("[WebSearch] Web search is ENABLED, proceeding...")
+    
+    web_search_agent = settings.get("web_search_agent") or {}
+    debug_print(f"[WebSearch] web_search_agent config present: {bool(web_search_agent)}")
+    if web_search_agent:
+        # Avoid logging sensitive data, just log structure
+        debug_print(f"[WebSearch]   web_search_agent keys: {list(web_search_agent.keys())}")
+    
+    other_settings = web_search_agent.get("other_settings") or {}
+    debug_print(f"[WebSearch] other_settings keys: {list(other_settings.keys()) if other_settings else '<empty>'}")
+    
+    foundry_settings = other_settings.get("azure_ai_foundry") or {}
+    debug_print(f"[WebSearch] foundry_settings present: {bool(foundry_settings)}")
+    if foundry_settings:
+        # Log only non-sensitive keys
+        safe_keys = ['agent_id', 'project_id', 'endpoint']
+        safe_info = {k: foundry_settings.get(k, '<not set>') for k in safe_keys}
+        debug_print(f"[WebSearch]   foundry_settings (safe keys): {safe_info}")
+
+    agent_id = (foundry_settings.get("agent_id") or "").strip()
+    debug_print(f"[WebSearch] Extracted agent_id: '{agent_id}'")
+    
+    if not agent_id:
+        log_event(
+            "[WebSearch] Skipping Foundry web search: agent_id is not configured",
+            extra={
+                "conversation_id": conversation_id,
+                "user_id": user_id,
+            },
+            level=logging.WARNING,
+        )
+        debug_print("[WebSearch] Foundry agent_id not configured, skipping web search.")
+        # Add failure message so the model knows search was requested but not configured
+        system_messages_for_augmentation.append({
+            "role": "system",
+            "content": "Web search was requested but is not properly configured. Please inform the user that web search is currently unavailable and you cannot provide real-time information. Do not attempt to answer questions requiring current information from your training data.",
+        })
+        return False  # Configuration error
+
+    debug_print(f"[WebSearch] Agent ID is configured: {agent_id}")
+    
+    query_text = None
+    try:
+        query_text = search_query
+        debug_print(f"[WebSearch] Using search_query as query_text: {query_text[:100] if query_text else None}...")
+    except NameError:
+        query_text = None
+        debug_print("[WebSearch] search_query not defined, query_text is None")
+
+    query_text = (query_text or user_message or "").strip()
+    debug_print(f"[WebSearch] Final query_text after fallback: '{query_text[:100] if query_text else ''}'")
+    
+    if not query_text:
+        debug_print("[WebSearch] Query text is EMPTY after processing, skipping web search")
+        log_event(
+            "[WebSearch] Skipping Foundry web search: empty query",
+            extra={
+                "conversation_id": conversation_id,
+                "user_id": user_id,
+            },
+            level=logging.WARNING,
+        )
+        return True  # Not an error, just empty query
+
+    debug_print(f"[WebSearch] Building message history with query: {query_text[:100]}...")
+    message_history = [
+        ChatMessageContent(role="user", content=query_text)
+    ]
+    debug_print(f"[WebSearch] Message history created with {len(message_history)} message(s)")
+
+    try:
+        foundry_metadata = {
+            "conversation_id": conversation_id,
+            "user_id": user_id,
+            "message_id": user_message_id,
+            "chat_type": chat_type,
+            "document_scope": document_scope,
+            "group_id": active_group_id if chat_type == "group" else None,
+            "public_workspace_id": active_public_workspace_id,
+            "search_query": query_text,
+        }
+        debug_print(f"[WebSearch] Foundry metadata prepared: {json.dumps(foundry_metadata, default=str)}")
+        
+        debug_print("[WebSearch] Calling execute_foundry_agent...")
+        debug_print(f"[WebSearch]   foundry_settings keys: {list(foundry_settings.keys())}")
+        debug_print(f"[WebSearch]   global_settings type: {type(settings)}")
+        
+        result = asyncio.run(
+            execute_foundry_agent(
+                foundry_settings=foundry_settings,
+                global_settings=settings,
+                message_history=message_history,
+                metadata={k: v for k, v in foundry_metadata.items() if v is not None},
+            )
+        )
+    except FoundryAgentInvocationError as exc:
+        log_event(
+            f"[WebSearch] Foundry agent invocation failed: {exc}",
+            extra={
+                "conversation_id": conversation_id,
+                "user_id": user_id,
+                "agent_id": agent_id,
+            },
+            level=logging.ERROR,
+            exceptionTraceback=True,
+        )
+        # Add failure message so the model informs the user
+        system_messages_for_augmentation.append({
+            "role": "system",
+            "content": f"Web search failed with error: {exc}. Please inform the user that the web search encountered an error and you cannot provide real-time information for this query. Do not attempt to answer questions requiring current information from your training data - instead, acknowledge the search failure and suggest the user try again.",
+        })
+        return False  # Search failed
+    except Exception as exc:
+        log_event(
+            f"[WebSearch] Unexpected error invoking Foundry agent: {exc}",
+            extra={
+                "conversation_id": conversation_id,
+                "user_id": user_id,
+                "agent_id": agent_id,
+            },
+            level=logging.ERROR,
+            exceptionTraceback=True,
+        )
+        # Add failure message so the model informs the user
+        system_messages_for_augmentation.append({
+            "role": "system",
+            "content": f"Web search failed with an unexpected error: {exc}. Please inform the user that the web search encountered an error and you cannot provide real-time information for this query. Do not attempt to answer questions requiring current information from your training data - instead, acknowledge the search failure and suggest the user try again.",
+        })
+        return False  # Search failed
+
+    debug_print("[WebSearch] ========== FOUNDRY AGENT RESULT ==========")
+    debug_print(f"[WebSearch] Result type: {type(result)}")
+    debug_print(f"[WebSearch] Result has message: {bool(result.message)}")
+    debug_print(f"[WebSearch] Result has citations: {bool(result.citations)}")
+    debug_print(f"[WebSearch] Result has metadata: {bool(result.metadata)}")
+    debug_print(f"[WebSearch] Result model: {getattr(result, 'model', 'N/A')}")
+    
+    if result.message:
+        debug_print(f"[WebSearch] Result message length: {len(result.message)} chars")
+        debug_print(f"[WebSearch] Result message preview: {result.message[:500] if len(result.message) > 500 else result.message}")
+    else:
+        debug_print("[WebSearch] Result message is EMPTY or None")
+    
+    if result.citations:
+        debug_print(f"[WebSearch] Result citations count: {len(result.citations)}")
+        for i, cit in enumerate(result.citations[:3]):
+            debug_print(f"[WebSearch]   Citation {i}: {json.dumps(cit, default=str)[:200]}...")
+    else:
+        debug_print("[WebSearch] Result citations is EMPTY or None")
+    
+    if result.metadata:
+        try:
+            metadata_payload = json.dumps(result.metadata, default=str)
+        except (TypeError, ValueError):
+            metadata_payload = str(result.metadata)
+        debug_print(f"[WebSearch] Foundry metadata: {metadata_payload}")
+    else:
+        debug_print("[WebSearch] Foundry metadata: <empty>")
+
+    if result.message:
+        debug_print("[WebSearch] Adding result message to system_messages_for_augmentation")
+        system_messages_for_augmentation.append({
+            "role": "system",
+            "content": f"Web search results:\n{result.message}",
+        })
+        debug_print(f"[WebSearch] Added system message to augmentation list. Total augmentation messages: {len(system_messages_for_augmentation)}")
+
+        debug_print("[WebSearch] Extracting web citations from result message...")
+        web_citations = _extract_web_search_citations_from_content(result.message)
+        debug_print(f"[WebSearch] Extracted {len(web_citations)} web citations from message content")
+        if web_citations:
+            web_search_citations_list.extend(web_citations)
+            debug_print(f"[WebSearch] Total web_search_citations_list now has {len(web_search_citations_list)} citations")
+        else:
+            debug_print("[WebSearch] No web citations extracted from message content")
+    else:
+        debug_print("[WebSearch] No result.message to process for augmentation")
+
+    citations = result.citations or []
+    debug_print(f"[WebSearch] Processing {len(citations)} citations from result.citations")
+    if citations:
+        for i, citation in enumerate(citations):
+            debug_print(f"[WebSearch] Processing citation {i}: {json.dumps(citation, default=str)[:200]}...")
+            try:
+                serializable = json.loads(json.dumps(citation, default=str))
+            except (TypeError, ValueError):
+                serializable = {"value": str(citation)}
+            citation_title = serializable.get("title") or serializable.get("url") or "Web search source"
+            debug_print(f"[WebSearch] Adding agent citation with title: {citation_title}")
+            agent_citations_list.append({
+                "tool_name": citation_title,
+                "function_name": "azure_ai_foundry_web_search",
+                "plugin_name": "azure_ai_foundry",
+                "function_arguments": serializable,
+                "function_result": serializable,
+                "timestamp": datetime.utcnow().isoformat(),
+                "success": True,
+            })
+        debug_print(f"[WebSearch] Total agent_citations_list now has {len(agent_citations_list)} citations")
+    else:
+        debug_print("[WebSearch] No citations in result.citations to process")
+
+    debug_print(f"[WebSearch] Starting token usage extraction from Foundry metadata. Metadata: {result.metadata}")
+    token_usage = _extract_token_usage_from_metadata(result.metadata or {})
+    if token_usage.get("total_tokens"):
+        try:
+            workspace_type = 'personal'
+            if active_public_workspace_id:
+                workspace_type = 'public'
+            elif active_group_id:
+                workspace_type = 'group'
+
+            log_token_usage(
+                user_id=user_id,
+                token_type='web_search',
+                total_tokens=token_usage.get('total_tokens', 0),
+                model=result.model or 'azure-ai-foundry-web-search',
+                workspace_type=workspace_type,
+                prompt_tokens=token_usage.get('prompt_tokens'),
+                completion_tokens=token_usage.get('completion_tokens'),
+                conversation_id=conversation_id,
+                message_id=user_message_id,
+                group_id=active_group_id,
+                public_workspace_id=active_public_workspace_id,
+                additional_context={
+                    'agent_id': agent_id,
+                    'search_query': query_text,
+                    'token_source': 'foundry_metadata'
+                }
+            )
+        except Exception as log_error:
+            log_event(
+                f"[WebSearch] Failed to log web search token usage: {log_error}",
+                extra={
+                    "conversation_id": conversation_id,
+                    "user_id": user_id,
+                    "agent_id": agent_id,
+                },
+                level=logging.WARNING,
+            )
+
+    debug_print("[WebSearch] ========== FINAL SUMMARY ==========")
+    debug_print(f"[WebSearch] system_messages_for_augmentation count: {len(system_messages_for_augmentation)}")
+    debug_print(f"[WebSearch] agent_citations_list count: {len(agent_citations_list)}")
+    debug_print(f"[WebSearch] web_search_citations_list count: {len(web_search_citations_list)}")
+    debug_print(f"[WebSearch] Token usage extracted: {token_usage}")
+    debug_print("[WebSearch] ========== EXITING perform_web_search ==========")
+    
+    log_event(
+        "[WebSearch] Foundry web search invocation complete",
+        extra={
+            "conversation_id": conversation_id,
+            "user_id": user_id,
+            "agent_id": agent_id,
+            "citation_count": len(citations),
+        },
+        level=logging.INFO,
+    )
+    
+    return True  # Search succeeded

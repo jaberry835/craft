@@ -59,6 +59,39 @@ $(document).ready(function () {
     }
   });
 
+  // Add event delegation for select user button in search results
+  $(document).on("click", ".select-user-btn", function () {
+    const id = $(this).data("user-id");
+    const name = $(this).data("user-name");
+    const email = $(this).data("user-email");
+    selectUserForAdd(id, name, email);
+  });
+
+  // Add event delegation for remove member button
+  $(document).on("click", ".remove-member-btn", function () {
+    const userId = $(this).data("user-id");
+    removeMember(userId);
+  });
+
+  // Add event delegation for change role button
+  $(document).on("click", ".change-role-btn", function () {
+    const userId = $(this).data("user-id");
+    const currentRole = $(this).data("user-role");
+    openChangeRoleModal(userId, currentRole);
+    $("#changeRoleModal").modal("show");
+  });
+
+  // Add event delegation for approve/reject request buttons
+  $(document).on("click", ".approve-request-btn", function () {
+    const requestId = $(this).data("request-id");
+    approveRequest(requestId);
+  });
+
+  $(document).on("click", ".reject-request-btn", function () {
+    const requestId = $(this).data("request-id");
+    rejectRequest(requestId);
+  });
+
   // CSV Bulk Upload Events
   $("#addBulkMemberBtn").on("click", function () {
     $("#csvBulkUploadModal").modal("show");
@@ -82,6 +115,14 @@ $(document).ready(function () {
   $('input[name="activityLimit"]').on('change', function() {
     const limit = parseInt($(this).val());
     loadActivityTimeline(limit);
+  });
+
+  // Retention policy settings
+  $("#saveRetentionBtn").on("click", function () {
+    saveGroupRetentionSettings();
+  });
+  $('#settings-tab').on('shown.bs.tab', function () {
+    loadGroupRetentionSettings();
   });
 
   // Bulk Actions Events
@@ -288,14 +329,16 @@ function loadGroupInfo(doneCallback) {
         $("#addMemberBtn").show();
         $("#addBulkMemberBtn").show();
       }
-      
+
       $("#pendingRequestsSection").show();
       $("#activityTimelineSection").show();
       $("#stats-tab-item").show();
+      $("#settings-tab-item").removeClass("d-none");
 
       loadPendingRequests();
       loadGroupStats();
       loadActivityTimeline(50);
+      loadGroupRetentionSettings();
     }
 
     if (typeof doneCallback === "function") {
@@ -407,17 +450,15 @@ function renderMemberActions(member) {
     } else {
       return `
         <button
-          class="btn btn-sm btn-danger me-1"
-          onclick="removeMember('${member.userId}')">
+          class="btn btn-sm btn-danger me-1 remove-member-btn"
+          data-user-id="${member.userId}">
           Remove
         </button>
         <button
           type="button"
-          class="btn btn-sm btn-outline-secondary"
-          data-bs-toggle="modal"
-          data-bs-target="#changeRoleModal"
-          onclick="openChangeRoleModal('${member.userId}', '${member.role}')"
-        >
+          class="btn btn-sm btn-outline-secondary change-role-btn"
+          data-user-id="${member.userId}"
+          data-user-role="${member.role}">
           Change Role
         </button>
       `;
@@ -440,11 +481,21 @@ function setRole(userId, newRole) {
     data: JSON.stringify({ role: newRole }),
     success: function () {
       $("#changeRoleModal").modal("hide");
+      showToast("success", "Role updated successfully");
       loadMembers();
     },
     error: function (err) {
-      console.error(err);
-      alert("Failed to update role.");
+      console.error("Error updating role:", err);
+      let errorMsg = "Failed to update role.";
+      if (err.status === 404) {
+        errorMsg = "Member not found. They may have been removed.";
+        loadMembers(); // Refresh the member list
+      } else if (err.status === 403) {
+        errorMsg = "You don't have permission to change this member's role.";
+      } else if (err.responseJSON && err.responseJSON.message) {
+        errorMsg = err.responseJSON.message;
+      }
+      showToast("error", errorMsg);
     },
   });
 }
@@ -455,11 +506,21 @@ function removeMember(userId) {
     url: `/api/groups/${groupId}/members/${userId}`,
     method: "DELETE",
     success: function () {
+      showToast("success", "Member removed successfully");
       loadMembers();
     },
     error: function (err) {
-      console.error(err);
-      alert("Failed to remove member.");
+      console.error("Error removing member:", err);
+      let errorMsg = "Failed to remove member.";
+      if (err.status === 404) {
+        errorMsg = "Member not found. They may have already been removed.";
+        loadMembers(); // Refresh the member list
+      } else if (err.status === 403) {
+        errorMsg = "You don't have permission to remove this member.";
+      } else if (err.responseJSON && err.responseJSON.message) {
+        errorMsg = err.responseJSON.message;
+      }
+      showToast("error", errorMsg);
     },
   });
 }
@@ -473,8 +534,10 @@ function loadPendingRequests() {
           <td>${u.displayName}</td>
           <td>${u.email}</td>
           <td>
-            <button class="btn btn-sm btn-success" onclick="approveRequest('${u.userId}')">Approve</button>
-            <button class="btn btn-sm btn-danger" onclick="rejectRequest('${u.userId}')">Reject</button>
+            <button class="btn btn-sm btn-success approve-request-btn" 
+                    data-request-id="${u.userId}">Approve</button>
+            <button class="btn btn-sm btn-danger reject-request-btn" 
+                    data-request-id="${u.userId}">Reject</button>
           </td>
         </tr>
       `;
@@ -522,66 +585,64 @@ function rejectRequest(requestId) {
   });
 }
 
+// Search users for manual add
 function searchUsers() {
   const term = $("#userSearchTerm").val().trim();
   if (!term) {
-    alert("Please enter a search term.");
+    // Show inline validation error
+    $("#searchStatus").text("⚠️ Please enter a name or email to search");
+    $("#searchStatus").removeClass("text-muted text-success").addClass("text-warning");
+    $("#userSearchTerm").addClass("is-invalid");
     return;
   }
-
-  // UI state
+  
+  // Clear any previous validation states
+  $("#userSearchTerm").removeClass("is-invalid");
+  $("#searchStatus").removeClass("text-warning text-danger text-success").addClass("text-muted");
   $("#searchStatus").text("Searching...");
   $("#searchUsersBtn").prop("disabled", true);
 
-  $.ajax({
-    url: "/api/userSearch",
-    method: "GET",
-    data: { query: term },
-    dataType: "json",
-  })
-    .done(function (results) {
-      renderUserSearchResults(results);
-    })
-    .fail(function (jqXHR, textStatus, errorThrown) {
-      console.error("User search error:", textStatus, errorThrown);
-
-      if (jqXHR.status === 401) {
-        // Session expired or no token → force re-login
-        window.location.href = "/login";
+  $.get("/api/userSearch", { query: term })
+    .done(function(users) {
+      renderUserSearchResults(users);
+      // Show success status
+      if (users && users.length > 0) {
+        $("#searchStatus").text(`✓ Found ${users.length} user(s)`);
+        $("#searchStatus").removeClass("text-muted text-warning text-danger").addClass("text-success");
       } else {
-        const msg = jqXHR.responseJSON?.error
-          ? jqXHR.responseJSON.error
-          : "User search failed.";
-        alert(msg);
+        $("#searchStatus").text("No users found");
+        $("#searchStatus").removeClass("text-muted text-warning text-success").addClass("text-muted");
       }
     })
+    .fail(function (jq) {
+      const err = jq.responseJSON?.error || jq.statusText;
+      // Show inline error
+      $("#searchStatus").text(`❌ Search failed: ${err}`);
+      $("#searchStatus").removeClass("text-muted text-warning text-success").addClass("text-danger");
+      // Also show toast for critical errors
+      showToast("User search failed: " + err, "danger");
+    })
     .always(function () {
-      // Restore UI state
-      $("#searchStatus").text("");
       $("#searchUsersBtn").prop("disabled", false);
     });
 }
 
+// Render user-search results in add-member modal
 function renderUserSearchResults(users) {
   let html = "";
-  if (!users || users.length === 0) {
-    html = `
-      <tr>
-        <td colspan="3" class="text-muted text-center">No results found</td>
-      </tr>
-    `;
+  if (!users || !users.length) {
+    html = `<tr><td colspan="3" class="text-center text-muted">No results.</td></tr>`;
   } else {
-    users.forEach((u) => {
+    users.forEach(u => {
       html += `
         <tr>
           <td>${u.displayName || "(no name)"}</td>
           <td>${u.email || ""}</td>
           <td>
-            <button class="btn btn-sm btn-primary"
-              onclick="selectUserForAdd('${u.id}', '${u.displayName}', '${
-        u.email
-      }')"
-            >
+            <button class="btn btn-sm btn-primary select-user-btn"
+                    data-user-id="${u.id}"
+                    data-user-name="${u.displayName}"
+                    data-user-email="${u.email}">
               Select
             </button>
           </td>
@@ -592,9 +653,10 @@ function renderUserSearchResults(users) {
   $("#userSearchResultsTable tbody").html(html);
 }
 
-function selectUserForAdd(uid, displayName, email) {
-  $("#newUserId").val(uid);
-  $("#newUserDisplayName").val(displayName);
+// Populate manual-add fields from search result
+function selectUserForAdd(id, name, email) {
+  $("#newUserId").val(id);
+  $("#newUserDisplayName").val(name);
   $("#newUserEmail").val(email);
 }
 
@@ -1139,6 +1201,10 @@ function copyRawActivityToClipboard() {
   });
 }
 
+// Make functions globally available for onclick handlers
+window.showRawActivity = showRawActivity;
+window.copyRawActivityToClipboard = copyRawActivityToClipboard;
+
 function showCsvError(message) {
   $("#csvErrorList").html(`<pre class="mb-0">${escapeHtml(message)}</pre>`);
   $("#csvErrorDetails").show();
@@ -1366,7 +1432,7 @@ async function bulkAssignRole() {
 
 async function bulkRemoveMembers() {
   const selectedMembers = getSelectedMembers();
-  
+
   if (selectedMembers.length === 0) {
     alert("No members selected");
     return;
@@ -1374,21 +1440,21 @@ async function bulkRemoveMembers() {
 
   // Close modal
   $("#bulkRemoveMembersModal").modal("hide");
-  
+
   let successCount = 0;
   let failedCount = 0;
   const failures = [];
 
   for (let i = 0; i < selectedMembers.length; i++) {
     const member = selectedMembers[i];
-    
+
     try {
       const response = await fetch(`/api/groups/${groupId}/members/${member.userId}`, {
         method: 'DELETE'
       });
 
       const data = await response.json();
-      
+
       if (response.ok && data.success) {
         successCount++;
       } else {
@@ -1413,4 +1479,103 @@ async function bulkRemoveMembers() {
 
   // Reload members and clear selection
   loadMembers();
+}
+
+/* ===================== GROUP RETENTION POLICY ===================== */
+
+async function loadGroupRetentionSettings() {
+    const convSelect = document.getElementById('group-conversation-retention-days');
+    const docSelect = document.getElementById('group-document-retention-days');
+
+    if (!convSelect || !docSelect) return;
+
+    try {
+        const orgDefaultsResp = await fetch('/api/retention-policy/defaults/group');
+        const orgData = await orgDefaultsResp.json();
+
+        if (orgData.success) {
+            const convDefaultOption = convSelect.querySelector('option[value="default"]');
+            const docDefaultOption = docSelect.querySelector('option[value="default"]');
+
+            if (convDefaultOption) {
+                convDefaultOption.textContent = `Using organization default (${orgData.default_conversation_label})`;
+            }
+            if (docDefaultOption) {
+                docDefaultOption.textContent = `Using organization default (${orgData.default_document_label})`;
+            }
+        }
+    } catch (error) {
+        console.error('Error loading group retention defaults:', error);
+    }
+
+    try {
+        const groupResp = await fetch(`/api/groups/${groupId}`);
+
+        if (!groupResp.ok) {
+            throw new Error(`Failed to fetch group: ${groupResp.status}`);
+        }
+
+        const groupData = await groupResp.json();
+
+        if (groupData && groupData.retention_policy) {
+            const retentionPolicy = groupData.retention_policy;
+            let convRetention = retentionPolicy.conversation_retention_days;
+            let docRetention = retentionPolicy.document_retention_days;
+
+            if (convRetention === undefined || convRetention === null) convRetention = 'default';
+            if (docRetention === undefined || docRetention === null) docRetention = 'default';
+
+            convSelect.value = convRetention;
+            docSelect.value = docRetention;
+        } else {
+            convSelect.value = 'default';
+            docSelect.value = 'default';
+        }
+    } catch (error) {
+        console.error('Error loading group retention settings:', error);
+        convSelect.value = 'default';
+        docSelect.value = 'default';
+    }
+}
+
+async function saveGroupRetentionSettings() {
+    const convSelect = document.getElementById('group-conversation-retention-days');
+    const docSelect = document.getElementById('group-document-retention-days');
+    const statusSpan = document.getElementById('group-retention-save-status');
+
+    if (!convSelect || !docSelect) return;
+
+    const retentionData = {
+        conversation_retention_days: convSelect.value,
+        document_retention_days: docSelect.value
+    };
+
+    if (statusSpan) {
+        statusSpan.innerHTML = '<span class="text-info"><i class="bi bi-hourglass-split"></i> Saving...</span>';
+    }
+
+    try {
+        const response = await fetch(`/api/retention-policy/group/${groupId}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(retentionData)
+        });
+
+        const data = await response.json();
+
+        if (response.ok && data.success) {
+            if (statusSpan) {
+                statusSpan.innerHTML = '<span class="text-success"><i class="bi bi-check-circle-fill"></i> Saved successfully!</span>';
+                setTimeout(() => { statusSpan.innerHTML = ''; }, 3000);
+            }
+        } else {
+            throw new Error(data.error || 'Failed to save retention settings');
+        }
+    } catch (error) {
+        console.error('Error saving group retention settings:', error);
+        if (statusSpan) {
+            statusSpan.innerHTML = `<span class="text-danger"><i class="bi bi-exclamation-circle-fill"></i> Error: ${error.message}</span>`;
+        }
+        showToast(`Error saving retention settings: ${error.message}`, 'danger');
+    }
 }

@@ -18,7 +18,7 @@
             <img id="sidebar-logo" src="{{ url_for('static', filename='images/custom_logo.png') }}?v={{ app_settings.logo_version | default(1) }}" 
                  alt="Logo" height="32" class="me-2 d-light-mode-only" />
           {% else %}
-            <img id="sidebar-logo" src="{{ url_for('static', filename='images/logo.png') }}" 
+            <img id="sidebar-logo" src="{{ url_for('static', filename='images/logo-lightmode.png') }}" 
                  alt="Logo" height="32" class="me-2 d-light-mode-only" />
           {% endif %}
           <!-- Dark mode logo -->
@@ -29,11 +29,12 @@
             <img id="sidebar-logo-dark" src="{{ url_for('static', filename='images/custom_logo.png') }}?v={{ app_settings.logo_version | default(1) }}" 
                  alt="Logo" height="32" class="me-2 d-dark-mode-only" />
           {% else %}
-            <img id="sidebar-logo-dark" src="{{ url_for('static', filename='images/logo.png') }}" 
+            <img id="sidebar-logo-dark" src="{{ url_for('static', filename='images/logo-darkmode.png') }}" 
                  alt="Logo" height="32" class="me-2 d-dark-mode-only" />
           {% endif %}
         {% else %}
-          <img id="sidebar-logo" src="{{ url_for('static', filename='images/logo.png') }}" alt="Logo" height="32" class="me-2" />
+          <img id="sidebar-logo" src="{{ url_for('static', filename='images/logo-lightmode.png') }}" alt="Logo" height="32" class="me-2 d-light-mode-only" />
+          <img id="sidebar-logo-dark" src="{{ url_for('static', filename='images/logo-darkmode.png') }}" alt="Logo" height="32" class="me-2 d-dark-mode-only" />
         {% endif %}
         {% if not app_settings.hide_app_title %}
           <span id="sidebar-app-title" class="fw-bold sidebar-title-truncate" data-title="{{ app_settings.app_title }}" data-show-logo="{{ app_settings.show_logo }}" title="{{ app_settings.app_title }}">{{ app_settings.app_title }}</span>
@@ -399,6 +400,11 @@
                   <i class="bi bi-hourglass-split me-2" style="font-size: 0.8em;"></i><span class="nav-text">Retention Policy</span>
                 </a>
               </li>
+              <li class="nav-item">
+                <a class="nav-link d-flex align-items-center admin-nav-section" href="#" data-tab="workspaces" data-section="user-agreement-section">
+                  <i class="bi bi-file-earmark-check me-2" style="font-size: 0.8em;"></i><span class="nav-text">User Agreement</span>
+                </a>
+              </li>
             </ul>
           </li>
           <li class="nav-item">
@@ -463,6 +469,11 @@
             </a>
             <ul class="nav flex-column ms-3" style="display: none;" id="search-extract-submenu">
               <li class="nav-item">
+                <a class="nav-link d-flex align-items-center admin-nav-section" href="#" data-tab="search-extract" data-section="web-search-section">
+                  <i class="bi bi-globe me-2" style="font-size: 0.8em;"></i><span class="nav-text">Web Search</span>
+                </a>
+              </li>
+              <li class="nav-item">
                 <a class="nav-link d-flex align-items-center admin-nav-section" href="#" data-tab="search-extract" data-section="azure-ai-search-section">
                   <i class="bi bi-search me-2" style="font-size: 0.8em;"></i><span class="nav-text">Azure AI Search</span>
                 </a>
@@ -484,8 +495,11 @@
     </div>
     {% endif %}
 
-    <!-- Control Center Section - Show when on control center page for admins OR users with ControlCenter roles -->
-    {% if request.endpoint == 'control_center' and ((session.get('user') and 'ControlCenterAdmin' in session['user']['roles']) or (app_settings.require_member_of_control_center_dashboard_reader and session.get('user') and 'ControlCenterDashboardReader' in session['user']['roles']) or ('Admin' in session['user']['roles'] and not app_settings.require_member_of_control_center_admin and not app_settings.require_member_of_control_center_dashboard_reader)) %}
+    <!-- Control Center Section - Show when on control center page for users with proper access -->
+    <!-- Access logic: When require_member_of_control_center_admin is ENABLED, only ControlCenterAdmin role grants access -->
+    <!-- When DISABLED (default), only regular Admin role grants access (ControlCenterAdmin is ignored) -->
+    <!-- DashboardReader role grants dashboard-only access when that setting is enabled -->
+    {% if request.endpoint == 'control_center' and ((app_settings.require_member_of_control_center_admin and session.get('user') and 'ControlCenterAdmin' in session['user']['roles']) or (app_settings.require_member_of_control_center_dashboard_reader and session.get('user') and 'ControlCenterDashboardReader' in session['user']['roles']) or (not app_settings.require_member_of_control_center_admin and 'Admin' in session['user']['roles'])) %}
     <div class="overflow-auto">
       <div id="control-center-toggle" class="mt-2 mb-1 ps-3 pe-2 text-muted small d-flex align-items-center justify-content-between" style="font-weight: 500; letter-spacing: 0.02em; cursor: pointer; user-select: none;">
         <div class="d-flex align-items-center">
@@ -513,8 +527,10 @@
               <i class="bi bi-speedometer2 me-2"></i><span class="nav-text">Dashboard</span>
             </a>
           </li>
-          {# Only show admin tabs if user has ControlCenterAdmin role #}
-          {% if session.get('user') and 'ControlCenterAdmin' in session['user']['roles'] %}
+          {# Only show admin tabs if user has full admin access based on settings #}
+          {# When require_member_of_control_center_admin is ENABLED: need ControlCenterAdmin role #}
+          {# When DISABLED: need regular Admin role #}
+          {% if (app_settings.require_member_of_control_center_admin and session.get('user') and 'ControlCenterAdmin' in session['user']['roles']) or (not app_settings.require_member_of_control_center_admin and session.get('user') and 'Admin' in session['user']['roles']) %}
           <li class="nav-item">
             <a class="nav-link d-flex align-items-center control-center-nav-tab" href="#" data-tab="users">
               <i class="bi bi-people me-2"></i><span class="nav-text">User Management</span>
@@ -557,14 +573,17 @@
             <i class="bi bi-eye" style="font-size: 0.9em;"></i>
           </button>
           <div id="conversations-actions" class="d-flex align-items-center" style="display: none !important;">
-            <button id="sidebar-pin-selected-btn" class="btn btn-sm btn-outline-primary me-1" style="display: none; padding: 2px 6px; font-size: 0.75rem; border-radius: 4px;" title="Pin selected conversations">
+            <button id="sidebar-pin-selected-btn" class="btn btn-sm btn-outline-primary" style="display: none; padding: 2px 4px; font-size: 0.7rem; border-radius: 4px;" title="Pin selected conversations">
               <i class="bi bi-pin-angle"></i>
             </button>
-            <button id="sidebar-hide-selected-btn" class="btn btn-sm btn-outline-secondary me-1" style="display: none; padding: 2px 6px; font-size: 0.75rem; border-radius: 4px;" title="Hide selected conversations">
+            <button id="sidebar-hide-selected-btn" class="btn btn-sm btn-outline-secondary" style="display: none; padding: 2px 4px; font-size: 0.7rem; border-radius: 4px;" title="Hide selected conversations">
               <i class="bi bi-eye-slash"></i>
             </button>
-            <button id="sidebar-delete-selected-btn" class="btn btn-sm btn-outline-danger me-1" style="display: none; padding: 2px 6px; font-size: 0.75rem; border-radius: 4px;" title="Delete selected conversations">
+            <button id="sidebar-delete-selected-btn" class="btn btn-sm btn-outline-danger" style="display: none; padding: 2px 4px; font-size: 0.7rem; border-radius: 4px;" title="Delete selected conversations">
               <i class="bi bi-trash-fill"></i>
+            </button>
+            <button id="sidebar-export-selected-btn" class="btn btn-sm btn-outline-info" style="display: none; padding: 2px 4px; font-size: 0.7rem; border-radius: 4px;" title="Export selected conversations">
+              <i class="bi bi-download"></i>
             </button>
           </div>
         </div>
@@ -687,8 +706,11 @@
             <a class="dropdown-item" href="{{ url_for('admin_settings') }}">App Settings</a>
           </li>
           {% endif %}
-          {# Control Center - accessible to admins OR users with ControlCenter roles #}
-          {% if (session.get('user') and 'ControlCenterAdmin' in session['user']['roles']) or (app_settings.require_member_of_control_center_dashboard_reader and session.get('user') and 'ControlCenterDashboardReader' in session['user']['roles']) or ('Admin' in session['user']['roles'] and not app_settings.require_member_of_control_center_admin and not app_settings.require_member_of_control_center_dashboard_reader) %}
+          {# Control Center - access based on role requirements #}
+          {# When require_member_of_control_center_admin ENABLED: only ControlCenterAdmin role grants access #}
+          {# When DISABLED (default): only regular Admin role grants access #}
+          {# DashboardReader role grants dashboard-only access when that setting is enabled #}
+          {% if (app_settings.require_member_of_control_center_admin and session.get('user') and 'ControlCenterAdmin' in session['user']['roles']) or (app_settings.require_member_of_control_center_dashboard_reader and session.get('user') and 'ControlCenterDashboardReader' in session['user']['roles']) or (not app_settings.require_member_of_control_center_admin and 'Admin' in session['user']['roles']) %}
           <li>
             <a class="dropdown-item" href="{{ url_for('control_center') }}">Control Center</a>
           </li>
@@ -910,7 +932,7 @@
       <img src="{{ url_for('static', filename='images/custom_logo.png') }}?v={{ app_settings.logo_version | default(1) }}" 
            alt="Logo" height="24" style="max-width: none;" class="d-light-mode-only" />
     {% else %}
-      <img src="{{ url_for('static', filename='images/logo.png') }}" 
+      <img src="{{ url_for('static', filename='images/logo-lightmode.png') }}" 
            alt="Logo" height="24" style="max-width: none;" class="d-light-mode-only" />
     {% endif %}
     <!-- Dark mode logo -->
@@ -921,10 +943,11 @@
       <img src="{{ url_for('static', filename='images/custom_logo.png') }}?v={{ app_settings.logo_version | default(1) }}" 
            alt="Logo" height="24" style="max-width: none;" class="d-dark-mode-only" />
     {% else %}
-      <img src="{{ url_for('static', filename='images/logo.png') }}" 
+      <img src="{{ url_for('static', filename='images/logo-darkmode.png') }}" 
            alt="Logo" height="24" style="max-width: none;" class="d-dark-mode-only" />
     {% endif %}
   {% else %}
-    <img src="{{ url_for('static', filename='images/logo.png') }}" alt="Logo" height="24" style="max-width: none;" />
+    <img src="{{ url_for('static', filename='images/logo-lightmode.png') }}" alt="Logo" height="24" style="max-width: none;" class="d-light-mode-only" />
+    <img src="{{ url_for('static', filename='images/logo-darkmode.png') }}" alt="Logo" height="24" style="max-width: none;" class="d-dark-mode-only" />
   {% endif %}
 </button>

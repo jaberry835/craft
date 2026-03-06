@@ -40,6 +40,12 @@ def get_settings(use_cosmos=False):
         'allow_user_plugins': False,
         'allow_group_agents': False,
         'allow_group_custom_agent_endpoints': False,
+        'allow_ai_foundry_agents': False,
+        'allow_group_ai_foundry_agents': False,
+        'allow_personal_ai_foundry_agents': False,
+        'enable_agent_template_gallery': True,
+        'agent_templates_allow_user_submission': True,
+        'agent_templates_require_approval': True,
         'allow_group_plugins': False,
         'id': 'app_settings',
         # Control Center settings
@@ -124,9 +130,11 @@ def get_settings(use_cosmos=False):
         'enable_group_workspaces': True,
         'enable_group_creation': True,
         'require_member_of_create_group': False,
+        'require_owner_for_group_agent_management': False,
         'enable_public_workspaces': False,
         'require_member_of_create_public_workspace': False,
         'enable_file_sharing': False,
+        'enforce_workspace_scope_lock': True,
 
         # Multimedia
         'enable_video_file_support': False,
@@ -216,6 +224,34 @@ def get_settings(use_cosmos=False):
         'azure_apim_document_intelligence_endpoint': '',
         'azure_apim_document_intelligence_subscription_key': '',
 
+        # Web search (via Azure AI Foundry agent)
+        'enable_web_search': False,
+        'web_search_consent_accepted': False,
+        'enable_web_search_user_notice': False,  # Show popup to users explaining their message will be sent to Bing
+        'web_search_user_notice_text': 'Your message will be sent to Microsoft Bing for web search. Only your current message is sent, not your conversation history.',
+        'web_search_agent': {
+            'agent_type': 'aifoundry',
+            'azure_openai_gpt_endpoint': '',
+            'azure_openai_gpt_api_version': '',
+            'azure_openai_gpt_deployment': '',
+            'other_settings': {
+                'azure_ai_foundry': {
+                    'agent_id': '',
+                    'endpoint': '',
+                    'api_version': 'v1',
+                    'authentication_type': 'managed_identity',
+                    'managed_identity_type': 'system_assigned',
+                    'managed_identity_client_id': '',
+                    'tenant_id': '',
+                    'client_id': '',
+                    'client_secret': '',
+                    'cloud': '',
+                    'authority': '',
+                    'notes': ''
+                }
+            }
+        },
+
         # Authentication & Redirect Settings
         'enable_front_door': False,
         'front_door_url': '',
@@ -276,6 +312,15 @@ def get_settings(use_cosmos=False):
         'retention_conversation_max_days': 3650,  # ~10 years
         'retention_document_min_days': 1,
         'retention_document_max_days': 3650,  # ~10 years
+        # Default retention policies for each workspace type
+        # 'none' means no automatic deletion (users can still set their own)
+        # Numeric values (e.g., 30, 60, 90, 180, 365, 730) represent days
+        'default_retention_conversation_personal': 'none',
+        'default_retention_document_personal': 'none',
+        'default_retention_conversation_group': 'none',
+        'default_retention_document_group': 'none',
+        'default_retention_conversation_public': 'none',
+        'default_retention_document_public': 'none',
     }
 
     try:
@@ -506,15 +551,22 @@ def get_user_settings(user_id):
     from flask import session
     try:
         doc = cosmos_user_settings_container.read_item(item=user_id, partition_key=user_id)
+        updated = False
+
         # Ensure the settings key exists for consistency downstream
-        if 'settings' not in doc:
+        if 'settings' not in doc or not isinstance(doc.get('settings'), dict):
+            previous_type = type(doc.get('settings')).__name__ if 'settings' in doc else 'missing'
             doc['settings'] = {}
+            updated = True
+            log_event("[UserSettings] Malformed settings repaired", {
+                "user_id": user_id,
+                "previous_type": previous_type,
+            })
         
         # Try to update email/display_name if missing and available in session
         user = session.get("user", {})
         email = user.get("preferred_username") or user.get("email")
         display_name = user.get("name")
-        updated = False
         if email and doc.get("email") != email:
             doc["email"] = email
             updated = True
@@ -732,9 +784,35 @@ def enabled_required(setting_key):
     return decorator
 
 def sanitize_settings_for_user(full_settings: dict) -> dict:
-    # Exclude any key containing "key", "base64", "storage_account_url"
-    return {k: v for k, v in full_settings.items() 
-            if "key" not in k.lower() and "storage_account_url" not in k.lower()}
+    if not isinstance(full_settings, dict):
+        return full_settings
+
+    sensitive_terms = ("key", "secret", "password", "connection", "base64", "storage_account_url")
+    sanitized = {}
+
+    for k, v in full_settings.items():
+        if any(term in k.lower() for term in sensitive_terms):
+            continue
+        if isinstance(v, dict):
+            sanitized[k] = sanitize_settings_for_user(v)
+        elif isinstance(v, list):
+            sanitized[k] = [
+                sanitize_settings_for_user(item) if isinstance(item, dict) else item
+                for item in v
+            ]
+        else:
+            sanitized[k] = v
+
+    # Add boolean flags for logo/favicon existence so templates can check without exposing base64 data
+    # These fields are stripped by the base64 filter above, but templates need to know if logos exist
+    if 'custom_logo_base64' in full_settings:
+        sanitized['custom_logo_base64'] = bool(full_settings.get('custom_logo_base64'))
+    if 'custom_logo_dark_base64' in full_settings:
+        sanitized['custom_logo_dark_base64'] = bool(full_settings.get('custom_logo_dark_base64'))
+    if 'custom_favicon_base64' in full_settings:
+        sanitized['custom_favicon_base64'] = bool(full_settings.get('custom_favicon_base64'))
+
+    return sanitized
 
 def sanitize_settings_for_logging(full_settings: dict) -> dict:
     """
