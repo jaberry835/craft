@@ -7,10 +7,54 @@ from azure.cognitiveservices.vision.computervision.models import VisualFeatureTy
 from msrest.authentication import CognitiveServicesCredentials
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from ..config import Settings
+from ..config import Settings, get_azure_credential
 from ..models import ImageAnalysisResult, DetectedObject, BoundingBox
 
 logger = structlog.get_logger()
+
+
+class _AzureIdentityCredentialAdapter:
+    """Wraps azure.identity credentials for msrest-based SDKs (track 1).
+
+    The v3.2 ComputerVisionClient uses msrest which expects a credential with
+    a ``signed_session`` method.  This adapter bridges ``azure.identity``
+    credentials (e.g. DefaultAzureCredential / AzureCliCredential) so they
+    can be used in place of ``CognitiveServicesCredentials``.
+    """
+
+    def __init__(self, credential, resource_id: str = "https://cognitiveservices.azure.com/.default"):
+        self._credential = credential
+        self._resource_id = resource_id
+
+    def signed_session(self, session=None):
+        """Return a requests.Session with a fresh Bearer token."""
+        import requests as _requests
+        if session is None:
+            session = _requests.Session()
+        token = self._credential.get_token(self._resource_id)
+        session.headers["Authorization"] = f"Bearer {token.token}"
+        return session
+
+
+def _get_cv_credentials(settings: Settings):
+    """Build credentials for the v3.2 ComputerVisionClient.
+
+    Uses the API key when available; otherwise falls back to
+    DefaultAzureCredential (which includes AzureCliCredential for local dev).
+    """
+    if settings.azure_cv_key:
+        logger.info("Using API key for Computer Vision")
+        return CognitiveServicesCredentials(settings.azure_cv_key)
+
+    credential = get_azure_credential()
+    if credential:
+        logger.info("Using DefaultAzureCredential (CLI) for Computer Vision")
+        return _AzureIdentityCredentialAdapter(credential)
+
+    raise ValueError(
+        "No valid credential for Computer Vision v3.2. "
+        "Provide AZURE_CV_KEY or ensure 'az login' has been run."
+    )
 
 
 class ComputerVisionAnalyzer:
@@ -21,13 +65,12 @@ class ComputerVisionAnalyzer:
         self.settings = settings
         self.logger = logger.bind(component="computer_vision")
         
-        if not settings.azure_cv_key:
-            raise ValueError("AZURE_CV_KEY is required for Computer Vision v3.2")
+        credentials = _get_cv_credentials(settings)
         
         self.logger.info("CV endpoint configured (v3.2)", endpoint=settings.azure_cv_endpoint)
         self.client = ComputerVisionClient(
             endpoint=settings.azure_cv_endpoint,
-            credentials=CognitiveServicesCredentials(settings.azure_cv_key)
+            credentials=credentials,
         )
     
     @retry(

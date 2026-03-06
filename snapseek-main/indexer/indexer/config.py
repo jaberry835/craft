@@ -81,10 +81,35 @@ class Settings(BaseSettings):
     )
     
 
+def _is_running_on_azure() -> bool:
+    """Detect if we're running on Azure (App Service, Container Apps, AKS, etc.)."""
+    import os
+    azure_indicators = [
+        "WEBSITE_INSTANCE_ID",      # App Service
+        "IDENTITY_ENDPOINT",         # Managed Identity configured
+        "CONTAINER_APP_NAME",        # Container Apps
+        "KUBERNETES_SERVICE_HOST",   # AKS
+    ]
+    return any(os.environ.get(var) for var in azure_indicators)
+
+
 def get_azure_credential():
-    """Get DefaultAzureCredential for identity-based auth."""
+    """Get DefaultAzureCredential for identity-based auth.
+
+    On Azure: Uses full credential chain including ManagedIdentityCredential.
+    Locally: Excludes IMDS to avoid 5+ second timeout on each token request,
+             so AzureCliCredential is used instead.
+    """
     try:
-        credential = DefaultAzureCredential()
+        if _is_running_on_azure():
+            credential = DefaultAzureCredential()
+            logger.info("DefaultAzureCredential initialized (Azure environment)")
+        else:
+            credential = DefaultAzureCredential(
+                exclude_managed_identity_credential=True,
+                exclude_shared_token_cache_credential=True,
+            )
+            logger.info("DefaultAzureCredential initialized (local dev - IMDS excluded)")
         return credential
     except Exception as e:
         logger.warning("Failed to get DefaultAzureCredential", error=str(e))
