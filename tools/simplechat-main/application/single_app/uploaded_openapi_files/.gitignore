@@ -1,4 +1,0 @@
-# Ignore all uploaded OpenAPI specification files
-# These may contain sensitive API information
-*
-!.gitignore

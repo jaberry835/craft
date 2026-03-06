@@ -47,6 +47,24 @@ MAX_FILE_SIZE = 10 * 1024 * 1024
 SYNC_STATE_FILE = ".add_repo_sync_state.json"
 
 
+def get_repo_root() -> Path:
+    """Return the git repo root directory, so all paths resolve correctly
+    regardless of where the script is invoked from."""
+    result = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode == 0:
+        return Path(result.stdout.strip())
+    # Fallback: walk upward looking for .git
+    p = Path(__file__).resolve().parent
+    while p != p.parent:
+        if (p / ".git").exists():
+            return p
+        p = p.parent
+    raise RuntimeError("Cannot find git repo root. Run from inside a git repository.")
+
+
 def get_github_token() -> str | None:
     token = os.environ.get("ADD_REPO_GITHUB_TOKEN")
     if token:
@@ -323,6 +341,13 @@ def parse_args():
 def main():
     args = parse_args()
     source, branch = args.source, args.branch
+
+    # Always work from the git repo root so target dirs, README, and
+    # sync-state land in the right place regardless of CWD.
+    repo_root = get_repo_root()
+    os.chdir(repo_root)
+    print(f"📁 Working directory: {repo_root}")
+
     if is_github_https_source(source):
         setup_gh_git_credentials()
     git_source = build_git_source_with_auth(source)

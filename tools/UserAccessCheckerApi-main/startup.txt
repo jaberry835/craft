@@ -1,3 +1,0 @@
-# Azure App Service startup command.
-# Set this as the "Startup Command" in App Service → Configuration → General settings.
-gunicorn --bind=0.0.0.0:8001 --timeout 120 app:app

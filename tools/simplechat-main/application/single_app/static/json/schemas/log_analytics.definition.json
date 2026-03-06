@@ -1,9 +1,0 @@
-{
-    "$schema": "./plugin.definition.schema.json",
-    "allowedAuthTypes": [
-		"identity",
-		"servicePrincipal",
-		"user",
-		"key"
-	]
-}

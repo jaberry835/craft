@@ -1,5 +1,0 @@
-.env
-__pycache__
-flask_session
-Dockerfile
-.dockerignore
