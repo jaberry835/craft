@@ -9,7 +9,7 @@ repos=(
   "https://github.com/adamruderman/Rude-MCPServer main"
   "https://github.com/adamruderman/UserAccessChecker-Python main"
   "https://github.com/jaberry835/snapseek main"
-  "https://github.com/jaberry835/PrintShopDemo main"
+  "https://github.com/microsoft/simplechat main"
 )
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

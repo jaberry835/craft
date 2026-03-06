@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import sys, subprocess, os, shutil, stat, tempfile, filecmp, json
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -264,6 +265,46 @@ def sync_directories(fresh_dir: str, target_dir: str) -> dict:
     return stats
 
 
+README_PATH = Path("README.md")
+
+
+def append_readme_log(repo_name: str, branch: str, stats: dict) -> bool:
+    """Append a sync-log row to the root README.md. Returns True if written."""
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    parts = []
+    if stats["added"]:
+        parts.append(f"+{stats['added']}")
+    if stats["updated"]:
+        parts.append(f"~{stats['updated']}")
+    if stats["removed"]:
+        parts.append(f"-{stats['removed']}")
+    changes = ", ".join(parts) if parts else "no changes"
+    row = f"| {now} | {repo_name} | {branch} | {changes} |\n"
+
+    if not README_PATH.exists():
+        header = (
+            "# curated\nCurated Demo Code\n\n"
+            "## Sync Log\n\n"
+            "| Date | Project | Branch | Changes |\n"
+            "|------|---------|--------|---------|\n"
+        )
+        README_PATH.write_text(header + row, encoding="utf-8")
+        return True
+
+    content = README_PATH.read_text(encoding="utf-8")
+    if content.rstrip().endswith("|"):
+        # Table already has rows — just append
+        README_PATH.write_text(content.rstrip("\n") + "\n" + row, encoding="utf-8")
+    else:
+        # No table yet — add one
+        content = content.rstrip("\n") + "\n\n## Sync Log\n\n"
+        content += "| Date | Project | Branch | Changes |\n"
+        content += "|------|---------|--------|---------|\n"
+        content += row
+        README_PATH.write_text(content, encoding="utf-8")
+    return True
+
+
 def parse_args():
     import argparse
     parser = argparse.ArgumentParser(
@@ -356,16 +397,17 @@ def main():
 
     total_changes = stats['added'] + stats['updated'] + stats['removed']
     if total_changes == 0:
+        # No file changes — save sync state but do NOT commit anything
         if remote_head:
             sync_state[sync_key] = remote_head
             save_sync_state(state_path, sync_state)
         print("\n✅ Already up to date — nothing to commit.")
         return
 
-    subprocess.run(["git", "add", target_dir], check=True)
-    subprocess.run(["git", "commit", "-m", f"Add/update {repo_name} ({branch})"], check=True)
-    subprocess.run(["git", "push"], check=True)
+    # --- Real changes: log to README, stage everything, single commit ---
+    append_readme_log(repo_name, branch, stats)
 
+    # Resolve remote_head now if we don't have it yet
     if not remote_head and not os.path.exists(source):
         try:
             remote_head = get_remote_branch_head(git_source, branch)
@@ -374,6 +416,20 @@ def main():
     if remote_head:
         sync_state[sync_key] = remote_head
         save_sync_state(state_path, sync_state)
+
+    # Stage only the target dir, README, and sync state — nothing else
+    subprocess.run(["git", "add", target_dir], check=True)
+    subprocess.run(["git", "add", str(README_PATH)], check=True)
+    subprocess.run(["git", "add", SYNC_STATE_FILE], check=True)
+
+    # Double-check git actually has staged changes before committing
+    diff = subprocess.run(["git", "diff", "--cached", "--quiet"])
+    if diff.returncode == 0:
+        print("\n✅ Nothing staged — skipping commit.")
+        return
+
+    subprocess.run(["git", "commit", "-m", f"Add/update {repo_name} ({branch})"], check=True)
+    subprocess.run(["git", "push"], check=True)
 
     print(f"✅ Synced {source} ({branch}) into curated repo as {target_dir}")
 
