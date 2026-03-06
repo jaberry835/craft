@@ -397,7 +397,8 @@ async def send_message(request: Request, chat_request: ChatRequest):
                     yield _agui_sse(TextMessageContentEvent(message_id=message_id, delta=event.content))
                     yield _agui_sse(TextMessageEndEvent(message_id=message_id))
 
-                    full_response.append(f"[{event.agent_name}]: {event.content}")
+                    # Persist clean assistant text; agent provenance is captured in chatter metadata.
+                    full_response.append(event.content)
             
             # Save assistant response with chatter history
             combined_response = "\n\n".join(full_response)
@@ -481,9 +482,11 @@ async def send_message_sync(request: Request, chat_request: ChatRequest):
     
     agent_ids = chat_request.agent_ids or session.get("selected_agents", [])
     
-    # Agent Framework providers handle history loading and RAG injection
+    # Agent Framework providers handle history loading and RAG injection.
+    # execute_orchestration yields both ChatterEvent and AgentResponse items;
+    # sync endpoint should only include final AgentResponse content.
     agent_responses = []
-    async for response in agent_manager.execute_orchestration(
+    async for event in agent_manager.execute_orchestration(
         pattern=pattern,
         agent_ids=agent_ids,
         user_message=chat_request.message,
@@ -491,14 +494,20 @@ async def send_message_sync(request: Request, chat_request: ChatRequest):
         user_id=user.user_id,
         user_token=user_token
     ):
-        agent_responses.append({
-            "agent_id": response.agent_id,
-            "agent_name": response.agent_name,
-            "content": response.content
-        })
+        if isinstance(event, ChatterEvent):
+            continue
+        if isinstance(event, AgentManagerResponse):
+            agent_responses.append({
+                "agent_id": event.agent_id,
+                "agent_name": event.agent_name,
+                "content": event.content
+            })
+            continue
+        logger.warning(f"Unexpected orchestration event type in send-sync: {type(event).__name__}")
     
     # Save and return response
-    combined = "\n\n".join([f"[{r['agent_name']}]: {r['content']}" for r in agent_responses])
+    # Return/store clean assistant text; callers can still inspect `agent_responses` for provenance.
+    combined = "\n\n".join([r["content"] for r in agent_responses])
     saved_msg = await cosmos_service.save_message(
         session_id=session_id,
         user_id=user.user_id,

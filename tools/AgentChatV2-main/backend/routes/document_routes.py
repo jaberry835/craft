@@ -316,16 +316,16 @@ async def get_document_content(request: Request, document_id: str):
     For image-only uploads (no indexed chunks), serves the image directly from
     the Cosmos DB message that stores the base64 vision attachment.
     
-    Note: We don't filter by user_id here since the document_id is a UUID that 
-    serves as a capability token. If you have the ID, you can view the content.
+    Access is restricted to the authenticated user who uploaded the document.
     """
     from fastapi.responses import PlainTextResponse, Response
     import base64
+    user = request.state.user
     
     logger.info(f"Getting content for document {document_id}")
     
-    # Get all chunks for this document (no user filter - document ID is the auth)
-    chunks = await search_service.get_document_chunks(document_id)
+    # Restrict chunk lookup to the current user to avoid cross-user access.
+    chunks = await search_service.get_document_chunks(document_id, user_id=user.user_id)
     
     logger.info(f"Found {len(chunks)} chunks for document {document_id}")
     
@@ -340,9 +340,9 @@ async def get_document_content(request: Request, document_id: str):
         )
     
     # No chunks — check if this is an image-only upload with a vision attachment
-    # Look up the session that references this document to find the image message
+    # owned by the current user.
     try:
-        image_msg = await _find_image_message_for_document(document_id)
+        image_msg = await _find_image_message_for_document(document_id, user.user_id)
         if image_msg:
             attachment = image_msg["metadata"]["image_attachment"]
             image_bytes = base64.b64decode(attachment["base64"])
@@ -361,32 +361,34 @@ async def get_document_content(request: Request, document_id: str):
     raise HTTPException(status_code=404, detail="Document not found")
 
 
-async def _find_image_message_for_document(document_id: str) -> dict | None:
+async def _find_image_message_for_document(document_id: str, user_id: str) -> dict | None:
     """
     Search for the Cosmos image message associated with a document ID.
     We find the session that references this document, then look for image
     messages in that session whose filename matches the document title.
     """
-    # Query sessions that reference this document ID
+    # Query sessions for the current user that reference this document ID.
     query = """
         SELECT s.id, s.userId, s.documents FROM s
         WHERE ARRAY_CONTAINS(s.documents, {"id": @doc_id}, true)
+          AND s.userId = @user_id
     """
-    params = [{"name": "@doc_id", "value": document_id}]
+    params = [
+        {"name": "@doc_id", "value": document_id},
+        {"name": "@user_id", "value": user_id},
+    ]
     
-    sessions = list(cosmos_service.sessions_container.query_items(
+    sessions = [item async for item in cosmos_service.sessions_container.query_items(
         query=query,
         parameters=params,
         enable_cross_partition_query=True,
-    ))
+    )]
     
     if not sessions:
         return None
     
     session = sessions[0]
     session_id = session["id"]
-    user_id = session["userId"]
-    
     # Find the document title we're looking for
     doc_title = None
     for doc in session.get("documents", []):

@@ -23,6 +23,7 @@ For delegation to specialists:
 {
   "action": "delegate",
   "specialists": ["agent_id_1", "agent_id_2"],
+  "contextualized_query": "A fully self-contained rewrite of the user's request that includes all necessary context from the conversation history so a specialist with NO access to prior messages can understand it completely",
   "reasoning": "Brief explanation of why these specialists are needed"
 }
 ```
@@ -35,6 +36,13 @@ For direct answer (no specialists needed):
 }
 ```
 [Then provide your direct answer after the JSON block]
+
+CONTEXTUALIZED QUERY RULES:
+When delegating, you MUST provide a "contextualized_query" that:
+1. Resolves ALL pronouns and vague references (e.g. "it", "that", "the show", "tell me more") using conversation history
+2. Includes specific names, titles, and details from prior messages so the query is fully self-contained
+3. Can be understood by a specialist who has NEVER seen the conversation history
+4. Example: If user previously discussed "Speific Name" and now says "tell me more about the tv show", the contextualized_query should be "Tell me more about the TV show 'Specific Name'"
 
 DELEGATION RULES:
 1. Delegate when the request matches a specialist's domain
@@ -59,6 +67,7 @@ User: "Query the customers table for all active users"
 {
   "action": "delegate",
   "specialists": ["data-agent"],
+  "contextualized_query": "Query the customers table for all active users",
   "reasoning": "Database query request matches data specialist's capabilities"
 }
 ```
@@ -68,6 +77,7 @@ User: "Compare the API response with what's in our documents"
 {
   "action": "delegate",
   "specialists": ["api-agent", "document-agent"],
+  "contextualized_query": "Compare the API response with what's in our documents",
   "reasoning": "Request requires both API access and document search"
 }
 ```

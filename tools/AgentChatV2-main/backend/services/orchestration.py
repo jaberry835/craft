@@ -58,6 +58,7 @@ For delegation to specialists:
 {
   "action": "delegate",
   "specialists": ["agent_id_1", "agent_id_2"],
+  "contextualized_query": "A fully self-contained rewrite of the user's request that includes all necessary context from the conversation history so a specialist with NO access to prior messages can understand it completely",
   "reasoning": "Brief explanation of why these specialists are needed"
 }
 ```
@@ -70,6 +71,12 @@ For direct answer (no specialists needed):
 }
 ```
 [Then provide your direct answer after the JSON block]
+
+CONTEXTUALIZED QUERY RULES:
+When delegating, you MUST provide a "contextualized_query" that:
+1. Resolves ALL pronouns and vague references (e.g. "it", "that", "the show", "tell me more") using conversation history
+2. Includes specific names, titles, and details from prior messages so the query is fully self-contained
+3. Can be understood by a specialist who has NEVER seen the conversation history
 
 DELEGATION RULES:
 1. Delegate when the request matches a specialist's domain
@@ -104,6 +111,22 @@ FORMATTING:
 - For errors, explain what went wrong and suggest next steps if possible
 
 Provide your synthesized response to the user now:
+"""
+
+# ── Supplement appended to any analysis prompt that lacks the field ──
+CONTEXTUALIZED_QUERY_SUPPLEMENT = """
+
+IMPORTANT — CONTEXTUALIZED QUERY:
+When delegating to specialists, you MUST include a "contextualized_query" field
+in your JSON response.  This is a fully self-contained rewrite of the user's
+request that resolves ALL pronouns, vague references (e.g. "it", "that",
+"the show", "tell me more"), and implicit context using the conversation history.
+
+The specialist agents have NO access to prior messages — they will only see the
+"contextualized_query" text.  If the query references something discussed
+earlier, you must spell it out explicitly.
+
+
 """
 
 DEFAULT_EVALUATION_PROMPT = """You are evaluating whether the specialist agents have gathered enough information to answer the user's question.
@@ -196,6 +219,12 @@ async def run_orchestrator_for_analysis(
     
     # Format the prompt with agent list
     analysis_prompt = analysis_prompt.replace("{agent_list}", "\n".join(agent_list) if agent_list else "No specialists available")
+
+    # Always append the contextualized-query instruction so that even
+    # admin-customized prompts produce a self-contained rewrite for
+    # specialists that have no access to conversation history.
+    if "contextualized_query" not in analysis_prompt:
+        analysis_prompt += CONTEXTUALIZED_QUERY_SUPPLEMENT
     
     # Create chat client
     chat_client = create_chat_client_fn(orchestrator_config)

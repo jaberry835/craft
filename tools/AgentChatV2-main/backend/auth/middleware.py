@@ -21,7 +21,6 @@ PUBLIC_PATHS = {"/", "/health", "/docs", "/openapi.json", "/redoc", "/a2a/agents
 # - Document content: accessed via direct browser link - document ID serves as capability token
 # - A2A agent cards: GET requests for agent discovery (POST requests still require auth)
 PUBLIC_PATH_PATTERNS = [
-    re.compile(r"^/api/documents/[a-f0-9-]+/content$"),  # Document content viewing
     re.compile(r"^/a2a/[a-f0-9-]+(/\.well-known/agent(-card)?\.json)?$"),  # A2A discovery (GET only)
     re.compile(r"^/api/settings/ui$"),  # UI settings (public GET for banner/branding)
 ]
@@ -81,10 +80,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
             logger.info(f"Auth middleware: header present={bool(auth_header)}, length={len(auth_header)}, path={request.url.path}")
         
         if not auth_header.startswith("Bearer "):
-            # For development, create a mock user
+            # For explicit local development only, create a mock user.
             from config import get_settings
             settings = get_settings()
-            if settings.environment == "development":
+            if settings.environment == "development" and settings.allow_dev_auth_bypass:
+                logger.warning(
+                    "DEV AUTH BYPASS ENABLED: allowing unauthenticated request for %s",
+                    request.url.path,
+                )
                 dev_user = UserInfo(
                     user_id="dev-user-id",
                     email="dev@localhost",

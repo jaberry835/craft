@@ -487,7 +487,8 @@ You are being called as a specialist by an orchestrator agent. The user's reques
 
         # --- External A2A agents: use HTTP protocol ---
         return await self._call_specialist_remote(
-            agent_id, agent_name, config, message, user_token, chatter_queue
+            agent_id, agent_name, config, message, user_token, chatter_queue,
+            session_id=session_id, user_id=user_id,
         )
 
     async def _call_specialist_local(
@@ -641,6 +642,81 @@ You are being called as a specialist by an orchestrator agent. The user's reques
                 ))
             return {"agent_id": agent_id, "agent_name": agent_name, "response": "", "error": str(e)}
 
+    async def _build_context_enriched_message(
+        self,
+        message: str,
+        session_id: Optional[str],
+        user_id: Optional[str],
+        agent_name: str,
+    ) -> str:
+        """
+        Build a context-enriched message for external A2A agents by prepending
+        recent conversation history.
+
+        Since external agents communicate via the A2A protocol (single message
+        per task), they have no access to the session's chat history.  This
+        method loads the last few turns from Cosmos DB and formats them as
+        context so the remote agent can resolve references like "tell me more"
+        or pronouns that depend on prior messages.
+        """
+        if not session_id or not user_id:
+            return message
+
+        try:
+            raw_messages, _, _ = await cosmos_service.get_session_messages(
+                session_id=session_id,
+                user_id=user_id,
+                page_size=10,       # last 10 messages (5 turns) is enough context
+                oldest_first=True,
+            )
+
+            if not raw_messages:
+                return message
+
+            # Filter out the current message (already saved to Cosmos before
+            # orchestration) to avoid duplication.
+            history = [
+                m for m in raw_messages
+                if not (m.get("role") == "user" and m.get("content", "").strip() == message.strip())
+            ]
+
+            if not history:
+                return message
+
+            # Format as a compact conversation context block
+            lines = []
+            for m in history:
+                role = m.get("role", "user").capitalize()
+                content = m.get("content", "").strip()
+                if content:
+                    # Truncate very long assistant replies to keep the payload reasonable
+                    if len(content) > 500:
+                        content = content[:500] + "..."
+                    lines.append(f"{role}: {content}")
+
+            if not lines:
+                return message
+
+            context_block = "\n".join(lines)
+            enriched = (
+                f"[Conversation context — previous messages in this session]\n"
+                f"{context_block}\n\n"
+                f"[Current request]\n"
+                f"{message}"
+            )
+
+            if should_log_a2a():
+                logger.info(
+                    f"A2A context enrichment for {agent_name}: "
+                    f"{len(history)} history messages prepended "
+                    f"({len(enriched)} chars total)"
+                )
+            return enriched
+
+        except Exception as e:
+            logger.warning(f"Failed to load history for A2A context enrichment: {e}")
+            return message
+
     async def _call_specialist_remote(
         self,
         agent_id: str,
@@ -648,16 +724,27 @@ You are being called as a specialist by an orchestrator agent. The user's reques
         config: dict,
         message: str,
         user_token: Optional[str],
-        chatter_queue: Optional[asyncio.Queue]
+        chatter_queue: Optional[asyncio.Queue],
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> dict:
         """
         Call an external A2A agent via HTTP protocol with streaming.
 
         Uses the SDK's streaming mode so we receive incremental updates
         instead of waiting for the full response.
+
+        When session_id/user_id are available, conversation history is loaded
+        from Cosmos DB and prepended to the message so the remote agent has
+        context for follow-up questions and pronoun resolution.
         """
+        # Enrich the message with conversation history for context
+        enriched_message = await self._build_context_enriched_message(
+            message, session_id, user_id, agent_name
+        )
+
         if should_log_a2a():
-            logger.info(f"A2A CALL (remote): {agent_name} <- {message[:100]}...")
+            logger.info(f"A2A CALL (remote): {agent_name} <- {enriched_message[:200]}...")
 
         start_time = time.time()
         try:
@@ -672,12 +759,12 @@ You are being called as a specialist by an orchestrator agent. The user's reques
                 await chatter_queue.put(ChatterEvent(
                     type=ChatterEventType.THINKING,
                     agent_name=agent_name,
-                    content="Connecting to remote agent...",
+                    content="Connecting to remote agent (with conversation context)...",
                     friendly_message=f"{agent_name} is working...",
                 ))
 
             async with agent:
-                stream = agent.run(message, stream=True)
+                stream = agent.run(enriched_message, stream=True)
                 async for update in stream:
                     for content_item in update.contents:
                         if hasattr(content_item, 'text') and content_item.text:
@@ -818,7 +905,12 @@ You are being called as a specialist by an orchestrator agent. The user's reques
         )
 
         if should_log_agent():
-            logger.info(f"Phase 1 decision: action={decision.get('action')}, specialists={decision.get('specialists', [])}")
+            ctx_query = decision.get('contextualized_query', '')
+            logger.info(
+                f"Phase 1 decision: action={decision.get('action')}, "
+                f"specialists={decision.get('specialists', [])}"
+                + (f", contextualized_query={ctx_query[:120]}" if ctx_query else "")
+            )
 
         # Emit decision result event
         reasoning = decision.get("reasoning", "")
@@ -888,6 +980,13 @@ You are being called as a specialist by an orchestrator agent. The user's reques
         if should_log_agent():
             logger.info(f"Phase 2: Executing {len(specialist_ids)} specialists with pattern={pattern.value}")
 
+        # Use the orchestrator's contextualized query (if available) so that
+        # specialists — especially external A2A agents with no access to chat
+        # history — receive a fully self-contained, disambiguated message.
+        specialist_message = decision.get("contextualized_query") or user_message
+        if specialist_message != user_message and should_log_agent():
+            logger.info(f"Using contextualized query for specialists: {specialist_message[:200]}")
+
         yield ChatterEvent(
             type=ChatterEventType.THINKING,
             agent_name=orchestrator_config.get("name", "Orchestrator"),
@@ -906,7 +1005,7 @@ You are being called as a specialist by an orchestrator agent. The user's reques
             execute_specialists_with_pattern(
                 pattern=pattern.value,
                 specialist_ids=specialist_ids,
-                user_message=user_message,
+                user_message=specialist_message,
                 configs_cache=self._configs_cache,
                 create_specialist_agent_fn=self._create_specialist_agent,
                 call_specialist_a2a_fn=self._call_specialist_a2a,

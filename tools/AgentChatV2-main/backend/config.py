@@ -5,7 +5,7 @@ Uses Pydantic Settings for type-safe environment configuration.
 import os
 from functools import lru_cache
 from typing import Union
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 from azure.identity import AzureCliCredential, ManagedIdentityCredential
 from azure.identity.aio import AzureCliCredential as AzureCliCredentialAsync, ManagedIdentityCredential as ManagedIdentityCredentialAsync
@@ -15,7 +15,9 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
     
     # Environment
-    environment: str = Field(default="development", alias="ENVIRONMENT")
+    environment: str = Field(default="production", alias="ENVIRONMENT")
+    # Explicitly opt-in to auth/admin bypass for local development only.
+    allow_dev_auth_bypass: bool = Field(default=False, alias="ALLOW_DEV_AUTH_BYPASS")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     
     # CORS - comma-separated origins allowed for credentialed requests
@@ -122,9 +124,10 @@ class Settings(BaseSettings):
     rate_limit_chat: str = Field(default="10/minute", alias="RATE_LIMIT_CHAT")
     rate_limit_upload: str = Field(default="20/minute", alias="RATE_LIMIT_UPLOAD")
     
-    class Config:
-        env_file = ".env"
-        case_sensitive = False
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        case_sensitive=False,
+    )
 
 
 @lru_cache()

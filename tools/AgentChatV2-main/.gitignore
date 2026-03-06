@@ -24,6 +24,8 @@ build/
 
 # TypeScript
 *.tsbuildinfo
+# Don't blow away local environments
+environment.ts
 
 # IDE
 .idea/
@@ -74,3 +76,4 @@ yarn-error.log*
 frontend/src/environments/environment.ts
 backend/MCPServerDevCert.pfx
 backend/MCPServerDevCert-protected.pfx
+

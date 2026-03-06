@@ -290,6 +290,19 @@ import { environment } from '../../../environments/environment';
               />
               <span class="field-hint">Shown in the sidebar header. Leave blank to use default.</span>
             </div>
+
+            <div class="form-group">
+              <label>Assistant Display Name</label>
+              <input 
+                type="text" 
+                class="input" 
+                [(ngModel)]="uiSettings.assistant_display_name"
+                (ngModelChange)="onSettingsChanged()"
+                placeholder="Assistant (default)"
+                maxlength="100"
+              />
+              <span class="field-hint">Shown above assistant messages in chat. Leave blank to use "Assistant".</span>
+            </div>
             
             <div class="form-group">
               <label>Branding Logo</label>
@@ -2400,6 +2413,7 @@ export class AdminComponent implements OnInit, OnDestroy {
     branding_image_filename: null,
     branding_image_position: 'sidebar',
     app_title: null,
+    assistant_display_name: null,
     favicon_image: null,
     favicon_image_filename: null
   };

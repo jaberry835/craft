@@ -6,6 +6,7 @@ Uses API key for local dev, DefaultAzureCredential for production.
 from typing import Optional, Union
 import json
 import time
+import asyncio
 
 from azure.core.credentials import AzureKeyCredential
 from azure.search.documents import SearchClient
@@ -78,7 +79,7 @@ class SearchService:
     async def _ensure_index(self) -> None:
         """Ensure the search index exists with proper schema."""
         try:
-            self.index_client.get_index(self.index_name)
+            await asyncio.to_thread(self.index_client.get_index, self.index_name)
             logger.debug(f"Index {self.index_name} exists")
         except Exception:
             # Create index
@@ -113,7 +114,7 @@ class SearchService:
                 )
             )
             
-            self.index_client.create_index(index)
+            await asyncio.to_thread(self.index_client.create_index, index)
             logger.info(f"Created search index: {self.index_name}")
     
     async def index_document(
@@ -140,7 +141,7 @@ class SearchService:
         }
         
         start_time = time.perf_counter()
-        self.search_client.upload_documents(documents=[document])
+        await asyncio.to_thread(self.search_client.upload_documents, [document])
         duration_ms = (time.perf_counter() - start_time) * 1000
         
         if should_log_performance():
@@ -186,12 +187,14 @@ class SearchService:
         )
         
         start_time = time.perf_counter()
-        results = self.search_client.search(
-            search_text=None,
-            vector_queries=[vector_query],
-            filter=filter_expr,
-            select=["id", "title", "content", "fileType", "sessionId"],
-            top=top_k
+        results = await asyncio.to_thread(
+            lambda: list(self.search_client.search(
+                search_text=None,
+                vector_queries=[vector_query],
+                filter=filter_expr,
+                select=["id", "title", "content", "fileType", "sessionId"],
+                top=top_k
+            ))
         )
         
         documents = []
@@ -246,12 +249,14 @@ class SearchService:
         )
         
         start_time = time.perf_counter()
-        results = self.search_client.search(
-            search_text=query_text,
-            vector_queries=[vector_query],
-            filter=filter_expr,
-            select=["id", "title", "content", "fileType", "sessionId"],
-            top=top_k
+        results = await asyncio.to_thread(
+            lambda: list(self.search_client.search(
+                search_text=query_text,
+                vector_queries=[vector_query],
+                filter=filter_expr,
+                select=["id", "title", "content", "fileType", "sessionId"],
+                top=top_k
+            ))
         )
         
         documents = []
@@ -283,7 +288,7 @@ class SearchService:
     
     async def delete_document(self, doc_id: str) -> None:
         """Delete a document from the index."""
-        self.search_client.delete_documents(documents=[{"id": doc_id}])
+        await asyncio.to_thread(self.search_client.delete_documents, [{"id": doc_id}])
         logger.info(f"Deleted document {doc_id}")
     
     async def get_document_chunks(self, doc_id: str, user_id: str = None) -> list[dict]:
@@ -295,11 +300,13 @@ class SearchService:
         # Search for all chunks - optionally filter by user
         filter_expr = f"userId eq '{user_id}'" if user_id else None
         
-        results = self.search_client.search(
-            search_text="*",
-            filter=filter_expr,
-            select=["id", "title", "content", "fileType", "userId"],
-            top=1000  # Get more results to find all chunks
+        results = await asyncio.to_thread(
+            lambda: list(self.search_client.search(
+                search_text="*",
+                filter=filter_expr,
+                select=["id", "title", "content", "fileType", "userId"],
+                top=1000  # Get more results to find all chunks
+            ))
         )
         
         # Filter results that match the doc_id prefix
@@ -329,15 +336,17 @@ class SearchService:
     async def delete_session_documents(self, session_id: str) -> None:
         """Delete all documents for a session."""
         # Find all docs for session
-        results = self.search_client.search(
-            search_text="*",
-            filter=f"sessionId eq '{session_id}'",
-            select=["id"]
+        results = await asyncio.to_thread(
+            lambda: list(self.search_client.search(
+                search_text="*",
+                filter=f"sessionId eq '{session_id}'",
+                select=["id"]
+            ))
         )
         
         doc_ids = [{"id": r["id"]} for r in results]
         if doc_ids:
-            self.search_client.delete_documents(documents=doc_ids)
+            await asyncio.to_thread(self.search_client.delete_documents, doc_ids)
             logger.info(f"Deleted {len(doc_ids)} documents for session {session_id}")
 
 

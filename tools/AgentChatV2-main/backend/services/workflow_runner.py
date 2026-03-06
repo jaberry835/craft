@@ -96,8 +96,19 @@ async def build_specialist_agents(
         providers = None
         if has_session:
             providers = [
-                CosmosHistoryProvider(cosmos_service),
-                DocumentRAGProvider(embedding_service, search_service),
+                CosmosHistoryProvider(
+                    cosmos_service,
+                    default_session_id=session_id,
+                    default_user_id=user_id,
+                    default_query=None,  # set dynamically per-run via session state
+                ),
+                DocumentRAGProvider(
+                    embedding_service,
+                    search_service,
+                    default_session_id=session_id,
+                    default_user_id=user_id,
+                    default_query=None,
+                ),
             ]
 
         agent = await create_specialist_agent_fn(

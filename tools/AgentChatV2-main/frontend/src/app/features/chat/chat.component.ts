@@ -1218,8 +1218,29 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
   
   /** Open document content in a new tab */
   openDocument(file: UploadedFile): void {
-    const url = this.documentService.getDocumentContentUrl(file.document.id);
-    window.open(url, '_blank');
+    this.documentService.fetchDocumentContent(file.document.id).subscribe({
+      next: (response) => {
+        const blob = response.body;
+        if (!blob) {
+          return;
+        }
+        const contentType = response.headers.get('Content-Type') || 'text/plain';
+        const blobUrl = URL.createObjectURL(new Blob([blob], { type: contentType }));
+        window.open(blobUrl, '_blank');
+        // Revoke after a delay to allow the new tab to load content.
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+      },
+      error: (error) => {
+        console.error('Failed to open document:', error);
+        if (error.status === 403) {
+          this.uploadError = 'You do not have permission to view this document.';
+        } else if (error.status === 404) {
+          this.uploadError = 'Document not found.';
+        } else {
+          this.uploadError = 'Failed to open document. Please try again.';
+        }
+      }
+    });
   }
   
   getFileIcon(fileType: string): string {

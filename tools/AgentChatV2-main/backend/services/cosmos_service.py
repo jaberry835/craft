@@ -569,8 +569,9 @@ class CosmosDBService:
         try:
             session = await self.get_session(session_id, user_id)
             if session:
+                current_count = session.get("message_count", session.get("messageCount", 0))
                 await self.update_session(session_id, user_id, {
-                    "messageCount": session.get("messageCount", 0) + 1
+                    "messageCount": current_count + 1
                 })
         except Exception as e:
             logger.warning(f"Failed to update session stats: {e}")

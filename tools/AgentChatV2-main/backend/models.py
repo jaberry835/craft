@@ -499,6 +499,11 @@ class UISettings(BaseModel):
         max_length=100,
         description="Custom application title (shown in sidebar)"
     )
+    assistant_display_name: Optional[str] = Field(
+        default=None,
+        max_length=100,
+        description="Custom display name for assistant messages"
+    )
     favicon_image: Optional[str] = Field(
         default=None,
         description="Base64-encoded favicon image (max ~100KB before encoding)"
