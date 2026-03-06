@@ -1,4 +1,0 @@
-requests
-msal
-logging
-dotenv

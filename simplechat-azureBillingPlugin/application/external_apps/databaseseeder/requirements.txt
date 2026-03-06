@@ -1,5 +1,0 @@
-requests
-msal
-logging
-dotenv
-flask
