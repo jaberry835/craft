@@ -92,6 +92,14 @@ class FaceMatchService:
             return self._embed_dlib(img_array)
         return self._embed_deepface(img_array)
 
+    @staticmethod
+    def _normalize(vec: np.ndarray) -> list[float]:
+        """L2-normalize so cosine similarity works correctly in Azure AI Search."""
+        norm = np.linalg.norm(vec)
+        if norm > 0:
+            vec = vec / norm
+        return vec.tolist()
+
     def _embed_dlib(self, img_array: np.ndarray) -> list[float] | None:
         import face_recognition
 
@@ -101,8 +109,8 @@ class FaceMatchService:
         encodings = face_recognition.face_encodings(img_array, known_face_locations=locations)
         if not encodings:
             return None
-        # Return first (largest) face
-        return encodings[0].tolist()
+        # Return first (largest) face, L2-normalized
+        return self._normalize(encodings[0])
 
     def _embed_deepface(self, img_array: np.ndarray) -> list[float] | None:
         from deepface import DeepFace
@@ -309,7 +317,7 @@ class FaceMatchService:
             return 0
 
     def name_face_cluster(
-        self, face_doc_id: str, name: str, threshold: float = 0.75
+        self, face_doc_id: str, name: str, threshold: float = 0.85
     ) -> list[str]:
         """Name a face and all its similar faces in the faces index.
 

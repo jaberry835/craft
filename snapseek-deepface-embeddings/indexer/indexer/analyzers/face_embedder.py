@@ -134,6 +134,14 @@ class FaceEmbedder:
             return self._generate_embeddings_dlib(img_array)
         return self._generate_embeddings_deepface(img_array)
 
+    @staticmethod
+    def _normalize(vec: np.ndarray) -> list[float]:
+        """L2-normalize so cosine similarity works correctly in Azure AI Search."""
+        norm = np.linalg.norm(vec)
+        if norm > 0:
+            vec = vec / norm
+        return vec.tolist()
+
     def _generate_embeddings_dlib(self, img_array: np.ndarray) -> list[dict[str, Any]]:
         import face_recognition
 
@@ -145,7 +153,7 @@ class FaceEmbedder:
         results: list[dict[str, Any]] = []
         for (top, right, bottom, left), encoding in zip(locations, encodings):
             results.append({
-                "embedding": encoding.tolist(),
+                "embedding": self._normalize(encoding),
                 "facial_area": {"x": left, "y": top, "w": right - left, "h": bottom - top},
                 "confidence": 1.0,
             })
@@ -361,7 +369,7 @@ class FaceEmbedder:
             h, w = crop_array.shape[:2]
             locations = [(0, w, h, 0)]  # top, right, bottom, left
             encodings = face_recognition.face_encodings(crop_array, known_face_locations=locations)
-            return encodings[0].tolist() if encodings else None
+            return self._normalize(encodings[0]) if encodings else None
         else:
             from deepface import DeepFace
             crop = crop.resize((160, 160), Image.LANCZOS)
