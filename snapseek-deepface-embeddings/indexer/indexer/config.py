@@ -70,23 +70,27 @@ class Settings(BaseSettings):
     use_persistent_faces: bool = Field(default=True, description="Use two-pass face clustering with FaceList storage")
     enable_image_embeddings: bool = Field(default=True)
     
-    # Local face embeddings (deepface)
+    # Local face embeddings
     enable_face_embeddings: bool = Field(
         default=True,
-        description="Enable local face embedding generation using deepface"
+        description="Enable local face embedding generation"
     )
-    face_embedding_dimensions: int = Field(default=512, description="Dimension of face embeddings (Facenet512=512)")
+    face_embedding_backend: str = Field(
+        default="dlib",
+        description="Backend for face embeddings: 'dlib' (128-dim, no download) or 'deepface' (512-dim, requires weight download)"
+    )
+    face_embedding_dimensions: int = Field(default=128, description="Dimension of face embeddings (dlib=128, Facenet512=512)")
     azure_search_faces_index_name: str = Field(
         default="snapseek-faces",
         description="Separate Azure AI Search index for face embeddings"
     )
     face_detection_fallback: bool = Field(
         default=True,
-        description="Use deepface for face detection when Azure Face API finds no faces"
+        description="Use local face detection when Azure Face API finds no faces"
     )
     deepface_model_name: str = Field(
         default="Facenet512",
-        description="DeepFace model for face embeddings (Facenet512, VGG-Face, ArcFace, etc.)"
+        description="DeepFace model for face embeddings (Facenet512, VGG-Face, ArcFace, etc.) — only used when face_embedding_backend='deepface'"
     )
     
     # Vector dimensions

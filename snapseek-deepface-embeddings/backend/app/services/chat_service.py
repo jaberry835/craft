@@ -333,14 +333,25 @@ class ChatService:
         collected_image_ids: list[str] = list(request.image_context or [])
         max_turns = 6  # safety cap
 
+        # Newer models (o-series, gpt-5.x) require max_completion_tokens
+        # and may reject the legacy max_tokens parameter with a 400 error.
+        deployment = self.settings.azure_openai_chat_deployment
+        uses_new_api = any(
+            deployment.startswith(p) for p in ("o1", "o3", "o4", "gpt-5")
+        )
+        extra_params: dict = (
+            {"max_completion_tokens": 800}
+            if uses_new_api
+            else {"max_tokens": 800, "temperature": 0.4}
+        )
+
         for _turn in range(max_turns):
             completion = self.client.chat.completions.create(
-                model=self.settings.azure_openai_chat_deployment,
+                model=deployment,
                 messages=messages,
                 tools=TOOLS,
                 tool_choice="auto",
-                max_tokens=800,
-                temperature=0.4,
+                **extra_params,
             )
 
             choice = completion.choices[0]

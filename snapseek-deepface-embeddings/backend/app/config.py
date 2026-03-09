@@ -89,7 +89,11 @@ class Settings(BaseSettings):
     # Vector dimensions
     text_embedding_dimensions: int = Field(default=1536)
     image_embedding_dimensions: int = Field(default=768)
-    face_embedding_dimensions: int = Field(default=512, description="Deepface Facenet512 embedding dimensions")
+    face_embedding_backend: str = Field(
+        default="dlib",
+        description="Backend for face embeddings: 'dlib' (128-dim, no download) or 'deepface' (512-dim, requires weight download)"
+    )
+    face_embedding_dimensions: int = Field(default=128, description="Face embedding dimensions (dlib=128, Facenet512=512)")
     
     # Faces search index
     azure_search_faces_index_name: str = Field(
@@ -98,7 +102,7 @@ class Settings(BaseSettings):
     )
     deepface_model_name: str = Field(
         default="Facenet512",
-        description="DeepFace model for face embeddings"
+        description="DeepFace model for face embeddings — only used when face_embedding_backend='deepface'"
     )
     
     # Identity auth scope

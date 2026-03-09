@@ -1,4 +1,4 @@
-"""Local face detection and embedding using DeepFace (Facenet512)."""
+"""Local face detection and embedding using dlib (face_recognition) or DeepFace."""
 
 import hashlib
 import io
@@ -15,36 +15,49 @@ logger = structlog.get_logger()
 
 
 class FaceEmbedder:
-    """Detect faces locally and generate 512-dim embeddings using DeepFace / Facenet512."""
+    """Detect faces locally and generate embeddings.
+
+    Supports two backends (controlled by ``settings.face_embedding_backend``):
+
+    * **dlib** (default) – Uses the ``face_recognition`` package.  Produces
+      128-dim embeddings.  Model weights are bundled in the pip package so
+      *no internet download is required* at runtime.
+    * **deepface** – Uses DeepFace with configurable model (default Facenet512).
+      Produces 512-dim embeddings but requires a one-time weight download.
+    """
 
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.model_name = settings.deepface_model_name  # e.g. "Facenet512"
-        self.logger = logger.bind(component="face_embedder")
+        self.backend = settings.face_embedding_backend.lower()  # "dlib" or "deepface"
+        self.model_name = settings.deepface_model_name  # only used for deepface
+        self.logger = logger.bind(component="face_embedder", backend=self.backend)
         self._model_loaded = False
 
     # ------------------------------------------------------------------
-    # Lazy-load the DeepFace model so import time stays fast
+    # Lazy-load the model so import time stays fast
     # ------------------------------------------------------------------
     def _ensure_model(self) -> None:
         """Pre-load the model weights on first call (avoids repeated cold starts)."""
         if self._model_loaded:
             return
         try:
-            from deepface import DeepFace
-
-            # Trigger weight download / caching by running a tiny dummy image
-            dummy = np.zeros((48, 48, 3), dtype=np.uint8)
-            DeepFace.represent(
-                img_path=dummy,
-                model_name=self.model_name,
-                enforce_detection=False,
-                detector_backend="skip",
-            )
-            self._model_loaded = True
-            self.logger.info("DeepFace model loaded", model=self.model_name)
+            if self.backend == "dlib":
+                import face_recognition  # noqa: F401 – validates install
+                self._model_loaded = True
+                self.logger.info("face_recognition (dlib) ready")
+            else:
+                from deepface import DeepFace
+                dummy = np.zeros((48, 48, 3), dtype=np.uint8)
+                DeepFace.represent(
+                    img_path=dummy,
+                    model_name=self.model_name,
+                    enforce_detection=False,
+                    detector_backend="skip",
+                )
+                self._model_loaded = True
+                self.logger.info("DeepFace model loaded", model=self.model_name)
         except Exception as e:
-            self.logger.warning("Failed to pre-load DeepFace model", error=str(e))
+            self.logger.warning("Failed to pre-load face model", error=str(e))
 
     # ------------------------------------------------------------------
     # Public API
@@ -52,16 +65,33 @@ class FaceEmbedder:
 
     def detect_faces(self, image_data: bytes) -> FaceAnalysisResult:
         """
-        Detect faces in *image_data* using the configured DeepFace detector.
+        Detect faces in *image_data*.
 
         Returns an ``FaceAnalysisResult`` with bounding-box information for
         every face found (no embeddings yet).
         """
+        self._ensure_model()
+        img_array = self._bytes_to_numpy(image_data)
+
+        if self.backend == "dlib":
+            return self._detect_faces_dlib(img_array)
+        return self._detect_faces_deepface(img_array)
+
+    def _detect_faces_dlib(self, img_array: np.ndarray) -> FaceAnalysisResult:
+        import face_recognition
+
+        locations = face_recognition.face_locations(img_array, model="hog")
+        detected: list[DetectedFace] = []
+        for i, (top, right, bottom, left) in enumerate(locations):
+            bbox = BoundingBox(x=left, y=top, width=right - left, height=bottom - top)
+            detected.append(
+                DetectedFace(face_id=f"local_{i}", confidence=1.0, bounding_box=bbox)
+            )
+        return FaceAnalysisResult(faces=detected, face_count=len(detected))
+
+    def _detect_faces_deepface(self, img_array: np.ndarray) -> FaceAnalysisResult:
         from deepface import DeepFace
 
-        self._ensure_model()
-
-        img_array = self._bytes_to_numpy(image_data)
         try:
             faces = DeepFace.extract_faces(
                 img_path=img_array,
@@ -75,26 +105,17 @@ class FaceEmbedder:
 
         detected: list[DetectedFace] = []
         for i, face_obj in enumerate(faces):
-            # extract_faces returns confidence = 0 when no face is truly found
             conf = face_obj.get("confidence", 0)
             if conf is None or conf < 0.50:
                 continue
-
             region = face_obj.get("facial_area", {})
             bbox = BoundingBox(
-                x=region.get("x", 0),
-                y=region.get("y", 0),
-                width=region.get("w", 0),
-                height=region.get("h", 0),
+                x=region.get("x", 0), y=region.get("y", 0),
+                width=region.get("w", 0), height=region.get("h", 0),
             )
             detected.append(
-                DetectedFace(
-                    face_id=f"local_{i}",
-                    confidence=float(conf),
-                    bounding_box=bbox,
-                )
+                DetectedFace(face_id=f"local_{i}", confidence=float(conf), bounding_box=bbox)
             )
-
         return FaceAnalysisResult(faces=detected, face_count=len(detected))
 
     def generate_embeddings(
@@ -102,15 +123,37 @@ class FaceEmbedder:
     ) -> list[dict[str, Any]]:
         """
         Detect all faces and return a list of dicts, each containing:
-            - ``embedding``: list[float] (512-dim for Facenet512)
+            - ``embedding``: list[float] (128-dim for dlib, 512-dim for Facenet512)
             - ``facial_area``: dict with x, y, w, h
             - ``confidence``: float
         """
+        self._ensure_model()
+        img_array = self._bytes_to_numpy(image_data)
+
+        if self.backend == "dlib":
+            return self._generate_embeddings_dlib(img_array)
+        return self._generate_embeddings_deepface(img_array)
+
+    def _generate_embeddings_dlib(self, img_array: np.ndarray) -> list[dict[str, Any]]:
+        import face_recognition
+
+        locations = face_recognition.face_locations(img_array, model="hog")
+        if not locations:
+            return []
+        encodings = face_recognition.face_encodings(img_array, known_face_locations=locations)
+
+        results: list[dict[str, Any]] = []
+        for (top, right, bottom, left), encoding in zip(locations, encodings):
+            results.append({
+                "embedding": encoding.tolist(),
+                "facial_area": {"x": left, "y": top, "w": right - left, "h": bottom - top},
+                "confidence": 1.0,
+            })
+        return results
+
+    def _generate_embeddings_deepface(self, img_array: np.ndarray) -> list[dict[str, Any]]:
         from deepface import DeepFace
 
-        self._ensure_model()
-
-        img_array = self._bytes_to_numpy(image_data)
         try:
             representations = DeepFace.represent(
                 img_path=img_array,
@@ -127,13 +170,11 @@ class FaceEmbedder:
             conf = rep.get("face_confidence", 0)
             if conf is None or conf < 0.50:
                 continue
-            results.append(
-                {
-                    "embedding": rep["embedding"],
-                    "facial_area": rep.get("facial_area", {}),
-                    "confidence": float(conf),
-                }
-            )
+            results.append({
+                "embedding": rep["embedding"],
+                "facial_area": rep.get("facial_area", {}),
+                "confidence": float(conf),
+            })
         return results
 
     def generate_single_embedding(self, image_data: bytes) -> list[float] | None:
@@ -233,9 +274,7 @@ class FaceEmbedder:
         keys ``x``, ``y``, ``width``, ``height``.
 
         The face is cropped from the full image with *padding_pct* extra margin
-        (default 30 %) to give the recognition model surrounding context, then
-        passed to DeepFace with ``detector_backend="skip"`` so it generates an
-        embedding without re-detecting.
+        (default 30 %) to give the recognition model surrounding context.
 
         Falls back to ``detect_and_embed()`` if no *face_regions* are supplied.
 
@@ -247,8 +286,6 @@ class FaceEmbedder:
                 image_data, image_id, image_url, filename
             )
             return docs
-
-        from deepface import DeepFace
 
         self._ensure_model()
 
@@ -273,32 +310,13 @@ class FaceEmbedder:
             y2 = min(y + h + pad_y, img_h)
 
             crop = full_img.crop((x1, y1, x2, y2))
-            # Resize to a standard face-input size that Facenet512 expects
-            crop = crop.resize((160, 160), Image.LANCZOS)
-            crop_array = np.array(crop)
 
-            try:
-                reps = DeepFace.represent(
-                    img_path=crop_array,
-                    model_name=self.model_name,
-                    enforce_detection=False,
-                    detector_backend="skip",
-                )
-            except Exception as e:
-                self.logger.warning(
-                    "Embedding failed for face crop",
-                    face_index=idx, error=str(e),
-                )
+            embedding = self._embed_crop(crop)
+            if embedding is None:
+                self.logger.warning("Embedding failed for face crop", face_index=idx)
                 continue
 
-            if not reps:
-                continue
-
-            embedding = reps[0]["embedding"]
-            conf = reps[0].get("face_confidence", region.get("confidence", 0.0))
-            # When detector_backend="skip", confidence may be 0; use Face API's
-            if (conf is None or conf == 0) and region.get("confidence"):
-                conf = region["confidence"]
+            conf = region.get("confidence", 1.0)
 
             face_doc_id = hashlib.md5(
                 f"{image_id}_face_{idx}".encode()
@@ -334,12 +352,38 @@ class FaceEmbedder:
 
         return face_docs
 
+    def _embed_crop(self, crop: Image.Image) -> list[float] | None:
+        """Embed a single cropped face image using the active backend."""
+        if self.backend == "dlib":
+            import face_recognition
+            crop_array = np.array(crop.convert("RGB"))
+            # Use the whole crop as the face location (skip re-detection)
+            h, w = crop_array.shape[:2]
+            locations = [(0, w, h, 0)]  # top, right, bottom, left
+            encodings = face_recognition.face_encodings(crop_array, known_face_locations=locations)
+            return encodings[0].tolist() if encodings else None
+        else:
+            from deepface import DeepFace
+            crop = crop.resize((160, 160), Image.LANCZOS)
+            crop_array = np.array(crop)
+            try:
+                reps = DeepFace.represent(
+                    img_path=crop_array,
+                    model_name=self.model_name,
+                    enforce_detection=False,
+                    detector_backend="skip",
+                )
+            except Exception as e:
+                self.logger.warning("DeepFace embed crop failed", error=str(e))
+                return None
+            return reps[0]["embedding"] if reps else None
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
     @staticmethod
     def _bytes_to_numpy(image_data: bytes) -> np.ndarray:
-        """Convert raw bytes to an RGB numpy array expected by DeepFace."""
+        """Convert raw bytes to an RGB numpy array."""
         img = Image.open(io.BytesIO(image_data)).convert("RGB")
         return np.array(img)

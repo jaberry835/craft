@@ -1,4 +1,4 @@
-"""Service for local face matching using DeepFace embeddings + Azure AI Search vector search."""
+"""Service for local face matching using face embeddings + Azure AI Search vector search."""
 
 import io
 import threading
@@ -21,14 +21,15 @@ _face_match_service_lock = threading.Lock()
 
 class FaceMatchService:
     """
-    Uses DeepFace (Facenet512) to embed a query face image, then performs
-    a vector search against the ``snapseek-faces`` index in Azure AI Search.
+    Embeds a query face image using dlib (face_recognition) or DeepFace,
+    then performs a vector search against the ``snapseek-faces`` index.
     """
 
     def __init__(self, settings: Settings):
         self.settings = settings
+        self.backend = settings.face_embedding_backend.lower()
         self.model_name = settings.deepface_model_name
-        self.logger = logger.bind(component="face_match_service")
+        self.logger = logger.bind(component="face_match_service", backend=self.backend)
         self.enabled = settings.enable_local_face_matching
         self._model_loaded = False
 
@@ -42,29 +43,33 @@ class FaceMatchService:
             self.logger.info(
                 "FaceMatchService initialised",
                 index=settings.azure_search_faces_index_name,
-                model=self.model_name,
+                backend=self.backend,
             )
 
     # ------------------------------------------------------------------
-    # Lazy-load the DeepFace model
+    # Lazy-load the face model
     # ------------------------------------------------------------------
     def _ensure_model(self) -> None:
         if self._model_loaded:
             return
         try:
-            from deepface import DeepFace
-
-            dummy = np.zeros((48, 48, 3), dtype=np.uint8)
-            DeepFace.represent(
-                img_path=dummy,
-                model_name=self.model_name,
-                enforce_detection=False,
-                detector_backend="skip",
-            )
-            self._model_loaded = True
-            self.logger.info("DeepFace model loaded for backend", model=self.model_name)
+            if self.backend == "dlib":
+                import face_recognition  # noqa: F401
+                self._model_loaded = True
+                self.logger.info("face_recognition (dlib) ready for backend")
+            else:
+                from deepface import DeepFace
+                dummy = np.zeros((48, 48, 3), dtype=np.uint8)
+                DeepFace.represent(
+                    img_path=dummy,
+                    model_name=self.model_name,
+                    enforce_detection=False,
+                    detector_backend="skip",
+                )
+                self._model_loaded = True
+                self.logger.info("DeepFace model loaded for backend", model=self.model_name)
         except Exception as e:
-            self.logger.warning("Failed to pre-load DeepFace model", error=str(e))
+            self.logger.warning("Failed to pre-load face model", error=str(e))
 
     # ------------------------------------------------------------------
     # Public API
@@ -74,17 +79,34 @@ class FaceMatchService:
         """
         Generate a face embedding from *image_data*.
 
-        Returns the 512-dim vector for the most prominent face,
+        Returns the embedding vector for the most prominent face,
         or ``None`` if no face is detected.
         """
         if not self.enabled:
             return None
 
+        self._ensure_model()
+        img_array = self._bytes_to_numpy(image_data)
+
+        if self.backend == "dlib":
+            return self._embed_dlib(img_array)
+        return self._embed_deepface(img_array)
+
+    def _embed_dlib(self, img_array: np.ndarray) -> list[float] | None:
+        import face_recognition
+
+        locations = face_recognition.face_locations(img_array, model="hog")
+        if not locations:
+            return None
+        encodings = face_recognition.face_encodings(img_array, known_face_locations=locations)
+        if not encodings:
+            return None
+        # Return first (largest) face
+        return encodings[0].tolist()
+
+    def _embed_deepface(self, img_array: np.ndarray) -> list[float] | None:
         from deepface import DeepFace
 
-        self._ensure_model()
-
-        img_array = self._bytes_to_numpy(image_data)
         try:
             results = DeepFace.represent(
                 img_path=img_array,
@@ -96,11 +118,9 @@ class FaceMatchService:
             self.logger.error("DeepFace embedding failed", error=str(e))
             return None
 
-        # Filter out low-confidence detections
         valid = [r for r in results if (r.get("face_confidence") or 0) >= 0.50]
         if not valid:
             return None
-
         best = max(valid, key=lambda r: r.get("face_confidence", 0))
         return best["embedding"]
 
