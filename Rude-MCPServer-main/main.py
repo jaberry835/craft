@@ -16,6 +16,7 @@ from urllib.parse import urlencode
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse
+from starlette.routing import Route
 
 # Configure logging FIRST, before any other imports or operations
 logging.basicConfig(
@@ -65,7 +66,7 @@ from starlette.middleware.cors import CORSMiddleware
 # Import tool registration functions
 try:
     logger.info("📦 Importing tool registration functions...")
-    from tools import register_adx_tools, register_fictional_api_tools, register_document_tools, register_rag_tools, register_company_and_device_tools, register_postgres_tools, register_translation_tools, register_computer_vision_tools
+    from tools import register_adx_tools, register_fictional_api_tools, register_document_tools, register_rag_tools, register_company_and_device_tools, register_postgres_tools, register_translation_tools, register_computer_vision_tools, register_knowledge_base_tools
     logger.info("✅ Tool imports successful")
 except ImportError as e:
     logger.error(f"❌ Failed to import tools: {e}")
@@ -287,6 +288,8 @@ register_translation_tools(mcp)
 logger.info("✅ Translation tools registered")
 register_computer_vision_tools(mcp)
 logger.info("✅ Computer Vision tools registered")
+register_knowledge_base_tools(mcp)
+logger.info("✅ Knowledge Base tools registered")
 logger.info("🎉 All tools registered successfully")
 
 
@@ -392,13 +395,11 @@ logger.info("🔧 Configuring CORS middleware...")
 configure_cors(app)
 
 # Add custom routes to the app
-@app.route("/health")
 async def health_endpoint(request):
     """Azure App Service health check endpoint"""
     return JSONResponse(get_health_status())
 
 # OAuth discovery endpoints for GitHub Copilot and other MCP clients
-@app.route("/.well-known/oauth-authorization-server")
 async def oauth_metadata(request):
     """OAuth 2.1 authorization server metadata for MCP clients like GitHub Copilot"""
     
@@ -433,7 +434,6 @@ async def oauth_metadata(request):
     logger.info("🔍 OAuth metadata requested by MCP client")
     return JSONResponse(metadata)
 
-@app.route("/.well-known/mcp-oauth")
 async def mcp_oauth_metadata(request):
     """MCP-specific OAuth configuration for clients like GitHub Copilot"""
     
@@ -452,7 +452,6 @@ async def mcp_oauth_metadata(request):
     return JSONResponse(metadata)
 
 # Redirect handler to fix 127.0.0.1 vs localhost redirect URI issue
-@app.route("/oauth/redirect/{port:path}")
 async def oauth_redirect_handler_with_port(request):
     """Handle OAuth redirects from Azure AD and forward to GitHub Copilot on specific port"""
     
@@ -471,7 +470,6 @@ async def oauth_redirect_handler_with_port(request):
     return RedirectResponse(url=localhost_redirect)
 
 # Redirect handler to fix 127.0.0.1 vs localhost redirect URI issue
-@app.route("/oauth/redirect")
 async def oauth_redirect_handler(request):
     """Handle OAuth redirects from Azure AD and forward to GitHub Copilot"""
     
@@ -500,7 +498,6 @@ async def oauth_redirect_handler(request):
     
     return RedirectResponse(url=localhost_redirect)
 
-@app.route("/api/tools")
 async def list_tools_endpoint(request):
     """List all available MCP tools with count (requires authentication)"""
     
@@ -567,7 +564,6 @@ async def list_tools_endpoint(request):
             "timestamp": datetime.now().isoformat()
         }, status_code=500)
 
-@app.route("/debug/tools")
 async def debug_tools_endpoint(request):
     """Debug endpoint to test tool registration and access"""
     try:
@@ -615,7 +611,6 @@ async def debug_tools_endpoint(request):
             "debug_timestamp": datetime.now().isoformat()
         }, status_code=500)
 
-@app.route("/")
 async def root(request):
     """Server information endpoint"""
     return JSONResponse({
@@ -638,6 +633,18 @@ async def root(request):
                 "computer_vision_tools": ["analyze_image", "read_text_from_image", "computer_vision_health"]
         }
     })
+
+# Mount routes using Route() objects instead of deprecated @app.route decorator
+app.routes.extend([
+    Route("/health", health_endpoint),
+    Route("/.well-known/oauth-authorization-server", oauth_metadata),
+    Route("/.well-known/mcp-oauth", mcp_oauth_metadata),
+    Route("/oauth/redirect/{port:path}", oauth_redirect_handler_with_port),
+    Route("/oauth/redirect", oauth_redirect_handler),
+    Route("/api/tools", list_tools_endpoint),
+    Route("/debug/tools", debug_tools_endpoint),
+    Route("/", root),
+])
 
 if __name__ == "__main__":
     try:
