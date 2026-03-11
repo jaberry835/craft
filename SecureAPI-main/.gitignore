@@ -1,0 +1,13 @@
+# Private keys and certificates — never commit these
+certs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/

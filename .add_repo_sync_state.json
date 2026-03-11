@@ -1,6 +1,7 @@
 {
   "remote::https://github.com/adamruderman/AgentChatV2::main": "dbb2065d7c9dc2a2cd2b6236d4490dd6af2b1698",
   "remote::https://github.com/adamruderman/Rude-MCPServer::main": "9845bde58432edee4276c48faada07d2284b6737",
+  "remote::https://github.com/adamruderman/SecureAPI::main": "477d1beb03b58ee6c47ed125e8c94e7e73aa0a65",
   "remote::https://github.com/adamruderman/UserAccessChecker-Python::main": "501c9f9f0da72aa8f0dcf2f35c2238fd5328543e",
   "remote::https://github.com/adamruderman/UserAccessCheckerApi::main": "94709ad66ce5ec8473d58850f816f80a34688c17",
   "remote::https://github.com/adamruderman/WebScrapeAndIndex::main": "6318978e98b518758c0483318df23b319d9ac5ae",
