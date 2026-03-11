@@ -316,7 +316,7 @@ def get_health_status() -> Dict[str, Any]:
         fictional_api_status = "configured" if os.getenv("FICTIONAL_COMPANIES_API_URL") else "default_localhost"
         
         # Check if Azure Search is configured for document tools
-        document_service_status = "configured" if (os.getenv("AZURE_SEARCH_ENDPOINT") and os.getenv("AZURE_SEARCH_KEY")) else "not_configured"
+        document_service_status = "configured" if os.getenv("AZURE_SEARCH_ENDPOINT") else "not_configured"
         
         return {
             "status": "healthy",

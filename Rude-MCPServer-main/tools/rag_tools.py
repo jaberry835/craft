@@ -34,6 +34,7 @@ try:
     from azure.search.documents import SearchClient
     from azure.search.documents.models import VectorizedQuery
     from azure.core.credentials import AzureKeyCredential
+    from azure.identity import DefaultAzureCredential
     from openai import AzureOpenAI
     AZURE_AVAILABLE = True
 except Exception as e:
@@ -116,14 +117,20 @@ def register_rag_tools(mcp: FastMCP):
         api_key = _env("RAG_SEARCH_KEY", _env("AZURE_SEARCH_KEY"))
         index_name = _env("RAG_SEARCH_INDEX_NAME") or _env("AZURE_SEARCH_INDEX_NAME") or _env("AZURE_SEARCH_INDEX")
 
-        if endpoint and api_key and index_name:
+        if endpoint and index_name:
             try:
-                search_client = SearchClient(endpoint, index_name, AzureKeyCredential(api_key))
-                logger.info(f"✅ RAG Search client ready (index={index_name})")
+                audience = _env("AZURE_SEARCH_AUDIENCE")
+                credential = AzureKeyCredential(api_key) if api_key else DefaultAzureCredential()
+                kwargs = {}
+                if audience and not api_key:
+                    kwargs["audience"] = audience
+                search_client = SearchClient(endpoint, index_name, credential, **kwargs)
+                auth_method = "API key" if api_key else "DefaultAzureCredential"
+                logger.info(f"✅ RAG Search client ready (index={index_name}, auth={auth_method})")
             except Exception as e:
                 logger.error(f"❌ Failed to init RAG Search client: {e}")
         else:
-            logger.info("RAG Search not fully configured (need endpoint, key, index)")
+            logger.info("RAG Search not fully configured (need endpoint and index)")
 
         # Build Azure OpenAI client if configured
         aoai_endpoint = _env("AZURE_OPENAI_ENDPOINT")

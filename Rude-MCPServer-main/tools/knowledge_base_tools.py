@@ -32,6 +32,12 @@ from context import current_user_token
 
 logger = logging.getLogger(__name__)
 
+try:
+    from azure.identity import DefaultAzureCredential
+    AZURE_IDENTITY_AVAILABLE = True
+except ImportError:
+    AZURE_IDENTITY_AVAILABLE = False
+
 
 def _env(name: str, default: Optional[str] = None) -> Optional[str]:
     v = os.getenv(name)
@@ -50,9 +56,20 @@ def register_knowledge_base_tools(mcp: FastMCP):
     access_check_url = _env("USER_ACCESS_CHECK_URL")
     allowed_principals_field = _env("KB_ALLOWED_PRINCIPALS_FIELD", "ss_tokens")
 
-    configured = bool(endpoint and api_key and kb_name)
+    configured = bool(endpoint and kb_name and (api_key or AZURE_IDENTITY_AVAILABLE))
     if not configured:
-        logger.info("Knowledge Base tools not fully configured (need KB_SEARCH_ENDPOINT, KB_SEARCH_KEY, KB_NAME)")
+        logger.info("Knowledge Base tools not fully configured (need KB_SEARCH_ENDPOINT, KB_NAME, and either KB_SEARCH_KEY or azure-identity)")
+
+    # Prepare DefaultAzureCredential if no API key
+    _default_credential = None
+    _search_audience = _env("AZURE_SEARCH_AUDIENCE", "https://search.azure.com")
+    _search_token_scope = f"{_search_audience.rstrip('/')}/.default"
+    if not api_key and AZURE_IDENTITY_AVAILABLE and endpoint and kb_name:
+        try:
+            _default_credential = DefaultAzureCredential()
+            logger.info(f"\u2705 Knowledge Base using DefaultAzureCredential (scope={_search_token_scope})")
+        except Exception as e:
+            logger.error(f"\u274c Failed to create DefaultAzureCredential for KB: {e}")
 
     api_version = "2025-11-01-preview"
 
@@ -102,7 +119,7 @@ def register_knowledge_base_tools(mcp: FastMCP):
     ) -> Dict[str, Any]:
         """Core retrieval against the Knowledge Base API."""
         if not configured:
-            return {"success": False, "error": "Knowledge Base not configured (set KB_SEARCH_ENDPOINT, KB_SEARCH_KEY, KB_NAME)"}
+            return {"success": False, "error": "Knowledge Base not configured (set KB_SEARCH_ENDPOINT, KB_NAME, and either KB_SEARCH_KEY or azure-identity)"}
 
         # Resolve security filter
         try:
@@ -138,10 +155,14 @@ def register_knowledge_base_tools(mcp: FastMCP):
 
         url = f"{endpoint.rstrip('/')}/knowledgebases('{kb_name}')/retrieve"
         headers = {
-            "api-key": api_key,
             "Content-Type": "application/json",
             "Accept": "application/json;odata.metadata=minimal",
         }
+        if api_key:
+            headers["api-key"] = api_key
+        elif _default_credential:
+            token = _default_credential.get_token(_search_token_scope)
+            headers["Authorization"] = f"Bearer {token.token}"
         params = {"api-version": api_version}
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=60, write=10, pool=10)) as client:

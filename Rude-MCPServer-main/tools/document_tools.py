@@ -55,6 +55,7 @@ try:
     from azure.search.documents.models import VectorizedQuery
     from azure.core.credentials import AzureKeyCredential
     from azure.core.exceptions import ResourceNotFoundError, HttpResponseError
+    from azure.identity import DefaultAzureCredential
     from openai import AzureOpenAI
     AZURE_AVAILABLE = True
 except ImportError as e:
@@ -80,14 +81,21 @@ def register_document_tools(mcp: FastMCP):
         azure_search_key = os.getenv("AZURE_SEARCH_KEY")
         azure_search_index = os.getenv("AZURE_SEARCH_INDEX_NAME") or os.getenv("AZURE_SEARCH_INDEX") or "documents"
 
-        if azure_search_endpoint and azure_search_key:
+        if azure_search_endpoint:
             try:
+                audience = os.getenv("AZURE_SEARCH_AUDIENCE")
+                credential = AzureKeyCredential(azure_search_key) if azure_search_key else DefaultAzureCredential()
+                kwargs = {}
+                if audience and not azure_search_key:
+                    kwargs["audience"] = audience
                 search_client = SearchClient(
                     azure_search_endpoint,
                     azure_search_index,
-                    AzureKeyCredential(azure_search_key)
+                    credential,
+                    **kwargs
                 )
-                logger.info("✅ Azure AI Search client initialized")
+                auth_method = "API key" if azure_search_key else "DefaultAzureCredential"
+                logger.info(f"✅ Azure AI Search client initialized ({auth_method})")
             except Exception as e:
                 logger.error(f"❌ Failed to initialize Azure AI Search: {e}")
         
