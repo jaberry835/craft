@@ -1,0 +1,56 @@
+[project]
+name = "mcp-server"
+version = "0.1.0"
+description = "Python MCP Server with Streamable HTTP transport, ready for Azure hosting"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    # MCP Python SDK – includes FastMCP and CLI tools
+    "mcp[cli]>=1.6.0",
+    # ASGI web framework – used to mount MCP and add health/CORS/middleware
+    "starlette>=0.45.0",
+    # Production ASGI server
+    "uvicorn[standard]>=0.34.0",
+    # .env file support for local development
+    "python-dotenv>=1.0.0",
+    # Data validation and settings management
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+]
+
+# ---------------------------------------------------------------------------
+# Optional dependency groups
+#
+# auth  – Install when adding authentication (Layer 1 + OBO).
+#         See auth/verifier.py and auth/obo.py for implementation guidance.
+#         Install with:  uv add --optional auth msal azure-identity PyJWT
+#
+# dev   – Test and development tooling.
+#         Install with:  uv sync --group dev
+# ---------------------------------------------------------------------------
+[project.optional-dependencies]
+auth = [
+    "msal>=1.28.0",            # Microsoft Authentication Library – OBO + token validation
+    "azure-identity>=1.19.0",  # DefaultAzureCredential and managed identity support
+    "PyJWT[crypto]>=2.10.0",   # Lightweight JWT decoding + RS256 signature verification
+]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.25.0",
+    "httpx>=0.27.0",           # Async HTTP client used by tests
+]
+
+[project.scripts]
+# Convenience script – run the server with:  uv run serve
+serve = "uvicorn server:app --host 0.0.0.0 --port 8000 --reload"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.25.0",
+    "httpx>=0.27.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
