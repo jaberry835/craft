@@ -84,6 +84,7 @@ class GroundingService:
 
     def __init__(self):
         self._credential = None
+        self._client_kwargs: dict = {}  # Extra kwargs for SearchClient (e.g. credential_scopes for gov cloud)
         self._index_client: Optional[SearchIndexClient] = None
         self._initialized = False
         self._lock = asyncio.Lock()
@@ -111,12 +112,19 @@ class GroundingService:
                 # Use API key if available, otherwise managed identity
                 if settings.search_key:
                     self._credential = AzureKeyCredential(settings.search_key)
+                    self._client_kwargs = {}
                 else:
                     self._credential = get_azure_credential()
+                    # Set audience for sovereign cloud support (strips /.default to get base URL)
+                    # Gov: https://search.azure.us  Com: https://search.azure.com
+                    audience = settings.azure_search_scope.removesuffix("/.default")
+                    self._client_kwargs = {"audience": audience}
+                    logger.info(f"Azure AI Search audience: {audience}")
                 
                 self._index_client = SearchIndexClient(
                     endpoint=settings.search_endpoint,
-                    credential=self._credential
+                    credential=self._credential,
+                    **self._client_kwargs
                 )
                 
                 logger.info(f"Grounding service initialized with Azure AI Search: {settings.search_endpoint}")
@@ -148,7 +156,8 @@ class GroundingService:
                     sc = SearchClient(
                         endpoint=settings.search_endpoint,
                         index_name=index.name,
-                        credential=self._credential
+                        credential=self._credential,
+                        **self._client_kwargs
                     )
                     results = sc.search(
                         search_text="*",
@@ -442,7 +451,8 @@ class GroundingService:
             search_client = SearchClient(
                 endpoint=settings.search_endpoint,
                 index_name=index_name,
-                credential=self._credential
+                credential=self._credential,
+                **self._client_kwargs
             )
             
             # List blobs (with optional prefix filter)
@@ -801,7 +811,8 @@ class GroundingService:
             search_client = SearchClient(
                 endpoint=settings.search_endpoint,
                 index_name=index_name,
-                credential=self._credential
+                credential=self._credential,
+                **self._client_kwargs
             )
             
             # Find all documents for this agent
@@ -884,7 +895,8 @@ class GroundingService:
             search_client = SearchClient(
                 endpoint=settings.search_endpoint,
                 index_name=index_name,
-                credential=self._credential
+                credential=self._credential,
+                **self._client_kwargs
             )
             
             vector_query = VectorizedQuery(
@@ -923,15 +935,26 @@ class GroundingService:
             select_fields = ["id", "fileName", "content", "sourceName", "chunkIndex"]
 
             # -- Pass 1: Hybrid search (vector + BM25 + semantic reranking) --
-            hybrid_results = search_client.search(
-                search_text=query,
-                vector_queries=[vector_query],
-                filter=odata_filter,
-                select=select_fields,
-                top=top_k,
-                query_type=QueryType.SEMANTIC,
-                semantic_configuration_name="default-semantic",
-            )
+            # Fall back to plain hybrid if the index has no semantic configuration.
+            try:
+                hybrid_results = list(search_client.search(
+                    search_text=query,
+                    vector_queries=[vector_query],
+                    filter=odata_filter,
+                    select=select_fields,
+                    top=top_k,
+                    query_type=QueryType.SEMANTIC,
+                    semantic_configuration_name="default-semantic",
+                ))
+            except Exception as sem_err:
+                logger.warning(f"Semantic search unavailable for index (no semantic config?), falling back to hybrid: {sem_err}")
+                hybrid_results = list(search_client.search(
+                    search_text=query,
+                    vector_queries=[vector_query],
+                    filter=odata_filter,
+                    select=select_fields,
+                    top=top_k,
+                ))
 
             # -- Pass 2: Pure keyword / BM25 search (no vector) --
             # This guarantees exact keyword matches (e.g. opaque IDs like
@@ -1144,7 +1167,8 @@ class GroundingService:
             search_client = SearchClient(
                 endpoint=settings.search_endpoint,
                 index_name=index_name,
-                credential=self._credential
+                credential=self._credential,
+                **self._client_kwargs
             )
             
             # Count documents for this agent

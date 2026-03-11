@@ -52,21 +52,29 @@ class SearchService:
             if settings.search_key:
                 logger.info("Using Azure AI Search with API key")
                 self.credential = AzureKeyCredential(settings.search_key)
+                client_kwargs = {}
             else:
                 # Use centralized credential helper (AzureCliCredential for dev, ManagedIdentityCredential for prod)
                 self.credential = get_azure_credential()
                 env_mode = "dev" if settings.environment == "development" else "prod"
                 logger.info(f"Using Azure AI Search with {type(self.credential).__name__} ({env_mode} mode)")
+                # Set audience for sovereign cloud support (strips /.default to get base URL)
+                # Gov: https://search.azure.us  Com: https://search.azure.com
+                audience = settings.azure_search_scope.removesuffix("/.default")
+                client_kwargs = {"audience": audience}
+                logger.info(f"Azure AI Search audience: {audience}")
             
             self.index_client = SearchIndexClient(
                 endpoint=settings.search_endpoint,
-                credential=self.credential
+                credential=self.credential,
+                **client_kwargs
             )
             
             self.search_client = SearchClient(
                 endpoint=settings.search_endpoint,
                 index_name=self.index_name,
-                credential=self.credential
+                credential=self.credential,
+                **client_kwargs
             )
             
             await self._ensure_index()

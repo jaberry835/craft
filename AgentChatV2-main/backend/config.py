@@ -82,6 +82,13 @@ class Settings(BaseSettings):
     search_endpoint: str = Field(default="", alias="AZURE_SEARCH_ENDPOINT")
     search_key: str = Field(default="", alias="AZURE_SEARCH_KEY")
     search_index_name: str = Field(default="documents", alias="AZURE_SEARCH_INDEX_NAME")
+    # Azure AI Search scope for token auth (no key auth)
+    # Azure Commercial: https://search.azure.com/.default
+    # Azure Government: https://search.azure.us/.default
+    azure_search_scope: str = Field(
+        default="https://search.azure.com/.default",
+        alias="AZURE_SEARCH_SCOPE"
+    )
     
     # Azure Document Intelligence
     # Used for rich document extraction (PDFs, scanned docs, Office files).
