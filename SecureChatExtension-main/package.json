@@ -1,0 +1,286 @@
+{
+  "name": "secure-chat",
+  "displayName": "SecureChat - AI Assistant (Azure OpenAI)",
+  "description": "An offline-capable AI coding assistant powered by Azure OpenAI, providing Copilot-like chat, code analysis, editing, and project scaffolding.",
+  "version": "1.0.0",
+  "publisher": "your-org",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": ""
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "AI",
+    "Chat",
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "securechat",
+          "title": "SecureChat",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "securechat": [
+        {
+          "type": "webview",
+          "id": "securechat.chatView",
+          "name": "Chat"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "securechat.openChat",
+        "title": "SecureChat: Open Chat",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "securechat.newSession",
+        "title": "SecureChat: New Chat Session",
+        "icon": "$(add)"
+      },
+      {
+        "command": "securechat.indexWorkspace",
+        "title": "SecureChat: Index Workspace",
+        "icon": "$(search)"
+      },
+      {
+        "command": "securechat.selectModel",
+        "title": "SecureChat: Select Model",
+        "icon": "$(server)"
+      },
+      {
+        "command": "securechat.explainSelection",
+        "title": "SecureChat: Explain Selected Code"
+      },
+      {
+        "command": "securechat.reviewSelection",
+        "title": "SecureChat: Review Selected Code"
+      },
+      {
+        "command": "securechat.fixSelection",
+        "title": "SecureChat: Fix Selected Code"
+      },
+      {
+        "command": "securechat.manageMcpServers",
+        "title": "SecureChat: Manage MCP Servers",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "securechat.cancelAgent",
+        "title": "SecureChat: Cancel Agent Run",
+        "icon": "$(debug-stop)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "securechat.newSession",
+          "when": "view == securechat.chatView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "securechat.selectModel",
+          "when": "view == securechat.chatView",
+          "group": "navigation@2"
+        },
+        {
+          "command": "securechat.manageMcpServers",
+          "when": "view == securechat.chatView",
+          "group": "navigation@3"
+        },
+        {
+          "command": "securechat.indexWorkspace",
+          "when": "view == securechat.chatView",
+          "group": "navigation@4"
+        },
+        {
+          "command": "securechat.cancelAgent",
+          "when": "view == securechat.chatView",
+          "group": "navigation@5"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "securechat.explainSelection",
+          "group": "securechat@1",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "securechat.reviewSelection",
+          "group": "securechat@2",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "securechat.fixSelection",
+          "group": "securechat@3",
+          "when": "editorHasSelection"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "SecureChat",
+      "properties": {
+        "securechat.azureOpenAI.endpoint": {
+          "type": "string",
+          "default": "",
+          "description": "Azure OpenAI endpoint URL (e.g., https://your-resource.openai.azure.com)"
+        },
+        "securechat.azureOpenAI.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Azure OpenAI API key (stored in VS Code settings — consider using secrets)"
+        },
+        "securechat.azureOpenAI.deployments": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Display name for the deployment"
+              },
+              "deploymentId": {
+                "type": "string",
+                "description": "Azure OpenAI deployment ID"
+              },
+              "apiVersion": {
+                "type": "string",
+                "description": "API version (e.g., 2024-06-01)"
+              }
+            }
+          },
+          "default": [],
+          "description": "List of Azure OpenAI deployments available for selection"
+        },
+        "securechat.azureOpenAI.activeDeployment": {
+          "type": "string",
+          "default": "",
+          "description": "Currently active deployment ID"
+        },
+        "securechat.azureOpenAI.apiVersion": {
+          "type": "string",
+          "default": "2024-06-01",
+          "description": "Default Azure OpenAI API version"
+        },
+        "securechat.maxTokens": {
+          "type": "number",
+          "default": 4096,
+          "description": "Maximum tokens in AI response"
+        },
+        "securechat.temperature": {
+          "type": "number",
+          "default": 0.3,
+          "description": "Temperature for AI responses (0.0 - 1.0)"
+        },
+        "securechat.workspace.maxFileSize": {
+          "type": "number",
+          "default": 100000,
+          "description": "Maximum file size in bytes to index"
+        },
+        "securechat.workspace.excludePatterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/node_modules/**",
+            "**/.git/**",
+            "**/bin/**",
+            "**/obj/**",
+            "**/out/**",
+            "**/dist/**",
+            "**/*.min.js",
+            "**/*.map"
+          ],
+          "description": "Glob patterns to exclude from workspace indexing"
+        },
+        "securechat.agent.maxIterations": {
+          "type": "number",
+          "default": 25,
+          "description": "Maximum number of tool-call iterations per agent turn"
+        },
+        "securechat.agent.confirmWrites": {
+          "type": "boolean",
+          "default": true,
+          "description": "Ask for user confirmation before writing/deleting files"
+        },
+        "securechat.agent.confirmTerminal": {
+          "type": "boolean",
+          "default": true,
+          "description": "Ask for user confirmation before running terminal commands"
+        },
+        "securechat.mcp.servers": {
+          "type": "object",
+          "default": {},
+          "description": "MCP server configurations. Each key is a server name, value is { command, args?, env?, cwd? }",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "command": {
+                "type": "string",
+                "description": "Command to launch the MCP server"
+              },
+              "args": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Arguments for the MCP server command"
+              },
+              "env": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Environment variables for the MCP server"
+              },
+              "cwd": {
+                "type": "string",
+                "description": "Working directory for the MCP server"
+              }
+            },
+            "required": [
+              "command"
+            ]
+          }
+        }
+      }
+    },
+    "keybindings": [
+      {
+        "command": "securechat.openChat",
+        "key": "ctrl+shift+i",
+        "mac": "cmd+shift+i"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.37",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "@vscode/vsce": "^2.22.0",
+    "eslint": "^8.0.0",
+    "typescript": "^5.3.0"
+  }
+}
