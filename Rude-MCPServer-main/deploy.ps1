@@ -154,6 +154,34 @@ function Prepare-Deployment {
         exit 1
     }
     
+    # Copy auth.py (required for OBO authentication in tools)
+    if (Test-Path "auth.py") {
+        Copy-Item "auth.py" -Destination $DeployDir
+        Write-Status "Copied auth.py"
+    }
+    else {
+        Write-Error "auth.py file not found - deployment will fail!"
+        exit 1
+    }
+    
+    # Copy app_insights.py (required for Application Insights integration)
+    if (Test-Path "app_insights.py") {
+        Copy-Item "app_insights.py" -Destination $DeployDir
+        Write-Status "Copied app_insights.py"
+    }
+    else {
+        Write-Warning "app_insights.py not found, skipping"
+    }
+    
+    # Copy certificate file if it exists (required for certificate-based auth)
+    if (Test-Path "MCPServerDevCert.pfx") {
+        Copy-Item "MCPServerDevCert.pfx" -Destination $DeployDir
+        Write-Status "Copied MCPServerDevCert.pfx"
+    }
+    else {
+        Write-Warning "MCPServerDevCert.pfx not found, skipping (only needed for cert-based auth)"
+    }
+    
     # Copy the tools directory and all its contents
     if (Test-Path "tools") {
         Copy-Item "tools" -Destination $DeployDir -Recurse

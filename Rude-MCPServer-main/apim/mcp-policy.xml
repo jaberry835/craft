@@ -1,0 +1,31 @@
+<!--
+    - Policies are applied in the order they appear.
+    - Position <base/> inside a section to inherit policies from the outer scope.
+    - Comments within policies are not preserved.
+-->
+<!-- Add policies as children to the <inbound>, <outbound>, <backend>, and <on-error> elements -->
+<policies>
+    <!-- Throttle, authorize, validate, cache, or transform the requests -->
+    <inbound>
+        <base />
+        <!-- Rate limit: 20 calls per 60 seconds per subscription -->
+        <rate-limit calls="20" renewal-period="60" remaining-calls-header-name="x-ratelimit-remaining" />
+        <!-- Optional: additional rate limit by caller IP -->
+        <rate-limit-by-key calls="10" renewal-period="60"
+                          counter-key="@(context.Request.IpAddress)"
+                          increment-condition="@(context.Response.StatusCode >= 200)"
+                          remaining-calls-header-name="x-ratelimit-remaining-by-ip" />
+    </inbound>
+    <!-- Control if and how the requests are forwarded to services -->
+    <backend>
+        <base />
+    </backend>
+    <!-- Customize the responses -->
+    <outbound>
+        <base />
+    </outbound>
+    <!-- Handle exceptions and customize error responses -->
+    <on-error>
+        <base />
+    </on-error>
+</policies>
