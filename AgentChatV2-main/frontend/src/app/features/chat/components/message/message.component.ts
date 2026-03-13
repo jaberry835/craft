@@ -5,6 +5,7 @@ import { marked } from 'marked';
 
 import { Message } from '../../../../core/services/chat.service';
 import { SettingsService } from '../../../../core/services/settings.service';
+import { environment } from '@env/environment';
 
 // Import chatter event type from parent
 interface ChatterEvent {
@@ -894,7 +895,7 @@ export class MessageComponent implements DoCheck, OnInit {
     if (this.message.role === 'assistant') {
       const blobUrlPattern = /(<a\s[^>]*href=")(https:\/\/[^"]+\.blob\.core\.(?:windows\.net|usgovcloudapi\.net|chinacloudapi\.cn)\/[^"]+)("[^>]*>)/gi;
       result = result.replace(blobUrlPattern, (_m, prefix, blobUrl, suffix) => {
-        const proxyUrl = `/api/documents/blob-proxy?url=${encodeURIComponent(blobUrl)}`;
+        const proxyUrl = `${environment.apiUrl}/documents/blob-proxy?url=${encodeURIComponent(blobUrl)}`;
         // Add doc-citation class for the click interceptor
         const classedSuffix = suffix.includes('class="')
           ? suffix.replace('class="', 'class="doc-citation ')
@@ -919,7 +920,7 @@ export class MessageComponent implements DoCheck, OnInit {
         `(<a\\s[^>]*href=")(?:[^"]*/)?(${fileNameRe})("[^>]*>)`, 'gi'
       );
       result = result.replace(existingLinkPattern, (_m, prefix, fileName, suffix) => {
-        const url = `/api/documents/grounding/${agentId}/${encodeURIComponent(fileName)}`;
+        const url = `${environment.apiUrl}/documents/grounding/${agentId}/${encodeURIComponent(fileName)}`;
         // Ensure the doc-citation class is added
         const classAttr = suffix.includes('class="') 
           ? suffix.replace('class="', 'class="doc-citation ') 
@@ -940,7 +941,7 @@ export class MessageComponent implements DoCheck, OnInit {
           // Only auto-link in text that's NOT inside an existing <a> tag
           if (insideAnchor || !text) return text || '';
           return text.replace(fileNamePattern, (_fm: string, fileName: string) => {
-            const url = `/api/documents/grounding/${agentId}/${encodeURIComponent(fileName)}`;
+            const url = `${environment.apiUrl}/documents/grounding/${agentId}/${encodeURIComponent(fileName)}`;
             return `<a href="${url}" target="_blank" rel="noopener noreferrer" class="doc-citation">${fileName}</a>`;
           });
         }

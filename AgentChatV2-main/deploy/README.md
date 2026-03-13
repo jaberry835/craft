@@ -121,13 +121,13 @@ The backend container requires these environment variables:
 | AZURE_SEARCH_ENDPOINT | Azure AI Search endpoint | `https://search-xxx.search.windows.us` |
 | AZURE_OPENAI_ENDPOINT | Azure OpenAI endpoint | `https://openai-xxx.openai.azure.us` |
 | MCP_SERVER_ENDPOINT | MCP server URL | `https://mcp-server.azurewebsites.us/mcp/` |
-| BACKEND_URL | **Required for A2A** - This backend's public URL | `https://app-agentchat-api.azurewebsites.us` |
+| BACKEND_URL | **Required for A2A and citations** - This backend's public URL | `https://app-agentchat-api.azurewebsites.us` |
 | AZURE_MANAGED_IDENTITY_CLIENT_ID | Client ID of user-assigned managed identity (if not using system-assigned) | `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` |
 | AZURE_COGNITIVE_SERVICES_SCOPE | Token scope for Azure OpenAI (defaults differ by cloud) | `https://cognitiveservices.azure.us/.default` |
 | AZURE_CLIENT_SECRET | **OBO only** - Client secret for On-Behalf-Of token exchange | `your-secret-value` |
 | AZURE_CLIENT_CERTIFICATE_PATH | **OBO only** - Path to PFX certificate (alternative to secret) | `/certs/app.pfx` |
 
-> **Important**: `BACKEND_URL` must be set to the deployed backend's public URL. This is used for agent-to-agent (A2A) communication where the orchestrator calls specialist agents via internal HTTP requests.
+> **Important**: `BACKEND_URL` must be set to the deployed backend's public URL. This is used for agent-to-agent (A2A) communication and for document citation links. The frontend Docker build injects this URL so that citation links point to the correct backend API. Without it, document citations will fail with CORS or 404 errors.
 
 ## Deployment Scripts Reference
 
@@ -255,3 +255,20 @@ When deploying to Azure Government:
    ```
 2. Wait 5-10 minutes for role propagation
 3. Restart the App Service after role assignment
+
+### Document Citations Return "Not Found" or "Not Authorized"
+
+The backend API proxies blob storage requests on behalf of the user (for grounding document citations and MCP tool blob links). The **backend App Service's managed identity** needs the **Storage Blob Data Reader** role on every storage account that contains referenced documents.
+
+```powershell
+az role assignment create `
+  --assignee "<backend-managed-identity-client-id>" `
+  --role "Storage Blob Data Reader" `
+  --scope "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Storage/storageAccounts/<storage-account>"
+```
+
+This applies to:
+- Storage accounts used for **agent grounding sources** (document RAG)
+- Storage accounts referenced by **MCP tools** that return direct blob URLs
+
+If citations work for some agents but not others, check that the managed identity has access to all relevant storage accounts.
