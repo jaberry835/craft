@@ -1,17 +1,33 @@
 /**
  * Session Manager — persists chat sessions to VS Code's global storage.
+ *
+ * Limits:
+ *  - MAX_SESSIONS (20): oldest sessions are pruned when exceeded.
+ *  - MAX_MESSAGE_LENGTH (8000): individual tool results / message content
+ *    are trimmed before persistence to stay within globalState's ~1 MB budget.
+ *  - Base64 image data is stripped from persisted messages.
  */
 import * as vscode from 'vscode';
 import { ChatSession, ChatMessage } from './types';
 
+const MAX_SESSIONS = 20;
+const MAX_MESSAGE_LENGTH = 8000;
+
 export class SessionManager {
     private static STORAGE_KEY = 'securechat.sessions';
+    private static ACTIVE_KEY = 'securechat.activeSession';
     private currentSession: ChatSession;
     private sessions: Map<string, ChatSession> = new Map();
 
     constructor(private globalState: vscode.Memento) {
         this.loadSessions();
-        this.currentSession = this.createNewSession();
+        // Restore the last active session, or create a new one
+        const activeId = this.globalState.get<string>(SessionManager.ACTIVE_KEY);
+        if (activeId && this.sessions.has(activeId)) {
+            this.currentSession = this.sessions.get(activeId)!;
+        } else {
+            this.currentSession = this.createNewSession();
+        }
     }
 
     private loadSessions() {
@@ -22,11 +38,43 @@ export class SessionManager {
     }
 
     private saveSessions() {
+        this.pruneOldSessions();
         const obj: Record<string, ChatSession> = {};
         for (const [id, session] of this.sessions) {
             obj[id] = session;
         }
         this.globalState.update(SessionManager.STORAGE_KEY, obj);
+        this.globalState.update(SessionManager.ACTIVE_KEY, this.currentSession.id);
+    }
+
+    /** Drop oldest sessions beyond MAX_SESSIONS. */
+    private pruneOldSessions() {
+        if (this.sessions.size <= MAX_SESSIONS) { return; }
+        const sorted = [...this.sessions.entries()].sort((a, b) => b[1].updatedAt - a[1].updatedAt);
+        const keep = new Set(sorted.slice(0, MAX_SESSIONS).map(e => e[0]));
+        for (const id of [...this.sessions.keys()]) {
+            if (!keep.has(id)) { this.sessions.delete(id); }
+        }
+    }
+
+    /**
+     * Trim a message for persistence: cap string lengths, strip base64 images.
+     */
+    private trimForStorage(messages: ChatMessage[]): ChatMessage[] {
+        return messages.map(m => {
+            const clone = { ...m };
+            // Trim text content
+            if (typeof clone.content === 'string' && clone.content.length > MAX_MESSAGE_LENGTH) {
+                clone.content = clone.content.slice(0, MAX_MESSAGE_LENGTH) + '\n... [trimmed for storage]';
+            }
+            // Strip base64 images from multimodal content arrays
+            if (Array.isArray(clone.content)) {
+                clone.content = clone.content.filter(
+                    (part: any) => !(part.type === 'image_url' && part.image_url?.url?.startsWith('data:'))
+                );
+            }
+            return clone;
+        });
     }
 
     createNewSession(): ChatSession {
@@ -48,14 +96,17 @@ export class SessionManager {
     }
 
     updateMessages(messages: ChatMessage[]) {
-        this.currentSession.messages = messages;
+        this.currentSession.messages = this.trimForStorage(messages);
         this.currentSession.updatedAt = Date.now();
 
         // Auto-title from first user message
         if (this.currentSession.title === 'New Chat') {
             const firstUser = messages.find(m => m.role === 'user');
             if (firstUser?.content) {
-                this.currentSession.title = firstUser.content.slice(0, 60) + (firstUser.content.length > 60 ? '...' : '');
+                const text = typeof firstUser.content === 'string'
+                    ? firstUser.content
+                    : (firstUser.content.find((p: any) => p.type === 'text') as any)?.text || '';
+                this.currentSession.title = text.slice(0, 60) + (text.length > 60 ? '...' : '');
             }
         }
 

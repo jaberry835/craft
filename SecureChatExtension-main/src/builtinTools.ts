@@ -7,24 +7,40 @@ import * as path from 'path';
 import * as cp from 'child_process';
 import { ToolDefinition, ToolResult, ToolHandler } from './types';
 import { WorkspaceIndexer } from './workspaceIndexer';
+import { SymbolIndexer } from './symbolIndexer';
+import { SemanticIndexer } from './semanticIndexer';
 
 export class BuiltinTools {
     private handlers: Map<string, ToolHandler> = new Map();
     private definitions: ToolDefinition[] = [];
     private confirmWrite: boolean = true;
     private confirmTerminal: boolean = true;
+    private sessionAllowTerminal: boolean = false;
+    private sessionAllowWrites: boolean = false;
     private pendingConfirmations: Map<string, { resolve: (approved: boolean) => void }> = new Map();
-    private onConfirmRequest?: (actionId: string, description: string) => void;
+    private onConfirmRequest?: (actionId: string, description: string, category?: string) => void;
 
     constructor(
-        private workspaceIndexer: WorkspaceIndexer
+        private workspaceIndexer: WorkspaceIndexer,
+        private symbolIndexer: SymbolIndexer,
+        private semanticIndexer: SemanticIndexer
     ) {
         this.loadConfig();
         this.registerAll();
     }
 
-    setConfirmCallback(cb: (actionId: string, description: string) => void) {
+    setConfirmCallback(cb: (actionId: string, description: string, category?: string) => void) {
         this.onConfirmRequest = cb;
+    }
+
+    allowForSession(category: string) {
+        if (category === 'terminal') { this.sessionAllowTerminal = true; }
+        if (category === 'write') { this.sessionAllowWrites = true; }
+    }
+
+    resetSessionApprovals() {
+        this.sessionAllowTerminal = false;
+        this.sessionAllowWrites = false;
     }
 
     resolveConfirmation(actionId: string, approved: boolean) {
@@ -69,12 +85,37 @@ export class BuiltinTools {
         return resolved;
     }
 
-    private async requestConfirmation(description: string): Promise<boolean> {
+    /**
+     * Wait briefly for the language server to re-analyze a file, then collect
+     * Error/Warning diagnostics.  Returns a newline-separated summary or empty string.
+     */
+    private async collectDiagnosticsAfterEdit(absPath: string, relPath: string): Promise<string> {
+        // Give language servers a moment to refresh
+        await new Promise(r => setTimeout(r, 750));
+        const uri = vscode.Uri.file(absPath);
+        const diags = vscode.languages.getDiagnostics(uri);
+        // Only surface errors and warnings — ignore hints/info
+        const important = diags.filter(d =>
+            d.severity === vscode.DiagnosticSeverity.Error ||
+            d.severity === vscode.DiagnosticSeverity.Warning
+        );
+        if (important.length === 0) { return ''; }
+        const lines = important.map(d => {
+            const sev = d.severity === vscode.DiagnosticSeverity.Error ? 'Error' : 'Warning';
+            return `  ${relPath}:${d.range.start.line + 1}: [${sev}] ${d.message}`;
+        });
+        return '\n\n⚠ Post-edit diagnostics:\n' + lines.join('\n');
+    }
+
+    private async requestConfirmation(description: string, category?: string): Promise<boolean> {
         if (!this.onConfirmRequest) { return true; }
+        // Check session-level approval
+        if (category === 'terminal' && this.sessionAllowTerminal) { return true; }
+        if (category === 'write' && this.sessionAllowWrites) { return true; }
         const actionId = `action_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
         return new Promise((resolve) => {
             this.pendingConfirmations.set(actionId, { resolve });
-            this.onConfirmRequest!(actionId, description);
+            this.onConfirmRequest!(actionId, description, category);
             // Timeout after 60s — auto-reject
             setTimeout(() => {
                 if (this.pendingConfirmations.has(actionId)) {
@@ -153,14 +194,15 @@ export class BuiltinTools {
             if (!absPath) { return { success: false, result: 'Invalid path or outside workspace.' }; }
 
             if (this.confirmWrite) {
-                const approved = await this.requestConfirmation(`Write file: ${filePath}`);
+                const approved = await this.requestConfirmation(`Write file: ${filePath}`, 'write');
                 if (!approved) { return { success: false, result: 'User declined the file write.' }; }
             }
 
             try {
                 const uri = vscode.Uri.file(absPath);
                 await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf8'));
-                return { success: true, result: `File written: ${filePath}` };
+                const diag = await this.collectDiagnosticsAfterEdit(absPath, filePath);
+                return { success: true, result: `File written: ${filePath}${diag}` };
             } catch (e: unknown) {
                 return { success: false, result: `Failed to write file: ${e instanceof Error ? e.message : String(e)}` };
             }
@@ -190,7 +232,7 @@ export class BuiltinTools {
             if (!absPath) { return { success: false, result: 'Invalid path or outside workspace.' }; }
 
             if (this.confirmWrite) {
-                const approved = await this.requestConfirmation(`Edit file: ${filePath}`);
+                const approved = await this.requestConfirmation(`Edit file: ${filePath}`, 'write');
                 if (!approved) { return { success: false, result: 'User declined the edit.' }; }
             }
 
@@ -207,7 +249,8 @@ export class BuiltinTools {
                 }
                 const updated = content.replace(oldStr, newStr);
                 await vscode.workspace.fs.writeFile(uri, Buffer.from(updated, 'utf8'));
-                return { success: true, result: `File edited: ${filePath}` };
+                const diag = await this.collectDiagnosticsAfterEdit(absPath, filePath);
+                return { success: true, result: `File edited: ${filePath}${diag}` };
             } catch (e: unknown) {
                 return { success: false, result: `Failed to edit file: ${e instanceof Error ? e.message : String(e)}` };
             }
@@ -330,6 +373,47 @@ export class BuiltinTools {
             }
         });
 
+        // ── semantic_search ──
+        this.register({
+            type: 'function',
+            function: {
+                name: 'semantic_search',
+                description: 'Find conceptually relevant code snippets by meaning (not just exact keyword matches). Best for architecture/questions like "where is model selection handled" or "how does indexing work".',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        query: { type: 'string', description: 'Natural language or keyword query describing what you need' },
+                        maxResults: { type: 'string', description: 'Optional max number of chunks to return (default 8, max 20)' }
+                    },
+                    required: ['query']
+                }
+            }
+        }, async (args) => {
+            const query = args.query as string;
+            const requested = args.maxResults ? parseInt(args.maxResults as string, 10) : 8;
+            const maxResults = Math.max(1, Math.min(20, isNaN(requested) ? 8 : requested));
+
+            const matches = this.semanticIndexer.search(query, maxResults);
+            if (matches.length === 0) {
+                return { success: true, result: 'No semantic matches found. Try broader wording or run Index Workspace first.' };
+            }
+
+            const sections: string[] = [];
+            for (let i = 0; i < matches.length; i++) {
+                const m = matches[i];
+                const snippet = m.text.length > 1200 ? `${m.text.slice(0, 1200)}\n... [truncated]` : m.text;
+                sections.push(
+                    `Match ${i + 1}: ${m.filePath}:${m.startLine}-${m.endLine} (score ${m.score.toFixed(3)})\n${snippet}`
+                );
+            }
+
+            const result = sections.join('\n\n');
+            return {
+                success: true,
+                result: result.length > 20000 ? `${result.slice(0, 20000)}\n\n... [truncated]` : result
+            };
+        });
+
         // ── get_file_tree ──
         this.register({
             type: 'function',
@@ -346,23 +430,286 @@ export class BuiltinTools {
             return { success: true, result: this.workspaceIndexer.getFileTree() };
         });
 
+        // ── get_document_symbols ──
+        this.register({
+            type: 'function',
+            function: {
+                name: 'get_document_symbols',
+                description: 'List symbols (classes, functions, methods, variables, etc.) for a specific file.',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        path: { type: 'string', description: 'Relative file path from workspace root' }
+                    },
+                    required: ['path']
+                }
+            }
+        }, async (args) => {
+            const filePath = args.path as string;
+            const absPath = this.validatePath(filePath);
+            if (!absPath) { return { success: false, result: 'Invalid path or outside workspace.' }; }
+
+            const relPath = vscode.workspace.asRelativePath(vscode.Uri.file(absPath), false);
+            const symbols = this.symbolIndexer.getFileSymbols(relPath);
+            if (symbols.length === 0) {
+                return { success: true, result: `No symbols found for ${relPath}.` };
+            }
+
+            const lines = symbols.slice(0, 200).map(s => {
+                const container = s.containerName ? ` (in ${s.containerName})` : '';
+                return `${s.filePath}:${s.line}:${s.character} [${s.kind}] ${s.name}${container}`;
+            });
+            return { success: true, result: lines.join('\n') };
+        });
+
+        // ── find_symbol ──
+        this.register({
+            type: 'function',
+            function: {
+                name: 'find_symbol',
+                description: 'Find symbol definitions by name across the indexed workspace.',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        name: { type: 'string', description: 'Symbol name or partial name to search for' },
+                        includeLocals: { type: 'string', description: 'Optional: "true" to include local variables/properties/parameters (default false)' }
+                    },
+                    required: ['name']
+                }
+            }
+        }, async (args) => {
+            const name = args.name as string;
+            const includeLocals = (args.includeLocals as string) === 'true';
+            const preferredKinds = new Set(['Class', 'Interface', 'Method', 'Function', 'Constructor', 'Namespace', 'Enum']);
+
+            let matches = this.symbolIndexer.findSymbolsByName(name, 200);
+
+            // Default mode: filter to high-signal symbol kinds for cleaner navigation results.
+            if (!includeLocals) {
+                matches = matches.filter(s => preferredKinds.has(s.kind));
+            }
+
+            // De-duplicate by file + line + name (requested UX behavior).
+            const deduped: typeof matches = [];
+            const seen = new Set<string>();
+            for (const s of matches) {
+                const key = `${s.filePath}|${s.line}|${s.name}`;
+                if (seen.has(key)) { continue; }
+                seen.add(key);
+                deduped.push(s);
+            }
+
+            if (deduped.length === 0) {
+                return { success: true, result: `No symbol matches for "${name}".` };
+            }
+
+            const lines = deduped.slice(0, 100).map(s => {
+                const container = s.containerName ? ` (in ${s.containerName})` : '';
+                return `${s.filePath}:${s.line}:${s.character} [${s.kind}] ${s.name}${container}`;
+            });
+            return { success: true, result: lines.join('\n') };
+        });
+
+        // ── go_to_definition ──
+        this.register({
+            type: 'function',
+            function: {
+                name: 'go_to_definition',
+                description: 'Find the definition location for a symbol in a file.',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        path: { type: 'string', description: 'Relative file path containing a symbol usage' },
+                        symbol: { type: 'string', description: 'Symbol name to resolve' },
+                        lineHint: { type: 'string', description: 'Optional 1-based line number where symbol appears' }
+                    },
+                    required: ['path', 'symbol']
+                }
+            }
+        }, async (args) => {
+            const filePath = args.path as string;
+            const symbol = args.symbol as string;
+            const lineHint = args.lineHint ? parseInt(args.lineHint as string, 10) : undefined;
+
+            const resolved = await this.resolveSymbolPosition(filePath, symbol, lineHint);
+            if (!resolved) {
+                return { success: false, result: `Could not resolve symbol position for ${symbol} in ${filePath}.` };
+            }
+
+            try {
+                const defs = await vscode.commands.executeCommand<(vscode.Location | vscode.LocationLink)[] | undefined>(
+                    'vscode.executeDefinitionProvider',
+                    resolved.uri,
+                    resolved.position
+                );
+
+                if (!defs || defs.length === 0) {
+                    return { success: true, result: `No definition found for ${symbol}.` };
+                }
+
+                const lines = defs.slice(0, 50).map((d) => {
+                    const uri = 'targetUri' in d ? d.targetUri : d.uri;
+                    const range = 'targetRange' in d ? d.targetRange : d.range;
+                    const rel = vscode.workspace.asRelativePath(uri, false);
+                    return `${rel}:${range.start.line + 1}:${range.start.character + 1}`;
+                });
+                return { success: true, result: lines.join('\n') };
+            } catch (e: unknown) {
+                return { success: false, result: `Definition lookup failed: ${e instanceof Error ? e.message : String(e)}` };
+            }
+        });
+
+        // ── find_references ──
+        this.register({
+            type: 'function',
+            function: {
+                name: 'find_references',
+                description: 'Find references for a symbol in a file.',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        path: { type: 'string', description: 'Relative file path containing a symbol usage/definition' },
+                        symbol: { type: 'string', description: 'Symbol name to find references for' },
+                        lineHint: { type: 'string', description: 'Optional 1-based line number where symbol appears' },
+                        includeDeclaration: { type: 'string', description: '"true" to include declarations, default false' }
+                    },
+                    required: ['path', 'symbol']
+                }
+            }
+        }, async (args) => {
+            const filePath = args.path as string;
+            const symbol = args.symbol as string;
+            const lineHint = args.lineHint ? parseInt(args.lineHint as string, 10) : undefined;
+            const includeDeclaration = (args.includeDeclaration as string) === 'true';
+
+            const resolved = await this.resolveSymbolPosition(filePath, symbol, lineHint);
+            if (!resolved) {
+                return { success: false, result: `Could not resolve symbol position for ${symbol} in ${filePath}.` };
+            }
+
+            try {
+                const refs = await vscode.commands.executeCommand<vscode.Location[] | undefined>(
+                    'vscode.executeReferenceProvider',
+                    resolved.uri,
+                    resolved.position
+                );
+
+                if (!refs || refs.length === 0) {
+                    return { success: true, result: `No references found for ${symbol}.` };
+                }
+
+                const currentFile = vscode.workspace.asRelativePath(resolved.uri, false);
+                const currentLine = resolved.position.line + 1;
+
+                const filtered = includeDeclaration
+                    ? refs
+                    : refs.filter(r => {
+                        const rel = vscode.workspace.asRelativePath(r.uri, false);
+                        const line = r.range.start.line + 1;
+                        return !(rel === currentFile && line === currentLine);
+                    });
+
+                const lines = filtered.slice(0, 200).map(r => {
+                    const rel = vscode.workspace.asRelativePath(r.uri, false);
+                    return `${rel}:${r.range.start.line + 1}:${r.range.start.character + 1}`;
+                });
+                return {
+                    success: true,
+                    result: lines.length > 0 ? lines.join('\n') : `No references found for ${symbol} (after filtering declaration).`
+                };
+            } catch (e: unknown) {
+                return { success: false, result: `Reference lookup failed: ${e instanceof Error ? e.message : String(e)}` };
+            }
+        });
+
+        // ── rename_symbol ──
+        this.register({
+            type: 'function',
+            function: {
+                name: 'rename_symbol',
+                description: 'Rename a symbol (variable, function, class, etc.) across all files using VS Code\'s rename provider. This is like pressing F2 — it updates all references, imports, and usages project-wide.',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        path: { type: 'string', description: 'Relative path to a file containing the symbol' },
+                        symbol: { type: 'string', description: 'Current name of the symbol to rename' },
+                        newName: { type: 'string', description: 'New name for the symbol' },
+                        lineHint: { type: 'number', description: 'Optional 1-based line number where the symbol appears' }
+                    },
+                    required: ['path', 'symbol', 'newName']
+                }
+            }
+        }, async (args) => {
+            const filePath = args.path as string;
+            const symbol = args.symbol as string;
+            const newName = args.newName as string;
+            const lineHint = args.lineHint as number | undefined;
+
+            if (this.confirmWrite) {
+                const approved = await this.requestConfirmation(`Rename "${symbol}" → "${newName}" in ${filePath}`, 'write');
+                if (!approved) { return { success: false, result: 'User declined the rename.' }; }
+            }
+
+            try {
+                const resolved = await this.resolveSymbolPosition(filePath, symbol, lineHint);
+                if (!resolved) {
+                    return { success: false, result: `Could not find symbol "${symbol}" in ${filePath}` };
+                }
+
+                const edit = await vscode.commands.executeCommand<vscode.WorkspaceEdit>(
+                    'vscode.executeDocumentRenameProvider',
+                    resolved.uri,
+                    resolved.position,
+                    newName
+                );
+
+                if (!edit || edit.size === 0) {
+                    return { success: false, result: `Rename provider returned no edits for "${symbol}". The language server may not support rename at this location.` };
+                }
+
+                const applied = await vscode.workspace.applyEdit(edit);
+                if (!applied) {
+                    return { success: false, result: 'Failed to apply rename edits.' };
+                }
+
+                // Summarize what changed
+                const entries = edit.entries();
+                const fileCount = entries.length;
+                let editCount = 0;
+                const changedFiles: string[] = [];
+                for (const [uri, edits] of entries) {
+                    editCount += edits.length;
+                    changedFiles.push(vscode.workspace.asRelativePath(uri, false));
+                }
+
+                return {
+                    success: true,
+                    result: `Renamed "${symbol}" → "${newName}" — ${editCount} edit(s) across ${fileCount} file(s):\n${changedFiles.join('\n')}`
+                };
+            } catch (e: unknown) {
+                return { success: false, result: `Rename failed: ${e instanceof Error ? e.message : String(e)}` };
+            }
+        });
+
         // ── run_terminal_command ──
         this.register({
             type: 'function',
             function: {
                 name: 'run_terminal_command',
-                description: 'Execute a shell command in the workspace root and return stdout/stderr. Use for building, testing, installing packages, git operations, etc. Commands run with a timeout.',
+                description: 'Execute a shell command in the workspace root and return stdout/stderr. Use for building, testing, installing packages, git operations, etc. Do NOT use for long-running or watch-mode commands (e.g. tsc --watch, npm start, dev servers) — they will time out. Default timeout is 30 seconds; use the timeout_ms parameter for commands that need longer (e.g. full builds).',
                 parameters: {
                     type: 'object',
                     properties: {
                         command: { type: 'string', description: 'The shell command to execute' },
-                        cwd: { type: 'string', description: 'Optional working directory relative to workspace root' }
+                        cwd: { type: 'string', description: 'Optional working directory relative to workspace root' },
+                        timeout_ms: { type: 'number', description: 'Optional timeout in milliseconds (default 30000). Use up to 120000 for slow builds. Do not use for indefinite processes.' }
                     },
                     required: ['command']
                 }
             }
         }, async (args) => {
             const command = args.command as string;
+            const timeoutMs = Math.min(Math.max(Number(args.timeout_ms) || 30000, 5000), 120000);
 
             // Block dangerous commands
             const dangerous = [/rm\s+-rf\s+\//, /format\s+[a-z]:/i, /del\s+\/s\s+\/q\s+[a-z]:/i];
@@ -373,7 +720,7 @@ export class BuiltinTools {
             }
 
             if (this.confirmTerminal) {
-                const approved = await this.requestConfirmation(`Run command: ${command}`);
+                const approved = await this.requestConfirmation(`Run command: ${command}`, 'terminal');
                 if (!approved) { return { success: false, result: 'User declined the terminal command.' }; }
             }
 
@@ -383,7 +730,7 @@ export class BuiltinTools {
             return new Promise((resolve) => {
                 const proc = cp.exec(command, {
                     cwd,
-                    timeout: 30000,
+                    timeout: timeoutMs,
                     maxBuffer: 1024 * 512,
                     env: { ...process.env }
                 }, (error: cp.ExecException | null, stdout: string, stderr: string) => {
@@ -396,10 +743,20 @@ export class BuiltinTools {
                     if (output.length > 30000) {
                         output = output.slice(0, 30000) + '\n... [output truncated]';
                     }
-                    resolve({
-                        success: !error,
-                        result: output || '(no output)'
-                    });
+
+                    // If timed out but captured output, treat as partial success
+                    const timedOut = error && (error as any).killed;
+                    if (timedOut && output) {
+                        resolve({
+                            success: true,
+                            result: output + `\n\n⚠ Command timed out after ${timeoutMs / 1000}s but produced output above.`
+                        });
+                    } else {
+                        resolve({
+                            success: !error,
+                            result: output || '(no output)'
+                        });
+                    }
                 });
             });
         });
@@ -424,7 +781,7 @@ export class BuiltinTools {
             if (!absPath) { return { success: false, result: 'Invalid path or outside workspace.' }; }
 
             if (this.confirmWrite) {
-                const approved = await this.requestConfirmation(`Delete file: ${filePath}`);
+                const approved = await this.requestConfirmation(`Delete file: ${filePath}`, 'write');
                 if (!approved) { return { success: false, result: 'User declined the delete.' }; }
             }
 
@@ -506,5 +863,121 @@ export class BuiltinTools {
                 result: files.length > 0 ? files.join('\n') : 'No editors open.'
             };
         });
+
+        // ── apply_code_action ──
+        this.register({
+            type: 'function',
+            function: {
+                name: 'apply_code_action',
+                description: 'List and optionally apply a VS Code code action (quick-fix / auto-fix) for a diagnostic at a given location. Call with apply=false first to see available fixes, then call again with apply=true and the action title.',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        path: { type: 'string', description: 'Relative path to the file' },
+                        line: { type: 'number', description: 'Line number (1-based) of the diagnostic' },
+                        apply: { type: 'boolean', description: 'If false, list available actions. If true, apply the action matching the title.' },
+                        title: { type: 'string', description: 'Title of the code action to apply (required when apply=true)' }
+                    },
+                    required: ['path', 'line']
+                }
+            }
+        }, async (args) => {
+            const filePath = args.path as string;
+            const line = (args.line as number) - 1; // convert to 0-based
+            const shouldApply = args.apply as boolean ?? false;
+            const targetTitle = args.title as string | undefined;
+            const absPath = this.validatePath(filePath);
+            if (!absPath) { return { success: false, result: 'Invalid path or outside workspace.' }; }
+
+            try {
+                const uri = vscode.Uri.file(absPath);
+                const range = new vscode.Range(line, 0, line, 1000);
+                const actions: vscode.CodeAction[] = await vscode.commands.executeCommand(
+                    'vscode.executeCodeActionProvider', uri, range
+                );
+
+                if (!actions || actions.length === 0) {
+                    return { success: true, result: 'No code actions available at this location.' };
+                }
+
+                if (!shouldApply) {
+                    // List mode
+                    const listing = actions.map((a, i) => `${i + 1}. ${a.title}`).join('\n');
+                    return { success: true, result: `Available code actions:\n${listing}` };
+                }
+
+                // Apply mode — find matching action
+                if (!targetTitle) {
+                    return { success: false, result: 'Must provide title when apply=true.' };
+                }
+
+                const match = actions.find(a =>
+                    a.title.toLowerCase().includes(targetTitle.toLowerCase())
+                );
+                if (!match) {
+                    const listing = actions.map(a => `  - ${a.title}`).join('\n');
+                    return { success: false, result: `No action matching "${targetTitle}". Available:\n${listing}` };
+                }
+
+                if (this.confirmWrite) {
+                    const approved = await this.requestConfirmation(`Apply code action: ${match.title}`, 'write');
+                    if (!approved) { return { success: false, result: 'User declined the code action.' }; }
+                }
+
+                // Apply workspace edit if present
+                if (match.edit) {
+                    await vscode.workspace.applyEdit(match.edit);
+                }
+                // Execute command if present
+                if (match.command) {
+                    await vscode.commands.executeCommand(
+                        match.command.command,
+                        ...(match.command.arguments || [])
+                    );
+                }
+
+                return { success: true, result: `Applied code action: ${match.title}` };
+            } catch (e: unknown) {
+                return { success: false, result: `Failed: ${e instanceof Error ? e.message : String(e)}` };
+            }
+        });
+    }
+
+    private async resolveSymbolPosition(
+        filePath: string,
+        symbol: string,
+        lineHint?: number
+    ): Promise<{ uri: vscode.Uri; position: vscode.Position } | null> {
+        const absPath = this.validatePath(filePath);
+        if (!absPath) { return null; }
+        const uri = vscode.Uri.file(absPath);
+        const relPath = vscode.workspace.asRelativePath(uri, false);
+
+        if (lineHint && lineHint > 0) {
+            return { uri, position: new vscode.Position(lineHint - 1, 0) };
+        }
+
+        const pos = this.symbolIndexer.getPositionForSymbol(relPath, symbol);
+        if (pos) {
+            return { uri, position: pos };
+        }
+
+        // fallback: try to find the symbol text in the file
+        try {
+            const bytes = await vscode.workspace.fs.readFile(uri);
+            const content = Buffer.from(bytes).toString('utf8');
+            const lines = content.split('\n');
+            const target = symbol.toLowerCase();
+            for (let i = 0; i < lines.length; i++) {
+                const idx = lines[i].toLowerCase().indexOf(target);
+                if (idx >= 0) {
+                    return { uri, position: new vscode.Position(i, idx) };
+                }
+            }
+        } catch {
+            // ignore
+        }
+
+        return null;
     }
 }

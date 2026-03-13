@@ -1,5 +1,5 @@
 /**
- * Shared types for the SecureChat agent extension.
+ * Shared types for the Junior agent extension.
  */
 
 // ── Azure OpenAI Types ──
@@ -90,10 +90,15 @@ export type ToolHandler = (args: Record<string, unknown>) => Promise<ToolResult>
 // ── MCP Types ──
 
 export interface McpServerConfig {
-    command: string;
+    /** stdio transport: command to spawn */
+    command?: string;
     args?: string[];
     env?: Record<string, string>;
     cwd?: string;
+    /** HTTP transport: base URL of the MCP server */
+    url?: string;
+    /** HTTP transport: extra headers (e.g. Authorization) */
+    headers?: Record<string, string>;
 }
 
 export interface McpToolInfo {
@@ -116,6 +121,12 @@ export interface ChatSession {
     updatedAt: number;
 }
 
+export interface AgentPlanStep {
+    id: string;
+    title: string;
+    status: 'pending' | 'in_progress' | 'completed' | 'failed';
+}
+
 // ── Webview Message Types ──
 
 export type WebviewMessage =
@@ -125,12 +136,16 @@ export type WebviewMessage =
     | { type: 'selectModel' }
     | { type: 'selectModelById'; deploymentId: string }
     | { type: 'attachFile' }
-    | { type: 'confirmAction'; actionId: string; approved: boolean }
+    | { type: 'confirmAction'; actionId: string; approved: boolean; allowSession?: boolean; category?: string }
+    | { type: 'switchSession'; sessionId: string }
+    | { type: 'deleteSession'; sessionId: string }
+    | { type: 'requestSessionList' }
     | { type: 'ready' };
 
 export type ExtensionMessage =
     | { type: 'addUserMessage'; text: string; images?: string[]; fileNames?: string[] }
     | { type: 'setModels'; models: Array<{ name: string; deploymentId: string }>; activeDeployment?: string }
+    | { type: 'agentPlan'; steps: AgentPlanStep[] }
     | { type: 'startAssistantMessage' }
     | { type: 'appendAssistantText'; text: string }
     | { type: 'endAssistantMessage' }
@@ -140,6 +155,9 @@ export type ExtensionMessage =
     | { type: 'modelChanged'; model: string }
     | { type: 'sessionCleared' }
     | { type: 'setStatus'; status: string }
-    | { type: 'confirmAction'; actionId: string; description: string }
+    | { type: 'confirmAction'; actionId: string; description: string; category?: string }
     | { type: 'fileAttached'; name: string; content: string }
+    | { type: 'sessionList'; sessions: Array<{ id: string; title: string; updatedAt: number; messageCount: number }>; activeId: string }
+    | { type: 'sessionSwitched' }
     | { type: 'agentDone' };
+

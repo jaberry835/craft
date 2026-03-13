@@ -5,10 +5,12 @@ import { BuiltinTools } from './builtinTools';
 import { McpClient } from './mcpClient';
 import { ChatViewProvider } from './chatViewProvider';
 import { SessionManager } from './sessionManager';
+import { SymbolIndexer } from './symbolIndexer';
+import { SemanticIndexer } from './semanticIndexer';
 
 let chatViewProvider: ChatViewProvider;
 let mcpClient: McpClient;
-export const outputChannel = vscode.window.createOutputChannel('SecureChat');
+export const outputChannel = vscode.window.createOutputChannel('Junior');
 
 function log(msg: string) {
     const ts = new Date().toISOString();
@@ -16,10 +18,13 @@ function log(msg: string) {
 }
 
 export function activate(context: vscode.ExtensionContext) {
-    log('SecureChat extension activating...');
+    log('Junior extension activating...');
     const aoaiClient = new AzureOpenAIClient();
+    aoaiClient.setSecretStorage(context.secrets);
     const workspaceIndexer = new WorkspaceIndexer();
-    const builtinTools = new BuiltinTools(workspaceIndexer);
+    const symbolIndexer = new SymbolIndexer();
+    const semanticIndexer = new SemanticIndexer();
+    const builtinTools = new BuiltinTools(workspaceIndexer, symbolIndexer, semanticIndexer);
     mcpClient = new McpClient();
     const sessionManager = new SessionManager(context.globalState);
 
@@ -56,8 +61,28 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     context.subscriptions.push(
+        vscode.commands.registerCommand('securechat.toggleHistory', () => {
+            chatViewProvider.toggleHistory();
+        })
+    );
+
+    context.subscriptions.push(
         vscode.commands.registerCommand('securechat.cancelAgent', () => {
             chatViewProvider.cancelAgent();
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('securechat.setApiKey', async () => {
+            const key = await vscode.window.showInputBox({
+                prompt: 'Enter your Azure OpenAI API key',
+                password: true,
+                placeHolder: 'Paste API key here (stored securely in VS Code SecretStorage)'
+            });
+            if (key) {
+                await aoaiClient.storeApiKey(key);
+                vscode.window.showInformationMessage('API key stored securely. You can remove it from settings.json if present.');
+            }
         })
     );
 
@@ -66,13 +91,17 @@ export function activate(context: vscode.ExtensionContext) {
             await vscode.window.withProgress(
                 {
                     location: vscode.ProgressLocation.Notification,
-                    title: 'SecureChat: Indexing workspace...',
+                    title: 'Junior: Indexing workspace...',
                     cancellable: true
                 },
                 async (progress, token) => {
                     await workspaceIndexer.indexWorkspace(progress, token);
+                    progress.report({ message: 'Indexing symbols...' });
+                    await symbolIndexer.indexWorkspace(workspaceIndexer, progress, token);
+                    progress.report({ message: 'Indexing semantic chunks...' });
+                    await semanticIndexer.indexWorkspace(workspaceIndexer, progress, token);
                     vscode.window.showInformationMessage(
-                        `SecureChat: Indexed ${workspaceIndexer.getFileCount()} files.`
+                        `Junior: Indexed ${workspaceIndexer.getFileCount()} files, ${symbolIndexer.getSymbolFileCount()} symbol files, ${semanticIndexer.getChunkCount()} semantic chunks.`
                     );
                 }
             );
@@ -117,13 +146,13 @@ export function activate(context: vscode.ExtensionContext) {
                     log(`User picked: ${picked.label} (${picked.deploymentId})`);
                     await config.update('activeDeployment', picked.deploymentId, vscode.ConfigurationTarget.Global);
                     chatViewProvider.notifyModelChanged(picked.label);
-                    vscode.window.showInformationMessage(`SecureChat: Switched to ${picked.label}`);
+                    vscode.window.showInformationMessage(`Junior: Switched to ${picked.label}`);
                 } else {
                     log('QuickPick dismissed without selection');
                 }
             } catch (err: any) {
                 log(`selectModel error: ${err.message}\n${err.stack}`);
-                vscode.window.showErrorMessage(`SecureChat: Select Model failed — ${err.message}`);
+                vscode.window.showErrorMessage(`Junior: Select Model failed — ${err.message}`);
             }
         })
     );
@@ -140,14 +169,14 @@ export function activate(context: vscode.ExtensionContext) {
             if (!pick) { return; }
             if (pick.label.includes('Connect All')) {
                 await mcpClient.connectConfiguredServers();
-                vscode.window.showInformationMessage(`SecureChat: ${mcpClient.getToolCount()} MCP tools available.`);
+                vscode.window.showInformationMessage(`Junior: ${mcpClient.getToolCount()} MCP tools available.`);
             } else if (pick.label.includes('Disconnect All')) {
                 mcpClient.disconnectAll();
-                vscode.window.showInformationMessage('SecureChat: All MCP servers disconnected.');
+                vscode.window.showInformationMessage('Junior: All MCP servers disconnected.');
             } else {
                 const name = pick.label.replace('$(debug-disconnect) Disconnect: ', '');
                 mcpClient.disconnectServer(name);
-                vscode.window.showInformationMessage(`SecureChat: Disconnected ${name}.`);
+                vscode.window.showInformationMessage(`Junior: Disconnected ${name}.`);
             }
         })
     );
@@ -175,13 +204,17 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Index workspace on activation
     if (vscode.workspace.workspaceFolders) {
-        workspaceIndexer.indexWorkspace().catch((e) => log(`Workspace indexing failed: ${e}`));
+        (async () => {
+            await workspaceIndexer.indexWorkspace();
+            await symbolIndexer.indexWorkspace(workspaceIndexer);
+            await semanticIndexer.indexWorkspace(workspaceIndexer);
+        })().catch((e) => log(`Workspace/symbol/semantic indexing failed: ${e}`));
     }
 
     // Connect MCP servers from settings
     mcpClient.connectConfiguredServers().catch((e) => log(`MCP connect failed: ${e}`));
 
-    log('SecureChat extension activated successfully.');
+    log('Junior extension activated successfully.');
 }
 
 function sendSelectionToChat(prefix: string) {
@@ -200,3 +233,5 @@ function sendSelectionToChat(prefix: string) {
 export function deactivate() {
     mcpClient?.dispose();
 }
+
+

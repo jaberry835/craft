@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Build, install, and uninstall the SecureChat VS Code extension.
+    Build, install, and uninstall the Junior VS Code extension.
 
 .PARAMETER Action
     The action to perform: build, install, uninstall, or reinstall.
@@ -64,7 +64,7 @@ function Invoke-Install {
 
 function Invoke-Uninstall {
     Write-Step "To uninstall, open VS Code and run:"
-    Write-Ok "Ctrl+Shift+P > 'Extensions: Uninstall' on SecureChat"
+    Write-Ok "Ctrl+Shift+P > 'Extensions: Uninstall' on Junior"
 }
 
 function Invoke-Reinstall {
@@ -80,3 +80,4 @@ switch ($Action) {
 }
 
 Write-Host ""
+

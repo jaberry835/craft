@@ -86,9 +86,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         if (this.agentLoop?.isRunning()) {
             this.agentLoop.cancel();
         }
+        this.builtinTools.resetSessionApprovals();
         this.sessionManager.createNewSession();
         this.agentLoop?.clearMessages();
         this.sendToWebview({ type: 'sessionCleared' });
+        this.sendSessionList();
+    }
+
+    toggleHistory() {
+        this.sendToWebview({ type: 'toggleHistory' } as any);
     }
 
     cancelAgent() {
@@ -116,15 +122,28 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     this.handleSelectModelById(msg.deploymentId);
                     break;
                 case 'confirmAction':
+                    if (msg.allowSession && msg.category) {
+                        this.builtinTools.allowForSession(msg.category);
+                    }
                     this.builtinTools.resolveConfirmation(msg.actionId, msg.approved);
                     break;
                 case 'attachFile':
                     this.handleAttachFile();
                     break;
+                case 'switchSession':
+                    this.handleSwitchSession(msg.sessionId);
+                    break;
+                case 'deleteSession':
+                    this.handleDeleteSession(msg.sessionId);
+                    break;
+                case 'requestSessionList':
+                    this.sendSessionList();
+                    break;
                 case 'ready':
                     this.log('Webview reported ready');
                     this.syncModelsToWebview();
                     this.restoreSession();
+                    this.sendSessionList();
                     break;
             }
         } catch (err: any) {
@@ -153,14 +172,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
 
         // Confirmation callback for built-in tools
-        this.builtinTools.setConfirmCallback((actionId, description) => {
-            this.sendToWebview({ type: 'confirmAction', actionId, description });
+        this.builtinTools.setConfirmCallback((actionId, description, category) => {
+            this.sendToWebview({ type: 'confirmAction', actionId, description, category });
         });
 
         await this.agentLoop.run(text, images, files);
 
         // Persist after run completes
         this.sessionManager.updateMessages(this.agentLoop.getMessages());
+        this.sendSessionList();
     }
 
     private async handleAttachFile() {
@@ -188,6 +208,49 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         const config = vscode.workspace.getConfiguration('securechat.azureOpenAI');
         await config.update('activeDeployment', deploymentId, vscode.ConfigurationTarget.Global);
         this.syncModelsToWebview();
+    }
+
+    private sendSessionList() {
+        const sessions = this.sessionManager.getSessions().map(s => ({
+            id: s.id,
+            title: s.title,
+            updatedAt: s.updatedAt,
+            messageCount: s.messages.length
+        }));
+        this.sendToWebview({
+            type: 'sessionList',
+            sessions,
+            activeId: this.sessionManager.getCurrentSession().id
+        });
+    }
+
+    private handleSwitchSession(sessionId: string) {
+        if (this.agentLoop?.isRunning()) {
+            this.agentLoop.cancel();
+        }
+        const session = this.sessionManager.switchSession(sessionId);
+        if (!session) { return; }
+        this.builtinTools.resetSessionApprovals();
+        this.sendToWebview({ type: 'sessionCleared' });
+        this.sendToWebview({ type: 'sessionSwitched' });
+        this.restoreSession();
+        this.sendSessionList();
+        // Sync agent loop messages
+        if (this.agentLoop) {
+            this.agentLoop.setMessages([...session.messages]);
+        }
+    }
+
+    private handleDeleteSession(sessionId: string) {
+        const wasCurrent = this.sessionManager.getCurrentSession().id === sessionId;
+        this.sessionManager.deleteSession(sessionId);
+        if (wasCurrent) {
+            if (this.agentLoop?.isRunning()) { this.agentLoop.cancel(); }
+            this.agentLoop?.clearMessages();
+            this.sendToWebview({ type: 'sessionCleared' });
+            this.restoreSession();   // restore whatever session the manager switched to
+        }
+        this.sendSessionList();
     }
 
     private restoreSession() {
@@ -290,29 +353,45 @@ body { display: flex; flex-direction: column; }
 }
 #status-bar.active { min-height: 20px; }
 
-/* MODEL PICKER */
-#composer-top {
-    display: flex;
-    margin-bottom: 6px;
-}
-#model-select {
-    width: 100%;
-    background: var(--input-bg);
-    color: var(--input-fg);
-    border: 1px solid var(--input-border);
+/* PLAN PANEL */
+#plan-panel {
+    display: none;
+    margin: 4px 10px 2px;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
     border-radius: 6px;
-    padding: 5px 8px;
-    font-family: inherit;
+    background: var(--tool-bg);
     font-size: 11px;
-    outline: none;
 }
-#model-select:focus {
-    border-color: var(--vscode-focusBorder, var(--btn-bg));
+#plan-panel .plan-title {
+    opacity: 0.8;
+    margin-bottom: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.2px;
 }
+#plan-panel .plan-step {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    padding: 1px 0;
+}
+#plan-panel .plan-step .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--vscode-descriptionForeground, #888);
+    flex-shrink: 0;
+}
+#plan-panel .plan-step.pending .dot { background: var(--vscode-descriptionForeground, #888); }
+#plan-panel .plan-step.in_progress .dot { background: var(--user-msg); }
+#plan-panel .plan-step.completed .dot { background: var(--success-fg); }
+#plan-panel .plan-step.failed .dot { background: var(--error-fg); }
+#plan-panel .plan-step .label { opacity: 0.95; }
 
 /* MESSAGES */
 #messages {
     flex: 1;
+    min-height: 0;          /* allow flex item to shrink below content so overflow-y scrolls */
     overflow-y: auto;
     padding: 6px 10px;
     display: flex;
@@ -325,7 +404,7 @@ body { display: flex; flex-direction: column; }
     border-radius: 3px;
 }
 
-.msg { line-height: 1.45; word-wrap: break-word; }
+.msg { line-height: 1.45; word-wrap: break-word; flex-shrink: 0; }
 .msg.user {
     background: rgba(55, 148, 255, 0.08);
     border-radius: 8px;
@@ -341,7 +420,32 @@ body { display: flex; flex-direction: column; }
     margin-bottom: 4px;
 }
 .msg.assistant { padding: 4px 0; }
-.msg.assistant .content { white-space: pre-wrap; }
+.msg.assistant .content {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+.msg.assistant .content h1,
+.msg.assistant .content h2,
+.msg.assistant .content h3 {
+    margin: 8px 0 4px;
+    font-weight: 700;
+    line-height: 1.3;
+}
+.msg.assistant .content h1 { font-size: 1.1em; }
+.msg.assistant .content h2 { font-size: 1.03em; }
+.msg.assistant .content h3 { font-size: 0.98em; }
+.msg.assistant .content ul,
+.msg.assistant .content ol {
+    margin: 6px 0;
+    padding-left: 18px;
+}
+.msg.assistant .content li {
+    margin: 2px 0;
+}
+.msg.assistant .content hr {
+    display: none;
+}
 .msg.assistant .content code {
     background: var(--code-bg);
     padding: 1px 4px;
@@ -367,6 +471,7 @@ body { display: flex; flex-direction: column; }
     margin: 4px 0;
     border: 1px solid var(--border);
     overflow: hidden;
+    flex-shrink: 0;
 }
 .tool-block .tool-header {
     display: flex;
@@ -404,7 +509,8 @@ body { display: flex; flex-direction: column; }
     max-height: 200px;
     overflow-y: auto;
     white-space: pre-wrap;
-    word-break: break-all;
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 .tool-block .tool-result.success { color: var(--success-fg); }
 .tool-block .tool-result.failure { color: var(--error-fg); }
@@ -416,6 +522,7 @@ body { display: flex; flex-direction: column; }
     border-radius: 6px;
     padding: 10px;
     margin: 4px 0;
+    flex-shrink: 0;
 }
 .confirm-dialog p { margin-bottom: 8px; font-size: 12px; }
 .confirm-dialog .confirm-actions { display: flex; gap: 6px; }
@@ -431,6 +538,12 @@ body { display: flex; flex-direction: column; }
     color: var(--btn-fg);
 }
 .confirm-dialog .btn-approve:hover { background: var(--btn-hover); }
+.confirm-dialog .btn-session {
+    background: transparent;
+    border: 1px solid var(--btn-bg);
+    color: var(--btn-bg);
+}
+.confirm-dialog .btn-session:hover { background: var(--btn-bg); color: var(--btn-fg); }
 .confirm-dialog .btn-deny {
     background: transparent;
     border: 1px solid var(--border);
@@ -445,6 +558,39 @@ body { display: flex; flex-direction: column; }
     border-left: 3px solid var(--error-fg);
     background: rgba(255, 68, 68, 0.06);
     border-radius: 4px;
+    flex-shrink: 0;
+}
+
+/* WORKING SPINNER */
+#working-indicator {
+    display: none;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    font-size: 12px;
+    opacity: 0.7;
+    flex-shrink: 0;
+}
+#working-indicator.active {
+    display: flex;
+}
+#working-indicator .spinner-dots {
+    display: flex;
+    gap: 3px;
+}
+#working-indicator .spinner-dots span {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--fg);
+    opacity: 0.3;
+    animation: dot-pulse 1.4s ease-in-out infinite;
+}
+#working-indicator .spinner-dots span:nth-child(2) { animation-delay: 0.2s; }
+#working-indicator .spinner-dots span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes dot-pulse {
+    0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+    40% { opacity: 1; transform: scale(1); }
 }
 
 /* INPUT */
@@ -457,12 +603,18 @@ body { display: flex; flex-direction: column; }
     background: rgba(55, 148, 255, 0.1);
     border-top: 2px dashed var(--user-msg);
 }
+#composer-shell {
+    border: 1px solid var(--input-border);
+    border-radius: 8px;
+    background: var(--input-bg);
+    overflow: hidden;
+}
 #input-area textarea {
     width: 100%;
     background: var(--input-bg);
     color: var(--input-fg);
-    border: 1px solid var(--input-border);
-    border-radius: 6px;
+    border: none;
+    border-radius: 0;
     padding: 8px 10px;
     font-family: inherit;
     font-size: inherit;
@@ -473,26 +625,95 @@ body { display: flex; flex-direction: column; }
     line-height: 1.4;
 }
 #input-area textarea:focus {
-    border-color: var(--vscode-focusBorder, var(--btn-bg));
+    border-color: transparent;
 }
-#input-area .input-row {
+#composer-toolbar {
     display: flex;
-    gap: 4px;
-    align-items: flex-end;
+    align-items: center;
+    justify-content: space-between;
+    border-top: 1px solid var(--border);
+    padding: 4px 6px;
+    min-height: 32px;
 }
-#input-area .input-row textarea { flex: 1; }
 #btn-attach {
     background: none;
     border: none;
     color: var(--fg);
     cursor: pointer;
-    font-size: 16px;
-    padding: 6px;
+    font-size: 15px;
+    padding: 4px 6px;
     border-radius: 4px;
     opacity: 0.6;
     flex-shrink: 0;
 }
 #btn-attach:hover { opacity: 1; background: rgba(255,255,255,0.08); }
+
+/* HISTORY PANEL */
+#history-panel {
+    display: none;
+    max-height: 50vh;
+    overflow-y: auto;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+    flex-shrink: 0;
+}
+#history-panel.open { display: block; }
+#history-panel::-webkit-scrollbar { width: 6px; }
+#history-panel::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px; }
+.history-item {
+    display: flex;
+    align-items: center;
+    padding: 6px 10px;
+    cursor: pointer;
+    font-size: 12px;
+    gap: 6px;
+    border-bottom: 1px solid rgba(128,128,128,0.1);
+}
+.history-item:hover { background: rgba(255,255,255,0.04); }
+.history-item.active {
+    background: rgba(55, 148, 255, 0.1);
+    border-left: 2px solid var(--user-msg);
+}
+.history-item .hi-title {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.history-item .hi-meta {
+    font-size: 10px;
+    opacity: 0.5;
+    white-space: nowrap;
+}
+.history-item .hi-delete {
+    background: none;
+    border: none;
+    color: var(--fg);
+    opacity: 0.3;
+    cursor: pointer;
+    font-size: 14px;
+    padding: 2px 4px;
+    border-radius: 3px;
+    flex-shrink: 0;
+}
+.history-item .hi-delete:hover { opacity: 1; color: var(--error-fg); background: rgba(255,68,68,0.1); }
+
+#model-select {
+    width: auto;
+    min-width: 130px;
+    max-width: 210px;
+    background: transparent;
+    color: var(--input-fg);
+    border: 1px solid var(--input-border);
+    border-radius: 6px;
+    padding: 3px 7px;
+    font-family: inherit;
+    font-size: 11px;
+    outline: none;
+}
+#model-select:focus {
+    border-color: var(--vscode-focusBorder, var(--btn-bg));
+}
 
 /* ATTACHMENT PREVIEW */
 #attach-preview {
@@ -594,19 +815,27 @@ body { display: flex; flex-direction: column; }
 </head>
 <body>
 
-
+<div id="history-panel">
+    <div id="history-list"></div>
+</div>
 <div id="status-bar"></div>
-<div id="messages"></div>
-<div id="input-area">
-    <div id="composer-top">
-        <select id="model-select" title="Choose model deployment">
-            <option value="">Loading models...</option>
-        </select>
+<div id="plan-panel"></div>
+<div id="messages">
+    <div id="working-indicator">
+        <div class="spinner-dots"><span></span><span></span><span></span></div>
+        <span id="working-text">Working...</span>
     </div>
+</div>
+<div id="input-area">
     <div id="attach-preview"></div>
-    <div class="input-row">
-        <button id="btn-attach" title="Attach file">&#128206;</button>
-        <textarea id="input" rows="1" placeholder="Ask SecureChat anything..." autofocus></textarea>
+    <div id="composer-shell">
+        <textarea id="input" rows="1" placeholder="Ask Junior anything..." autofocus></textarea>
+        <div id="composer-toolbar">
+            <button id="btn-attach" title="Attach file">&#128206;</button>
+            <select id="model-select" title="Choose model deployment">
+                <option value="">Loading models...</option>
+            </select>
+        </div>
     </div>
     <div class="hint">Enter to send &middot; Shift+Enter for newline &middot; Paste images from clipboard</div>
 </div>
@@ -625,3 +854,5 @@ function getNonce(): string {
     }
     return nonce;
 }
+
+

@@ -1,9 +1,9 @@
 {
   "name": "secure-chat",
-  "displayName": "SecureChat - AI Assistant (Azure OpenAI)",
+  "displayName": "Junior - AI Assistant (Azure OpenAI)",
   "description": "An offline-capable AI coding assistant powered by Azure OpenAI, providing Copilot-like chat, code analysis, editing, and project scaffolding.",
   "version": "1.0.0",
-  "publisher": "your-org",
+  "publisher": "MSFT-CSU-ETT",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -26,7 +26,7 @@
       "activitybar": [
         {
           "id": "securechat",
-          "title": "SecureChat",
+          "title": "Junior",
           "icon": "media/icon.svg"
         }
       ]
@@ -43,45 +43,55 @@
     "commands": [
       {
         "command": "securechat.openChat",
-        "title": "SecureChat: Open Chat",
+        "title": "Junior: Open Chat",
         "icon": "$(comment-discussion)"
       },
       {
         "command": "securechat.newSession",
-        "title": "SecureChat: New Chat Session",
+        "title": "Junior: New Chat Session",
         "icon": "$(add)"
       },
       {
         "command": "securechat.indexWorkspace",
-        "title": "SecureChat: Index Workspace",
+        "title": "Junior: Index Workspace",
         "icon": "$(search)"
       },
       {
         "command": "securechat.selectModel",
-        "title": "SecureChat: Select Model",
+        "title": "Junior: Select Model",
         "icon": "$(server)"
       },
       {
         "command": "securechat.explainSelection",
-        "title": "SecureChat: Explain Selected Code"
+        "title": "Junior: Explain Selected Code"
       },
       {
         "command": "securechat.reviewSelection",
-        "title": "SecureChat: Review Selected Code"
+        "title": "Junior: Review Selected Code"
       },
       {
         "command": "securechat.fixSelection",
-        "title": "SecureChat: Fix Selected Code"
+        "title": "Junior: Fix Selected Code"
       },
       {
         "command": "securechat.manageMcpServers",
-        "title": "SecureChat: Manage MCP Servers",
+        "title": "Junior: Manage MCP Servers",
         "icon": "$(plug)"
       },
       {
         "command": "securechat.cancelAgent",
-        "title": "SecureChat: Cancel Agent Run",
+        "title": "Junior: Cancel Agent Run",
         "icon": "$(debug-stop)"
+      },
+      {
+        "command": "securechat.toggleHistory",
+        "title": "Junior: Toggle Chat History",
+        "icon": "$(history)"
+      },
+      {
+        "command": "securechat.setApiKey",
+        "title": "Junior: Set API Key",
+        "icon": "$(key)"
       }
     ],
     "menus": {
@@ -92,24 +102,29 @@
           "group": "navigation@1"
         },
         {
-          "command": "securechat.selectModel",
+          "command": "securechat.toggleHistory",
           "when": "view == securechat.chatView",
           "group": "navigation@2"
         },
         {
-          "command": "securechat.manageMcpServers",
+          "command": "securechat.selectModel",
           "when": "view == securechat.chatView",
           "group": "navigation@3"
         },
         {
-          "command": "securechat.indexWorkspace",
+          "command": "securechat.manageMcpServers",
           "when": "view == securechat.chatView",
           "group": "navigation@4"
         },
         {
-          "command": "securechat.cancelAgent",
+          "command": "securechat.indexWorkspace",
           "when": "view == securechat.chatView",
           "group": "navigation@5"
+        },
+        {
+          "command": "securechat.cancelAgent",
+          "when": "view == securechat.chatView",
+          "group": "navigation@6"
         }
       ],
       "editor/context": [
@@ -131,7 +146,7 @@
       ]
     },
     "configuration": {
-      "title": "SecureChat",
+      "title": "Junior",
       "properties": {
         "securechat.azureOpenAI.endpoint": {
           "type": "string",
@@ -225,35 +240,47 @@
         "securechat.mcp.servers": {
           "type": "object",
           "default": {},
-          "description": "MCP server configurations. Each key is a server name, value is { command, args?, env?, cwd? }",
+          "description": "MCP server configurations. Each key is a server name. Use { command, args?, env?, cwd? } for stdio or { url, headers? } for HTTP transport.",
           "additionalProperties": {
             "type": "object",
-            "properties": {
-              "command": {
-                "type": "string",
-                "description": "Command to launch the MCP server"
+            "oneOf": [
+              {
+                "required": ["command"],
+                "properties": {
+                  "command": {
+                    "type": "string",
+                    "description": "Command to launch the MCP server (stdio transport)"
+                  },
+                  "args": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Arguments for the MCP server command"
+                  },
+                  "env": {
+                    "type": "object",
+                    "additionalProperties": { "type": "string" },
+                    "description": "Environment variables for the MCP server"
+                  },
+                  "cwd": {
+                    "type": "string",
+                    "description": "Working directory for the MCP server"
+                  }
+                }
               },
-              "args": {
-                "type": "array",
-                "items": {
-                  "type": "string"
-                },
-                "description": "Arguments for the MCP server command"
-              },
-              "env": {
-                "type": "object",
-                "additionalProperties": {
-                  "type": "string"
-                },
-                "description": "Environment variables for the MCP server"
-              },
-              "cwd": {
-                "type": "string",
-                "description": "Working directory for the MCP server"
+              {
+                "required": ["url"],
+                "properties": {
+                  "url": {
+                    "type": "string",
+                    "description": "HTTP endpoint URL for the MCP server (HTTP transport)"
+                  },
+                  "headers": {
+                    "type": "object",
+                    "additionalProperties": { "type": "string" },
+                    "description": "Extra HTTP headers (e.g. Authorization) for the MCP server"
+                  }
+                }
               }
-            },
-            "required": [
-              "command"
             ]
           }
         }
@@ -284,3 +311,5 @@
     "typescript": "^5.3.0"
   }
 }
+
+

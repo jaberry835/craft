@@ -8,13 +8,45 @@ import * as vscode from 'vscode';
 import { AoaiConfig, ChatMessage, ToolDefinition, AoaiStreamChunk, ToolCall } from './types';
 
 export class AzureOpenAIClient {
+    private secrets?: vscode.SecretStorage;
+    private cachedSecretKey?: string;
+
+    setSecretStorage(secrets: vscode.SecretStorage) {
+        this.secrets = secrets;
+        // Invalidate cache when secrets change
+        secrets.onDidChange(e => {
+            if (e.key === 'securechat.apiKey') { this.cachedSecretKey = undefined; }
+        });
+    }
+
+    async storeApiKey(key: string): Promise<void> {
+        if (!this.secrets) { return; }
+        await this.secrets.store('securechat.apiKey', key);
+        this.cachedSecretKey = key;
+    }
+
+    async getApiKey(): Promise<string> {
+        // 1. Cached secret
+        if (this.cachedSecretKey) { return this.cachedSecretKey; }
+        // 2. SecretStorage
+        if (this.secrets) {
+            const stored = await this.secrets.get('securechat.apiKey');
+            if (stored) {
+                this.cachedSecretKey = stored;
+                return stored;
+            }
+        }
+        // 3. Fallback to settings.json
+        return vscode.workspace.getConfiguration('securechat.azureOpenAI').get<string>('apiKey') || '';
+    }
 
     getConfig(): AoaiConfig {
         const cfg = vscode.workspace.getConfiguration('securechat');
         const aoai = vscode.workspace.getConfiguration('securechat.azureOpenAI');
 
         const endpoint = aoai.get<string>('endpoint') || '';
-        const apiKey = aoai.get<string>('apiKey') || '';
+        // apiKey is resolved async via getApiKey() — callers that need it should call getConfigAsync()
+        const apiKey = this.cachedSecretKey || aoai.get<string>('apiKey') || '';
         const deploymentId = aoai.get<string>('activeDeployment') || '';
         const apiVersion = aoai.get<string>('apiVersion') || '2024-06-01';
         const maxTokens = cfg.get<number>('maxTokens') || 4096;
@@ -23,11 +55,25 @@ export class AzureOpenAIClient {
         return { endpoint, apiKey, deploymentId, apiVersion, maxTokens, temperature };
     }
 
-    validate(): string | null {
-        const c = this.getConfig();
+    async getConfigAsync(): Promise<AoaiConfig> {
+        const cfg = vscode.workspace.getConfiguration('securechat');
+        const aoai = vscode.workspace.getConfiguration('securechat.azureOpenAI');
+
+        const endpoint = aoai.get<string>('endpoint') || '';
+        const apiKey = await this.getApiKey();
+        const deploymentId = aoai.get<string>('activeDeployment') || '';
+        const apiVersion = aoai.get<string>('apiVersion') || '2024-06-01';
+        const maxTokens = cfg.get<number>('maxTokens') || 4096;
+        const temperature = cfg.get<number>('temperature') || 0.3;
+
+        return { endpoint, apiKey, deploymentId, apiVersion, maxTokens, temperature };
+    }
+
+    async validate(): Promise<string | null> {
+        const c = await this.getConfigAsync();
         if (!c.endpoint) { return 'Azure OpenAI endpoint is not configured.'; }
-        if (!c.apiKey) { return 'Azure OpenAI API key is not configured.'; }
-        if (!c.deploymentId) { return 'No model deployment selected. Run "SecureChat: Select Model".'; }
+        if (!c.apiKey) { return 'Azure OpenAI API key is not configured. Run "Junior: Set API Key" to store it securely.'; }
+        if (!c.deploymentId) { return 'No model deployment selected. Run "Junior: Select Model".'; }
         return null;
     }
 
@@ -40,7 +86,7 @@ export class AzureOpenAIClient {
         tools: ToolDefinition[],
         abortSignal?: AbortSignal
     ): AsyncGenerator<{ type: 'text'; text: string } | { type: 'toolCalls'; calls: ToolCall[] } | { type: 'done' }> {
-        const config = this.getConfig();
+        const config = await this.getConfigAsync();
         const url = new URL(
             `/openai/deployments/${encodeURIComponent(config.deploymentId)}/chat/completions?api-version=${config.apiVersion}`,
             config.endpoint
@@ -213,3 +259,5 @@ export class AzureOpenAIClient {
         });
     }
 }
+
+

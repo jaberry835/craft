@@ -1,11 +1,15 @@
 /**
- * MCP (Model Context Protocol) client — spawns stdio-based MCP servers,
- * performs the JSON-RPC initialize/initialized handshake, discovers tools,
- * and proxies tool calls for the agent loop.
+ * MCP (Model Context Protocol) client — supports both stdio-based and HTTP-based
+ * MCP servers.  Performs the JSON-RPC initialize/initialized handshake, discovers
+ * tools, and proxies tool calls for the agent loop.
+ *
+ * stdio:  spawns a local process, communicates via Content-Length framed JSON-RPC
+ * HTTP:   POSTs JSON-RPC to a remote endpoint, reads JSON responses
  */
 import * as vscode from 'vscode';
 import * as cp from 'child_process';
-import * as path from 'path';
+import * as http from 'http';
+import * as https from 'https';
 import { McpServerConfig, McpToolInfo, ToolDefinition, ToolResult } from './types';
 
 interface JsonRpcRequest {
@@ -28,35 +32,53 @@ interface JsonRpcNotification {
     params?: unknown;
 }
 
-interface McpConnection {
-    process: cp.ChildProcess;
+interface McpConnectionBase {
     tools: McpToolInfo[];
     nextId: number;
+    serverName: string;
+    transport: 'stdio' | 'http';
+}
+
+interface StdioConnection extends McpConnectionBase {
+    transport: 'stdio';
+    process: cp.ChildProcess;
     pendingRequests: Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>;
     buffer: string;
-    serverName: string;
 }
+
+interface HttpConnection extends McpConnectionBase {
+    transport: 'http';
+    baseUrl: string;
+    headers: Record<string, string>;
+    sessionId?: string;
+}
+
+type McpConnection = StdioConnection | HttpConnection;
 
 export class McpClient {
     private connections: Map<string, McpConnection> = new Map();
     private outputChannel: vscode.OutputChannel;
 
     constructor() {
-        this.outputChannel = vscode.window.createOutputChannel('SecureChat MCP');
+        this.outputChannel = vscode.window.createOutputChannel('Junior MCP');
     }
 
     /** Load MCP server configs from VS Code settings and connect to each */
     async connectConfiguredServers(): Promise<void> {
         const cfg = vscode.workspace.getConfiguration('securechat.mcp');
         const servers = cfg.get<Record<string, McpServerConfig>>('servers') || {};
+        const names = Object.keys(servers);
+        this.outputChannel.appendLine(`MCP: found ${names.length} configured server(s): ${names.join(', ') || '(none)'}`);
 
         for (const [name, config] of Object.entries(servers)) {
             try {
+                this.outputChannel.appendLine(`MCP: connecting "${name}" — transport: ${config.url ? 'HTTP' : config.command ? 'stdio' : 'UNKNOWN'}`);
                 await this.connectServer(name, config);
             } catch (e: unknown) {
-                this.outputChannel.appendLine(`Failed to connect MCP server "${name}": ${e instanceof Error ? e.message : String(e)}`);
+                this.outputChannel.appendLine(`MCP: FAILED to connect "${name}": ${e instanceof Error ? e.message : String(e)}`);
             }
         }
+        this.outputChannel.appendLine(`MCP: ${this.getToolCount()} total tools across ${this.connections.size} connected server(s)`);
     }
 
     async connectServer(name: string, config: McpServerConfig): Promise<void> {
@@ -65,16 +87,29 @@ export class McpClient {
             this.disconnectServer(name);
         }
 
-        this.outputChannel.appendLine(`Connecting to MCP server: ${name} (${config.command})`);
+        if (config.url) {
+            await this.connectHttpServer(name, config);
+        } else if (config.command) {
+            await this.connectStdioServer(name, config);
+        } else {
+            throw new Error('MCP server config must have either "command" (stdio) or "url" (HTTP).');
+        }
+    }
+
+    // ── stdio transport ──────────────────────────────────────────────
+
+    private async connectStdioServer(name: string, config: McpServerConfig): Promise<void> {
+        this.outputChannel.appendLine(`Connecting to MCP server (stdio): ${name} (${config.command})`);
 
         const cwd = config.cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
-        const proc = cp.spawn(config.command, config.args || [], {
+        const proc = cp.spawn(config.command!, config.args || [], {
             cwd,
             env: { ...process.env, ...(config.env || {}) },
             stdio: ['pipe', 'pipe', 'pipe']
         });
 
-        const conn: McpConnection = {
+        const conn: StdioConnection = {
+            transport: 'stdio',
             process: proc,
             tools: [],
             nextId: 1,
@@ -83,15 +118,13 @@ export class McpClient {
             serverName: name
         };
 
-        // Handle stderr
         proc.stderr?.on('data', (data: Buffer) => {
             this.outputChannel.appendLine(`[${name} stderr] ${data.toString()}`);
         });
 
-        // Handle stdout (JSON-RPC over stdio with Content-Length headers)
         proc.stdout?.on('data', (data: Buffer) => {
             conn.buffer += data.toString();
-            this.processBuffer(conn);
+            this.processStdioBuffer(conn);
         });
 
         proc.on('exit', (code) => {
@@ -101,18 +134,15 @@ export class McpClient {
 
         this.connections.set(name, conn);
 
-        // MCP initialize handshake
         try {
-            const initResult = await this.sendRequest(conn, 'initialize', {
+            await this.sendRequest(conn, 'initialize', {
                 protocolVersion: '2024-11-05',
                 capabilities: {},
-                clientInfo: { name: 'SecureChat', version: '1.0.0' }
-            }, 10000) as { capabilities?: { tools?: unknown } };
+                clientInfo: { name: 'Junior', version: '1.0.0' }
+            }, 10000);
 
-            // Send initialized notification
             this.sendNotification(conn, 'initialized', {});
 
-            // Discover tools
             const toolsResult = await this.sendRequest(conn, 'tools/list', {}, 10000) as { tools?: McpToolRaw[] };
             if (toolsResult?.tools) {
                 conn.tools = toolsResult.tools.map(t => ({
@@ -122,7 +152,7 @@ export class McpClient {
                     serverName: name
                 }));
             }
-            this.outputChannel.appendLine(`MCP server "${name}" connected with ${conn.tools.length} tools`);
+            this.outputChannel.appendLine(`MCP server "${name}" connected (stdio) with ${conn.tools.length} tools`);
         } catch (e: unknown) {
             this.outputChannel.appendLine(`MCP handshake failed for "${name}": ${e instanceof Error ? e.message : String(e)}`);
             proc.kill();
@@ -131,11 +161,132 @@ export class McpClient {
         }
     }
 
+    // ── HTTP transport ───────────────────────────────────────────────
+
+    private async connectHttpServer(name: string, config: McpServerConfig): Promise<void> {
+        this.outputChannel.appendLine(`[${name}] Connecting to MCP server (HTTP): ${config.url}`);
+
+        const conn: HttpConnection = {
+            transport: 'http',
+            baseUrl: config.url!.replace(/\/+$/, ''),
+            headers: config.headers || {},
+            tools: [],
+            nextId: 1,
+            serverName: name
+        };
+
+        this.connections.set(name, conn);
+
+        try {
+            this.outputChannel.appendLine(`[${name}] Sending initialize...`);
+            const initResult = await this.sendRequest(conn, 'initialize', {
+                protocolVersion: '2024-11-05',
+                capabilities: {},
+                clientInfo: { name: 'Junior', version: '1.0.0' }
+            }, 15000);
+            this.outputChannel.appendLine(`[${name}] Initialize result: ${JSON.stringify(initResult).slice(0, 500)}`);
+
+            this.outputChannel.appendLine(`[${name}] Sending initialized notification...`);
+            await this.sendRequest(conn, 'notifications/initialized', {}, 5000).catch((e) => {
+                this.outputChannel.appendLine(`[${name}] Initialized notification response (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+            });
+
+            this.outputChannel.appendLine(`[${name}] Requesting tools/list...`);
+            const toolsResult = await this.sendRequest(conn, 'tools/list', {}, 15000) as { tools?: McpToolRaw[] };
+            this.outputChannel.appendLine(`[${name}] tools/list result: ${JSON.stringify(toolsResult).slice(0, 1000)}`);
+
+            if (toolsResult?.tools) {
+                conn.tools = toolsResult.tools.map(t => ({
+                    name: t.name,
+                    description: t.description || '',
+                    inputSchema: (t.inputSchema as McpToolInfo['inputSchema']) || { type: 'object' as const, properties: {}, required: [] },
+                    serverName: name
+                }));
+            }
+            this.outputChannel.appendLine(`[${name}] Connected (HTTP) with ${conn.tools.length} tools`);
+            if (conn.tools.length > 0) {
+                this.outputChannel.appendLine(`[${name}] Tools: ${conn.tools.map(t => t.name).join(', ')}`);
+            }
+        } catch (e: unknown) {
+            this.outputChannel.appendLine(`[${name}] HTTP handshake FAILED: ${e instanceof Error ? e.stack || e.message : String(e)}`);
+            this.connections.delete(name);
+            throw e;
+        }
+    }
+
+    /** Send a JSON-RPC request over HTTP. Handles both JSON and SSE responses. */
+    private httpPost(conn: HttpConnection, body: string, timeoutMs: number): Promise<{ body: string; headers: http.IncomingHttpHeaders; contentType: string }> {
+        return new Promise((resolve, reject) => {
+            const parsed = new URL(conn.baseUrl);
+            const isHttps = parsed.protocol === 'https:';
+            const mod = isHttps ? https : http;
+
+            const reqHeaders: Record<string, string> = {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json, text/event-stream',
+                ...conn.headers
+            };
+
+            if (conn.sessionId) {
+                reqHeaders['Mcp-Session-Id'] = conn.sessionId;
+            }
+
+            const options: http.RequestOptions = {
+                hostname: parsed.hostname,
+                port: parsed.port || (isHttps ? 443 : 80),
+                path: parsed.pathname + parsed.search,
+                method: 'POST',
+                headers: reqHeaders,
+                timeout: timeoutMs
+            };
+
+            this.outputChannel.appendLine(`[${conn.serverName}] HTTP POST ${parsed.pathname} (${body.slice(0, 200)})`);
+
+            const req = mod.request(options, (res) => {
+                const chunks: Buffer[] = [];
+                res.on('data', (chunk: Buffer) => chunks.push(chunk));
+                res.on('end', () => {
+                    const responseBody = Buffer.concat(chunks).toString('utf8');
+                    const ct = (res.headers['content-type'] || '').toLowerCase();
+
+                    this.outputChannel.appendLine(`[${conn.serverName}] HTTP ${res.statusCode} Content-Type: ${ct} Body(${responseBody.length}): ${responseBody.slice(0, 500)}`);
+
+                    // Capture session ID
+                    const sid = res.headers['mcp-session-id'];
+                    if (sid && typeof sid === 'string') {
+                        conn.sessionId = sid;
+                        this.outputChannel.appendLine(`[${conn.serverName}] Session ID: ${sid}`);
+                    }
+
+                    if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+                        resolve({ body: responseBody, headers: res.headers, contentType: ct });
+                    } else {
+                        reject(new Error(`HTTP ${res.statusCode}: ${responseBody.slice(0, 500)}`));
+                    }
+                });
+            });
+
+            req.on('error', (err) => {
+                this.outputChannel.appendLine(`[${conn.serverName}] HTTP request error: ${err.message}`);
+                reject(err);
+            });
+            req.on('timeout', () => {
+                this.outputChannel.appendLine(`[${conn.serverName}] HTTP request timed out`);
+                req.destroy();
+                reject(new Error('HTTP request timed out'));
+            });
+            req.write(body);
+            req.end();
+        });
+    }
+
     disconnectServer(name: string) {
         const conn = this.connections.get(name);
         if (conn) {
-            conn.process.kill();
-            conn.pendingRequests.forEach(p => p.reject(new Error('Server disconnected')));
+            if (conn.transport === 'stdio') {
+                conn.process.kill();
+                conn.pendingRequests.forEach(p => p.reject(new Error('Server disconnected')));
+            }
             this.connections.delete(name);
             this.outputChannel.appendLine(`Disconnected MCP server: ${name}`);
         }
@@ -209,9 +360,111 @@ export class McpClient {
         return count;
     }
 
-    // ── JSON-RPC transport ──
+    // ── JSON-RPC transport (dispatch by type) ──
 
     private sendRequest(conn: McpConnection, method: string, params: unknown, timeoutMs: number): Promise<unknown> {
+        if (conn.transport === 'http') {
+            return this.sendHttpRequest(conn, method, params, timeoutMs);
+        }
+        return this.sendStdioRequest(conn, method, params, timeoutMs);
+    }
+
+    private sendNotification(conn: McpConnection, method: string, params: unknown) {
+        if (conn.transport === 'http') {
+            // Fire-and-forget HTTP POST for notifications
+            const id = conn.nextId++;
+            const msg: JsonRpcRequest = { jsonrpc: '2.0', id, method, params };
+            this.httpPost(conn, JSON.stringify(msg), 5000).catch(() => {});
+            return;
+        }
+        const msg: JsonRpcNotification = { jsonrpc: '2.0', method, params };
+        const payload = JSON.stringify(msg);
+        const frame = `Content-Length: ${Buffer.byteLength(payload)}\r\n\r\n${payload}`;
+        (conn as StdioConnection).process.stdin?.write(frame);
+    }
+
+    // ── HTTP request ──
+
+    private async sendHttpRequest(conn: HttpConnection, method: string, params: unknown, timeoutMs: number): Promise<unknown> {
+        const id = conn.nextId++;
+        const msg: JsonRpcRequest = { jsonrpc: '2.0', id, method, params };
+        const { body, contentType } = await this.httpPost(conn, JSON.stringify(msg), timeoutMs);
+
+        // Handle SSE responses (text/event-stream)
+        if (contentType.includes('text/event-stream')) {
+            return this.parseSSEResponse(conn.serverName, body, id);
+        }
+
+        // Plain JSON response
+        try {
+            const parsed = JSON.parse(body) as JsonRpcResponse;
+            if (parsed.error) {
+                throw new Error(parsed.error.message);
+            }
+            return parsed.result;
+        } catch (e) {
+            if (e instanceof SyntaxError) {
+                throw new Error(`Invalid JSON response: ${body.slice(0, 200)}`);
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * Parse an SSE (Server-Sent Events) response body.
+     * Extracts JSON-RPC messages from `data:` lines and returns the result
+     * matching the given request id.
+     */
+    private parseSSEResponse(serverName: string, body: string, requestId: number): unknown {
+        const lines = body.split('\n');
+        let lastResult: unknown = undefined;
+
+        for (const line of lines) {
+            if (!line.startsWith('data:')) { continue; }
+            const data = line.slice(5).trim();
+            if (!data || data === '[DONE]') { continue; }
+
+            try {
+                const parsed = JSON.parse(data);
+                this.outputChannel.appendLine(`[${serverName}] SSE event: ${data.slice(0, 300)}`);
+
+                // JSON-RPC response with matching id
+                if (parsed.id === requestId) {
+                    if (parsed.error) {
+                        throw new Error(parsed.error.message);
+                    }
+                    return parsed.result;
+                }
+
+                // JSON-RPC response without id match — store as fallback
+                if ('result' in parsed) {
+                    lastResult = parsed.result;
+                }
+
+                // Some servers send the result directly as a non-RPC object
+                if (parsed.tools || parsed.capabilities || parsed.protocolVersion) {
+                    lastResult = parsed;
+                }
+            } catch (e) {
+                if (e instanceof SyntaxError) {
+                    this.outputChannel.appendLine(`[${serverName}] SSE parse skip: ${data.slice(0, 100)}`);
+                } else {
+                    throw e;
+                }
+            }
+        }
+
+        if (lastResult !== undefined) {
+            return lastResult;
+        }
+
+        this.outputChannel.appendLine(`[${serverName}] SSE: no matching result found for id ${requestId}`);
+        return undefined;
+    }
+
+    // ── stdio request ──
+
+    private sendStdioRequest(conn: StdioConnection, method: string, params: unknown, timeoutMs: number): Promise<unknown> {
         const id = conn.nextId++;
         const msg: JsonRpcRequest = { jsonrpc: '2.0', id, method, params };
         const payload = JSON.stringify(msg);
@@ -238,14 +491,7 @@ export class McpClient {
         });
     }
 
-    private sendNotification(conn: McpConnection, method: string, params: unknown) {
-        const msg: JsonRpcNotification = { jsonrpc: '2.0', method, params };
-        const payload = JSON.stringify(msg);
-        const frame = `Content-Length: ${Buffer.byteLength(payload)}\r\n\r\n${payload}`;
-        conn.process.stdin?.write(frame);
-    }
-
-    private processBuffer(conn: McpConnection) {
+    private processStdioBuffer(conn: StdioConnection) {
         while (true) {
             // Look for Content-Length header
             const headerEnd = conn.buffer.indexOf('\r\n\r\n');
@@ -302,3 +548,5 @@ interface McpToolRaw {
     description?: string;
     inputSchema?: Record<string, unknown>;
 }
+
+
