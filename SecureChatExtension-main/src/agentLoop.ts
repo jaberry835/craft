@@ -31,7 +31,7 @@ const RETRY_DELAY_MS = 600;
 const MAX_AUTOFIX_CYCLES = 3;
 
 /** Tools that modify files — used to track which files may have new diagnostics */
-const WRITE_TOOLS = new Set(['write_file', 'edit_file', 'delete_file', 'apply_code_action', 'rename_symbol']);
+const WRITE_TOOLS = new Set(['write_file', 'edit_file', 'replace_lines', 'delete_file', 'apply_code_action', 'rename_symbol']);
 
 const SYSTEM_PROMPT = `You are Junior Agent, a highly capable AI coding assistant running inside VS Code. You have access to tools that let you interact with the developer's workspace.
 
@@ -51,7 +51,8 @@ const SYSTEM_PROMPT = `You are Junior Agent, a highly capable AI coding assistan
 - Do NOT re-read a file you already read in this conversation unless you need to verify an edit you just made. The content is already in your context.
 - For code navigation questions (where defined/used), prefer symbol tools (find_symbol, get_document_symbols, go_to_definition, find_references) before broad grep
 - For conceptual questions (architecture/flow), prefer semantic_search before broad grep
-- Use edit_file for targeted edits (replacing exact strings) rather than rewriting entire files
+- Use edit_file for targeted edits (replacing a few lines via exact string match)
+- Use replace_lines for larger rewrites (replacing a range of lines by line number) — especially when refactoring functions, restructuring blocks, or rewriting 10+ lines
 - When creating new files, use write_file
 - Run appropriate build/test commands after making changes to verify they work
 - If a tool call fails, try to understand why and retry with adjusted parameters
@@ -70,6 +71,7 @@ const SYSTEM_PROMPT = `You are Junior Agent, a highly capable AI coding assistan
 - Large files are auto-capped at the first 250 lines. Only use startLine/endLine to read MORE if you specifically need content beyond what was shown. Do NOT re-read sections you already have.
 - For edit_file, include enough surrounding context in old_string (3-5 lines before and after) to ensure a unique match.
 - If edit_file fails with "not found", re-read the target area with read_file to get the exact current text, then retry.
+- For larger rewrites (10+ lines, refactoring a whole function/block), prefer replace_lines with the start and end line numbers from read_file output.
 
 ## Context Awareness
 - Before the first iteration you receive a [Context Snapshot] system message with open editors, recent diagnostics, and workspace layout. Use this to orient yourself — you often don\'t need to call get_open_editors or get_file_tree at the start.
@@ -210,6 +212,8 @@ export class AgentLoop {
                 return { icon: 'edit', label: `Created ${this.shortPath(args.path)}` };
             case 'edit_file':
                 return { icon: 'edit', label: `Edited ${this.shortPath(args.path)}` };
+            case 'replace_lines':
+                return { icon: 'edit', label: `Rewrote lines ${args.start_line}–${args.end_line} in ${this.shortPath(args.path)}` };
             case 'delete_file':
                 return { icon: 'edit', label: `Deleted ${this.shortPath(args.path)}` };
             case 'apply_code_action':

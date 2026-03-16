@@ -681,6 +681,81 @@ export class BuiltinTools {
             }
         });
 
+        // ── replace_lines ──
+        this.register({
+            type: 'function',
+            function: {
+                name: 'replace_lines',
+                description: 'Replace a range of lines in a file with new content. Use this for larger edits like refactoring a function, rewriting a code block, or replacing 10+ lines where edit_file (exact string match) is fragile. Line numbers are 1-based and inclusive — use the line numbers from read_file output.',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        path: { type: 'string', description: 'Relative path to the file' },
+                        start_line: { type: 'number', description: '1-based first line to replace (inclusive)' },
+                        end_line: { type: 'number', description: '1-based last line to replace (inclusive)' },
+                        new_content: { type: 'string', description: 'The replacement content (replaces lines start_line through end_line)' }
+                    },
+                    required: ['path', 'start_line', 'end_line', 'new_content']
+                }
+            }
+        }, async (args) => {
+            const filePath = args.path as string;
+            const startLine = Math.max(1, Math.round(Number(args.start_line)));
+            const endLine = Math.max(startLine, Math.round(Number(args.end_line)));
+            const newContent = args.new_content as string;
+            const absPath = this.validatePath(filePath);
+            if (!absPath) { return { success: false, result: 'Invalid path or outside workspace.' }; }
+
+            try {
+                const uri = vscode.Uri.file(absPath);
+                await this.snapshotOriginal(absPath, filePath);
+
+                const openDoc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === absPath);
+                const content = openDoc
+                    ? openDoc.getText()
+                    : Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8');
+
+                const lines = content.split('\n');
+                const totalLines = lines.length;
+
+                if (startLine > totalLines) {
+                    return { success: false, result: `start_line ${startLine} is beyond end of file (${totalLines} lines).` };
+                }
+
+                const clampedEnd = Math.min(endLine, totalLines);
+                const removedLines = lines.slice(startLine - 1, clampedEnd);
+
+                // Safety: warn if replacing a huge chunk (>50% of file)
+                const replacePct = removedLines.length / totalLines;
+                if (replacePct > 0.5 && totalLines > 20) {
+                    // Still allow it, but note the scope in the result
+                }
+
+                // Build updated content
+                const before = lines.slice(0, startLine - 1);
+                const after = lines.slice(clampedEnd);
+                const newLines = newContent.split('\n');
+                const updated = [...before, ...newLines, ...after].join('\n');
+
+                await vscode.workspace.fs.writeFile(uri, Buffer.from(updated, 'utf8'));
+
+                const doc = await vscode.workspace.openTextDocument(uri);
+                await vscode.window.showTextDocument(doc, { preview: true, preserveFocus: true });
+
+                this.notifyFileChanged(absPath, filePath);
+
+                const removed = clampedEnd - startLine + 1;
+                const added = newLines.length;
+                const diag = await this.collectDiagnosticsAfterEdit(absPath, filePath);
+                return {
+                    success: true,
+                    result: `Replaced lines ${startLine}-${clampedEnd} in ${filePath} (removed ${removed}, added ${added} lines).${diag}`
+                };
+            } catch (e: unknown) {
+                return { success: false, result: `Failed to replace lines: ${e instanceof Error ? e.message : String(e)}` };
+            }
+        });
+
         // ── list_directory ──
         this.register({
             type: 'function',

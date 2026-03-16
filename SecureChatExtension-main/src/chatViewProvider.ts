@@ -443,6 +443,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 return { label: `Created ${shortPath(args.path)}` };
             case 'edit_file':
                 return { label: `Edited ${shortPath(args.path)}` };
+            case 'replace_lines':
+                return { label: `Rewrote lines ${args.start_line}–${args.end_line} in ${shortPath(args.path)}` };
             case 'delete_file':
                 return { label: `Deleted ${shortPath(args.path)}` };
             case 'run_terminal_command':
