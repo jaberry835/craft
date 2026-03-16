@@ -8,7 +8,7 @@ A production-ready, ChatGPT-style interface for multi-agent orchestration using 
 - **A2A Protocol**: JSON-RPC over HTTP for inter-agent communication with chatter events
 - **External A2A Agents**: Connect to remote agents on other deployments with automatic OBO token exchange
 - **Dynamic Agent Configuration**: Admin UI to configure agents, prompts, and MCP tools
-- **Multiple AOAI Endpoints**: Configure multiple Azure OpenAI endpoints with model deployment discovery
+- **Multiple AOAI Endpoints**: Configure multiple Azure OpenAI endpoints (direct or APIM-fronted) with model deployment discovery
 - **MCP Integration**: Connect agents to external tools via Model Context Protocol
 - **Agent Chatter**: Real-time visibility into specialist agent activity (tool calls, results, tokens)
 - **Chat History**: CosmosDB-backed with continuation token pagination
@@ -685,19 +685,45 @@ The Admin UI allows you to configure multiple Azure OpenAI endpoints. This is us
 - You have different AOAI resources for different environments (dev, prod)
 - You want to use different models from different AOAI deployments
 - You need to spread load across multiple AOAI resources
+- You front Azure OpenAI with Azure API Management (APIM) for governance, rate limiting, or cost tracking
 
 ### How It Works
 
 1. **Add AOAI Endpoints**: In the Admin UI, scroll to "Azure OpenAI Endpoints" and click "Add Endpoint"
-2. **Discover Deployments**: When you add an endpoint, the system automatically discovers all model deployments
-3. **Select Models**: When creating/editing an agent, select from a dropdown of all available deployments across all endpoints
-4. **Per-Agent Configuration**: Each agent can use a different AOAI endpoint and model deployment
+2. **Choose Endpoint Type**: Select **Direct Azure OpenAI** or **API Management (APIM)**
+3. **Discover or Add Deployments**: Direct endpoints can auto-discover deployments; APIM endpoints require manual entry
+4. **Select Models**: When creating/editing an agent, select from a dropdown of all available deployments across all endpoints
+5. **Per-Agent Configuration**: Each agent can use a different AOAI endpoint and model deployment
 
 ### Authentication
 
 AOAI endpoints support two authentication methods:
 - **Managed Identity** (recommended): Leave API Key blank to use managed identity/Azure CLI credentials
 - **API Key**: Provide an API key for direct authentication
+
+### Adding an APIM Endpoint
+
+Azure API Management can front your Azure OpenAI resources to provide centralized governance, rate limiting, usage tracking, and key management. To add an APIM-fronted endpoint:
+
+1. In the Admin UI, click **Add Endpoint** and select the **API Management (APIM)** type
+2. Enter the **APIM Base URL** — this is your APIM gateway URL with the API suffix, **without** the `/openai` path (the SDK appends it automatically). For example:
+   - If your APIM console shows a request URL like `https://myapim.azure-api.net/foundryapi/openai/deployments/{deployment-id}/chat/completions?api-version=...`
+   - Enter: `https://myapim.azure-api.net/foundryapi`
+3. Enter the **APIM Subscription Key** in the API Key field
+4. Set the **API Version** to match what your APIM API expects (e.g. `2025-03-01-preview`)
+5. **Manually add deployments** — type the deployment name (e.g. `gpt-4o`) and click Add. APIM endpoints cannot auto-discover deployments via ARM since APIM is a proxy, not a direct AOAI resource.
+
+> **Important — Header Name**: The Foundry/Azure OpenAI APIM APIs are typically configured to use `api-key` as the subscription key header name (not the default `Ocp-Apim-Subscription-Key`). When setting up your APIM API, ensure the **Header name** for the subscription key is set to `api-key` in the APIM Subscription settings. The OpenAI SDK sends credentials via the `api-key` header, so APIM must be configured to accept it there.
+
+#### APIM Setup Checklist
+
+| Setting | Value |
+|---------|-------|
+| **APIM API URL suffix** | e.g. `foundryapi/openai` |
+| **Subscription required** | Yes |
+| **Subscription header name** | `api-key` (not `Ocp-Apim-Subscription-Key`) |
+| **Backend URL in APIM** | Your Azure OpenAI endpoint (e.g. `https://myaoai.openai.azure.com/openai`) |
+| **URL entered in Admin UI** | APIM gateway + prefix, e.g. `https://myapim.azure-api.net/foundryapi` |
 
 ### Notes
 

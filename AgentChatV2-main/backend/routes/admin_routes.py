@@ -751,14 +751,17 @@ async def create_aoai_endpoint(
     Register a new Azure OpenAI endpoint.
     Attempts auto-discovery of deployments, falls back to manually provided deployments.
     """
-    logger.info(f"Creating AOAI endpoint: {endpoint_config.name} by {admin.user_id}")
+    logger.info(f"Creating AOAI endpoint: {endpoint_config.name} (type={endpoint_config.endpoint_type}) by {admin.user_id}")
     
     endpoint_dict = endpoint_config.model_dump(exclude_unset=True)
     
-    # Try to auto-discover deployments (requires subscription_id and resource_group)
+    # Try to auto-discover deployments (only for direct Azure OpenAI endpoints)
     discovered_deployments = []
     discovery_error = None
-    if endpoint_config.subscription_id and endpoint_config.resource_group:
+    is_apim = endpoint_config.endpoint_type == "apim"
+    if is_apim:
+        logger.info("APIM endpoint - skipping ARM auto-discovery (add deployments manually)")
+    elif endpoint_config.subscription_id and endpoint_config.resource_group:
         try:
             discovered = await aoai_discovery.discover_deployments(
                 endpoint=endpoint_config.endpoint,
@@ -853,6 +856,14 @@ async def refresh_aoai_deployments(
     existing = await cosmos_service.get_aoai_endpoint(endpoint_id)
     if not existing:
         raise HTTPException(status_code=404, detail="AOAI endpoint not found")
+    
+    # APIM endpoints don't support ARM auto-discovery
+    if existing.get("endpoint_type") == "apim":
+        raise HTTPException(
+            status_code=400,
+            detail="APIM endpoints do not support ARM auto-discovery. "
+                   "Please add deployments manually."
+        )
     
     subscription_id = existing.get("subscription_id")
     resource_group = existing.get("resource_group")

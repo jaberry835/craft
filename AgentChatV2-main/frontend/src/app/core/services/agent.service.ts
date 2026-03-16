@@ -138,10 +138,11 @@ export interface AOAIEndpointConfig {
   id?: string;
   name: string;
   endpoint: string;
+  endpoint_type?: string;  // 'azure_openai' (default) or 'apim'
   cloud?: string;  // AzureCommercial, AzureGovernment, AzureChina
   api_version?: string;
-  api_key?: string;  // Optional - uses managed identity if not provided
-  // ARM API info for deployment discovery (required for auto-discovery)
+  api_key?: string;  // Optional - uses managed identity if not provided; APIM subscription key for apim type
+  // ARM API info for deployment discovery (required for auto-discovery, not used for APIM)
   subscription_id?: string;
   resource_group?: string;
   is_active?: boolean;

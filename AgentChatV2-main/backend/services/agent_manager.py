@@ -182,8 +182,9 @@ class AgentManager:
                 if cached_endpoint.get("api_version"):
                     api_version = cached_endpoint.get("api_version")
                 cloud = cached_endpoint.get("cloud", "unknown")
+                endpoint_type = cached_endpoint.get("endpoint_type", "azure_openai")
                 logger.info(f"[AOAI-CONFIG] Using custom AOAI endpoint for agent '{agent_name}': "
-                            f"endpoint={endpoint_url}, cloud={cloud}, api_version={api_version}")
+                            f"type={endpoint_type}, endpoint={endpoint_url}, cloud={cloud}, api_version={api_version}")
             else:
                 logger.warning(f"[AOAI-CONFIG] Agent '{agent_name}' has aoai_endpoint_id={aoai_endpoint_id} "
                                f"but NO cached endpoint config found! Using global defaults. "

@@ -413,16 +413,27 @@ class ModelDeployment(BaseModel):
 
 
 class AOAIEndpointConfig(BaseModel):
-    """Azure OpenAI endpoint configuration."""
+    """Azure OpenAI endpoint configuration.
+
+    Supports two endpoint types:
+      - "azure_openai" (default): Direct Azure OpenAI endpoint
+        e.g. https://myaoai.openai.azure.com
+      - "apim": Azure API Management fronting Azure OpenAI
+        e.g. https://myapim.azure-api.net/myprefix
+        The SDK appends /openai/deployments/{name}/chat/completions automatically.
+    """
     id: Optional[str] = None
     name: str = Field(..., min_length=1, max_length=100)
-    endpoint: str = Field(..., min_length=1, description="Azure OpenAI endpoint URL")
+    endpoint: str = Field(..., min_length=1, description="Azure OpenAI endpoint URL or APIM base URL")
+    # Endpoint type: "azure_openai" for direct AOAI, "apim" for APIM-fronted
+    endpoint_type: str = Field(default="azure_openai", description="Endpoint type: azure_openai or apim")
     # Azure cloud environment: AzureGovernment, AzureCommercial, AzureChina
     cloud: str = Field(default="AzureCommercial", description="Azure cloud environment")
     api_version: str = Field(default="2024-02-15-preview", description="API version to use")
     # Note: Authentication uses managed identity or Azure CLI credential
     # API key is optional for backward compatibility or specific scenarios
-    api_key: Optional[str] = Field(default=None, description="Optional API key (uses managed identity if not provided)")
+    # For APIM endpoints, this should be the APIM subscription key
+    api_key: Optional[str] = Field(default=None, description="Optional API key / APIM subscription key")
 
     @field_validator("endpoint")
     @classmethod
@@ -438,9 +449,22 @@ class AOAIEndpointConfig(BaseModel):
         # Enforce https
         if not v.startswith("https://"):
             raise ValueError("Endpoint URL must use https://")
+        # Remove trailing /openai if present (SDK appends it automatically)
+        v = v.rstrip("/")
+        if v.endswith("/openai"):
+            v = v[:-len("/openai")]
         # Ensure trailing slash for consistency
         if not v.endswith("/"):
             v += "/"
+        return v
+
+    @field_validator("endpoint_type")
+    @classmethod
+    def validate_endpoint_type(cls, v: str) -> str:
+        """Ensure endpoint_type is a valid value."""
+        allowed = ("azure_openai", "apim")
+        if v not in allowed:
+            raise ValueError(f"endpoint_type must be one of {allowed}")
         return v
     # ARM API info for deployment discovery (required for auto-discovery)
     subscription_id: Optional[str] = Field(default=None, description="Azure subscription ID for deployment discovery")

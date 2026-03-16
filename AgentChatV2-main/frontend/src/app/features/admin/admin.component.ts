@@ -137,7 +137,7 @@ import { environment } from '../../../environments/environment';
                 <div class="endpoint-meta">
                   <span class="meta-item">
                     <span class="material-icons">cloud</span>
-                    {{ getCloudLabel(endpoint.endpoint) }}
+                    {{ getCloudLabel(endpoint.endpoint, endpoint.endpoint_type) }}
                   </span>
                   <span class="meta-item">
                     <span class="material-icons">memory</span>
@@ -152,9 +152,11 @@ import { environment } from '../../../environments/environment';
                 </div>
               </div>
               <div class="endpoint-actions">
+                @if (endpoint.endpoint_type !== 'apim') {
                 <button class="btn btn-icon btn-refresh" (click)="refreshAoaiEndpoint(endpoint)" title="Refresh Deployments">
                   <span class="material-icons">refresh</span>
                 </button>
+                }
                 <button class="btn btn-icon btn-edit" (click)="editAoaiEndpoint(endpoint)" title="Edit">
                   <span class="material-icons">edit</span>
                 </button>
@@ -466,6 +468,29 @@ import { environment } from '../../../environments/environment';
             </div>
             
             <div class="modal-body">
+              <!-- Endpoint Type Selector -->
+              <div class="form-group">
+                <label>Endpoint Type *</label>
+                <div class="endpoint-type-toggle">
+                  <button 
+                    class="toggle-btn" 
+                    [class.active]="editingAoaiEndpoint!.endpoint_type !== 'apim'"
+                    (click)="editingAoaiEndpoint!.endpoint_type = 'azure_openai'"
+                  >
+                    <span class="material-icons">cloud</span>
+                    Direct Azure OpenAI
+                  </button>
+                  <button 
+                    class="toggle-btn" 
+                    [class.active]="editingAoaiEndpoint!.endpoint_type === 'apim'"
+                    (click)="editingAoaiEndpoint!.endpoint_type = 'apim'"
+                  >
+                    <span class="material-icons">api</span>
+                    API Management (APIM)
+                  </button>
+                </div>
+              </div>
+
               <div class="form-group">
                 <label>Name *</label>
                 <input 
@@ -477,14 +502,21 @@ import { environment } from '../../../environments/environment';
               </div>
               
               <div class="form-group">
-                <label>Endpoint URL *</label>
+                <label>{{ editingAoaiEndpoint!.endpoint_type === 'apim' ? 'APIM Base URL *' : 'Endpoint URL *' }}</label>
                 <input 
                   type="url" 
                   class="input" 
                   [(ngModel)]="editingAoaiEndpoint!.endpoint"
-                  placeholder="https://your-aoai.openai.azure.com"
+                  [placeholder]="editingAoaiEndpoint!.endpoint_type === 'apim' ? 'https://your-apim.azure-api.net/your-api-prefix' : 'https://your-aoai.openai.azure.com'"
                 />
-                <span class="field-hint">Azure OpenAI endpoint URL from Azure Portal</span>
+                <span class="field-hint">
+                  @if (editingAoaiEndpoint!.endpoint_type === 'apim') {
+                    APIM base URL <strong>without</strong> the /openai suffix (the SDK appends it automatically).
+                    E.g. if your APIM request URL is <em>https://myapim.azure-api.net/myapi/openai/deployments/...</em> enter <em>https://myapim.azure-api.net/myapi</em>
+                  } @else {
+                    Azure OpenAI endpoint URL from Azure Portal
+                  }
+                </span>
               </div>
               
               <div class="form-row">
@@ -501,17 +533,21 @@ import { environment } from '../../../environments/environment';
               
               <div class="form-row">
                 <div class="form-group">
-                  <label>API Key (Optional)</label>
+                  <label>{{ editingAoaiEndpoint!.endpoint_type === 'apim' ? 'APIM Subscription Key' : 'API Key (Optional)' }}</label>
                   <input 
                     type="password" 
                     class="input" 
                     [(ngModel)]="editingAoaiEndpoint!.api_key"
-                    placeholder="Uses managed identity if blank"
+                    [placeholder]="editingAoaiEndpoint!.endpoint_type === 'apim' ? 'APIM subscription key (api-key header)' : 'Uses managed identity if blank'"
                   />
+                  @if (editingAoaiEndpoint!.endpoint_type === 'apim') {
+                    <span class="field-hint">Sent as the <code>api-key</code> header to APIM</span>
+                  }
                 </div>
               </div>
               
-              <!-- ARM API info for deployment discovery (optional - for auto-discovery) -->
+              <!-- ARM API info for deployment discovery (only for direct Azure OpenAI) -->
+              @if (editingAoaiEndpoint!.endpoint_type !== 'apim') {
               <div class="form-row">
                 <div class="form-group">
                   <label>Subscription ID</label>
@@ -535,6 +571,7 @@ import { environment } from '../../../environments/environment';
                   <span class="field-hint">Optional — needed for auto-discovery</span>
                 </div>
               </div>
+              }
               
               <div class="form-group">
                 <label>Description</label>
@@ -563,9 +600,14 @@ import { environment } from '../../../environments/environment';
                   Model Deployments
                 </label>
                 <span class="field-hint">
-                  Auto-discover with Subscription ID + Resource Group, or add deployments manually below.
+                  @if (editingAoaiEndpoint!.endpoint_type === 'apim') {
+                    APIM endpoints require manual deployment entry. Add the deployment names that your APIM routes to.
+                  } @else {
+                    Auto-discover with Subscription ID + Resource Group, or add deployments manually below.
+                  }
                 </span>
                 
+                @if (editingAoaiEndpoint!.endpoint_type !== 'apim') {
                 <div class="discover-row">
                   <button 
                     class="btn btn-secondary" 
@@ -594,6 +636,7 @@ import { environment } from '../../../environments/environment';
                     </span>
                   }
                 </div>
+                }
                 
                 <div class="deployment-input">
                   <input 
@@ -1905,6 +1948,42 @@ import { environment } from '../../../environments/environment';
         border-color: var(--primary);
       }
     }
+
+    .endpoint-type-toggle {
+      display: flex;
+      gap: 0;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      overflow: hidden;
+
+      .toggle-btn {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: var(--spacing-xs);
+        padding: var(--spacing-sm) var(--spacing-md);
+        border: none;
+        background: var(--bg-secondary);
+        color: var(--text-secondary);
+        cursor: pointer;
+        font-size: 0.85rem;
+        transition: background 0.2s, color 0.2s;
+
+        &:hover:not(.active) {
+          background: var(--bg-tertiary, rgba(0,0,0,0.05));
+        }
+
+        &.active {
+          background: var(--primary);
+          color: #fff;
+        }
+
+        .material-icons {
+          font-size: 18px;
+        }
+      }
+    }
     
     .endpoint-info {
       flex: 1;
@@ -2937,6 +3016,7 @@ export class AdminComponent implements OnInit, OnDestroy {
     } : {
       name: '',
       endpoint: '',
+      endpoint_type: 'azure_openai',
       api_version: '2024-02-15-preview',
       subscription_id: '',
       resource_group: '',
@@ -2961,7 +3041,8 @@ export class AdminComponent implements OnInit, OnDestroy {
     this.newDeploymentModelName = '';
   }
 
-  getCloudLabel(endpoint: string): string {
+  getCloudLabel(endpoint: string, endpointType?: string): string {
+    if (endpointType === 'apim') return 'APIM';
     const ep = (endpoint || '').toLowerCase();
     if (ep.includes('.azure.us')) return 'Gov';
     if (ep.includes('.azure.cn')) return 'China';
