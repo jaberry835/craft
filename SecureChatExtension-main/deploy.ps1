@@ -20,8 +20,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$ExtensionId = "ms-csu-ett.secure-chat"
-$VsixPattern = "secure-chat-*.vsix"
+$ExtensionId = "ms-csu-ett.junior"
+$VsixPattern = "junior-*.vsix"
 
 function Write-Step($msg) { Write-Host "`n>> $msg" -ForegroundColor Cyan }
 function Write-Ok($msg)   { Write-Host "   $msg" -ForegroundColor Green }
@@ -80,4 +80,5 @@ switch ($Action) {
 }
 
 Write-Host ""
+
 

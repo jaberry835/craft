@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
+import * as fs from 'fs';
 import { WorkspaceIndexer } from './workspaceIndexer';
 
 interface SemanticChunk {
@@ -9,6 +11,19 @@ interface SemanticChunk {
     termFreq: Map<string, number>;
     termCount: number;
 }
+
+/** Serializable form written to disk (Maps are stored as plain objects). */
+interface CachedChunk {
+    filePath: string;
+    startLine: number;
+    endLine: number;
+    text: string;
+    termFreq: Record<string, number>;
+    termCount: number;
+}
+
+const CACHE_VERSION = 1;
+const CACHE_FILENAME = 'semanticIndex.json';
 
 const STOP_WORDS = new Set([
     'the', 'and', 'for', 'with', 'this', 'that', 'from', 'into', 'when', 'where', 'what',
@@ -22,40 +37,58 @@ const STOP_WORDS = new Set([
 export class SemanticIndexer {
     private chunks: SemanticChunk[] = [];
     private docFreq: Map<string, number> = new Map();
+    private storagePath: string | undefined;
+
+    /** Set the directory used for persisting the semantic index cache. */
+    setStoragePath(dir: string) {
+        this.storagePath = dir;
+    }
 
     async indexWorkspace(
         workspaceIndexer: WorkspaceIndexer,
         progress?: vscode.Progress<{ message?: string; increment?: number }>,
-        token?: vscode.CancellationToken
+        token?: vscode.CancellationToken,
+        changedFiles?: Set<string>
     ): Promise<void> {
-        this.chunks = [];
-        this.docFreq.clear();
-
         const files = workspaceIndexer.getFiles();
         const total = files.length;
-        let done = 0;
 
+        // Load cached chunks grouped by file
+        const cachedByFile = this.loadCache();
+
+        // Determine which files actually need re-chunking
+        const currentFilePaths = new Set(files.map(f => f.relativePath));
+        const needsRechunk = changedFiles ?? currentFilePaths; // if no diff info, rechunk everything
+
+        // Start with cached chunks for files that haven't changed
+        const newChunks: SemanticChunk[] = [];
+        for (const [filePath, chunks] of cachedByFile) {
+            if (currentFilePaths.has(filePath) && !needsRechunk.has(filePath)) {
+                newChunks.push(...chunks);
+            }
+        }
+
+        // Process only files that changed (or all files if no cache)
+        let done = 0;
+        let rechunked = 0;
         for (const file of files) {
             if (token?.isCancellationRequested) { break; }
 
-            try {
-                const bytes = await vscode.workspace.fs.readFile(file.uri);
-                const content = Buffer.from(bytes).toString('utf8');
-                if (!content || content.indexOf('\u0000') >= 0) {
-                    done++;
-                    continue;
-                }
-
-                const fileChunks = this.chunkFile(file.relativePath, content);
-                for (const chunk of fileChunks) {
-                    this.chunks.push(chunk);
-                    const seen = new Set<string>(chunk.termFreq.keys());
-                    for (const term of seen) {
-                        this.docFreq.set(term, (this.docFreq.get(term) || 0) + 1);
+            if (needsRechunk.has(file.relativePath)) {
+                try {
+                    const bytes = await vscode.workspace.fs.readFile(file.uri);
+                    const content = Buffer.from(bytes).toString('utf8');
+                    if (!content || content.indexOf('\u0000') >= 0) {
+                        done++;
+                        continue;
                     }
+
+                    const fileChunks = this.chunkFile(file.relativePath, content);
+                    newChunks.push(...fileChunks);
+                    rechunked++;
+                } catch {
+                    // ignore unreadable files
                 }
-            } catch {
-                // ignore unreadable files
             }
 
             done++;
@@ -66,6 +99,20 @@ export class SemanticIndexer {
                 });
             }
         }
+
+        this.chunks = newChunks;
+
+        // Rebuild document-frequency table
+        this.docFreq.clear();
+        for (const chunk of this.chunks) {
+            const seen = new Set<string>(chunk.termFreq.keys());
+            for (const term of seen) {
+                this.docFreq.set(term, (this.docFreq.get(term) || 0) + 1);
+            }
+        }
+
+        // Persist for next activation
+        this.saveCache();
     }
 
     getChunkCount(): number {
@@ -150,5 +197,65 @@ export class SemanticIndexer {
     private tokenize(text: string): string[] {
         const raw = text.toLowerCase().match(/[a-z_][a-z0-9_]{2,}/g) || [];
         return raw.filter(t => !STOP_WORDS.has(t));
+    }
+
+    // ── Cache persistence ──
+
+    private getCachePath(): string | undefined {
+        if (!this.storagePath) { return undefined; }
+        return path.join(this.storagePath, CACHE_FILENAME);
+    }
+
+    /**
+     * Load cached chunks grouped by filePath.
+     * Returns an empty map if no cache exists or it's corrupt/stale.
+     */
+    private loadCache(): Map<string, SemanticChunk[]> {
+        const map = new Map<string, SemanticChunk[]>();
+        const cachePath = this.getCachePath();
+        if (!cachePath) { return map; }
+        try {
+            if (!fs.existsSync(cachePath)) { return map; }
+            const raw = fs.readFileSync(cachePath, 'utf8');
+            const data = JSON.parse(raw);
+            if (data?.version !== CACHE_VERSION) { return map; }
+            for (const c of data.chunks as CachedChunk[]) {
+                const chunk: SemanticChunk = {
+                    filePath: c.filePath,
+                    startLine: c.startLine,
+                    endLine: c.endLine,
+                    text: c.text,
+                    termFreq: new Map(Object.entries(c.termFreq)),
+                    termCount: c.termCount,
+                };
+                const arr = map.get(c.filePath) || [];
+                arr.push(chunk);
+                map.set(c.filePath, arr);
+            }
+        } catch {
+            // Corrupt cache — ignore and rebuild
+        }
+        return map;
+    }
+
+    private saveCache(): void {
+        const cachePath = this.getCachePath();
+        if (!cachePath) { return; }
+        try {
+            const dir = path.dirname(cachePath);
+            if (!fs.existsSync(dir)) { fs.mkdirSync(dir, { recursive: true }); }
+            const cached: CachedChunk[] = this.chunks.map(c => ({
+                filePath: c.filePath,
+                startLine: c.startLine,
+                endLine: c.endLine,
+                text: c.text,
+                termFreq: Object.fromEntries(c.termFreq),
+                termCount: c.termCount,
+            }));
+            const data = { version: CACHE_VERSION, chunks: cached };
+            fs.writeFileSync(cachePath, JSON.stringify(data), 'utf8');
+        } catch {
+            // Non-fatal
+        }
     }
 }

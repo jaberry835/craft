@@ -7,6 +7,7 @@ import { ChatViewProvider } from './chatViewProvider';
 import { SessionManager } from './sessionManager';
 import { SymbolIndexer } from './symbolIndexer';
 import { SemanticIndexer } from './semanticIndexer';
+import { getSetting, updateSetting } from './config';
 
 let chatViewProvider: ChatViewProvider;
 let mcpClient: McpClient;
@@ -24,9 +25,15 @@ export function activate(context: vscode.ExtensionContext) {
     const workspaceIndexer = new WorkspaceIndexer();
     const symbolIndexer = new SymbolIndexer();
     const semanticIndexer = new SemanticIndexer();
+
+    // Set up persistent index storage under globalStorage
+    const indexStorageDir = vscode.Uri.joinPath(context.globalStorageUri, 'index').fsPath;
+    workspaceIndexer.setStoragePath(indexStorageDir);
+    semanticIndexer.setStoragePath(indexStorageDir);
+
     const builtinTools = new BuiltinTools(workspaceIndexer, symbolIndexer, semanticIndexer);
     mcpClient = new McpClient();
-    const sessionManager = new SessionManager(context.globalState);
+    const sessionManager = new SessionManager(context.workspaceState);
 
     chatViewProvider = new ChatViewProvider(
         context.extensionUri,
@@ -40,7 +47,7 @@ export function activate(context: vscode.ExtensionContext) {
     // Register the webview provider
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(
-            'securechat.chatView',
+            'junior.chatView',
             chatViewProvider,
             { webviewOptions: { retainContextWhenHidden: true } }
         )
@@ -49,31 +56,31 @@ export function activate(context: vscode.ExtensionContext) {
     // ── Commands ──
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('securechat.openChat', () => {
-            vscode.commands.executeCommand('securechat.chatView.focus');
+        vscode.commands.registerCommand('junior.openChat', () => {
+            vscode.commands.executeCommand('junior.chatView.focus');
         })
     );
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('securechat.newSession', () => {
+        vscode.commands.registerCommand('junior.newSession', () => {
             chatViewProvider.newSession();
         })
     );
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('securechat.toggleHistory', () => {
+        vscode.commands.registerCommand('junior.toggleHistory', () => {
             chatViewProvider.toggleHistory();
         })
     );
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('securechat.cancelAgent', () => {
+        vscode.commands.registerCommand('junior.cancelAgent', () => {
             chatViewProvider.cancelAgent();
         })
     );
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('securechat.setApiKey', async () => {
+        vscode.commands.registerCommand('junior.setApiKey', async () => {
             const key = await vscode.window.showInputBox({
                 prompt: 'Enter your Azure OpenAI API key',
                 password: true,
@@ -87,33 +94,38 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('securechat.indexWorkspace', async () => {
-            await vscode.window.withProgress(
-                {
-                    location: vscode.ProgressLocation.Notification,
-                    title: 'Junior: Indexing workspace...',
-                    cancellable: true
-                },
-                async (progress, token) => {
-                    await workspaceIndexer.indexWorkspace(progress, token);
-                    progress.report({ message: 'Indexing symbols...' });
-                    await symbolIndexer.indexWorkspace(workspaceIndexer, progress, token);
-                    progress.report({ message: 'Indexing semantic chunks...' });
-                    await semanticIndexer.indexWorkspace(workspaceIndexer, progress, token);
-                    vscode.window.showInformationMessage(
-                        `Junior: Indexed ${workspaceIndexer.getFileCount()} files, ${symbolIndexer.getSymbolFileCount()} symbol files, ${semanticIndexer.getChunkCount()} semantic chunks.`
-                    );
-                }
-            );
+        vscode.commands.registerCommand('junior.indexWorkspace', async () => {
+            try {
+                await vscode.window.withProgress(
+                    {
+                        location: vscode.ProgressLocation.Notification,
+                        title: 'Junior: Indexing workspace...',
+                        cancellable: true
+                    },
+                    async (progress, token) => {
+                        await workspaceIndexer.indexWorkspace(progress, token);
+                        const changed = workspaceIndexer.getChangedFiles();
+                        progress.report({ message: 'Indexing symbols...' });
+                        await symbolIndexer.indexWorkspace(workspaceIndexer, progress, token);
+                        progress.report({ message: 'Indexing semantic chunks...' });
+                        await semanticIndexer.indexWorkspace(workspaceIndexer, progress, token, changed);
+                        vscode.window.showInformationMessage(
+                            `Junior: Indexed ${workspaceIndexer.getFileCount()} files, ${symbolIndexer.getSymbolFileCount()} symbol files, ${semanticIndexer.getChunkCount()} semantic chunks.`
+                        );
+                    }
+                );
+            } catch (err: any) {
+                log(`indexWorkspace error: ${err.message}\n${err.stack}`);
+                vscode.window.showErrorMessage(`Junior: Indexing failed — ${err.message}`);
+            }
         })
     );
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('securechat.selectModel', async () => {
+        vscode.commands.registerCommand('junior.selectModel', async () => {
             try {
                 log('selectModel command invoked');
-                const config = vscode.workspace.getConfiguration('securechat.azureOpenAI');
-                const deployments = config.get<Array<{ name: string; deploymentId: string; apiVersion?: string }>>('deployments') || [];
+                const deployments = getSetting<Array<{ name: string; deploymentId: string; apiVersion?: string }>>('azureOpenAI.deployments') || [];
                 log(`Found ${deployments.length} deployments: ${JSON.stringify(deployments)}`);
 
                 if (deployments.length === 0) {
@@ -124,7 +136,7 @@ export function activate(context: vscode.ExtensionContext) {
                     if (action === 'Open Settings') {
                         vscode.commands.executeCommand(
                             'workbench.action.openSettings',
-                            'securechat.azureOpenAI.deployments'
+                            'junior.azureOpenAI.deployments'
                         );
                     }
                     return;
@@ -144,7 +156,7 @@ export function activate(context: vscode.ExtensionContext) {
 
                 if (picked) {
                     log(`User picked: ${picked.label} (${picked.deploymentId})`);
-                    await config.update('activeDeployment', picked.deploymentId, vscode.ConfigurationTarget.Global);
+                    await updateSetting('azureOpenAI.activeDeployment', picked.deploymentId, vscode.ConfigurationTarget.Global);
                     chatViewProvider.notifyModelChanged(picked.label);
                     vscode.window.showInformationMessage(`Junior: Switched to ${picked.label}`);
                 } else {
@@ -158,44 +170,49 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('securechat.manageMcpServers', async () => {
-            const connected = mcpClient.getConnectedServers();
-            const items: vscode.QuickPickItem[] = [
-                { label: '$(add) Connect All Configured Servers', description: 'Read from settings and connect' },
-                { label: '$(close-all) Disconnect All', description: `${connected.length} connected` },
-                ...connected.map(name => ({ label: `$(debug-disconnect) Disconnect: ${name}`, description: 'Running' }))
-            ];
-            const pick = await vscode.window.showQuickPick(items, { placeHolder: 'Manage MCP Servers' });
-            if (!pick) { return; }
-            if (pick.label.includes('Connect All')) {
-                await mcpClient.connectConfiguredServers();
-                vscode.window.showInformationMessage(`Junior: ${mcpClient.getToolCount()} MCP tools available.`);
-            } else if (pick.label.includes('Disconnect All')) {
-                mcpClient.disconnectAll();
-                vscode.window.showInformationMessage('Junior: All MCP servers disconnected.');
-            } else {
-                const name = pick.label.replace('$(debug-disconnect) Disconnect: ', '');
-                mcpClient.disconnectServer(name);
-                vscode.window.showInformationMessage(`Junior: Disconnected ${name}.`);
+        vscode.commands.registerCommand('junior.manageMcpServers', async () => {
+            try {
+                const connected = mcpClient.getConnectedServers();
+                const items: vscode.QuickPickItem[] = [
+                    { label: '$(add) Connect All Configured Servers', description: 'Read from settings and connect' },
+                    { label: '$(close-all) Disconnect All', description: `${connected.length} connected` },
+                    ...connected.map(name => ({ label: `$(debug-disconnect) Disconnect: ${name}`, description: 'Running' }))
+                ];
+                const pick = await vscode.window.showQuickPick(items, { placeHolder: 'Manage MCP Servers' });
+                if (!pick) { return; }
+                if (pick.label.includes('Connect All')) {
+                    await mcpClient.connectConfiguredServers();
+                    vscode.window.showInformationMessage(`Junior: ${mcpClient.getToolCount()} MCP tools available.`);
+                } else if (pick.label.includes('Disconnect All')) {
+                    mcpClient.disconnectAll();
+                    vscode.window.showInformationMessage('Junior: All MCP servers disconnected.');
+                } else {
+                    const name = pick.label.replace('$(debug-disconnect) Disconnect: ', '');
+                    mcpClient.disconnectServer(name);
+                    vscode.window.showInformationMessage(`Junior: Disconnected ${name}.`);
+                }
+            } catch (err: any) {
+                log(`manageMcpServers error: ${err.message}\n${err.stack}`);
+                vscode.window.showErrorMessage(`Junior: MCP server operation failed — ${err.message}`);
             }
         })
     );
 
     // Context menu commands
     context.subscriptions.push(
-        vscode.commands.registerCommand('securechat.explainSelection', () => {
+        vscode.commands.registerCommand('junior.explainSelection', () => {
             sendSelectionToChat('Explain this code in detail:\n\n');
         })
     );
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('securechat.reviewSelection', () => {
+        vscode.commands.registerCommand('junior.reviewSelection', () => {
             sendSelectionToChat('Review this code for bugs, security issues, and improvements:\n\n');
         })
     );
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('securechat.fixSelection', () => {
+        vscode.commands.registerCommand('junior.fixSelection', () => {
             sendSelectionToChat('Fix any issues in this code and explain what was wrong:\n\n');
         })
     );
@@ -205,9 +222,13 @@ export function activate(context: vscode.ExtensionContext) {
     // Index workspace on activation
     if (vscode.workspace.workspaceFolders) {
         (async () => {
+            log(`Starting workspace index (storage: ${indexStorageDir})...`);
             await workspaceIndexer.indexWorkspace();
+            const changed = workspaceIndexer.getChangedFiles();
+            log(`File index done: ${workspaceIndexer.getFileCount()} files, ${changed.size} changed. Starting symbol + semantic index...`);
             await symbolIndexer.indexWorkspace(workspaceIndexer);
-            await semanticIndexer.indexWorkspace(workspaceIndexer);
+            await semanticIndexer.indexWorkspace(workspaceIndexer, undefined, undefined, changed);
+            log(`Index loaded: ${workspaceIndexer.getFileCount()} files (${changed.size} changed), ${semanticIndexer.getChunkCount()} semantic chunks.`);
         })().catch((e) => log(`Workspace/symbol/semantic indexing failed: ${e}`));
     }
 
@@ -227,11 +248,12 @@ function sendSelectionToChat(prefix: string) {
 
     const message = `${prefix}\`\`\`${lang}\n// File: ${file}\n${selection}\n\`\`\``;
     chatViewProvider.sendMessageFromExtension(message);
-    vscode.commands.executeCommand('securechat.chatView.focus');
+    vscode.commands.executeCommand('junior.chatView.focus');
 }
 
 export function deactivate() {
     mcpClient?.dispose();
 }
+
 
 

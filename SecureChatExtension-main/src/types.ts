@@ -5,7 +5,9 @@
 // ── Azure OpenAI Types ──
 
 export interface AoaiConfig {
+    provider: 'direct' | 'apim';
     endpoint: string;
+    apimBaseUrl: string;
     apiKey: string;
     deploymentId: string;
     apiVersion: string;
@@ -137,6 +139,9 @@ export type WebviewMessage =
     | { type: 'selectModelById'; deploymentId: string }
     | { type: 'attachFile' }
     | { type: 'confirmAction'; actionId: string; approved: boolean; allowSession?: boolean; category?: string }
+    | { type: 'fileChangeAction'; action: 'keep' | 'undo' }
+    | { type: 'fileChangeFileAction'; file: string; action: 'keep' | 'undo' }
+    | { type: 'openFileDiff'; file: string }
     | { type: 'switchSession'; sessionId: string }
     | { type: 'deleteSession'; sessionId: string }
     | { type: 'requestSessionList' }
@@ -155,9 +160,16 @@ export type ExtensionMessage =
     | { type: 'modelChanged'; model: string }
     | { type: 'sessionCleared' }
     | { type: 'setStatus'; status: string }
-    | { type: 'confirmAction'; actionId: string; description: string; category?: string }
+    | { type: 'confirmAction'; actionId: string; description: string; category?: string; diff?: string }
     | { type: 'fileAttached'; name: string; content: string }
     | { type: 'sessionList'; sessions: Array<{ id: string; title: string; updatedAt: number; messageCount: number }>; activeId: string }
     | { type: 'sessionSwitched' }
-    | { type: 'agentDone' };
+    | { type: 'fileChangeTick'; file: string; additions: number; deletions: number }
+    | { type: 'fileChangeFileResolved'; file: string; action: 'kept' | 'undone' }
+    | { type: 'fileChangeResolved'; action: 'kept' | 'undone' }
+    | { type: 'agentDone' }
+    | { type: 'progressCardStart'; title: string }
+    | { type: 'progressCardStep'; icon: 'search' | 'read' | 'edit' | 'run' | 'check' | 'loading' | 'done' | 'error'; label: string; detail?: string; status?: 'running' | 'done' | 'error'; toolName?: string }
+    | { type: 'progressCardEnd' }
+    | { type: 'terminalOutput'; line: string };
 

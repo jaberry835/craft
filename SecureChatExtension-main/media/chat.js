@@ -27,6 +27,22 @@ window.onerror = function(msg, src, line, col, err) {
     let currentAssistantEl = null;
     let currentContentEl = null;
     const toolStateById = new Map();
+    let activeProgressCard = null;  // the current .progress-card element
+    let activeProgressTimeline = null; // the .pc-timeline inside it
+    let pcBatchState = null; // tracks consecutive same-tool batching: { toolName, icon, count, items[], stepEl }
+    let pcCurrentPlanTitle = null; // the plan step title the active card is tracking
+
+    // Progress card icon map (icon name → unicode/emoji)
+    const PC_ICONS = {
+        search: '\uD83D\uDD0D',   // 🔍
+        read: '\uD83D\uDCC4',     // 📄
+        edit: '\u270F',            // ✏
+        run: '\u25B6',             // ▶
+        check: '\u2714',           // ✔
+        loading: '\u25CF',         // ●
+        done: '\u2713',            // ✓
+        error: '\u2717'            // ✗
+    };
 
     // ── History toggle (triggered by extension command) ──
     function toggleHistoryPanel() {
@@ -260,20 +276,38 @@ window.onerror = function(msg, src, line, col, err) {
     function renderPlan(steps) {
         if (!planPanelEl) { return; }
         if (!steps || steps.length === 0) {
-            planPanelEl.innerHTML = '';
-            planPanelEl.style.display = 'none';
+            planPanelEl.classList.add('hidden');
+            planPanelEl.classList.remove('expanded');
             return;
         }
+        planPanelEl.classList.remove('hidden');
 
-        const rows = steps.map(s => {
+        const icons = { pending: '\u25CB', in_progress: '\u25CF', completed: '\u2713', failed: '\u2717' };
+        const completed = steps.filter(s => s.status === 'completed').length;
+        const current = steps.find(s => s.status === 'in_progress');
+        // Count in_progress as part of progress so "1/5" shows while working on step 1
+        const progress = current ? completed + 1 : completed;
+
+        var progressText;
+        var nextPending = steps.find(function(s) { return s.status === 'pending'; });
+        if (current) {
+            progressText = current.title + '... (' + progress + '/' + steps.length + ')';
+        } else if (completed === steps.length) {
+            progressText = 'Completed (' + completed + '/' + steps.length + ')';
+        } else if (nextPending) {
+            progressText = nextPending.title + '... (' + progress + '/' + steps.length + ')';
+        } else {
+            progressText = '(' + progress + '/' + steps.length + ')';
+        }
+        planPanelEl.querySelector('.plan-progress').textContent = progressText;
+
+        const stepsEl = planPanelEl.querySelector('.plan-steps');
+        stepsEl.innerHTML = steps.map(function(s) {
             return '<div class="plan-step ' + s.status + '">' +
-                '<span class="dot"></span>' +
-                '<span class="label">' + escapeHtml(s.title) + '</span>' +
+                '<span class="plan-icon">' + icons[s.status] + '</span>' +
+                '<span>' + escapeHtml(s.title) + '</span>' +
             '</div>';
         }).join('');
-
-        planPanelEl.innerHTML = '<div class="plan-title">Plan</div>' + rows;
-        planPanelEl.style.display = 'block';
     }
 
     function scrollToBottom() {
@@ -423,7 +457,15 @@ window.onerror = function(msg, src, line, col, err) {
             }
             case 'endAssistantMessage': {
                 if (currentContentEl) {
-                    currentContentEl.innerHTML = renderMarkdownLite(currentContentEl.textContent || '');
+                    var rawText = (currentContentEl.textContent || '').trim();
+                    if (rawText.length > 0) {
+                        currentContentEl.innerHTML = renderMarkdownLite(currentContentEl.textContent || '');
+                    } else {
+                        // Remove empty assistant bubble (model only made tool calls, no text)
+                        if (currentAssistantEl && currentAssistantEl.parentNode) {
+                            currentAssistantEl.parentNode.removeChild(currentAssistantEl);
+                        }
+                    }
                 }
                 currentAssistantEl = null;
                 currentContentEl = null;
@@ -431,13 +473,15 @@ window.onerror = function(msg, src, line, col, err) {
                 break;
             }
             case 'toolCall': {
-                const block = document.createElement('div');
-                block.className = 'tool-block';
-                block.dataset.toolId = msg.id;
                 toolStateById.set(msg.id, {
                     name: msg.name,
                     args: safeParseJson(msg.args || '{}')
                 });
+                // When a progress card is active, suppress the standalone tool-block
+                if (activeProgressCard) { break; }
+                const block = document.createElement('div');
+                block.className = 'tool-block';
+                block.dataset.toolId = msg.id;
                 block.innerHTML =
                     '<div class="tool-header">' +
                         '<span class="tool-icon">&#9881;</span>' +
@@ -453,6 +497,11 @@ window.onerror = function(msg, src, line, col, err) {
                 break;
             }
             case 'toolResult': {
+                // When a progress card is active, suppress the standalone tool-block result
+                if (activeProgressCard) {
+                    toolStateById.delete(msg.id);
+                    break;
+                }
                 const block = messagesEl.querySelector('.tool-block[data-tool-id="' + CSS.escape(msg.id) + '"]');
                 if (block) {
                     const state = toolStateById.get(msg.id) || { name: 'tool', args: {} };
@@ -476,12 +525,24 @@ window.onerror = function(msg, src, line, col, err) {
                 const dialog = document.createElement('div');
                 dialog.className = 'confirm-dialog';
                 dialog.dataset.actionId = msg.actionId;
+                let diffHtml = '';
+                if (msg.diff) {
+                    const diffLines = msg.diff.split('\n').map(line => {
+                        const esc = escapeHtml(line);
+                        if (line.startsWith('+ ')) { return '<span class="diff-add">' + esc + '</span>'; }
+                        if (line.startsWith('- ')) { return '<span class="diff-del">' + esc + '</span>'; }
+                        return '<span class="diff-ctx">' + esc + '</span>';
+                    });
+                    diffHtml = '<div class="diff-preview"><pre>' + diffLines.join('\n') + '</pre></div>';
+                }
+                const isWriteOp = msg.category === 'write';
                 dialog.innerHTML =
                     '<p>&#9888; ' + escapeHtml(msg.description) + '</p>' +
+                    diffHtml +
                     '<div class="confirm-actions">' +
-                        '<button class="btn-approve">Allow</button>' +
-                        '<button class="btn-session">Allow for Session</button>' +
-                        '<button class="btn-deny">Deny</button>' +
+                        '<button class="btn-approve">' + (isWriteOp ? 'Keep' : 'Allow') + '</button>' +
+                        '<button class="btn-session">' + (isWriteOp ? 'Keep for Session' : 'Allow for Session') + '</button>' +
+                        '<button class="btn-deny">' + (isWriteOp ? 'Undo' : 'Deny') + '</button>' +
                     '</div>';
                 dialog.querySelector('.btn-approve').addEventListener('click', () => {
                     vscode.postMessage({ type: 'confirmAction', actionId: msg.actionId, approved: true });
@@ -497,6 +558,101 @@ window.onerror = function(msg, src, line, col, err) {
                 });
                 messagesEl.appendChild(dialog);
                 scrollToBottom();
+                break;
+            }
+            case 'fileChangeTick': {
+                const dock = document.getElementById('file-change-dock');
+                if (!dock) break;
+                dock.classList.remove('hidden');
+
+                // Add file to list if not already there
+                const filesEl = dock.querySelector('.dock-files');
+                const existing = filesEl.querySelector(`[data-file="${CSS.escape(msg.file)}"]`);
+                if (!existing) {
+                    const entry = document.createElement('div');
+                    entry.className = 'dock-file-entry';
+                    entry.dataset.file = msg.file;
+                    entry.innerHTML =
+                        '<span class="dock-file-name" title="Click to review changes">' + escapeHtml(msg.file) + '</span>' +
+                        '<span class="dock-file-counts">' +
+                            '<span class="dock-add">+' + msg.additions + '</span>' +
+                            '<span class="dock-del">-' + msg.deletions + '</span>' +
+                        '</span>' +
+                        '<span class="dock-file-actions">' +
+                            '<button class="file-btn-keep" title="Keep this file">&#10003;</button>' +
+                            '<button class="file-btn-undo" title="Undo this file">&#8617;</button>' +
+                        '</span>';
+                    // Click file name to open diff
+                    entry.querySelector('.dock-file-name').addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        vscode.postMessage({ type: 'openFileDiff', file: msg.file });
+                    });
+                    // Per-file button listeners
+                    entry.querySelector('.file-btn-keep').addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        vscode.postMessage({ type: 'fileChangeFileAction', file: msg.file, action: 'keep' });
+                    });
+                    entry.querySelector('.file-btn-undo').addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        vscode.postMessage({ type: 'fileChangeFileAction', file: msg.file, action: 'undo' });
+                    });
+                    filesEl.appendChild(entry);
+                }
+
+                // Update summary counts
+                const allEntries = filesEl.querySelectorAll('.dock-file-entry');
+                let totalAdd = 0, totalDel = 0;
+                allEntries.forEach(e => {
+                    totalAdd += parseInt(e.querySelector('.dock-add').textContent.slice(1)) || 0;
+                    totalDel += parseInt(e.querySelector('.dock-del').textContent.slice(1)) || 0;
+                });
+                dock.querySelector('.dock-summary').textContent =
+                    allEntries.length === 1 ? '1 file changed' : allEntries.length + ' files changed';
+                dock.querySelector('.dock-counts .dock-add').textContent = '+' + totalAdd;
+                dock.querySelector('.dock-counts .dock-del').textContent = '-' + totalDel;
+                break;
+            }
+            case 'fileChangeResolved': {
+                const dock = document.getElementById('file-change-dock');
+                if (!dock) break;
+                dock.classList.add('resolved');
+                const actionsEl = dock.querySelector('.dock-actions');
+                const cls = msg.action === 'kept' ? 'dock-resolved-kept' : 'dock-resolved-undone';
+                const label = msg.action === 'kept' ? 'Kept' : 'Undone';
+                actionsEl.innerHTML = '<span class="dock-resolved-label ' + cls + '">' + label + '</span>';
+                break;
+            }
+            case 'fileChangeFileResolved': {
+                const dock = document.getElementById('file-change-dock');
+                if (!dock) break;
+                const entry = dock.querySelector(`[data-file="${CSS.escape(msg.file)}"]`);
+                if (entry) {
+                    entry.classList.add('resolved');
+                    const actionsSpan = entry.querySelector('.dock-file-actions');
+                    if (actionsSpan) {
+                        const statusCls = msg.action === 'kept' ? 'kept' : 'undone';
+                        const statusLabel = msg.action === 'kept' ? '\u2713' : '\u21a9';
+                        actionsSpan.innerHTML = '<span class="dock-file-status ' + statusCls + '">' + statusLabel + '</span>';
+                    }
+                }
+                // Recalculate totals from non-resolved entries
+                const filesEl = dock.querySelector('.dock-files');
+                const remaining = filesEl.querySelectorAll('.dock-file-entry:not(.resolved)');
+                const allEntries = filesEl.querySelectorAll('.dock-file-entry');
+                let totalAdd = 0, totalDel = 0;
+                remaining.forEach(e => {
+                    totalAdd += parseInt(e.querySelector('.dock-add').textContent.slice(1)) || 0;
+                    totalDel += parseInt(e.querySelector('.dock-del').textContent.slice(1)) || 0;
+                });
+                dock.querySelector('.dock-counts .dock-add').textContent = '+' + totalAdd;
+                dock.querySelector('.dock-counts .dock-del').textContent = '-' + totalDel;
+                const unresolvedCount = remaining.length;
+                if (unresolvedCount === 0) {
+                    dock.querySelector('.dock-summary').textContent = allEntries.length + ' files resolved';
+                } else {
+                    dock.querySelector('.dock-summary').textContent =
+                        unresolvedCount === 1 ? '1 file remaining' : unresolvedCount + ' files remaining';
+                }
                 break;
             }
             case 'error': {
@@ -518,6 +674,24 @@ window.onerror = function(msg, src, line, col, err) {
             }
             case 'agentPlan': {
                 renderPlan(msg.steps);
+                // Detect plan step change and split the progress card
+                if (msg.steps && activeProgressCard) {
+                    var inProgress = msg.steps.find(function(s) { return s.status === 'in_progress'; });
+                    var newPlanTitle = inProgress ? inProgress.title : null;
+                    if (newPlanTitle && newPlanTitle !== pcCurrentPlanTitle) {
+                        var hasSteps = activeProgressCard.querySelectorAll('.pc-step').length > 0;
+                        if (hasSteps) {
+                            // Card has content — close it and open a new one for the new step
+                            closeCurrentProgressCard();
+                            openProgressCard(newPlanTitle);
+                        } else {
+                            // Card is brand new (no steps yet) — just update the title to match
+                            var titleEl = activeProgressCard.querySelector('.pc-title-text');
+                            if (titleEl) { titleEl.textContent = newPlanTitle; }
+                            pcCurrentPlanTitle = newPlanTitle;
+                        }
+                    }
+                }
                 break;
             }
             case 'sessionCleared': {
@@ -529,8 +703,30 @@ window.onerror = function(msg, src, line, col, err) {
                 }
                 currentAssistantEl = null;
                 currentContentEl = null;
+                activeProgressCard = null;
+                activeProgressTimeline = null;
+                pcBatchState = null;
+                pcCurrentPlanTitle = null;
                 clearAttachments();
                 renderPlan([]);
+                // Reset file-change dock
+                const dockReset = document.getElementById('file-change-dock');
+                if (dockReset) {
+                    dockReset.classList.add('hidden');
+                    dockReset.classList.remove('expanded', 'resolved');
+                    dockReset.querySelector('.dock-files').innerHTML = '';
+                    dockReset.querySelector('.dock-summary').textContent = '';
+                    dockReset.querySelector('.dock-counts .dock-add').textContent = '+0';
+                    dockReset.querySelector('.dock-counts .dock-del').textContent = '-0';
+                    const actionsEl = dockReset.querySelector('.dock-actions');
+                    actionsEl.innerHTML = '<button class="btn-keep">Keep All</button><button class="btn-undo">Undo All</button>';
+                    actionsEl.querySelector('.btn-keep').addEventListener('click', () => {
+                        vscode.postMessage({ type: 'fileChangeAction', action: 'keep' });
+                    });
+                    actionsEl.querySelector('.btn-undo').addEventListener('click', () => {
+                        vscode.postMessage({ type: 'fileChangeAction', action: 'undo' });
+                    });
+                }
                 break;
             }
             case 'setStatus': {
@@ -562,6 +758,11 @@ window.onerror = function(msg, src, line, col, err) {
                 inputEl.placeholder = 'Ask Junior anything...';
                 inputEl.focus();
                 if (workingEl) { workingEl.classList.remove('active'); }
+                // Fully release the progress card reference on agent completion
+                activeProgressCard = null;
+                activeProgressTimeline = null;
+                pcBatchState = null;
+                pcCurrentPlanTitle = null;
                 break;
             }
             case 'fileAttached': {
@@ -585,8 +786,238 @@ window.onerror = function(msg, src, line, col, err) {
                 toggleHistoryPanel();
                 break;
             }
+            case 'progressCardStart': {
+                var newTitle = msg.title || 'Working';
+                // Reuse the existing card if it has the same title (even if marked done from previous iteration)
+                if (activeProgressCard) {
+                    var existingTitle = activeProgressCard.querySelector('.pc-title-text');
+                    var existingTitleText = existingTitle ? existingTitle.textContent.replace(/\s*\(\d+ steps?\)$/, '') : '';
+                    if (existingTitleText === newTitle) {
+                        // Re-activate the existing card
+                        activeProgressCard.classList.remove('done');
+                        activeProgressCard.classList.add('expanded');
+                        activeProgressTimeline = activeProgressCard.querySelector('.pc-timeline');
+                        // Restore title without the step-count suffix
+                        if (existingTitle) { existingTitle.textContent = newTitle; }
+                        pcCurrentPlanTitle = newTitle;
+                        scrollToBottom();
+                        break;
+                    }
+                    // Different title — close the old card properly
+                    closeCurrentProgressCard();
+                    activeProgressCard = null;
+                    activeProgressTimeline = null;
+                }
+                openProgressCard(newTitle);
+                scrollToBottom();
+                break;
+            }
+            case 'progressCardStep': {
+                if (!activeProgressTimeline) { break; }
+                var icon = PC_ICONS[msg.icon] || '\u25CF';
+                var statusCls = msg.status || 'running';
+                var toolName = msg.toolName || '';
+
+                // Skip meta-tools from the progress card
+                if (toolName === 'set_plan' || toolName === 'update_plan_step') { break; }
+
+                // ── Batch-completion update: tool just finished ──
+                if (statusCls === 'done' || statusCls === 'error') {
+                    // If we're batching this tool, just increment the done count
+                    if (pcBatchState && pcBatchState.toolName === toolName && pcBatchState.stepEl) {
+                        pcBatchState.doneCount = (pcBatchState.doneCount || 0) + 1;
+                        if (statusCls === 'error') { pcBatchState.hasError = true; }
+                        // If all items in the batch are done, finalize the line
+                        if (pcBatchState.doneCount >= pcBatchState.count) {
+                            finalizeBatchStep();
+                        }
+                        scrollToBottom();
+                        break;
+                    }
+                    // Not batching — try to update a matching running step
+                    var runningSteps = activeProgressTimeline.querySelectorAll('.pc-step.running');
+                    var updated = false;
+                    for (var i = 0; i < runningSteps.length; i++) {
+                        var stepLabel = runningSteps[i].querySelector('.pc-step-label');
+                        if (stepLabel && stepLabel.textContent === msg.label) {
+                            runningSteps[i].className = 'pc-step ' + statusCls;
+                            var stepIcon = runningSteps[i].querySelector('.pc-step-icon');
+                            if (stepIcon) { stepIcon.textContent = statusCls === 'done' ? PC_ICONS.done : PC_ICONS.error; }
+                            updated = true;
+                            break;
+                        }
+                    }
+                    if (updated) { scrollToBottom(); break; }
+                }
+
+                // ── New "running" step ──
+                if (statusCls === 'running') {
+                    // Check if this is a consecutive call of the same tool → batch it
+                    if (pcBatchState && pcBatchState.toolName === toolName && pcBatchState.stepEl) {
+                        pcBatchState.count++;
+                        pcBatchState.items.push(msg.label);
+                        // Update the label in-place to show the current item
+                        var lbl = pcBatchState.stepEl.querySelector('.pc-step-label');
+                        if (lbl) { lbl.textContent = msg.label; }
+                        var det = pcBatchState.stepEl.querySelector('.pc-step-detail');
+                        if (det) { det.textContent = '(' + pcBatchState.count + ')'; }
+                        scrollToBottom();
+                        break;
+                    }
+                    // Finalize any previous batch before starting a new line
+                    if (pcBatchState && pcBatchState.stepEl) {
+                        finalizeBatchStep();
+                    }
+                    // Remove any streaming terminal output block from the previous step
+                    var prevTermBlock = activeProgressTimeline.querySelector('.pc-terminal-output');
+                    if (prevTermBlock) { prevTermBlock.parentNode.removeChild(prevTermBlock); }
+                    // Start a new batch tracker
+                    pcBatchState = { toolName: toolName, icon: msg.icon, count: 1, doneCount: 0, items: [msg.label], stepEl: null, hasError: false };
+                }
+
+                // Create new step element
+                var step = document.createElement('div');
+                step.className = 'pc-step ' + statusCls;
+                step.innerHTML =
+                    '<span class="pc-step-icon">' + icon + '</span>' +
+                    '<span class="pc-step-label">' + escapeHtml(msg.label || '') + '</span>' +
+                    (msg.detail ? '<span class="pc-step-detail">' + escapeHtml(msg.detail) + '</span>' : '') +
+                    '<span class="pc-step-status-dot"></span>';
+                activeProgressTimeline.appendChild(step);
+                // Track the DOM element for in-place updates
+                if (pcBatchState && statusCls === 'running') {
+                    pcBatchState.stepEl = step;
+                }
+                scrollToBottom();
+                break;
+            }
+            case 'terminalOutput': {
+                // Stream terminal lines into an output block within the current progress card
+                if (activeProgressTimeline) {
+                    var termBlock = activeProgressTimeline.querySelector('.pc-terminal-output');
+                    if (!termBlock) {
+                        termBlock = document.createElement('pre');
+                        termBlock.className = 'pc-terminal-output';
+                        activeProgressTimeline.appendChild(termBlock);
+                    }
+                    var lineEl = document.createElement('span');
+                    lineEl.textContent = msg.line + '\n';
+                    termBlock.appendChild(lineEl);
+                    // Cap visible lines at 100
+                    while (termBlock.childNodes.length > 100) {
+                        termBlock.removeChild(termBlock.firstChild);
+                    }
+                    scrollToBottom();
+                }
+                break;
+            }
+            case 'progressCardEnd': {
+                closeCurrentProgressCard();
+                // Keep activeProgressCard reference alive for potential reuse
+                scrollToBottom();
+                break;
+            }
         }
     });
+
+    /** Close the current progress card — finalize batches, remove if empty, mark done */
+    function closeCurrentProgressCard() {
+        if (pcBatchState && pcBatchState.stepEl) {
+            finalizeBatchStep();
+        }
+        pcBatchState = null;
+        if (!activeProgressCard) { return; }
+        var hasSteps = activeProgressCard.querySelectorAll('.pc-step').length > 0;
+        if (!hasSteps) {
+            // Empty card — remove entirely
+            if (activeProgressCard.parentNode) {
+                activeProgressCard.parentNode.removeChild(activeProgressCard);
+            }
+            activeProgressCard = null;
+            activeProgressTimeline = null;
+            pcCurrentPlanTitle = null;
+            return;
+        }
+        activeProgressCard.classList.add('done');
+        // Mark any still-running steps as done
+        var leftover = activeProgressCard.querySelectorAll('.pc-step.running');
+        for (var j = 0; j < leftover.length; j++) {
+            leftover[j].className = 'pc-step done';
+            var ico = leftover[j].querySelector('.pc-step-icon');
+            if (ico) { ico.textContent = PC_ICONS.done; }
+        }
+        // Update title to show step count (only if not already suffixed)
+        var titleEl = activeProgressCard.querySelector('.pc-title-text');
+        var stepCount = activeProgressCard.querySelectorAll('.pc-step').length;
+        if (titleEl && stepCount > 0 && !/\(\d+ steps?\)$/.test(titleEl.textContent)) {
+            titleEl.textContent = titleEl.textContent + ' (' + stepCount + ' step' + (stepCount !== 1 ? 's' : '') + ')';
+        }
+        // Keep reference alive for potential reuse by next progressCardStart
+    }
+
+    /** Open a new progress card with the given title */
+    function openProgressCard(title) {
+        var card = document.createElement('div');
+        card.className = 'progress-card expanded';
+        card.innerHTML =
+            '<div class="progress-card-header">' +
+                '<span class="pc-spinner"></span>' +
+                '<span class="pc-done-icon">\u2713</span>' +
+                '<span class="pc-title-text">' + escapeHtml(title) + '</span>' +
+                '<span class="pc-toggle">\u25B6</span>' +
+            '</div>' +
+            '<div class="progress-card-body">' +
+                '<div class="pc-timeline"></div>' +
+            '</div>';
+        card.querySelector('.progress-card-header').addEventListener('click', function() {
+            card.classList.toggle('expanded');
+        });
+        messagesEl.appendChild(card);
+        activeProgressCard = card;
+        activeProgressTimeline = card.querySelector('.pc-timeline');
+        pcCurrentPlanTitle = title;
+    }
+
+    /** Finalize a batched progress step — collapse "Reading X..." into "Read N files" */
+    function finalizeBatchStep() {
+        if (!pcBatchState || !pcBatchState.stepEl) { return; }
+        var el = pcBatchState.stepEl;
+        var count = pcBatchState.count;
+        var hasErr = pcBatchState.hasError;
+        var batchIcon = pcBatchState.icon || 'done';
+
+        // Build summary label
+        var summaryLabel;
+        var tn = pcBatchState.toolName;
+        if (count <= 1) {
+            // Single item — keep original label, just mark done
+            summaryLabel = null;
+        } else if (tn === 'read_file') {
+            summaryLabel = 'Read ' + count + ' files';
+        } else if (tn === 'grep_search' || tn === 'search_files' || tn === 'semantic_search') {
+            summaryLabel = 'Ran ' + count + ' searches';
+        } else if (tn === 'edit_file' || tn === 'write_file') {
+            summaryLabel = 'Edited ' + count + ' files';
+        } else if (tn === 'list_directory') {
+            summaryLabel = 'Listed ' + count + ' directories';
+        } else if (tn === 'find_references' || tn === 'go_to_definition' || tn === 'find_symbol' || tn === 'get_document_symbols') {
+            summaryLabel = 'Resolved ' + count + ' symbols';
+        } else {
+            summaryLabel = count + '\u00D7 ' + tn;
+        }
+
+        // Update the DOM
+        el.className = 'pc-step ' + (hasErr ? 'error' : 'done');
+        var stepIcon = el.querySelector('.pc-step-icon');
+        if (stepIcon) { stepIcon.textContent = hasErr ? PC_ICONS.error : PC_ICONS[batchIcon] || PC_ICONS.done; }
+        if (summaryLabel) {
+            var lbl = el.querySelector('.pc-step-label');
+            if (lbl) { lbl.textContent = summaryLabel; }
+        }
+        // Remove the running count detail
+        var det = el.querySelector('.pc-step-detail');
+        if (det && count > 1) { det.textContent = ''; }
+    }
 
     function formatJson(str) {
         try {
@@ -635,6 +1066,31 @@ window.onerror = function(msg, src, line, col, err) {
     function truncate(text, max) {
         if (text.length <= max) return text;
         return text.slice(0, max) + '\n... (truncated)';
+    }
+
+    // --- Plan panel toggle ---
+    if (planPanelEl) {
+        planPanelEl.querySelector('.plan-header').addEventListener('click', () => {
+            planPanelEl.classList.toggle('expanded');
+        });
+    }
+
+    // --- Dock event listeners ---
+    const dockEl = document.getElementById('file-change-dock');
+    if (dockEl) {
+        // Keep button
+        dockEl.querySelector('.btn-keep').addEventListener('click', () => {
+            vscode.postMessage({ type: 'fileChangeAction', action: 'keep' });
+        });
+        // Undo button
+        dockEl.querySelector('.btn-undo').addEventListener('click', () => {
+            vscode.postMessage({ type: 'fileChangeAction', action: 'undo' });
+        });
+        // Expand / collapse toggle
+        dockEl.querySelector('.dock-header').addEventListener('click', (e) => {
+            if (e.target.closest('.btn-keep') || e.target.closest('.btn-undo')) return;
+            dockEl.classList.toggle('expanded');
+        });
     }
 
     // Signal ready

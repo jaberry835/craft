@@ -1,5 +1,5 @@
 {
-  "name": "secure-chat",
+  "name": "junior",
   "displayName": "Junior - AI Assistant (Azure OpenAI)",
   "description": "An offline-capable AI coding assistant powered by Azure OpenAI, providing Copilot-like chat, code analysis, editing, and project scaffolding.",
   "version": "1.0.0",
@@ -25,71 +25,71 @@
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "securechat",
+          "id": "junior",
           "title": "Junior",
           "icon": "media/icon.svg"
         }
       ]
     },
     "views": {
-      "securechat": [
+      "junior": [
         {
           "type": "webview",
-          "id": "securechat.chatView",
+          "id": "junior.chatView",
           "name": "Chat"
         }
       ]
     },
     "commands": [
       {
-        "command": "securechat.openChat",
+        "command": "junior.openChat",
         "title": "Junior: Open Chat",
         "icon": "$(comment-discussion)"
       },
       {
-        "command": "securechat.newSession",
+        "command": "junior.newSession",
         "title": "Junior: New Chat Session",
         "icon": "$(add)"
       },
       {
-        "command": "securechat.indexWorkspace",
+        "command": "junior.indexWorkspace",
         "title": "Junior: Index Workspace",
         "icon": "$(search)"
       },
       {
-        "command": "securechat.selectModel",
+        "command": "junior.selectModel",
         "title": "Junior: Select Model",
         "icon": "$(server)"
       },
       {
-        "command": "securechat.explainSelection",
+        "command": "junior.explainSelection",
         "title": "Junior: Explain Selected Code"
       },
       {
-        "command": "securechat.reviewSelection",
+        "command": "junior.reviewSelection",
         "title": "Junior: Review Selected Code"
       },
       {
-        "command": "securechat.fixSelection",
+        "command": "junior.fixSelection",
         "title": "Junior: Fix Selected Code"
       },
       {
-        "command": "securechat.manageMcpServers",
+        "command": "junior.manageMcpServers",
         "title": "Junior: Manage MCP Servers",
         "icon": "$(plug)"
       },
       {
-        "command": "securechat.cancelAgent",
+        "command": "junior.cancelAgent",
         "title": "Junior: Cancel Agent Run",
         "icon": "$(debug-stop)"
       },
       {
-        "command": "securechat.toggleHistory",
+        "command": "junior.toggleHistory",
         "title": "Junior: Toggle Chat History",
         "icon": "$(history)"
       },
       {
-        "command": "securechat.setApiKey",
+        "command": "junior.setApiKey",
         "title": "Junior: Set API Key",
         "icon": "$(key)"
       }
@@ -97,50 +97,50 @@
     "menus": {
       "view/title": [
         {
-          "command": "securechat.newSession",
-          "when": "view == securechat.chatView",
+          "command": "junior.newSession",
+          "when": "view == junior.chatView",
           "group": "navigation@1"
         },
         {
-          "command": "securechat.toggleHistory",
-          "when": "view == securechat.chatView",
+          "command": "junior.toggleHistory",
+          "when": "view == junior.chatView",
           "group": "navigation@2"
         },
         {
-          "command": "securechat.selectModel",
-          "when": "view == securechat.chatView",
+          "command": "junior.selectModel",
+          "when": "view == junior.chatView",
           "group": "navigation@3"
         },
         {
-          "command": "securechat.manageMcpServers",
-          "when": "view == securechat.chatView",
+          "command": "junior.manageMcpServers",
+          "when": "view == junior.chatView",
           "group": "navigation@4"
         },
         {
-          "command": "securechat.indexWorkspace",
-          "when": "view == securechat.chatView",
+          "command": "junior.indexWorkspace",
+          "when": "view == junior.chatView",
           "group": "navigation@5"
         },
         {
-          "command": "securechat.cancelAgent",
-          "when": "view == securechat.chatView",
+          "command": "junior.cancelAgent",
+          "when": "view == junior.chatView",
           "group": "navigation@6"
         }
       ],
       "editor/context": [
         {
-          "command": "securechat.explainSelection",
-          "group": "securechat@1",
+          "command": "junior.explainSelection",
+          "group": "junior@1",
           "when": "editorHasSelection"
         },
         {
-          "command": "securechat.reviewSelection",
-          "group": "securechat@2",
+          "command": "junior.reviewSelection",
+          "group": "junior@2",
           "when": "editorHasSelection"
         },
         {
-          "command": "securechat.fixSelection",
-          "group": "securechat@3",
+          "command": "junior.fixSelection",
+          "group": "junior@3",
           "when": "editorHasSelection"
         }
       ]
@@ -148,17 +148,28 @@
     "configuration": {
       "title": "Junior",
       "properties": {
-        "securechat.azureOpenAI.endpoint": {
+        "junior.azureOpenAI.provider": {
+          "type": "string",
+          "enum": ["direct", "apim"],
+          "default": "direct",
+          "description": "How to connect to Azure OpenAI: 'direct' for a direct AOAI endpoint, 'apim' for an API Management proxy"
+        },
+        "junior.azureOpenAI.endpoint": {
           "type": "string",
           "default": "",
           "description": "Azure OpenAI endpoint URL (e.g., https://your-resource.openai.azure.com)"
         },
-        "securechat.azureOpenAI.apiKey": {
+        "junior.azureOpenAI.apimBaseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "APIM gateway base URL including path prefix (e.g., https://my-apim.azure-api.net/foundryapi). Used when provider is 'apim'."
+        },
+        "junior.azureOpenAI.apiKey": {
           "type": "string",
           "default": "",
           "description": "Azure OpenAI API key (stored in VS Code settings — consider using secrets)"
         },
-        "securechat.azureOpenAI.deployments": {
+        "junior.azureOpenAI.deployments": {
           "type": "array",
           "items": {
             "type": "object",
@@ -180,32 +191,32 @@
           "default": [],
           "description": "List of Azure OpenAI deployments available for selection"
         },
-        "securechat.azureOpenAI.activeDeployment": {
+        "junior.azureOpenAI.activeDeployment": {
           "type": "string",
           "default": "",
           "description": "Currently active deployment ID"
         },
-        "securechat.azureOpenAI.apiVersion": {
+        "junior.azureOpenAI.apiVersion": {
           "type": "string",
           "default": "2024-06-01",
           "description": "Default Azure OpenAI API version"
         },
-        "securechat.maxTokens": {
+        "junior.maxTokens": {
           "type": "number",
-          "default": 4096,
-          "description": "Maximum tokens in AI response"
+          "default": 16384,
+          "description": "Maximum completion tokens in AI response (output limit, not context window)."
         },
-        "securechat.temperature": {
+        "junior.temperature": {
           "type": "number",
           "default": 0.3,
           "description": "Temperature for AI responses (0.0 - 1.0)"
         },
-        "securechat.workspace.maxFileSize": {
+        "junior.workspace.maxFileSize": {
           "type": "number",
           "default": 100000,
           "description": "Maximum file size in bytes to index"
         },
-        "securechat.workspace.excludePatterns": {
+        "junior.workspace.excludePatterns": {
           "type": "array",
           "items": {
             "type": "string"
@@ -222,25 +233,37 @@
           ],
           "description": "Glob patterns to exclude from workspace indexing"
         },
-        "securechat.agent.maxIterations": {
+        "junior.agent.maxIterations": {
           "type": "number",
           "default": 25,
           "description": "Maximum number of tool-call iterations per agent turn"
         },
-        "securechat.agent.confirmWrites": {
+        "junior.agent.contextWindow": {
+          "type": "number",
+          "default": 128000,
+          "description": "Model context window size in tokens. Older messages are summarized when approaching this limit. Common values: 128000 (GPT-4o/4.1), 200000 (Claude)."
+        },
+        "junior.agent.contextThreshold": {
+          "type": "number",
+          "default": 0.70,
+          "minimum": 0.3,
+          "maximum": 0.95,
+          "description": "Fraction of the context window (0.3–0.95) at which older messages are summarized. Lower values trim more aggressively."
+        },
+        "junior.agent.confirmWrites": {
           "type": "boolean",
           "default": true,
           "description": "Ask for user confirmation before writing/deleting files"
         },
-        "securechat.agent.confirmTerminal": {
+        "junior.agent.confirmTerminal": {
           "type": "boolean",
           "default": true,
           "description": "Ask for user confirmation before running terminal commands"
         },
-        "securechat.mcp.servers": {
+        "junior.mcp.servers": {
           "type": "object",
           "default": {},
-          "description": "MCP server configurations. Each key is a server name. Use { command, args?, env?, cwd? } for stdio or { url, headers? } for HTTP transport.",
+          "description": "MCP server configurations. Each key is a server name. Use { command, args?, env?, cwd? } for stdio or { url, headers? } for HTTP transport. Entries here override duplicate names loaded from external settings.",
           "additionalProperties": {
             "type": "object",
             "oneOf": [
@@ -283,12 +306,23 @@
               }
             ]
           }
+        },
+        "junior.mcp.includeExternalServers": {
+          "type": "boolean",
+          "default": true,
+          "description": "Also load MCP servers from other VS Code settings keys (for example, mcp.servers from the official MCP extension)."
+        },
+        "junior.mcp.externalServerSettings": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["mcp.servers"],
+          "description": "List of settings paths to read additional MCP server definitions from. Format: \"section.key\"."
         }
       }
     },
     "keybindings": [
       {
-        "command": "securechat.openChat",
+        "command": "junior.openChat",
         "key": "ctrl+shift+i",
         "mac": "cmd+shift+i"
       }
@@ -311,5 +345,6 @@
     "typescript": "^5.3.0"
   }
 }
+
 
 

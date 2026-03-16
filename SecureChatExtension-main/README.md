@@ -5,9 +5,9 @@ A VS Code extension that provides a **Copilot-like autonomous agent** powered by
 ## Features
 
 - **Agent Mode** — Autonomous tool-calling loop: the AI reads files, edits code, runs terminal commands, and searches your workspace without manual intervention.
-- **Built-in Tools** — 11 workspace tools: `read_file`, `write_file`, `edit_file`, `delete_file`, `list_directory`, `search_files`, `grep_search`, `get_file_tree`, `run_terminal_command`, `get_diagnostics`, `get_open_editors`.
+- **Built-in Tools** — 20 workspace tools: `read_file`, `write_file`, `edit_file`, `delete_file`, `list_directory`, `search_files`, `grep_search`, `semantic_search`, `get_file_tree`, `get_document_symbols`, `find_symbol`, `go_to_definition`, `find_references`, `rename_symbol`, `run_terminal_command`, `get_diagnostics`, `get_open_editors`, `apply_code_action`, `set_plan`, `update_plan_step`.
 - **MCP (Model Context Protocol)** — Connect external MCP tool servers over stdio for extensible tool capabilities.
-- **Azure OpenAI Streaming** — Direct HTTPS connection to your Azure OpenAI resource with streaming responses (no SDK, zero external runtime dependencies).
+- **Azure OpenAI Streaming** — Direct HTTPS connection to your Azure OpenAI resource with streaming responses (no SDK, zero external runtime dependencies). Supports both direct AOAI and API Management (APIM) proxy connections.
 - **Multi-Model Selection** — Configure multiple deployments and switch between them from the chat panel.
 - **Confirmation Dialogs** — Approve or deny file writes, deletions, and terminal commands before execution.
 - **Context Menu Actions** — Right-click selected code to Explain, Review, or Fix it.
@@ -36,19 +36,24 @@ Use the helper script from the project root:
 Then in VS Code:
 1. Open **Command Palette** (`Ctrl+Shift+P`)
 2. Run **Extensions: Install from VSIX...**
-3. Select the generated `secure-chat-*.vsix`
+3. Select the generated `junior-*.vsix`
 4. Run **Developer: Reload Window**
 
 For extension development/testing, you can still press **F5** to launch the Extension Development Host.
 
 ### 2. Configure Azure OpenAI
 
+Junior supports two connection modes: **direct** to an Azure OpenAI resource, or through an **API Management (APIM)** proxy.
+
+#### Option A — Direct Azure OpenAI
+
 Open VS Code Settings (`Ctrl+,`) and search for `Junior`, or add to your `settings.json`:
 
 ```jsonc
 {
-  "securechat.azureOpenAI.endpoint": "https://your-resource.openai.azure.com",
-  "securechat.azureOpenAI.deployments": [
+  "junior.azureOpenAI.provider": "direct",
+  "junior.azureOpenAI.endpoint": "https://your-resource.openai.azure.com",
+  "junior.azureOpenAI.deployments": [
     {
       "name": "GPT-4o",
       "deploymentId": "gpt-4o",
@@ -60,9 +65,34 @@ Open VS Code Settings (`Ctrl+,`) and search for `Junior`, or add to your `settin
       "apiVersion": "2024-06-01"
     }
   ],
-  "securechat.azureOpenAI.activeDeployment": "gpt-4o"
+  "junior.azureOpenAI.activeDeployment": "gpt-4o"
 }
 ```
+
+#### Option B — Via API Management (APIM)
+
+If your Azure OpenAI is behind an APIM gateway, set the provider to `apim` and supply the APIM base URL (including any path prefix):
+
+```jsonc
+{
+  "junior.azureOpenAI.provider": "apim",
+  "junior.azureOpenAI.apimBaseUrl": "https://my-apim.azure-api.net/foundryapi",
+  "junior.azureOpenAI.deployments": [
+    {
+      "name": "GPT-5.3 Chat",
+      "deploymentId": "gpt-5.3-chat",
+      "apiVersion": "2025-03-01-preview"
+    }
+  ],
+  "junior.azureOpenAI.activeDeployment": "gpt-5.3-chat"
+}
+```
+
+The APIM endpoint must expose the standard Azure OpenAI Chat Completions API path (`/openai/deployments/{deployment-id}/chat/completions`). The API key is sent in the `api-key` header, which works with both direct AOAI and most APIM configurations.
+
+> **Note:** Deployments must be configured manually in `junior.azureOpenAI.deployments` — they are not auto-discovered. The `deploymentId` values must match the deployment names in your Azure OpenAI resource exactly.
+
+#### Store your API key
 
 Then store your API key securely:
 
@@ -72,17 +102,17 @@ Then store your API key securely:
 
 The key is stored in VS Code's **SecretStorage**, which uses your OS credential manager (Windows Credential Manager, macOS Keychain, or Linux secret service). **No plaintext is written to disk** — not in settings.json, not in any config file.
 
-> **Backward compatibility:** If you previously had `securechat.azureOpenAI.apiKey` in your settings.json, it still works as a fallback. However, we recommend migrating to SecretStorage and removing the key from settings.json for better security.
+> **Backward compatibility:** If you previously had `securechat.*` keys in your settings.json, Junior still reads them as a fallback. New settings should use `junior.*`.
 
 ### 3. (Optional) Configure MCP Servers
 
-Add MCP tool servers to extend the agent's capabilities. Junior supports two transports:
+Add MCP tool servers to extend the agent's capabilities. Junior supports two transports and can also reuse MCP server definitions from other VS Code extensions (for example the official MCP extension via `mcp.servers`) by default.
 
 **stdio** — spawn a local process:
 
 ```jsonc
 {
-  "securechat.mcp.servers": {
+  "junior.mcp.servers": {
     "filesystem": {
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/dir"]
@@ -101,7 +131,7 @@ Add MCP tool servers to extend the agent's capabilities. Junior supports two tra
 
 ```jsonc
 {
-  "securechat.mcp.servers": {
+  "junior.mcp.servers": {
     "remote-tools": {
       "url": "https://my-mcp-server.internal:8080/mcp",
       "headers": {
@@ -113,6 +143,36 @@ Add MCP tool servers to extend the agent's capabilities. Junior supports two tra
 ```
 
 You can mix both transports — servers with `command` use stdio, servers with `url` use HTTP.
+
+By default, Junior merges `junior.mcp.servers` with external settings listed in `junior.mcp.externalServerSettings` (defaults to `["mcp.servers"]`). If two settings define the same server name, `junior.mcp.servers` wins. Set `junior.mcp.includeExternalServers` to `false` to only use Junior's own setting.
+
+**Complete example (explicitly using external MCP servers):**
+
+```jsonc
+{
+  "junior.azureOpenAI.provider": "direct",
+  "junior.azureOpenAI.endpoint": "https://your-resource.openai.azure.com",
+  "junior.azureOpenAI.deployments": [
+    {
+      "name": "GPT-4o",
+      "deploymentId": "gpt-4o",
+      "apiVersion": "2024-06-01"
+    }
+  ],
+  "junior.azureOpenAI.activeDeployment": "gpt-4o",
+  "junior.mcp.includeExternalServers": true,  //use the vscode MCP servers in extensions view
+  "junior.mcp.externalServerSettings": [
+    "mcp.servers"
+  ],
+  // Optional local overrides/additions.
+  // Leave empty if you only want external servers.
+  "junior.mcp.servers": {
+      // "msdocs": {
+       // "url": "https://learn.microsoft.com/api/mcp"
+       // }
+  }
+}
+```
 
 MCP tools appear alongside built-in tools with names prefixed by their server name (e.g., `mcp_filesystem_read_file`).
 
@@ -152,6 +212,8 @@ Press **Shift+Enter** for a newline without sending.
 
 `Index Workspace` also runs automatically on activation. Use it manually after major file/folder changes or when workspace settings (exclude patterns, max file size) change.
 
+> **Index Persistence:** The file index and semantic index are cached under VS Code's global storage directory. On subsequent activations, only files whose size or modification time changed are re-processed, which dramatically reduces startup time for large repositories.
+
 ### Context Menu
 
 Select code in the editor, right-click, and choose:
@@ -163,19 +225,25 @@ Select code in the editor, right-click, and choose:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `securechat.azureOpenAI.endpoint` | `""` | Azure OpenAI endpoint URL |
-| `securechat.azureOpenAI.apiKey` | `""` | API key |
-| `securechat.azureOpenAI.deployments` | `[]` | List of `{ name, deploymentId, apiVersion }` |
-| `securechat.azureOpenAI.activeDeployment` | `""` | Currently active deployment ID |
-| `securechat.azureOpenAI.apiVersion` | `"2024-06-01"` | Default API version |
-| `securechat.maxTokens` | `4096` | Max tokens per response |
-| `securechat.temperature` | `0.3` | Response temperature (0–1) |
-| `securechat.workspace.maxFileSize` | `100000` | Max file size (bytes) to index |
-| `securechat.workspace.excludePatterns` | `[...]` | Glob patterns excluded from indexing |
-| `securechat.agent.maxIterations` | `25` | Max tool-call loops per turn |
-| `securechat.agent.confirmWrites` | `true` | Confirm before file write/delete |
-| `securechat.agent.confirmTerminal` | `true` | Confirm before terminal commands |
-| `securechat.mcp.servers` | `{}` | MCP server configurations |
+| `junior.azureOpenAI.provider` | `"direct"` | Connection mode: `direct` for AOAI, `apim` for API Management proxy |
+| `junior.azureOpenAI.endpoint` | `""` | Azure OpenAI endpoint URL (used when provider is `direct`) |
+| `junior.azureOpenAI.apimBaseUrl` | `""` | APIM gateway base URL with path prefix (used when provider is `apim`) |
+| `junior.azureOpenAI.apiKey` | `""` | API key |
+| `junior.azureOpenAI.deployments` | `[]` | List of `{ name, deploymentId, apiVersion }` — configured manually |
+| `junior.azureOpenAI.activeDeployment` | `""` | Currently active deployment ID |
+| `junior.azureOpenAI.apiVersion` | `"2024-06-01"` | Default API version |
+| `junior.maxTokens` | `4096` | Max tokens per response |
+| `junior.temperature` | `0.3` | Response temperature (0–1) |
+| `junior.workspace.maxFileSize` | `100000` | Max file size (bytes) to index |
+| `junior.workspace.excludePatterns` | `[...]` | Glob patterns excluded from indexing |
+| `junior.agent.maxIterations` | `25` | Max tool-call loops per turn |
+| `junior.agent.contextWindow` | `128000` | Model context window size (tokens). Older messages are summarized when approaching this limit. |
+| `junior.agent.contextThreshold` | `0.70` | Fraction of context window (0.3–0.95) at which older messages are summarized |
+| `junior.agent.confirmWrites` | `true` | Confirm before file write/delete |
+| `junior.agent.confirmTerminal` | `true` | Confirm before terminal commands |
+| `junior.mcp.servers` | `{}` | MCP server configurations (overrides duplicates from external settings) |
+| `junior.mcp.includeExternalServers` | `true` | Also load MCP servers from external settings keys |
+| `junior.mcp.externalServerSettings` | `["mcp.servers"]` | External settings paths to merge MCP servers from |
 
 ## Architecture
 
@@ -183,11 +251,17 @@ Select code in the editor, right-click, and choose:
 src/
 ├── extension.ts          — Activation entry point, command registration
 ├── types.ts              — Shared TypeScript type definitions
+├── config.ts             — Settings helper with legacy namespace fallback
 ├── aoaiClient.ts         — Azure OpenAI streaming client (raw HTTPS)
 ├── agentLoop.ts          — Core agent orchestrator (tool-calling loop)
-├── builtinTools.ts       — 11 built-in workspace tools
-├── mcpClient.ts          — MCP stdio client for external tool servers
-├── workspaceIndexer.ts   — Workspace file scanning and search
+├── contextManager.ts     — Context window management (token estimation, message trimming)
+├── toolValidator.ts      — Tool argument validation (schema checking before execution)
+├── builtinTools.ts       — 20 built-in workspace tools
+├── mcpClient.ts          — MCP stdio/HTTP client for external tool servers
+├── workspaceIndexer.ts   — Workspace file scanning and search (cached to disk)
+├── symbolIndexer.ts      — Symbol indexing (functions, classes, etc.)
+├── semanticIndexer.ts    — TF-IDF semantic indexing for natural-language search (cached to disk)
+├── planTreeProvider.ts   — Plan tree view provider for agent step tracking
 ├── sessionManager.ts     — Chat session persistence (globalState)
 └── chatViewProvider.ts   — Webview UI (sidebar chat panel)
 ```
@@ -207,7 +281,7 @@ Press **F5** to launch the Extension Development Host with the extension loaded.
 ## Security Notes
 
 - The API key is stored in VS Code's **SecretStorage** (OS credential manager) when set via **Junior: Set API Key**. No plaintext is written to disk. The legacy `settings.json` key is supported as a fallback but is not recommended.
-- All HTTP calls go directly to your Azure OpenAI endpoint — **no data leaves your network**.
+- All HTTP calls go directly to your Azure OpenAI endpoint (or APIM gateway) — **no data leaves your network**.
 - The webview uses a strict Content Security Policy with nonce-based script/style execution.
 
 ---
@@ -225,7 +299,7 @@ Junior's core is an autonomous **tool-calling loop** in `agentLoop.ts`. When you
 3. If the model responds with tool calls, each is executed and results are fed back. This loops for up to `maxIterations` (default 25).
 4. If the model responds with text (no tool calls), the loop ends and the response is streamed to the UI.
 
-### Built-in Tools (16+)
+### Built-in Tools (20)
 
 The agent has direct access to the workspace through built-in tools registered in `builtinTools.ts`:
 
@@ -238,15 +312,19 @@ The agent has direct access to the workspace through built-in tools registered i
 | `list_directory` | List folder contents |
 | `search_files` | Filename search across the workspace index |
 | `grep_search` | Regex/text search in file contents |
+| `semantic_search` | Natural-language code search using TF-IDF semantic indexing |
 | `get_file_tree` | Full workspace file tree |
+| `get_document_symbols` | List symbols (classes, functions, methods, etc.) for a specific file |
+| `find_symbol` | Find symbol definitions by name across the indexed workspace |
+| `go_to_definition` | Find the definition location for a symbol in a file |
+| `find_references` | Find all references to a symbol across the workspace |
+| `rename_symbol` | Project-wide rename (like F2) — updates all references, imports, and usages |
 | `run_terminal_command` | Execute shell commands with configurable timeout |
 | `get_diagnostics` | Read VS Code's language server diagnostics |
 | `get_open_editors` | List currently open editor tabs |
-| `find_symbols` | Symbol search (functions, classes, variables) via the symbol index |
-| `get_symbol_detail` | Detailed symbol info: signature, location, kind |
-| `find_references` | Find all references to a symbol across the workspace |
-| `semantic_search` | Natural-language code search using TF-IDF semantic indexing |
 | `apply_code_action` | List and apply VS Code quick-fixes at a specific line |
+| `set_plan` | Set the agent's plan with 3–6 specific steps for the current task |
+| `update_plan_step` | Update the status of a plan step (in_progress, completed, failed) |
 
 All file-path parameters are validated against the workspace root to prevent path traversal attacks.
 
@@ -343,5 +421,6 @@ Key UI features:
 ## License
 
 MIT
+
 
 

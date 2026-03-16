@@ -6,6 +6,7 @@ import * as https from 'https';
 import * as http from 'http';
 import * as vscode from 'vscode';
 import { AoaiConfig, ChatMessage, ToolDefinition, AoaiStreamChunk, ToolCall } from './types';
+import { getSetting } from './config';
 
 export class AzureOpenAIClient {
     private secrets?: vscode.SecretStorage;
@@ -15,12 +16,14 @@ export class AzureOpenAIClient {
         this.secrets = secrets;
         // Invalidate cache when secrets change
         secrets.onDidChange(e => {
-            if (e.key === 'securechat.apiKey') { this.cachedSecretKey = undefined; }
+            if (e.key === 'junior.apiKey' || e.key === 'securechat.apiKey') { this.cachedSecretKey = undefined; }
         });
     }
 
     async storeApiKey(key: string): Promise<void> {
         if (!this.secrets) { return; }
+        await this.secrets.store('junior.apiKey', key);
+        // Keep legacy key updated for compatibility with older builds.
         await this.secrets.store('securechat.apiKey', key);
         this.cachedSecretKey = key;
     }
@@ -30,48 +33,50 @@ export class AzureOpenAIClient {
         if (this.cachedSecretKey) { return this.cachedSecretKey; }
         // 2. SecretStorage
         if (this.secrets) {
-            const stored = await this.secrets.get('securechat.apiKey');
+            const stored = await this.secrets.get('junior.apiKey') || await this.secrets.get('securechat.apiKey');
             if (stored) {
                 this.cachedSecretKey = stored;
                 return stored;
             }
         }
         // 3. Fallback to settings.json
-        return vscode.workspace.getConfiguration('securechat.azureOpenAI').get<string>('apiKey') || '';
+        return getSetting<string>('azureOpenAI.apiKey') || '';
     }
 
     getConfig(): AoaiConfig {
-        const cfg = vscode.workspace.getConfiguration('securechat');
-        const aoai = vscode.workspace.getConfiguration('securechat.azureOpenAI');
-
-        const endpoint = aoai.get<string>('endpoint') || '';
+        const provider = (getSetting<string>('azureOpenAI.provider') || 'direct') as 'direct' | 'apim';
+        const endpoint = getSetting<string>('azureOpenAI.endpoint') || '';
+        const apimBaseUrl = getSetting<string>('azureOpenAI.apimBaseUrl') || '';
         // apiKey is resolved async via getApiKey() — callers that need it should call getConfigAsync()
-        const apiKey = this.cachedSecretKey || aoai.get<string>('apiKey') || '';
-        const deploymentId = aoai.get<string>('activeDeployment') || '';
-        const apiVersion = aoai.get<string>('apiVersion') || '2024-06-01';
-        const maxTokens = cfg.get<number>('maxTokens') || 4096;
-        const temperature = cfg.get<number>('temperature') || 0.3;
+        const apiKey = this.cachedSecretKey || getSetting<string>('azureOpenAI.apiKey') || '';
+        const deploymentId = getSetting<string>('azureOpenAI.activeDeployment') || '';
+        const apiVersion = getSetting<string>('azureOpenAI.apiVersion') || '2024-06-01';
+        const maxTokens = getSetting<number>('maxTokens') || 16384;
+        const temperature = getSetting<number>('temperature') || 0.3;
 
-        return { endpoint, apiKey, deploymentId, apiVersion, maxTokens, temperature };
+        return { provider, endpoint, apimBaseUrl, apiKey, deploymentId, apiVersion, maxTokens, temperature };
     }
 
     async getConfigAsync(): Promise<AoaiConfig> {
-        const cfg = vscode.workspace.getConfiguration('securechat');
-        const aoai = vscode.workspace.getConfiguration('securechat.azureOpenAI');
-
-        const endpoint = aoai.get<string>('endpoint') || '';
+        const provider = (getSetting<string>('azureOpenAI.provider') || 'direct') as 'direct' | 'apim';
+        const endpoint = getSetting<string>('azureOpenAI.endpoint') || '';
+        const apimBaseUrl = getSetting<string>('azureOpenAI.apimBaseUrl') || '';
         const apiKey = await this.getApiKey();
-        const deploymentId = aoai.get<string>('activeDeployment') || '';
-        const apiVersion = aoai.get<string>('apiVersion') || '2024-06-01';
-        const maxTokens = cfg.get<number>('maxTokens') || 4096;
-        const temperature = cfg.get<number>('temperature') || 0.3;
+        const deploymentId = getSetting<string>('azureOpenAI.activeDeployment') || '';
+        const apiVersion = getSetting<string>('azureOpenAI.apiVersion') || '2024-06-01';
+        const maxTokens = getSetting<number>('maxTokens') || 16384;
+        const temperature = getSetting<number>('temperature') || 0.3;
 
-        return { endpoint, apiKey, deploymentId, apiVersion, maxTokens, temperature };
+        return { provider, endpoint, apimBaseUrl, apiKey, deploymentId, apiVersion, maxTokens, temperature };
     }
 
     async validate(): Promise<string | null> {
         const c = await this.getConfigAsync();
-        if (!c.endpoint) { return 'Azure OpenAI endpoint is not configured.'; }
+        if (c.provider === 'apim') {
+            if (!c.apimBaseUrl) { return 'APIM base URL is not configured. Set junior.azureOpenAI.apimBaseUrl in settings.'; }
+        } else {
+            if (!c.endpoint) { return 'Azure OpenAI endpoint is not configured.'; }
+        }
         if (!c.apiKey) { return 'Azure OpenAI API key is not configured. Run "Junior: Set API Key" to store it securely.'; }
         if (!c.deploymentId) { return 'No model deployment selected. Run "Junior: Select Model".'; }
         return null;
@@ -87,20 +92,20 @@ export class AzureOpenAIClient {
         abortSignal?: AbortSignal
     ): AsyncGenerator<{ type: 'text'; text: string } | { type: 'toolCalls'; calls: ToolCall[] } | { type: 'done' }> {
         const config = await this.getConfigAsync();
+        const base = (config.provider === 'apim' ? config.apimBaseUrl : config.endpoint).replace(/\/+$/, '');
         const url = new URL(
-            `/openai/deployments/${encodeURIComponent(config.deploymentId)}/chat/completions?api-version=${config.apiVersion}`,
-            config.endpoint
+            `${base}/openai/deployments/${encodeURIComponent(config.deploymentId)}/chat/completions?api-version=${config.apiVersion}`
         );
 
         const body = JSON.stringify({
             messages,
-            max_tokens: config.maxTokens,
+            max_completion_tokens: config.maxTokens,
             temperature: config.temperature,
             stream: true,
             ...(tools.length > 0 ? { tools, tool_choice: 'auto' } : {})
         });
 
-        const response = await this.httpRequest(url, body, config.apiKey, abortSignal);
+        const response = await this.httpRequestWithRetry(url, body, config.apiKey, abortSignal);
 
         const toolCallAccumulator: Map<number, { id: string; name: string; arguments: string }> = new Map();
         let hasToolCalls = false;
@@ -178,6 +183,46 @@ export class AzureOpenAIClient {
         yield { type: 'done' };
     }
 
+    /**
+     * Retry wrapper for httpRequest — retries on 429 (rate limit) and 503 (service unavailable)
+     * using the Retry-After header or exponential backoff, up to 3 attempts.
+     */
+    private async httpRequestWithRetry(
+        url: URL,
+        body: string,
+        apiKey: string,
+        abortSignal?: AbortSignal,
+        maxRetries: number = 3
+    ): Promise<AsyncIterable<string>> {
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+            try {
+                return await this.httpRequest(url, body, apiKey, abortSignal);
+            } catch (err: any) {
+                const retryable = err.statusCode === 429 || err.statusCode === 503;
+                if (!retryable || attempt === maxRetries) { throw err; }
+                const waitSec = err.retryAfter && err.retryAfter > 0
+                    ? Math.min(err.retryAfter, 120)
+                    : Math.min(10 * Math.pow(2, attempt), 120);
+                // Notify via a custom event so the UI can show the wait
+                if ((this as any)._onRetry) { (this as any)._onRetry(waitSec, attempt + 1, maxRetries); }
+                await new Promise<void>((resolve) => {
+                    const timer = setTimeout(resolve, waitSec * 1000);
+                    if (abortSignal) {
+                        const onAbort = () => { clearTimeout(timer); resolve(); };
+                        abortSignal.addEventListener('abort', onAbort, { once: true });
+                    }
+                });
+                if (abortSignal?.aborted) { throw new Error('Aborted'); }
+            }
+        }
+        throw new Error('Unreachable');
+    }
+
+    /** Set a callback to be notified when a rate-limit retry is happening */
+    setRetryCallback(cb: (waitSec: number, attempt: number, maxRetries: number) => void) {
+        (this as any)._onRetry = cb;
+    }
+
     private httpRequest(
         url: URL,
         body: string,
@@ -207,7 +252,11 @@ export class AzureOpenAIClient {
                         let errBody = '';
                         res.on('data', (d: Buffer) => { errBody += d.toString(); });
                         res.on('end', () => {
-                            reject(new Error(`Azure OpenAI returned ${res.statusCode}: ${errBody}`));
+                            const err = new Error(`Azure OpenAI returned ${res.statusCode}: ${errBody}`) as any;
+                            err.statusCode = res.statusCode;
+                            err.retryAfter = res.headers['retry-after']
+                                ? parseInt(res.headers['retry-after'] as string, 10) : undefined;
+                            reject(err);
                         });
                         return;
                     }

@@ -1,10 +1,12 @@
 /**
- * Session Manager — persists chat sessions to VS Code's global storage.
+ * Session Manager — persists chat sessions to VS Code's workspace-scoped storage.
+ *
+ * Sessions are scoped per workspace so opening a different project starts fresh.
  *
  * Limits:
  *  - MAX_SESSIONS (20): oldest sessions are pruned when exceeded.
  *  - MAX_MESSAGE_LENGTH (8000): individual tool results / message content
- *    are trimmed before persistence to stay within globalState's ~1 MB budget.
+ *    are trimmed before persistence to stay within storage budget.
  *  - Base64 image data is stripped from persisted messages.
  */
 import * as vscode from 'vscode';

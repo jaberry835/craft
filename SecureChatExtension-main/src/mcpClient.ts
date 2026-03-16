@@ -11,6 +11,7 @@ import * as cp from 'child_process';
 import * as http from 'http';
 import * as https from 'https';
 import { McpServerConfig, McpToolInfo, ToolDefinition, ToolResult } from './types';
+import { getSetting } from './config';
 
 interface JsonRpcRequest {
     jsonrpc: '2.0';
@@ -57,6 +58,7 @@ type McpConnection = StdioConnection | HttpConnection;
 
 export class McpClient {
     private connections: Map<string, McpConnection> = new Map();
+    private mcpToolNameMap: Map<string, { serverName: string; toolName: string }> = new Map();
     private outputChannel: vscode.OutputChannel;
 
     constructor() {
@@ -65,8 +67,7 @@ export class McpClient {
 
     /** Load MCP server configs from VS Code settings and connect to each */
     async connectConfiguredServers(): Promise<void> {
-        const cfg = vscode.workspace.getConfiguration('securechat.mcp');
-        const servers = cfg.get<Record<string, McpServerConfig>>('servers') || {};
+        const servers = this.getConfiguredServers();
         const names = Object.keys(servers);
         this.outputChannel.appendLine(`MCP: found ${names.length} configured server(s): ${names.join(', ') || '(none)'}`);
 
@@ -79,6 +80,67 @@ export class McpClient {
             }
         }
         this.outputChannel.appendLine(`MCP: ${this.getToolCount()} total tools across ${this.connections.size} connected server(s)`);
+    }
+
+    private getConfiguredServers(): Record<string, McpServerConfig> {
+        const ownServers = getSetting<Record<string, McpServerConfig>>('mcp.servers') || {};
+        const includeExternalServers = getSetting<boolean>('mcp.includeExternalServers', true) ?? true;
+        const externalServerSettings = getSetting<string[]>('mcp.externalServerSettings', ['mcp.servers']) || ['mcp.servers'];
+
+        if (!includeExternalServers) {
+            return ownServers;
+        }
+
+        const combinedServers: Record<string, McpServerConfig> = { ...ownServers };
+        for (const settingPath of externalServerSettings) {
+            const externalServers = this.readServerConfigSetting(settingPath);
+            if (!externalServers) {
+                continue;
+            }
+
+            for (const [name, config] of Object.entries(externalServers)) {
+                if (!this.isMcpServerConfig(config)) {
+                    this.outputChannel.appendLine(`MCP: skipped invalid config for "${name}" from setting "${settingPath}"`);
+                    continue;
+                }
+
+                if (combinedServers[name]) {
+                    this.outputChannel.appendLine(`MCP: keeping "${name}" from junior.mcp.servers and ignoring duplicate in "${settingPath}"`);
+                    continue;
+                }
+
+                combinedServers[name] = config;
+            }
+        }
+
+        return combinedServers;
+    }
+
+    private readServerConfigSetting(settingPath: string): Record<string, unknown> | undefined {
+        const idx = settingPath.lastIndexOf('.');
+        if (idx <= 0 || idx === settingPath.length - 1) {
+            this.outputChannel.appendLine(`MCP: skipped invalid settings path "${settingPath}"`);
+            return undefined;
+        }
+
+        const section = settingPath.slice(0, idx);
+        const key = settingPath.slice(idx + 1);
+        const value = vscode.workspace.getConfiguration(section).get<unknown>(key);
+
+        if (!value || typeof value !== 'object' || Array.isArray(value)) {
+            return undefined;
+        }
+
+        return value as Record<string, unknown>;
+    }
+
+    private isMcpServerConfig(value: unknown): value is McpServerConfig {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) {
+            return false;
+        }
+
+        const config = value as McpServerConfig;
+        return typeof config.command === 'string' || typeof config.url === 'string';
     }
 
     async connectServer(name: string, config: McpServerConfig): Promise<void> {
@@ -187,9 +249,7 @@ export class McpClient {
             this.outputChannel.appendLine(`[${name}] Initialize result: ${JSON.stringify(initResult).slice(0, 500)}`);
 
             this.outputChannel.appendLine(`[${name}] Sending initialized notification...`);
-            await this.sendRequest(conn, 'notifications/initialized', {}, 5000).catch((e) => {
-                this.outputChannel.appendLine(`[${name}] Initialized notification response (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
-            });
+            this.sendNotification(conn, 'initialized', {});
 
             this.outputChannel.appendLine(`[${name}] Requesting tools/list...`);
             const toolsResult = await this.sendRequest(conn, 'tools/list', {}, 15000) as { tools?: McpToolRaw[] };
@@ -301,12 +361,18 @@ export class McpClient {
     /** Get all discovered MCP tools as OpenAI function definitions */
     getToolDefinitions(): ToolDefinition[] {
         const defs: ToolDefinition[] = [];
+        this.mcpToolNameMap.clear();
+        const usedNames = new Set<string>();
+
         for (const conn of this.connections.values()) {
             for (const tool of conn.tools) {
+                const functionName = this.makeFunctionName(conn.serverName, tool.name, usedNames);
+                this.mcpToolNameMap.set(functionName, { serverName: conn.serverName, toolName: tool.name });
+
                 defs.push({
                     type: 'function',
                     function: {
-                        name: `mcp_${conn.serverName}_${tool.name}`,
+                        name: functionName,
                         description: `[MCP: ${conn.serverName}] ${tool.description}`,
                         parameters: tool.inputSchema
                     }
@@ -318,14 +384,24 @@ export class McpClient {
 
     /** Call an MCP tool — name format: mcp_{serverName}_{toolName} */
     async callTool(fullName: string, args: Record<string, unknown>): Promise<ToolResult> {
-        // Parse mcp_<serverName>_<toolName>
-        const match = fullName.match(/^mcp_([^_]+)_(.+)$/);
-        if (!match) {
-            return { success: false, result: `Invalid MCP tool name format: ${fullName}` };
+        const mapped = this.mcpToolNameMap.get(fullName);
+        const serverName = mapped?.serverName;
+        const toolName = mapped?.toolName;
+
+        // Backward-compat fallback for any previously generated names.
+        if (!serverName || !toolName) {
+            const match = fullName.match(/^mcp_([^_]+)_(.+)$/);
+            if (!match) {
+                return { success: false, result: `Invalid MCP tool name format: ${fullName}` };
+            }
+
+            return this.callToolByName(match[1], match[2], args);
         }
 
-        const serverName = match[1];
-        const toolName = match[2];
+        return this.callToolByName(serverName, toolName, args);
+    }
+
+    private async callToolByName(serverName: string, toolName: string, args: Record<string, unknown>): Promise<ToolResult> {
         const conn = this.connections.get(serverName);
         if (!conn) {
             return { success: false, result: `MCP server "${serverName}" is not connected.` };
@@ -346,6 +422,27 @@ export class McpClient {
         } catch (e: unknown) {
             return { success: false, result: `MCP tool call failed: ${e instanceof Error ? e.message : String(e)}` };
         }
+    }
+
+    private makeFunctionName(serverName: string, toolName: string, usedNames: Set<string>): string {
+        const serverPart = this.sanitizeFunctionNamePart(serverName) || 'server';
+        const toolPart = this.sanitizeFunctionNamePart(toolName) || 'tool';
+        const base = `mcp_${serverPart}_${toolPart}`;
+
+        let candidate = base;
+        let index = 2;
+        while (usedNames.has(candidate)) {
+            candidate = `${base}_${index}`;
+            index++;
+        }
+
+        usedNames.add(candidate);
+        return candidate;
+    }
+
+    private sanitizeFunctionNamePart(value: string): string {
+        // Azure OpenAI expects function names to match: ^[a-zA-Z0-9_\.-]+$
+        return value.replace(/[^a-zA-Z0-9_.-]/g, '_');
     }
 
     getConnectedServers(): string[] {
@@ -548,5 +645,4 @@ interface McpToolRaw {
     description?: string;
     inputSchema?: Record<string, unknown>;
 }
-
 
