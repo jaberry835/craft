@@ -25,9 +25,11 @@ repos=(
   "https://github.com/adamruderman/AgentChatV2 main"
   "https://github.com/adamruderman/Rude-MCPServer main"
   "https://github.com/adamruderman/UserAccessChecker-Python main"
-  "https://github.com/jaberry835/snapseek main"
-  "https://github.com/jaberry835/snapseek deepface-embeddings"
-  "https://github.com/microsoft/simplechat main"
+  #"https://github.com/jaberry835/snapseek main"
+  #"https://github.com/microsoft/simplechat main"
+  "https://github.com/adamruderman/WebScrapeAndIndex main"
+  "https://github.com/adamruderman/SecureAPI main"
+  "https://github.com/adamruderman/SecureChatExtension main"
 )
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
