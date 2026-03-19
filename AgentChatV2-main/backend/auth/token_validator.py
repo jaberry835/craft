@@ -51,6 +51,7 @@ def validate_token(token: str) -> Optional[dict]:
         # The authority host is configurable via AZURE_AUTHORITY_HOST env var
         valid_issuers = [
             f"{settings.azure_authority_host}/{settings.azure_tenant_id}/v2.0",
+            f"{settings.azure_authority_host}/{settings.azure_tenant_id}/",
             f"https://sts.windows.net/{settings.azure_tenant_id}/",
             # Include both Commercial and Government issuers for flexibility
             f"https://login.microsoftonline.com/{settings.azure_tenant_id}/v2.0",

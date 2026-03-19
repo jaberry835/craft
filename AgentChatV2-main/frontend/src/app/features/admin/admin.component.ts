@@ -3046,7 +3046,8 @@ export class AdminComponent implements OnInit, OnDestroy {
     const ep = (endpoint || '').toLowerCase();
     if (ep.includes('.azure.us')) return 'Gov';
     if (ep.includes('.azure.cn')) return 'China';
-    return 'Commercial';
+    if (ep.includes('.azure.com')) return 'Commercial';
+    return 'Sovereign';
   }
 
   editAoaiEndpoint(endpoint: AOAIEndpointConfig): void {

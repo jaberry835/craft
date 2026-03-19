@@ -9,6 +9,7 @@ Supports multiple Azure clouds:
   - AzureCommercial (default): management.azure.com
   - AzureGovernment: management.usgovcloudapi.net
   - AzureChina: management.chinacloudapi.cn
+  - Custom: any sovereign cloud via AZURE_ARM_ENDPOINT / AZURE_ARM_SCOPE env vars
 """
 import httpx
 import re
@@ -16,7 +17,7 @@ from typing import Optional
 from urllib.parse import urlparse
 
 from models import ModelDeployment
-from config import get_azure_credential
+from config import get_azure_credential, get_settings
 from observability import get_logger
 
 logger = get_logger(__name__)
@@ -53,55 +54,85 @@ class AOAIDiscoveryService:
         self.arm_api_version = "2023-05-01"
     
     @staticmethod
-    def detect_cloud_from_endpoint(endpoint: str) -> str:
+    def detect_cloud_from_endpoint(endpoint: str) -> Optional[str]:
         """
         Auto-detect the Azure cloud from the endpoint URL suffix.
         
         E.g., https://myaoai.openai.azure.us -> AzureGovernment
         E.g., https://myaoai.openai.azure.com -> AzureCommercial
         E.g., https://myaoai.openai.azure.cn  -> AzureChina
+        
+        Returns None if the endpoint doesn't match any known cloud suffix,
+        indicating that AZURE_ARM_ENDPOINT / AZURE_ARM_SCOPE env vars
+        should be used instead.
         """
         endpoint_lower = endpoint.lower()
         for suffix, cloud in ENDPOINT_CLOUD_MAP.items():
             if suffix in endpoint_lower:
                 return cloud
-        return "AzureCommercial"
+        return None
     
     @staticmethod
     def _extract_account_name(endpoint: str) -> Optional[str]:
         """
         Extract the account name from an Azure OpenAI endpoint URL.
         
-        Supports all Azure clouds:
+        Supports all Azure clouds including sovereign/custom clouds:
           https://myaoai.openai.azure.com -> myaoai
           https://myaoai.openai.azure.us  -> myaoai
           https://myaoai.openai.azure.cn  -> myaoai
+          https://myaoai.openai.azure.eaglex.ic.gov -> myaoai
         Also supports Cognitive Services endpoints:
           https://myaoai.cognitiveservices.azure.com -> myaoai
         """
         try:
             parsed = urlparse(endpoint)
             hostname = parsed.hostname or ""
-            # Pattern: {account-name}.openai.azure.{com|us|cn}
-            match = re.match(r"^([^.]+)\.openai\.azure\.(com|us|cn)$", hostname)
+            # Pattern: {account-name}.openai.azure.{any-tld} (handles multi-part TLDs)
+            match = re.match(r"^([^.]+)\.openai\.azure\..+$", hostname)
             if match:
                 return match.group(1)
             # Also try cognitiveservices pattern
-            match = re.match(r"^([^.]+)\.cognitiveservices\.azure\.(com|us|cn)$", hostname)
+            match = re.match(r"^([^.]+)\.cognitiveservices\.azure\..+$", hostname)
             if match:
                 return match.group(1)
             return None
         except Exception:
             return None
     
-    def _get_cloud_config(self, cloud: str) -> dict:
-        """Get ARM configuration for the specified cloud."""
-        config = CLOUD_CONFIG.get(cloud)
-        if not config:
+    def _get_cloud_config(self, cloud: Optional[str]) -> dict:
+        """Get ARM configuration for the specified cloud.
+        
+        Falls back to AZURE_ARM_ENDPOINT / AZURE_ARM_SCOPE env vars if the
+        cloud is unknown or None (i.e. not auto-detected from the endpoint URL).
+        """
+        if cloud:
+            config = CLOUD_CONFIG.get(cloud)
+            if config:
+                return config
+        
+        # Try env-var overrides for sovereign/custom clouds
+        settings = get_settings()
+        if settings.azure_arm_endpoint and settings.azure_arm_scope:
+            logger.info(f"Using custom ARM config from env vars (cloud='{cloud}')")
+            return {
+                "arm_endpoint": settings.azure_arm_endpoint.rstrip("/"),
+                "arm_scope": settings.azure_arm_scope,
+            }
+        
+        if cloud:
             raise ValueError(
-                f"Unknown cloud '{cloud}'. Supported: {', '.join(CLOUD_CONFIG.keys())}"
+                f"Unknown cloud '{cloud}' and no AZURE_ARM_ENDPOINT / AZURE_ARM_SCOPE env vars configured. "
+                f"Known clouds: {', '.join(CLOUD_CONFIG.keys())}. "
+                f"For sovereign/custom clouds, set AZURE_ARM_ENDPOINT and AZURE_ARM_SCOPE."
             )
-        return config
+        else:
+            raise ValueError(
+                "Could not detect Azure cloud from endpoint URL and no "
+                "AZURE_ARM_ENDPOINT / AZURE_ARM_SCOPE env vars configured. "
+                f"Auto-detection works for: Commercial (.azure.com), Government (.azure.us), China (.azure.cn). "
+                f"For other sovereign clouds, set AZURE_ARM_ENDPOINT and AZURE_ARM_SCOPE."
+            )
     
     async def discover_deployments(
         self,
@@ -130,13 +161,14 @@ class AOAIDiscoveryService:
         # Normalize endpoint URL
         endpoint = endpoint.rstrip("/")
         
-        # Always auto-detect cloud from endpoint URL (most reliable source of truth)
+        # Auto-detect cloud from endpoint URL; may return None for sovereign/custom clouds
         detected_cloud = self.detect_cloud_from_endpoint(endpoint)
-        if cloud and cloud != detected_cloud:
+        if cloud and detected_cloud and cloud != detected_cloud:
             logger.warning(f"Stored cloud '{cloud}' doesn't match endpoint URL (detected '{detected_cloud}'). Using detected cloud.")
-        cloud = detected_cloud
+        # Use detected cloud, or fall back to stored cloud value (could also be None)
+        resolved_cloud = detected_cloud or cloud
         
-        cloud_config = self._get_cloud_config(cloud)
+        cloud_config = self._get_cloud_config(resolved_cloud)
         arm_endpoint = cloud_config["arm_endpoint"]
         arm_scope = cloud_config["arm_scope"]
         
@@ -145,7 +177,8 @@ class AOAIDiscoveryService:
         if not account_name:
             raise ValueError(
                 f"Could not parse account name from endpoint URL: {endpoint}. "
-                "Expected format: https://<account-name>.openai.azure.com (or .azure.us / .azure.cn)"
+                "Expected format: https://<account-name>.openai.azure.<tld> "
+                "(e.g., .azure.com, .azure.us, .azure.cn, or other sovereign cloud suffixes)"
             )
         
         # Require subscription and resource group for ARM API
@@ -155,7 +188,7 @@ class AOAIDiscoveryService:
                 "Please provide these values or add deployments manually."
             )
         
-        logger.info(f"Discovering deployments for {account_name} via ARM API ({cloud})")
+        logger.info(f"Discovering deployments for {account_name} via ARM API ({resolved_cloud or 'Custom'})")
         logger.info(f"  Subscription: {subscription_id}")
         logger.info(f"  Resource Group: {resource_group}")
         logger.info(f"  ARM Endpoint: {arm_endpoint}")

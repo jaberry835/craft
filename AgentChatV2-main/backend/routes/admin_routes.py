@@ -880,7 +880,7 @@ async def refresh_aoai_deployments(
             endpoint=existing.get("endpoint"),
             subscription_id=subscription_id,
             resource_group=resource_group,
-            cloud=existing.get("cloud", "AzureCommercial")
+            cloud=existing.get("cloud")
         )
         
         # Update endpoint with discovered deployments

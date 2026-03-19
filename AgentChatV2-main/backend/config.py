@@ -69,6 +69,15 @@ class Settings(BaseSettings):
         alias="AZURE_COGNITIVE_SERVICES_SCOPE"
     )
     
+    # Azure Resource Manager (ARM) overrides for sovereign/custom clouds.
+    # When set, these override the auto-detected ARM endpoint and scope
+    # used for AOAI deployment discovery.
+    # Examples:
+    #   Azure Government: https://management.usgovcloudapi.net
+    #   Azure Commercial: https://management.azure.com
+    azure_arm_endpoint: str = Field(default="", alias="AZURE_ARM_ENDPOINT")
+    azure_arm_scope: str = Field(default="", alias="AZURE_ARM_SCOPE")
+    
     # Cosmos DB
     cosmos_endpoint: str = Field(default="", alias="AZURE_COSMOS_DB_ENDPOINT")
     cosmos_connection_string: str = Field(default="", alias="AZURE_COSMOS_DB_CONNECTION_STRING")
