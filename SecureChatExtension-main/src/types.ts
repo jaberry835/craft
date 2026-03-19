@@ -20,7 +20,7 @@ export type ContentPart =
     | { type: 'image_url'; image_url: { url: string; detail?: 'auto' | 'low' | 'high' } };
 
 export interface ChatMessage {
-    role: 'system' | 'user' | 'assistant' | 'tool';
+    role: 'system' | 'developer' | 'user' | 'assistant' | 'tool';
     content: string | ContentPart[] | null;
     tool_calls?: ToolCall[];
     tool_call_id?: string;
@@ -47,6 +47,12 @@ export interface ToolCall {
     };
 }
 
+export interface TokenUsage {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+}
+
 export interface AoaiStreamChunk {
     id: string;
     choices: Array<{
@@ -65,6 +71,7 @@ export interface AoaiStreamChunk {
         };
         finish_reason: string | null;
     }>;
+    usage?: TokenUsage;
 }
 
 // ── Tool System Types ──
@@ -145,6 +152,7 @@ export type WebviewMessage =
     | { type: 'switchSession'; sessionId: string }
     | { type: 'deleteSession'; sessionId: string }
     | { type: 'requestSessionList' }
+    | { type: 'showTokenUsage' }
     | { type: 'ready' };
 
 export type ExtensionMessage =
@@ -171,5 +179,6 @@ export type ExtensionMessage =
     | { type: 'progressCardStart'; title: string }
     | { type: 'progressCardStep'; icon: 'search' | 'read' | 'edit' | 'run' | 'check' | 'loading' | 'done' | 'error'; label: string; detail?: string; status?: 'running' | 'done' | 'error'; toolName?: string }
     | { type: 'progressCardEnd' }
-    | { type: 'terminalOutput'; line: string };
+    | { type: 'terminalOutput'; line: string }
+    | { type: 'tokenUsage'; totalTokens: string; chatTokens: string; inlineTokens: string; chatPct: string; inlinePct: string; requests: number; chatPrompt: string; chatCompletion: string; inlinePrompt: string; inlineCompletion: string; chatPromptPct: string; chatCompletionPct: string; inlinePromptPct: string; inlineCompletionPct: string; chatRequests: number; inlineRequests: number; windowPct: number; contextWindow: string };
 

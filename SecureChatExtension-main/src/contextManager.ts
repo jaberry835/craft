@@ -328,6 +328,23 @@ export class ContextManager {
         }
     }
 
+    /**
+     * Emergency trim — aggressively reduce conversation to fit a smaller-than-expected
+     * context window. Called when the API rejects the prompt (e.g. invalid_prompt).
+     * Halves the effective context window and re-trims, repeating until the
+     * conversation is substantially smaller.
+     */
+    emergencyTrim(messages: ChatMessage[]): ChatMessage[] {
+        // Use half the configured window as the emergency budget
+        const emergencyBudget = Math.floor(this.getContextWindow() * 0.35);
+        const currentTokens = this.estimateTotalTokens(messages);
+        if (currentTokens <= emergencyBudget) {
+            // Already small — nothing more to trim
+            return messages;
+        }
+        return this.trimMessages(messages, emergencyBudget);
+    }
+
     /** Truncate a string to maxLen characters, appending "..." if cut. */
     private truncate(s: string, maxLen: number): string {
         if (s.length <= maxLen) { return s; }

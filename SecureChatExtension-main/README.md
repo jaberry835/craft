@@ -9,6 +9,7 @@ A VS Code extension that provides a **Copilot-like autonomous agent** powered by
 - **MCP (Model Context Protocol)** — Connect external MCP tool servers over stdio for extensible tool capabilities.
 - **Azure OpenAI Streaming** — Direct HTTPS connection to your Azure OpenAI resource with streaming responses (no SDK, zero external runtime dependencies). Supports both direct AOAI and API Management (APIM) proxy connections.
 - **Multi-Model Selection** — Configure multiple deployments and switch between them from the chat panel.
+- **Inline Code Completions** — Ghost-text suggestions (like GitHub Copilot) powered by your Azure OpenAI deployment. Supports a separate fast model for completions, debounced triggering, and aggressive cancellation for responsive UX.
 - **Confirmation Dialogs** — Approve or deny file writes, deletions, and terminal commands before execution.
 - **Context Menu Actions** — Right-click selected code to Explain, Review, or Fix it.
 - **Session Persistence** — Chat history is persisted across VS Code restarts.
@@ -57,12 +58,12 @@ Open VS Code Settings (`Ctrl+,`) and search for `Junior`, or add to your `settin
     {
       "name": "GPT-4o",
       "deploymentId": "gpt-4o",
-      "apiVersion": "2024-06-01"
+      "apiVersion": "2025-03-01-preview"
     },
     {
       "name": "GPT-4 Turbo",
       "deploymentId": "gpt-4-turbo",
-      "apiVersion": "2024-06-01"
+      "apiVersion": "2025-03-01-preview"
     }
   ],
   "junior.azureOpenAI.activeDeployment": "gpt-4o"
@@ -146,30 +147,41 @@ You can mix both transports — servers with `command` use stdio, servers with `
 
 By default, Junior merges `junior.mcp.servers` with external settings listed in `junior.mcp.externalServerSettings` (defaults to `["mcp.servers"]`). If two settings define the same server name, `junior.mcp.servers` wins. Set `junior.mcp.includeExternalServers` to `false` to only use Junior's own setting.
 
-**Complete example (explicitly using external MCP servers):**
+**Complete example (all features configured):**
 
 ```jsonc
 {
-  "junior.azureOpenAI.provider": "direct",
+  // ── Azure OpenAI connection ──
+  "junior.azureOpenAI.provider": "direct",           // or "apim" for API Management proxy
   "junior.azureOpenAI.endpoint": "https://your-resource.openai.azure.com",
+  "junior.azureOpenAI.apiVersion": "2025-03-01-preview",
   "junior.azureOpenAI.deployments": [
     {
       "name": "GPT-4o",
       "deploymentId": "gpt-4o",
-      "apiVersion": "2024-06-01"
+      "apiVersion": "2025-03-01-preview"
+    },
+    {
+      "name": "GPT-4o Mini",
+      "deploymentId": "gpt-4o-mini",
+      "apiVersion": "2025-03-01-preview"
     }
   ],
   "junior.azureOpenAI.activeDeployment": "gpt-4o",
-  "junior.mcp.includeExternalServers": true,  //use the vscode MCP servers in extensions view
+
+  // ── Inline completions (ghost text) ──
+  "junior.inlineCompletions.enabled": true,           // toggle inline suggestions on/off
+  "junior.inlineCompletions.deployment": "gpt-4o-mini", // fast model for completions (leave "" to use active chat model)
+  "junior.inlineCompletions.timeoutMs": 5000,         // abort if model doesn't respond within this time (1000–30000)
+  "junior.inlineCompletions.candidates": 1,           // number of alternatives (1–3); cycle with Alt+] / Alt+[
+
+  // ── MCP servers ──
+  "junior.mcp.includeExternalServers": true,          // also load servers from mcp.servers
   "junior.mcp.externalServerSettings": [
     "mcp.servers"
   ],
-  // Optional local overrides/additions.
-  // Leave empty if you only want external servers.
   "junior.mcp.servers": {
-      // "msdocs": {
-       // "url": "https://learn.microsoft.com/api/mcp"
-       // }
+    // Add local MCP servers here; these override duplicates from external settings
   }
 }
 ```
@@ -209,6 +221,9 @@ Press **Shift+Enter** for a newline without sending.
 | `Junior: Cancel Agent Run` | Stop the current agent loop |
 | `Junior: Toggle Chat History` | Show/hide the session history panel |
 | `Junior: Set API Key` | Store API key securely in OS credential manager |
+| `Junior: Trigger Inline Completion` | Manually trigger a ghost-text suggestion (`Alt+\`) |
+| `Junior: Show Token Usage` | Show detailed session token usage breakdown |
+| `Junior: Reset Token Usage` | Reset all session token counters to zero |
 
 `Index Workspace` also runs automatically on activation. Use it manually after major file/folder changes or when workspace settings (exclude patterns, max file size) change.
 
@@ -231,7 +246,7 @@ Select code in the editor, right-click, and choose:
 | `junior.azureOpenAI.apiKey` | `""` | API key |
 | `junior.azureOpenAI.deployments` | `[]` | List of `{ name, deploymentId, apiVersion }` — configured manually |
 | `junior.azureOpenAI.activeDeployment` | `""` | Currently active deployment ID |
-| `junior.azureOpenAI.apiVersion` | `"2024-06-01"` | Default API version |
+| `junior.azureOpenAI.apiVersion` | `"2025-03-01-preview"` | Default API version (>= `2024-08-01` required for token usage tracking) |
 | `junior.maxTokens` | `4096` | Max tokens per response |
 | `junior.temperature` | `0.3` | Response temperature (0–1) |
 | `junior.workspace.maxFileSize` | `100000` | Max file size (bytes) to index |
@@ -244,6 +259,10 @@ Select code in the editor, right-click, and choose:
 | `junior.mcp.servers` | `{}` | MCP server configurations (overrides duplicates from external settings) |
 | `junior.mcp.includeExternalServers` | `true` | Also load MCP servers from external settings keys |
 | `junior.mcp.externalServerSettings` | `["mcp.servers"]` | External settings paths to merge MCP servers from |
+| `junior.inlineCompletions.enabled` | `true` | Enable/disable inline ghost-text code completions |
+| `junior.inlineCompletions.deployment` | `""` | Deployment ID for inline completions. Leave empty to use the active chat deployment. A fast model (e.g. `gpt-4o`) is recommended. |
+| `junior.inlineCompletions.timeoutMs` | `5000` | Max time (ms) to wait for a completion response before aborting (1000–30000) |
+| `junior.inlineCompletions.candidates` | `1` | Number of alternative completions to fetch (1–3). Cycle with Alt+] / Alt+[ |
 
 ## Architecture
 
@@ -257,14 +276,14 @@ src/
 ├── contextManager.ts     — Context window management (token estimation, message trimming)
 ├── toolValidator.ts      — Tool argument validation (schema checking before execution)
 ├── builtinTools.ts       — 20 built-in workspace tools
+├── inlineCompletionProvider.ts — Inline ghost-text completions (InlineCompletionItemProvider)
 ├── mcpClient.ts          — MCP stdio/HTTP client for external tool servers
 ├── workspaceIndexer.ts   — Workspace file scanning and search (cached to disk)
 ├── symbolIndexer.ts      — Symbol indexing (functions, classes, etc.)
 ├── semanticIndexer.ts    — TF-IDF semantic indexing for natural-language search (cached to disk)
 ├── planTreeProvider.ts   — Plan tree view provider for agent step tracking
 ├── sessionManager.ts     — Chat session persistence (globalState)
-└── chatViewProvider.ts   — Webview UI (sidebar chat panel)
-```
+└── chatViewProvider.ts   — Webview UI (sidebar chat panel)└── tokenTracker.ts       — Session token usage tracking with status bar + webview badge```
 
 ## Development
 
@@ -402,7 +421,42 @@ Three indexers run on activation and can be re-triggered via the Index Workspace
 - Streams responses token-by-token via SSE (`stream: true`)
 - Handles tool-call function arguments that arrive across multiple SSE chunks
 - Supports switching between multiple configured deployments at runtime
+- Supports per-request overrides for `maxTokens` and `temperature` (used by inline completions)
 - Uses only Node.js built-in `https` — no npm packages, no SDK, no external dependencies
+
+### Inline Code Completions
+
+`inlineCompletionProvider.ts` registers as a VS Code `InlineCompletionItemProvider` to deliver ghost-text suggestions as you type:
+
+- **Debounced triggering** — requests fire after 150ms of idle time to avoid spamming the API during active typing.
+- **Aggressive cancellation** — every new keystroke aborts any in-flight request via `AbortSignal`, keeping the UI responsive.
+- **Buffered response** — streamed tokens are collected into a complete suggestion before displaying (no visual flicker).
+- **Request deduplication** — identical requests (same document version + cursor position) return cached results.
+- **FIM-style prompt** — sends prefix (up to 8K chars before cursor) and suffix (up to 2K chars after cursor) with a system prompt that instructs the model to output only code.
+- **Separate deployment** — optionally use a faster/cheaper model for completions (e.g. `gpt-4o`) while keeping a larger model for chat. Configure via `junior.inlineCompletions.deployment`.
+- **IntelliSense awareness** — suppresses ghost text when the native completions widget is active.
+- **Large file guard** — skips files over 500KB to avoid excessive token usage.
+- **Toggle** — disable instantly via `junior.inlineCompletions.enabled` (no reload required).
+- **Single-line vs multi-line detection** — when the cursor is mid-line, completes only the current line (64 tokens). On a blank line, generates multi-line blocks (256 tokens).
+- **Cooldown after dismissal** — if a suggestion is dismissed, the next request is delayed (up to 2.5s) to reduce API waste.
+- **Neighboring-tab context** — includes snippets from up to 3 open editor tabs in the prompt, giving the model awareness of related files.
+- **Smart suppression** — skips triggering in comment lines (detected via language-specific prefixes: `//`, `#`, `--`, `<!--`, etc.).
+- **Hard request timeout** — aborts if the model doesn't respond within the configured timeout (default 5s). Configurable via `junior.inlineCompletions.timeoutMs`.
+- **Type-ahead cache reuse** — when you type characters that match the beginning of the last suggestion, the remaining tail is served instantly with zero latency (no API call).
+- **Status bar indicator** — shows a sparkle icon in the status bar; displays a spinning animation while fetching. Click it to manually trigger a completion.
+- **Manual trigger** — press `Alt+\` to force a suggestion on demand, bypassing cooldown and comment suppression.
+- **Multi-candidate cycling** — set `junior.inlineCompletions.candidates` to 2 or 3 to fetch multiple alternatives in parallel with varied temperature. Cycle through them with `Alt+]` / `Alt+[`.
+
+### Token Usage Tracking
+
+Junior tracks cumulative token usage across your session — both from chat and inline completions — and displays it in two places:
+
+- **Status bar** — a `$(pulse) 18.6K` indicator in the bottom-left status bar. Hover for a rich GHCP-style tooltip showing a full breakdown: prompt vs. completion tokens, chat vs. inline, percentages, request counts, and a clickable "Reset Counters" link.
+- **Panel badge** — a small `📊 18.6K` badge in the chat panel next to "Enter to send".
+
+Token tracking requires `stream_options: { include_usage: true }` in the API request, which is supported on Azure OpenAI API versions `2024-08-01` and later. The default API version is `2025-03-01-preview`.
+
+**Graceful degradation:** If your deployment uses an older API version (e.g., `2024-06-01`), the `stream_options` parameter is automatically omitted. Everything works normally — the tracker simply shows 0 tokens because the API doesn't return usage data. No errors, no 500s.
 
 ### UI Architecture
 

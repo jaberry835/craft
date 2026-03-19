@@ -8,6 +8,8 @@ import { SessionManager } from './sessionManager';
 import { SymbolIndexer } from './symbolIndexer';
 import { SemanticIndexer } from './semanticIndexer';
 import { getSetting, updateSetting } from './config';
+import { InlineCompletionProvider } from './inlineCompletionProvider';
+import { TokenTracker } from './tokenTracker';
 
 let chatViewProvider: ChatViewProvider;
 let mcpClient: McpClient;
@@ -34,6 +36,7 @@ export function activate(context: vscode.ExtensionContext) {
     const builtinTools = new BuiltinTools(workspaceIndexer, symbolIndexer, semanticIndexer);
     mcpClient = new McpClient();
     const sessionManager = new SessionManager(context.workspaceState);
+    const tokenTracker = new TokenTracker(log);
 
     chatViewProvider = new ChatViewProvider(
         context.extensionUri,
@@ -41,7 +44,8 @@ export function activate(context: vscode.ExtensionContext) {
         builtinTools,
         mcpClient,
         sessionManager,
-        log
+        log,
+        tokenTracker
     );
 
     // Register the webview provider
@@ -197,6 +201,34 @@ export function activate(context: vscode.ExtensionContext) {
             }
         })
     );
+
+    // ── Inline Completions ──
+
+    const inlineProvider = new InlineCompletionProvider(aoaiClient, log, tokenTracker);
+    context.subscriptions.push(
+        vscode.languages.registerInlineCompletionItemProvider({ pattern: '**' }, inlineProvider)
+    );
+    context.subscriptions.push({ dispose: () => inlineProvider.dispose() });
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('junior.triggerInlineCompletion', () => {
+            vscode.commands.executeCommand('editor.action.inlineSuggest.trigger');
+        })
+    );
+
+    // Token usage commands
+    context.subscriptions.push(
+        vscode.commands.registerCommand('junior.showTokenUsage', () => {
+            tokenTracker.showDetailedUsage();
+        })
+    );
+    context.subscriptions.push(
+        vscode.commands.registerCommand('junior.resetTokenUsage', () => {
+            tokenTracker.reset();
+            vscode.window.showInformationMessage('Junior: Token usage counters reset.');
+        })
+    );
+    context.subscriptions.push({ dispose: () => tokenTracker.dispose() });
 
     // Context menu commands
     context.subscriptions.push(

@@ -5,12 +5,24 @@
 import * as https from 'https';
 import * as http from 'http';
 import * as vscode from 'vscode';
-import { AoaiConfig, ChatMessage, ToolDefinition, AoaiStreamChunk, ToolCall } from './types';
+import { AoaiConfig, ChatMessage, ToolDefinition, AoaiStreamChunk, ToolCall, TokenUsage } from './types';
 import { getSetting } from './config';
 
 export class AzureOpenAIClient {
     private secrets?: vscode.SecretStorage;
     private cachedSecretKey?: string;
+    /** Temporary deployment override — set by the agent loop for fallback recovery. */
+    private deploymentOverride?: string;
+
+    /** Temporarily override the active deployment (e.g. for model fallback). Pass undefined to clear. */
+    setDeploymentOverride(deploymentId: string | undefined) {
+        this.deploymentOverride = deploymentId;
+    }
+
+    /** Returns the current effective deployment ID (override or configured). */
+    getEffectiveDeployment(): string {
+        return this.deploymentOverride || getSetting<string>('azureOpenAI.activeDeployment') || '';
+    }
 
     setSecretStorage(secrets: vscode.SecretStorage) {
         this.secrets = secrets;
@@ -49,7 +61,7 @@ export class AzureOpenAIClient {
         const apimBaseUrl = getSetting<string>('azureOpenAI.apimBaseUrl') || '';
         // apiKey is resolved async via getApiKey() — callers that need it should call getConfigAsync()
         const apiKey = this.cachedSecretKey || getSetting<string>('azureOpenAI.apiKey') || '';
-        const deploymentId = getSetting<string>('azureOpenAI.activeDeployment') || '';
+        const deploymentId = this.getEffectiveDeployment();
         const apiVersion = getSetting<string>('azureOpenAI.apiVersion') || '2024-06-01';
         const maxTokens = getSetting<number>('maxTokens') || 16384;
         const temperature = getSetting<number>('temperature') || 0.3;
@@ -62,7 +74,7 @@ export class AzureOpenAIClient {
         const endpoint = getSetting<string>('azureOpenAI.endpoint') || '';
         const apimBaseUrl = getSetting<string>('azureOpenAI.apimBaseUrl') || '';
         const apiKey = await this.getApiKey();
-        const deploymentId = getSetting<string>('azureOpenAI.activeDeployment') || '';
+        const deploymentId = this.getEffectiveDeployment();
         const apiVersion = getSetting<string>('azureOpenAI.apiVersion') || '2024-06-01';
         const maxTokens = getSetting<number>('maxTokens') || 16384;
         const temperature = getSetting<number>('temperature') || 0.3;
@@ -89,19 +101,34 @@ export class AzureOpenAIClient {
     async *streamChat(
         messages: ChatMessage[],
         tools: ToolDefinition[],
-        abortSignal?: AbortSignal
-    ): AsyncGenerator<{ type: 'text'; text: string } | { type: 'toolCalls'; calls: ToolCall[] } | { type: 'done' }> {
+        abortSignal?: AbortSignal,
+        options?: { reasoningMode?: boolean; maxTokens?: number; temperature?: number; stop?: string[] }
+    ): AsyncGenerator<{ type: 'text'; text: string } | { type: 'toolCalls'; calls: ToolCall[] } | { type: 'usage'; usage: TokenUsage } | { type: 'done' }> {
         const config = await this.getConfigAsync();
         const base = (config.provider === 'apim' ? config.apimBaseUrl : config.endpoint).replace(/\/+$/, '');
         const url = new URL(
             `${base}/openai/deployments/${encodeURIComponent(config.deploymentId)}/chat/completions?api-version=${config.apiVersion}`
         );
 
+        // In reasoning mode, convert system→developer role and drop temperature
+        // to be compatible with reasoning models (o-series, some GPT-5.x variants)
+        const effectiveMessages = options?.reasoningMode
+            ? messages.map(m => m.role === 'system' ? { ...m, role: 'developer' as const } : m)
+            : messages;
+
+        const effectiveMaxTokens = options?.maxTokens ?? config.maxTokens;
+        const effectiveTemperature = options?.temperature ?? config.temperature;
+
+        // stream_options requires API version >= 2024-08-01-preview
+        const supportsStreamOptions = config.apiVersion >= '2024-08-01';
+
         const body = JSON.stringify({
-            messages,
-            max_completion_tokens: config.maxTokens,
-            temperature: config.temperature,
+            messages: effectiveMessages,
+            max_completion_tokens: effectiveMaxTokens,
+            ...(options?.reasoningMode ? {} : { temperature: effectiveTemperature }),
             stream: true,
+            ...(supportsStreamOptions ? { stream_options: { include_usage: true } } : {}),
+            ...(options?.stop ? { stop: options.stop } : {}),
             ...(tools.length > 0 ? { tools, tool_choice: 'auto' } : {})
         });
 
@@ -140,6 +167,11 @@ export class AzureOpenAIClient {
 
                 let parsed: AoaiStreamChunk;
                 try { parsed = JSON.parse(data); } catch { continue; }
+
+                // Usage arrives on the final chunk (choices may be empty)
+                if (parsed.usage) {
+                    yield { type: 'usage', usage: parsed.usage };
+                }
 
                 const choice = parsed.choices?.[0];
                 if (!choice) { continue; }
@@ -256,6 +288,13 @@ export class AzureOpenAIClient {
                             err.statusCode = res.statusCode;
                             err.retryAfter = res.headers['retry-after']
                                 ? parseInt(res.headers['retry-after'] as string, 10) : undefined;
+                            // Parse structured error fields when available
+                            try {
+                                const parsed = JSON.parse(errBody);
+                                const inner = parsed?.error || parsed;
+                                if (inner.code) { err.errorCode = inner.code; }
+                                if (inner.param) { err.errorParam = inner.param; }
+                            } catch { /* body wasn't JSON — leave fields unset */ }
                             reject(err);
                         });
                         return;

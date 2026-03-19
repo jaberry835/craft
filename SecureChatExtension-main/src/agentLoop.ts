@@ -13,6 +13,7 @@ import { ContextManager } from './contextManager';
 import { validateToolArgs, buildToolSchemaMap } from './toolValidator';
 import { getSetting } from './config';
 import { ChatMessage, ContentPart, ToolCall, ToolDefinition, ToolResult, ExtensionMessage, AgentPlanStep } from './types';
+import { TokenTracker } from './tokenTracker';
 
 export interface AgentCallbacks {
     sendToWebview(msg: ExtensionMessage): void;
@@ -29,6 +30,9 @@ const RETRY_DELAY_MS = 600;
 
 /** Max number of auto-fix cycles when the model stops but errors remain */
 const MAX_AUTOFIX_CYCLES = 3;
+
+/** Max number of emergency recovery attempts when the API rejects the prompt */
+const MAX_CONTEXT_RECOVERY_ATTEMPTS = 3;
 
 /** Tools that modify files — used to track which files may have new diagnostics */
 const WRITE_TOOLS = new Set(['write_file', 'edit_file', 'replace_lines', 'delete_file', 'apply_code_action', 'rename_symbol']);
@@ -101,7 +105,8 @@ export class AgentLoop {
         private aoaiClient: AzureOpenAIClient,
         private builtinTools: BuiltinTools,
         private mcpClient: McpClient,
-        private callbacks: AgentCallbacks
+        private callbacks: AgentCallbacks,
+        private tokenTracker?: TokenTracker
     ) {
         this.maxIterations = getSetting<number>('agent.maxIterations') ?? 25;
     }
@@ -252,6 +257,8 @@ export class AgentLoop {
         this.editedFiles.clear();
         let activeCardTitle: string | null = null;
         let autofixCycles = 0;
+        let contextRecoveryAttempts = 0;
+        let reasoningMode = false;
 
         // Add system prompt if first message
         if (this.messages.length === 0) {
@@ -336,25 +343,91 @@ export class AgentLoop {
 
                 let assistantText = '';
                 let toolCalls: ToolCall[] = [];
+                let streamFailed = false;
 
-                const stream = this.aoaiClient.streamChat(
-                    this.messages,
-                    tools,
-                    this.abortController.signal
-                );
+                try {
+                    const stream = this.aoaiClient.streamChat(
+                        this.messages,
+                        tools,
+                        this.abortController.signal,
+                        { reasoningMode }
+                    );
 
-                for await (const chunk of stream) {
-                    if (!this.running) { break; }
+                    for await (const chunk of stream) {
+                        if (!this.running) { break; }
 
-                    if (chunk.type === 'text') {
-                        assistantText += chunk.text;
-                        this.callbacks.sendToWebview({ type: 'appendAssistantText', text: chunk.text });
-                    } else if (chunk.type === 'toolCalls') {
-                        toolCalls = chunk.calls;
+                        if (chunk.type === 'text') {
+                            assistantText += chunk.text;
+                            this.callbacks.sendToWebview({ type: 'appendAssistantText', text: chunk.text });
+                        } else if (chunk.type === 'toolCalls') {
+                            toolCalls = chunk.calls;
+                        } else if (chunk.type === 'usage' && this.tokenTracker) {
+                            this.tokenTracker.record('chat', chunk.usage);
+                        }
                     }
+                } catch (streamErr: any) {
+                    // Detect invalid_prompt / context-too-large errors (400) and attempt recovery
+                    const isInvalidPrompt = streamErr.statusCode === 400 &&
+                        (streamErr.errorCode === 'invalid_prompt' ||
+                         /invalid.prompt/i.test(streamErr.message));
+
+                    if (isInvalidPrompt && contextRecoveryAttempts < MAX_CONTEXT_RECOVERY_ATTEMPTS) {
+                        contextRecoveryAttempts++;
+                        this.callbacks.sendToWebview({ type: 'endAssistantMessage' });
+
+                        if (contextRecoveryAttempts === 1) {
+                            // First attempt: emergency trim (context overflow)
+                            this.callbacks.sendToWebview({
+                                type: 'setStatus',
+                                status: 'Prompt too large for model — trimming context...'
+                            });
+                            this.callbacks.sendToWebview({
+                                type: 'appendAssistantText',
+                                text: '\n\n*[Context exceeded model limit — automatically trimming and retrying...]*\n\n'
+                            });
+                            this.messages = this.contextManager.emergencyTrim(this.messages);
+                        } else if (contextRecoveryAttempts === 2) {
+                            // Second attempt: switch to reasoning-compatible params
+                            // (system→developer role, drop temperature)
+                            reasoningMode = true;
+                            this.callbacks.sendToWebview({
+                                type: 'setStatus',
+                                status: 'Retrying with reasoning-compatible parameters...'
+                            });
+                            this.callbacks.sendToWebview({
+                                type: 'appendAssistantText',
+                                text: '\n\n*[Switching to reasoning-model compatible parameters and retrying...]*\n\n'
+                            });
+                        } else {
+                            // Third attempt: fall back to a different deployment
+                            const fallback = this.findFallbackDeployment();
+                            if (fallback) {
+                                this.aoaiClient.setDeploymentOverride(fallback.deploymentId);
+                                reasoningMode = false; // reset — fallback model may be standard
+                                this.messages = this.contextManager.emergencyTrim(this.messages);
+                                const label = fallback.name || fallback.deploymentId;
+                                this.callbacks.sendToWebview({
+                                    type: 'setStatus',
+                                    status: `Switching to ${label} to continue...`
+                                });
+                                this.callbacks.sendToWebview({
+                                    type: 'appendAssistantText',
+                                    text: `\n\n*[Falling back to ${label} to continue...]*\n\n`
+                                });
+                            } else {
+                                // No fallback available — rethrow
+                                throw streamErr;
+                            }
+                        }
+                        continue; // retry the while-loop iteration
+                    }
+                    // Not recoverable — rethrow to the outer catch
+                    throw streamErr;
                 }
 
                 this.callbacks.sendToWebview({ type: 'endAssistantMessage' });
+                // Reset recovery counter on successful streaming
+                contextRecoveryAttempts = 0;
 
                 if (!this.running) { break; }
 
@@ -512,6 +585,8 @@ export class AgentLoop {
                 });
             }
         } finally {
+            // Clear any deployment override so subsequent runs use the configured model
+            this.aoaiClient.setDeploymentOverride(undefined);
             // Final close for any lingering card
             this.callbacks.sendToWebview({ type: 'progressCardEnd' });
             // Mark any remaining pending/in-progress plan steps as completed
@@ -534,6 +609,21 @@ export class AgentLoop {
         const builtin = this.builtinTools.getDefinitions();
         const mcp = this.mcpClient.getToolDefinitions();
         return [...builtin, ...mcp];
+    }
+
+    /**
+     * Find a fallback deployment from the configured deployments list.
+     * Returns the first deployment that isn't the currently active one, or null.
+     */
+    private findFallbackDeployment(): { name: string; deploymentId: string } | null {
+        const deployments = getSetting<Array<{ name: string; deploymentId: string }>>('azureOpenAI.deployments') || [];
+        const active = this.aoaiClient.getEffectiveDeployment();
+        for (const d of deployments) {
+            if (d.deploymentId && d.deploymentId !== active) {
+                return d;
+            }
+        }
+        return null;
     }
 
     /**

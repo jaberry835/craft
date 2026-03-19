@@ -126,6 +126,11 @@ window.onerror = function(msg, src, line, col, err) {
         btnAttach.addEventListener('click', () => vscode.postMessage({ type: 'attachFile' }));
     }
 
+    var contextMeterEl = document.getElementById('context-meter');
+    if (contextMeterEl) {
+        contextMeterEl.addEventListener('click', () => vscode.postMessage({ type: 'showTokenUsage' }));
+    }
+
     if (modelSelectEl) {
         modelSelectEl.addEventListener('change', () => {
             const deploymentId = modelSelectEl.value;
@@ -915,6 +920,47 @@ window.onerror = function(msg, src, line, col, err) {
                 closeCurrentProgressCard();
                 // Keep activeProgressCard reference alive for potential reuse
                 scrollToBottom();
+                break;
+            }
+            case 'tokenUsage': {
+                // Update the SVG ring meter
+                var meterFill = document.querySelector('#context-meter .meter-fill');
+                var meterLabel = document.querySelector('#context-meter .meter-label');
+                if (meterFill && meterLabel) {
+                    var circumference = 2 * Math.PI * 8; // r=8 → ~50.27
+                    var pctVal = msg.windowPct || 0;
+                    var offset = circumference * (1 - pctVal / 100);
+                    meterFill.setAttribute('stroke-dashoffset', String(offset));
+                    meterLabel.textContent = msg.totalTokens + ' / ' + msg.contextWindow + ' (' + pctVal + '%)';
+                    // Set tooltip on the meter
+                    var meterEl = document.getElementById('context-meter');
+                    if (meterEl) {
+                        meterEl.title = 'Session Token Usage\n'
+                            + '\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n'
+                            + msg.totalTokens + ' tokens (' + msg.requests + ' requests)\n'
+                            + pctVal + '% of ' + msg.contextWindow + ' context window\n'
+                            + '\n'
+                            + 'Chat \u2014 ' + msg.chatTokens + ' (' + msg.chatPct + ')\n'
+                            + '  Prompt:       ' + msg.chatPrompt + '  ' + msg.chatPromptPct + '\n'
+                            + '  Completion:   ' + msg.chatCompletion + '  ' + msg.chatCompletionPct + '\n'
+                            + '  Requests:     ' + msg.chatRequests + '\n'
+                            + '\n'
+                            + 'Inline \u2014 ' + msg.inlineTokens + ' (' + msg.inlinePct + ')\n'
+                            + '  Prompt:       ' + msg.inlinePrompt + '  ' + msg.inlinePromptPct + '\n'
+                            + '  Completion:   ' + msg.inlineCompletion + '  ' + msg.inlineCompletionPct + '\n'
+                            + '  Requests:     ' + msg.inlineRequests + '\n'
+                            + '\n'
+                            + 'Click for details';
+                    }
+                    // Color the ring: green < 50%, yellow 50-75%, red > 75%
+                    if (pctVal > 75) {
+                        meterFill.style.stroke = 'var(--vscode-editorError-foreground, #f44)';
+                    } else if (pctVal > 50) {
+                        meterFill.style.stroke = 'var(--vscode-editorWarning-foreground, #fa0)';
+                    } else {
+                        meterFill.style.stroke = 'var(--vscode-progressBar-background, #0078d4)';
+                    }
+                }
                 break;
             }
         }

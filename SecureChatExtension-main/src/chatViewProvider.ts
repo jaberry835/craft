@@ -11,6 +11,7 @@ import { McpClient } from './mcpClient';
 import { SessionManager } from './sessionManager';
 import { ExtensionMessage, WebviewMessage } from './types';
 import { getSetting, updateSetting } from './config';
+import { TokenTracker } from './tokenTracker';
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
     private webviewView?: vscode.WebviewView;
@@ -23,7 +24,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         private builtinTools: BuiltinTools,
         private mcpClient: McpClient,
         private sessionManager: SessionManager,
-        log?: (msg: string) => void
+        log?: (msg: string) => void,
+        private tokenTracker?: TokenTracker
     ) {
         this.log = log || (() => {});
     }
@@ -139,6 +141,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 case 'attachFile':
                     this.handleAttachFile();
                     break;
+                case 'showTokenUsage':
+                    if (this.tokenTracker) { this.tokenTracker.showDetailedUsage(); }
+                    break;
                 case 'switchSession':
                     this.handleSwitchSession(msg.sessionId);
                     break;
@@ -153,6 +158,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     this.syncModelsToWebview();
                     this.restoreSession();
                     this.sendSessionList();
+                    if (this.tokenTracker) {
+                        this.tokenTracker.setWebviewSender((m) => this.sendToWebview(m));
+                    }
                     break;
             }
         } catch (err: any) {
@@ -177,7 +185,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 this.aoaiClient,
                 this.builtinTools,
                 this.mcpClient,
-                callbacks
+                callbacks,
+                this.tokenTracker
             );
         }
 
@@ -1259,6 +1268,48 @@ body { display: flex; flex-direction: column; }
     opacity: 0.5;
     margin-top: 3px;
     text-align: right;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+#context-meter {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+}
+#context-meter .meter-ring {
+    width: 18px;
+    height: 18px;
+    position: relative;
+}
+#context-meter .meter-ring svg {
+    width: 18px;
+    height: 18px;
+    transform: rotate(-90deg);
+}
+#context-meter .meter-ring .meter-bg {
+    fill: none;
+    stroke: var(--vscode-editorWidget-border, rgba(255,255,255,0.1));
+    stroke-width: 3;
+}
+#context-meter .meter-ring .meter-fill {
+    fill: none;
+    stroke: var(--vscode-progressBar-background, #0078d4);
+    stroke-width: 3;
+    stroke-linecap: round;
+    transition: stroke-dashoffset 0.4s ease;
+}
+#context-meter .meter-label {
+    white-space: nowrap;
+    max-width: 0;
+    overflow: hidden;
+    opacity: 0;
+    transition: max-width 0.3s ease, opacity 0.3s ease;
+}
+#context-meter:hover .meter-label {
+    max-width: 200px;
+    opacity: 1;
 }
 </style>
 </head>
@@ -1305,7 +1356,7 @@ body { display: flex; flex-direction: column; }
             </select>
         </div>
     </div>
-    <div class="hint">Enter to send &middot; Shift+Enter for newline &middot; Paste images from clipboard</div>
+    <div class="hint"><span class="hint-text">Enter to send &middot; Shift+Enter for newline &middot; Paste images from clipboard</span><div id="context-meter"><div class="meter-ring"><svg viewBox="0 0 20 20"><circle class="meter-bg" cx="10" cy="10" r="8" /><circle class="meter-fill" cx="10" cy="10" r="8" stroke-dasharray="50.27" stroke-dashoffset="50.27" /></svg></div><span class="meter-label">0 / 128.0K (0%)</span></div></div>
 </div>
 
 <script nonce="${nonce}" src="${scriptUri}"></script>

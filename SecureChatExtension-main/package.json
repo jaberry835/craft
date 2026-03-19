@@ -92,6 +92,21 @@
         "command": "junior.setApiKey",
         "title": "Junior: Set API Key",
         "icon": "$(key)"
+      },
+      {
+        "command": "junior.triggerInlineCompletion",
+        "title": "Junior: Trigger Inline Completion",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "junior.showTokenUsage",
+        "title": "Junior: Show Token Usage",
+        "icon": "$(dashboard)"
+      },
+      {
+        "command": "junior.resetTokenUsage",
+        "title": "Junior: Reset Token Usage Counters",
+        "icon": "$(clear-all)"
       }
     ],
     "menus": {
@@ -184,7 +199,7 @@
               },
               "apiVersion": {
                 "type": "string",
-                "description": "API version (e.g., 2024-06-01)"
+                "description": "API version (e.g., 2025-03-01-preview)"
               }
             }
           },
@@ -198,7 +213,7 @@
         },
         "junior.azureOpenAI.apiVersion": {
           "type": "string",
-          "default": "2024-06-01",
+          "default": "2025-03-01-preview",
           "description": "Default Azure OpenAI API version"
         },
         "junior.maxTokens": {
@@ -307,6 +322,30 @@
             ]
           }
         },
+        "junior.inlineCompletions.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable inline code completions (ghost text) powered by Azure OpenAI"
+        },
+        "junior.inlineCompletions.deployment": {
+          "type": "string",
+          "default": "",
+          "description": "Azure OpenAI deployment ID to use for inline completions. Leave empty to use the active chat deployment. A fast model (e.g. GPT-4o-mini) is recommended for low-latency completions."
+        },
+        "junior.inlineCompletions.timeoutMs": {
+          "type": "number",
+          "default": 5000,
+          "minimum": 1000,
+          "maximum": 30000,
+          "description": "Maximum time in milliseconds to wait for an inline completion response before aborting. Lower values feel snappier but may discard slower responses."
+        },
+        "junior.inlineCompletions.candidates": {
+          "type": "number",
+          "default": 1,
+          "minimum": 1,
+          "maximum": 3,
+          "description": "Number of alternative completions to fetch (1–3). Use Alt+] / Alt+[ to cycle between candidates. Higher values use more API calls per suggestion."
+        },
         "junior.mcp.includeExternalServers": {
           "type": "boolean",
           "default": true,
@@ -325,6 +364,12 @@
         "command": "junior.openChat",
         "key": "ctrl+shift+i",
         "mac": "cmd+shift+i"
+      },
+      {
+        "command": "junior.triggerInlineCompletion",
+        "key": "alt+oem_5",
+        "mac": "alt+oem_5",
+        "when": "editorTextFocus"
       }
     ]
   },
