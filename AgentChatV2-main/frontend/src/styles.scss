@@ -18,11 +18,13 @@
   --bg-secondary: #252526;
   --bg-tertiary: #2d2d30;
   --bg-hover: #3c3c3c;
+  --input-bg: #333336;
   
   --text-primary: #ffffff;
   --text-secondary: #cccccc;
   --text-muted: #888888;
   
+  --accent-color: #4fa3e0;
   --border-color: #3c3c3c;
   --shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
   
@@ -69,11 +71,13 @@ body.theme-light {
   --bg-secondary: #ffffff;
   --bg-tertiary: #e8e8e8;
   --bg-hover: #d6d6d6;
+  --input-bg: #f0f0f0;
 
   --text-primary: #1e1e1e;
   --text-secondary: #444444;
   --text-muted: #888888;
 
+  --accent-color: #0078d4;
   --border-color: #d1d1d1;
   --shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
 
@@ -178,7 +182,7 @@ body.theme-light {
 .input {
   width: 100%;
   padding: var(--spacing-sm) var(--spacing-md);
-  background-color: var(--bg-tertiary);
+  background-color: var(--input-bg);
   border: 1px solid var(--border-color);
   border-radius: 6px;
   color: var(--text-primary);

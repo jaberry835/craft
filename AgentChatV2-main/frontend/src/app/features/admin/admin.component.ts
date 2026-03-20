@@ -24,6 +24,15 @@ import { environment } from '../../../environments/environment';
             Agents
           </h2>
           <div class="header-actions">
+            <div class="search-filter">
+              <span class="material-icons">search</span>
+              <input 
+                type="text" 
+                class="input filter-input" 
+                [(ngModel)]="agentFilter"
+                placeholder="Filter agents..."
+              />
+            </div>
             <button class="btn btn-secondary" (click)="openA2AModal()">
               <span class="material-icons">link</span>
               Add A2A Agent
@@ -36,7 +45,7 @@ import { environment } from '../../../environments/environment';
         </div>
       
         <div class="agents-list">
-        @for (agent of agents; track agent.id) {
+        @for (agent of filteredAgents; track agent.id) {
           <div class="agent-card" [class.a2a-agent]="agent.agent_type === 'a2a'">
             <div class="agent-header">
               <div class="agent-icon" [class.orchestrator]="agent.is_orchestrator" [class.a2a]="agent.agent_type === 'a2a'">
@@ -458,7 +467,7 @@ import { environment } from '../../../environments/environment';
       
       <!-- AOAI Endpoint Editor Modal -->
       @if (showAoaiEditor) {
-        <div class="modal-overlay" (click)="closeAoaiEditor()">
+        <div class="modal-overlay" (mousedown)="onOverlayMouseDown($event)" (click)="onAoaiOverlayClick($event)">
           <div class="modal" (click)="$event.stopPropagation()">
             <div class="modal-header">
               <h2>{{ editingAoaiEndpoint?.id ? 'Edit' : 'Add' }} Azure OpenAI Endpoint</h2>
@@ -594,9 +603,9 @@ import { environment } from '../../../environments/environment';
               </div>
               
               <!-- Model Deployments Section -->
-              <div class="form-group deployments-section">
+              <div class="form-group deployments-section section-group">
                 <label>
-                  <span class="material-icons" style="vertical-align: middle; font-size: 18px; margin-right: 4px;">memory</span>
+                  <span class="material-icons section-icon">memory</span>
                   Model Deployments
                 </label>
                 <span class="field-hint">
@@ -702,7 +711,7 @@ import { environment } from '../../../environments/environment';
       
       <!-- Agent Editor Modal -->
       @if (showEditor) {
-        <div class="modal-overlay" (click)="closeEditor()">
+        <div class="modal-overlay" (mousedown)="onOverlayMouseDown($event)" (click)="onAgentOverlayClick($event)">
           <div class="modal" (click)="$event.stopPropagation()">
           <div class="modal-header">
             <h2>{{ editingAgent?.id ? 'Edit' : 'Create' }} Agent</h2>
@@ -797,7 +806,7 @@ import { environment } from '../../../environments/environment';
             
             <!-- Orchestrator-specific prompts (visible when is_orchestrator is checked) -->
             @if (editingAgent!.is_orchestrator) {
-              <div class="orchestrator-prompts">
+              <div class="orchestrator-prompts section-group">
                 <div class="form-group">
                   <label>Analysis Prompt (Phase 1)</label>
                   <textarea 
@@ -823,8 +832,9 @@ import { environment } from '../../../environments/environment';
             }
             
             <!-- MCP Server Discovery Section -->
-            <div class="form-group">
+            <div class="form-group section-group">
               <label>
+                <span class="material-icons section-icon">hub</span>
                 MCP Server Tools
                 <span class="material-icons info-tooltip" title="Model Context Protocol (MCP) allows agents to call external tools and APIs. Enter the URL of an MCP server to discover available tools.">info_outline</span>
               </label>
@@ -890,6 +900,16 @@ import { environment } from '../../../environments/environment';
               @if (editingAgent!.mcp_tools && editingAgent!.mcp_tools.length > 0) {
                 <div class="selected-tools">
                   <label>Selected Tools ({{ editingAgent!.mcp_tools.length }})</label>
+                  @if (getUniqueServerUrls().length > 0) {
+                    <div class="mcp-server-urls">
+                      @for (url of getUniqueServerUrls(); track url) {
+                        <div class="mcp-server-url">
+                          <span class="material-icons">link</span>
+                          <span>{{ url }}</span>
+                        </div>
+                      }
+                    </div>
+                  }
                   <div class="tools-chips">
                     @for (tool of editingAgent!.mcp_tools; track tool.name; let i = $index) {
                       <div class="tool-chip">
@@ -904,9 +924,9 @@ import { environment } from '../../../environments/environment';
             
             <!-- Document Grounding Section -->
             @if (groundingAvailable && !editingAgent!.is_orchestrator) {
-              <div class="form-group">
+              <div class="form-group section-group">
                 <label>
-                  <span class="material-icons" style="vertical-align: middle; font-size: 18px; margin-right: 4px;">library_books</span>
+                  <span class="material-icons section-icon">library_books</span>
                   Document Grounding (RAG)
                   <span class="material-icons info-tooltip" title="Retrieval Augmented Generation (RAG) grounds the agent in your documents. When asked questions, the agent will automatically search indexed documents for relevant context before responding.">info_outline</span>
                 </label>
@@ -1094,7 +1114,7 @@ import { environment } from '../../../environments/environment';
       
       <!-- A2A Agent Discovery Modal -->
       @if (showA2AModal) {
-        <div class="modal-overlay" (click)="closeA2AModal()">
+        <div class="modal-overlay" (mousedown)="onOverlayMouseDown($event)" (click)="onA2AOverlayClick($event)">
           <div class="modal" (click)="$event.stopPropagation()">
             <div class="modal-header">
               <h2>Add External A2A Agent</h2>
@@ -1216,6 +1236,36 @@ import { environment } from '../../../environments/environment';
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
       gap: var(--spacing-md);
+      max-height: 70vh;
+      overflow-y: auto;
+      padding: 2px;
+    }
+
+    .search-filter {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background-color: var(--input-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 0 var(--spacing-sm);
+      
+      .material-icons {
+        font-size: 18px;
+        color: var(--text-muted);
+      }
+      
+      .filter-input {
+        border: none;
+        background: transparent;
+        width: 180px;
+        padding: 6px 0;
+        
+        &:focus {
+          border: none;
+          outline: none;
+        }
+      }
     }
     
     .agent-card {
@@ -1387,7 +1437,7 @@ import { environment } from '../../../environments/environment';
       background-color: var(--bg-secondary);
       border-radius: 12px;
       width: 100%;
-      max-width: 600px;
+      max-width: 750px;
       max-height: 90vh;
       overflow-y: auto;
     }
@@ -1420,7 +1470,7 @@ import { environment } from '../../../environments/environment';
     .form-group {
       margin-bottom: var(--spacing-md);
       
-      label {
+      label:not(.tool-checkbox) {
         display: block;
         font-size: 12px;
         font-weight: 500;
@@ -1436,6 +1486,28 @@ import { environment } from '../../../environments/environment';
         margin-top: 4px;
         font-style: italic;
       }
+    }
+
+    .section-group {
+      border-left: 3px solid var(--accent-color);
+      padding-left: var(--spacing-md);
+      margin-top: var(--spacing-lg);
+      margin-bottom: var(--spacing-lg);
+      
+      > label:not(.tool-checkbox):first-child {
+        color: var(--accent-color);
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 0.5px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+    }
+
+    .section-icon {
+      font-size: 18px !important;
+      color: var(--accent-color);
     }
     
     .form-row {
@@ -1539,16 +1611,21 @@ import { environment } from '../../../environments/environment';
     .tool-checkboxes {
       display: flex;
       flex-direction: column;
-      gap: var(--spacing-xs);
-      max-height: 200px;
+      gap: 2px;
+      max-height: 300px;
       overflow-y: auto;
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: var(--spacing-xs);
     }
     
     .tool-checkbox {
       display: flex;
+      flex-direction: row;
+      flex-wrap: nowrap;
       align-items: flex-start;
-      gap: var(--spacing-sm);
-      padding: var(--spacing-xs) var(--spacing-sm);
+      gap: 8px;
+      padding: 6px 8px;
       border-radius: 4px;
       cursor: pointer;
       text-transform: none;
@@ -1557,22 +1634,30 @@ import { environment } from '../../../environments/environment';
         background-color: var(--bg-secondary);
       }
       
-      input {
-        margin-top: 3px;
+      input[type="checkbox"] {
+        flex: 0 0 16px;
+        width: 16px;
+        height: 16px;
+        margin: 2px 0 0 0;
+        cursor: pointer;
       }
       
       .tool-info {
+        flex: 1 1 auto;
+        min-width: 0;
         display: flex;
         flex-direction: column;
         
         strong {
           font-size: 13px;
           color: var(--text-primary);
+          word-break: break-word;
         }
         
         .tool-desc {
           font-size: 11px;
           color: var(--text-muted);
+          word-break: break-word;
         }
       }
     }
@@ -1582,6 +1667,27 @@ import { environment } from '../../../environments/environment';
       
       label {
         margin-bottom: var(--spacing-xs);
+      }
+    }
+
+    .mcp-server-urls {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      margin-bottom: var(--spacing-sm);
+    }
+
+    .mcp-server-url {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 12px;
+      color: var(--text-muted);
+      line-height: 1;
+      
+      .material-icons {
+        font-size: 13px;
+        line-height: 1;
       }
     }
     
@@ -2430,9 +2536,22 @@ import { environment } from '../../../environments/environment';
 })
 export class AdminComponent implements OnInit, OnDestroy {
   agents: AgentConfig[] = [];
+  agentFilter: string = '';
+
+  get filteredAgents(): AgentConfig[] {
+    if (!this.agentFilter.trim()) return this.agents;
+    const term = this.agentFilter.toLowerCase();
+    return this.agents.filter(a =>
+      a.name.toLowerCase().includes(term) ||
+      (a.description || '').toLowerCase().includes(term)
+    );
+  }
   isLoading = false;
   showEditor = false;
   editingAgent: AgentConfig | null = null;
+
+  // Track mousedown target to prevent modal close when dragging from inside to outside
+  private overlayMousedownTarget: EventTarget | null = null;
   
   // MCP Discovery state
   mcpServerUrl = '';
@@ -2728,6 +2847,16 @@ export class AdminComponent implements OnInit, OnDestroy {
   removeTool(index: number): void {
     if (!this.editingAgent?.mcp_tools) return;
     this.editingAgent.mcp_tools.splice(index, 1);
+  }
+
+  getUniqueServerUrls(): string[] {
+    const tools = this.editingAgent?.mcp_tools;
+    if (!tools || tools.length === 0) return [];
+    const urls = new Set<string>();
+    for (const tool of tools) {
+      if (tool.server_url) urls.add(tool.server_url);
+    }
+    return Array.from(urls);
   }
   
   // =========================================================================
@@ -3039,6 +3168,28 @@ export class AdminComponent implements OnInit, OnDestroy {
     this.editingAoaiEndpoint = null;
     this.newDeploymentName = '';
     this.newDeploymentModelName = '';
+  }
+
+  onOverlayMouseDown(event: MouseEvent): void {
+    this.overlayMousedownTarget = event.target;
+  }
+
+  onAoaiOverlayClick(event: MouseEvent): void {
+    if (this.overlayMousedownTarget === event.currentTarget) {
+      this.closeAoaiEditor();
+    }
+  }
+
+  onAgentOverlayClick(event: MouseEvent): void {
+    if (this.overlayMousedownTarget === event.currentTarget) {
+      this.closeEditor();
+    }
+  }
+
+  onA2AOverlayClick(event: MouseEvent): void {
+    if (this.overlayMousedownTarget === event.currentTarget) {
+      this.closeA2AModal();
+    }
   }
 
   getCloudLabel(endpoint: string, endpointType?: string): string {

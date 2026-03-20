@@ -8,75 +8,97 @@ import { AgentConfig } from '../../../../core/services/agent.service';
   standalone: true,
   imports: [FormsModule],
   template: `
-    <div class="agent-selector">
-      <div class="selector-header">
-        <h3>Configure Agents</h3>
-        <p class="text-muted">Select agents and orchestration pattern for this conversation.</p>
+    <div class="agent-selector" [class.collapsed]="isCollapsed">
+      <div class="selector-header" (click)="isCollapsed = !isCollapsed">
+        <div class="header-left">
+          <h3>Configure Agents</h3>
+          <p class="text-muted">Select agents and orchestration pattern for this conversation.</p>
+        </div>
+        <button class="btn btn-icon collapse-toggle" [title]="isCollapsed ? 'Expand' : 'Collapse'">
+          <span class="material-icons">{{ isCollapsed ? 'expand_more' : 'expand_less' }}</span>
+        </button>
       </div>
       
-      <div class="orchestration-select">
-        <label>Orchestration Pattern</label>
-        <select 
-          class="input" 
-          [ngModel]="orchestrationType"
-          (ngModelChange)="orchestrationChange.emit($event)"
-        >
-          <option value="single">Single Agent</option>
-          <option value="sequential">Sequential (Chain)</option>
-          <option value="concurrent">Concurrent (Parallel)</option>
-          <option value="magentic">Magentic-One</option>
-          <option value="group_chat">Group Chat</option>
-        </select>
-      </div>
-      
-      <div class="agents-grid">
-        @for (agent of sortedAgents; track agent.id) {
-          <div 
-            class="agent-card"
-            [class.selected]="isSelected(agent.id!) || agent.is_orchestrator"
-            [class.orchestrator]="agent.is_orchestrator"
-            [class.locked]="agent.is_orchestrator"
-            [class.a2a]="agent.agent_type === 'a2a'"
-            [title]="agent.description || agent.name"
-            (click)="!agent.is_orchestrator && agentToggle.emit(agent.id!)"
-          >
-            <div class="agent-icon">
-              <span class="material-icons">
-                {{ agent.is_orchestrator ? 'hub' : (agent.agent_type === 'a2a' ? 'cloud' : 'smart_toy') }}
-              </span>
+      @if (!isCollapsed) {
+        <div class="selector-controls">
+          <div class="orchestration-select">
+            <label>Orchestration Pattern</label>
+            <select 
+              class="input" 
+              [ngModel]="orchestrationType"
+              (ngModelChange)="orchestrationChange.emit($event)"
+            >
+              <option value="single">Single Agent</option>
+              <option value="sequential">Sequential (Chain)</option>
+              <option value="concurrent">Concurrent (Parallel)</option>
+              <option value="magentic">Magentic-One</option>
+              <option value="group_chat">Group Chat</option>
+            </select>
+          </div>
+          
+          @if (agents.length > 6) {
+            <div class="agent-search">
+              <span class="material-icons">search</span>
+              <input 
+                type="text" 
+                class="input filter-input" 
+                [(ngModel)]="agentFilter"
+                placeholder="Filter agents..."
+                (click)="$event.stopPropagation()"
+              />
             </div>
-            <div class="agent-info">
-              <div class="agent-name">
-                {{ agent.name }}
-                @if (agent.agent_type === 'a2a') {
-                  <span class="a2a-badge">A2A</span>
+          }
+        </div>
+        
+        <div class="agents-grid">
+          @for (agent of filteredSortedAgents; track agent.id) {
+            <div 
+              class="agent-card"
+              [class.selected]="isSelected(agent.id!) || agent.is_orchestrator"
+              [class.orchestrator]="agent.is_orchestrator"
+              [class.locked]="agent.is_orchestrator"
+              [class.a2a]="agent.agent_type === 'a2a'"
+              [title]="agent.description || agent.name"
+              (click)="!agent.is_orchestrator && agentToggle.emit(agent.id!)"
+            >
+              <div class="agent-icon">
+                <span class="material-icons">
+                  {{ agent.is_orchestrator ? 'hub' : (agent.agent_type === 'a2a' ? 'cloud' : 'smart_toy') }}
+                </span>
+              </div>
+              <div class="agent-info">
+                <div class="agent-name">
+                  {{ agent.name }}
+                  @if (agent.agent_type === 'a2a') {
+                    <span class="a2a-badge">A2A</span>
+                  }
+                </div>
+                <div class="agent-description">{{ agent.description }}</div>
+                @if (agent.model) {
+                  <div class="agent-model">{{ agent.model }}</div>
+                } @else if (agent.agent_type === 'a2a') {
+                  <div class="agent-model a2a-external">External Agent</div>
+                }
+                @if (agent.is_orchestrator) {
+                  <div class="agent-required">Required</div>
                 }
               </div>
-              <div class="agent-description">{{ agent.description }}</div>
-              @if (agent.model) {
-                <div class="agent-model">{{ agent.model }}</div>
-              } @else if (agent.agent_type === 'a2a') {
-                <div class="agent-model a2a-external">External Agent</div>
-              }
-              @if (agent.is_orchestrator) {
-                <div class="agent-required">Required</div>
+              @if (isSelected(agent.id!) || agent.is_orchestrator) {
+                <div class="agent-check">
+                  <span class="material-icons">{{ agent.is_orchestrator ? 'lock' : 'check_circle' }}</span>
+                </div>
               }
             </div>
-            @if (isSelected(agent.id!) || agent.is_orchestrator) {
-              <div class="agent-check">
-                <span class="material-icons">{{ agent.is_orchestrator ? 'lock' : 'check_circle' }}</span>
-              </div>
-            }
-          </div>
-        }
-        
-        @if (agents.length === 0) {
-          <div class="no-agents">
-            <span class="material-icons">warning</span>
-            <p>No agents configured. Go to Admin to create agents.</p>
-          </div>
-        }
-      </div>
+          }
+          
+          @if (agents.length === 0) {
+            <div class="no-agents">
+              <span class="material-icons">warning</span>
+              <p>No agents configured. Go to Admin to create agents.</p>
+            </div>
+          }
+        </div>
+      }
     </div>
   `,
   styles: [`
@@ -84,20 +106,52 @@ import { AgentConfig } from '../../../../core/services/agent.service';
       padding: var(--spacing-lg);
       border-bottom: 1px solid var(--border-color);
       background-color: var(--bg-secondary);
+      transition: all 0.2s ease;
+      
+      &.collapsed {
+        padding-bottom: var(--spacing-sm);
+      }
     }
     
     .selector-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
       margin-bottom: var(--spacing-md);
+      cursor: pointer;
+      
+      .header-left {
+        flex: 1;
+      }
       
       h3 {
         font-size: 18px;
         font-weight: 600;
         margin-bottom: var(--spacing-xs);
       }
+      
+      .collapsed & {
+        margin-bottom: 0;
+      }
+    }
+    
+    .collapse-toggle {
+      flex-shrink: 0;
+      opacity: 0.6;
+      
+      &:hover {
+        opacity: 1;
+      }
+    }
+    
+    .selector-controls {
+      display: flex;
+      align-items: flex-end;
+      gap: var(--spacing-md);
+      margin-bottom: var(--spacing-md);
     }
     
     .orchestration-select {
-      margin-bottom: var(--spacing-md);
       max-width: 300px;
       
       label {
@@ -114,10 +168,40 @@ import { AgentConfig } from '../../../../core/services/agent.service';
       }
     }
     
+    .agent-search {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background-color: var(--input-bg, var(--bg-tertiary));
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 0 var(--spacing-sm);
+      
+      .material-icons {
+        font-size: 18px;
+        color: var(--text-muted);
+      }
+      
+      .filter-input {
+        border: none;
+        background: transparent;
+        width: 180px;
+        padding: 6px 0;
+        
+        &:focus {
+          border: none;
+          outline: none;
+        }
+      }
+    }
+    
     .agents-grid {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
       gap: var(--spacing-md);
+      max-height: 50vh;
+      overflow-y: auto;
+      padding: 2px;
     }
     
     .agent-card {
@@ -267,13 +351,24 @@ export class AgentSelectorComponent {
   @Output() agentToggle = new EventEmitter<string>();
   @Output() orchestrationChange = new EventEmitter<string>();
   
-  // Sort agents with orchestrators first
+  isCollapsed = false;
+  agentFilter = '';
+
   get sortedAgents(): AgentConfig[] {
     return [...this.agents].sort((a, b) => {
       if (a.is_orchestrator && !b.is_orchestrator) return -1;
       if (!a.is_orchestrator && b.is_orchestrator) return 1;
       return 0;
     });
+  }
+  
+  get filteredSortedAgents(): AgentConfig[] {
+    if (!this.agentFilter.trim()) return this.sortedAgents;
+    const term = this.agentFilter.toLowerCase();
+    return this.sortedAgents.filter(a =>
+      a.name.toLowerCase().includes(term) ||
+      (a.description || '').toLowerCase().includes(term)
+    );
   }
   
   isSelected(agentId: string): boolean {

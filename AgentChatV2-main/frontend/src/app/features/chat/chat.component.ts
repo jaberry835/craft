@@ -11,6 +11,7 @@ import { MessageComponent } from './components/message/message.component';
 import { ChatInputComponent } from './components/chat-input/chat-input.component';
 import { AgentSelectorComponent } from './components/agent-selector/agent-selector.component';
 
+
 // Chatter event for displaying agent thought process
 export interface ChatterEvent {
   type: 'thinking' | 'tool_call' | 'tool_result' | 'delegation' | 'content' | 'reasoning';
@@ -110,11 +111,13 @@ interface UploadedFile {
           </div>
         }
         
-        @for (message of messages; track message.id) {
+        @for (message of messages; track message.id; let i = $index) {
           <app-message 
             [message]="message"
             [isStreaming]="message.isStreaming ?? false"
             [groundedAgentIds]="groundedAgentIds"
+            [isLastAssistantMessage]="isLastAssistant(i)"
+            (formSubmit)="sendMessage($event)"
           ></app-message>
         }
         
@@ -732,6 +735,16 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
     }
   }
   
+  /** Check if message at index i is the last assistant message (no streaming message active) */
+  isLastAssistant(index: number): boolean {
+    if (this.streamingMessage) return false;
+    if (this.messages[index]?.role !== 'assistant') return false;
+    for (let j = index + 1; j < this.messages.length; j++) {
+      if (this.messages[j].role === 'assistant') return false;
+    }
+    return true;
+  }
+
   sendMessage(content: string): void {
     if (!content.trim() || this.isSending) return;
     

@@ -1,4 +1,4 @@
-import { Component, Input, DoCheck, ViewChild, ElementRef, AfterViewChecked, HostListener, OnInit } from '@angular/core';
+import { Component, Input, Output, EventEmitter, DoCheck, ViewChild, ElementRef, AfterViewChecked, HostListener, OnInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { HttpClient } from '@angular/common/http';
 import { marked } from 'marked';
@@ -6,6 +6,7 @@ import { marked } from 'marked';
 import { Message } from '../../../../core/services/chat.service';
 import { SettingsService } from '../../../../core/services/settings.service';
 import { environment } from '@env/environment';
+import { WizardFormComponent, ParsedInputField, parseInputFields } from '../wizard-form/wizard-form.component';
 
 // Import chatter event type from parent
 interface ChatterEvent {
@@ -31,7 +32,7 @@ interface DisplayMessage extends Message {
 @Component({
   selector: 'app-message',
   standalone: true,
-  imports: [CommonModule],
+  imports: [CommonModule, WizardFormComponent],
   template: `
     <div class="message" [class.user]="message.role === 'user'" [class.assistant]="message.role === 'assistant'">
       <div class="message-avatar">
@@ -133,6 +134,14 @@ interface DisplayMessage extends Message {
           <div class="message-text" [innerHTML]="formatContent(message.content)"></div>
         }
         
+        @if (getParsedFields().length > 0 && !isStreaming && !formSubmitted) {
+          <app-wizard-form
+            [fields]="getParsedFields()"
+            [disabled]="isStreaming"
+            (formSubmit)="onWizardSubmit($event)"
+          ></app-wizard-form>
+        }
+
         @if (isStreaming) {
           <span class="typing-indicator">
             <span></span><span></span><span></span>
@@ -536,6 +545,66 @@ interface DisplayMessage extends Message {
       }
     }
 
+    /* MCP Document Download Card */
+    :deep(.mcp-download-card) {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      margin: 6px 0;
+      background-color: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      max-width: 400px;
+      transition: border-color var(--transition-fast);
+
+      &:hover {
+        border-color: var(--primary);
+      }
+
+      .mcp-download-icon {
+        font-size: 28px;
+        color: var(--primary);
+        flex-shrink: 0;
+      }
+
+      .mcp-download-name {
+        flex: 1;
+        min-width: 0;
+        font-size: 13px;
+        font-weight: 500;
+        color: var(--text-primary);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .mcp-download-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 5px 12px;
+        font-size: 12px;
+        font-weight: 600;
+        color: #fff !important;
+        background-color: var(--primary);
+        border: none;
+        border-radius: 6px;
+        cursor: pointer;
+        text-decoration: none !important;
+        white-space: nowrap;
+        transition: background-color var(--transition-fast);
+
+        .material-icons {
+          font-size: 16px;
+        }
+
+        &:hover {
+          background-color: var(--primary-hover, #2563eb);
+        }
+      }
+    }
+
     .message-text {
       font-size: 14px;
       line-height: 1.7;
@@ -784,6 +853,13 @@ export class MessageComponent implements DoCheck, OnInit {
   @Input() isStreaming = false;
   /** IDs of selected agents that have document grounding — used for auto-linking filenames */
   @Input() groundedAgentIds: string[] = [];
+  /** Whether this is the last assistant message (only show wizard on the last one) */
+  @Input() isLastAssistantMessage = false;
+  @Output() formSubmit = new EventEmitter<string>();
+
+  formSubmitted = false;
+  private cachedParsedFields: ParsedInputField[] | null = null;
+  private cachedContent: string | null = null;
   
   @ViewChild('chatterContainer') chatterContainer?: ElementRef<HTMLDivElement>;
   
@@ -819,6 +895,47 @@ export class MessageComponent implements DoCheck, OnInit {
   @HostListener('click', ['$event'])
   onDocCitationClick(event: MouseEvent): void {
     const target = event.target as HTMLElement;
+
+    // Handle MCP download button clicks — download to desktop
+    const downloadAnchor = target.closest('a.mcp-download-btn') as HTMLAnchorElement | null;
+    if (downloadAnchor) {
+      event.preventDefault();
+      event.stopPropagation();
+      const url = downloadAnchor.getAttribute('href');
+      if (!url) return;
+
+      // Extract filename from the sibling element
+      const card = downloadAnchor.closest('.mcp-download-card');
+      const nameEl = card?.querySelector('.mcp-download-name');
+      const fileName = nameEl?.textContent?.trim() || 'document';
+
+      // For URLs that go through our API, use HttpClient (auth interceptor adds token).
+      // For external URLs (MCP servers, pre-signed), fetch directly.
+      const isInternal = url.startsWith(environment.apiUrl) || url.startsWith('/api');
+
+      if (isInternal) {
+        this.http.get(url, { responseType: 'blob', observe: 'response' }).subscribe({
+          next: (response) => this.triggerDownload(response.body, fileName, response.headers.get('Content-Type')),
+          error: (err) => {
+            console.error('Failed to download document:', err);
+            alert(err.status === 404 ? 'Document not found.' : 'Failed to download document. Please try again.');
+          }
+        });
+      } else {
+        // External URL — open directly and let the browser/MCP server handle it
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = fileName;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      }
+      return;
+    }
+
+    // Handle grounding document citation clicks — open in new tab
     const anchor = target.closest('a.doc-citation') as HTMLAnchorElement | null;
     if (!anchor) return;
     
@@ -882,25 +999,82 @@ export class MessageComponent implements DoCheck, OnInit {
   }
   
   formatContent(content: string): string {
+    // Strip Kramdown/Jekyll-style attribute syntax that marked doesn't support,
+    // e.g. {:target="_blank"} or {:.class-name}
+    let cleaned = content.replace(/\{:\s*[^}]+\}/g, '');
+
     // Use marked for full markdown rendering
-    let result = (this.md ? this.md.parse(content) : marked.parse(content)) as string;
+    let result = (this.md ? this.md.parse(cleaned) : marked.parse(cleaned)) as string;
     
     // Open all links in new tabs
     result = result.replace(/<a\s+href="/g, '<a target="_blank" rel="noopener noreferrer" href="');
     
-    // Rewrite Azure Blob Storage URLs to use the backend blob proxy.
-    // This applies to ALL assistant messages — MCP tools often return direct
-    // blob URLs that the user can't access without SAS tokens.  The proxy
-    // uses managed identity and applies SS token checks.
+    // Detect external document download URLs in assistant messages and render
+    // download cards.  MCP tools that create documents return direct URLs;
+    // we render them as download cards so the user can save files to their desktop.
+    //
+    // IMPORTANT: Three distinct URL categories are handled separately:
+    //  1. Azure Blob Storage URLs → rewritten to blob-proxy with doc-citation
+    //     class so the click handler fetches via HttpClient with auth + SS token
+    //     access-checker checks.  These are citations from MCP tools that
+    //     reference existing access-controlled documents.
+    //  2. External non-blob URLs → rendered as download cards for direct
+    //     download.  These are new documents created by MCP tools (e.g. a
+    //     generated policy document served by the MCP server itself).
+    //  3. Internal API / relative filenames → left untouched for the
+    //     grounding auto-linker below.
     if (this.message.role === 'assistant') {
+
+      // ── Category 1: Azure Blob Storage URLs → blob-proxy with SS token checks ──
       const blobUrlPattern = /(<a\s[^>]*href=")(https:\/\/[^"]+\.blob\.core\.(?:windows\.net|usgovcloudapi\.net|chinacloudapi\.cn)\/[^"]+)("[^>]*>)/gi;
       result = result.replace(blobUrlPattern, (_m, prefix, blobUrl, suffix) => {
         const proxyUrl = `${environment.apiUrl}/documents/blob-proxy?url=${encodeURIComponent(blobUrl)}`;
-        // Add doc-citation class for the click interceptor
         const classedSuffix = suffix.includes('class="')
           ? suffix.replace('class="', 'class="doc-citation ')
           : suffix.replace('>', ' class="doc-citation">');
         return `${prefix}${proxyUrl}${classedSuffix}`;
+      });
+
+      // Also catch bare blob URLs in text (not inside <a> tags) and wrap them
+      const bareBlobPattern = /(?<!href="|">)(https:\/\/[^\s<"]+\.blob\.core\.(?:windows\.net|usgovcloudapi\.net|chinacloudapi\.cn)\/([^\s<"]+))/gi;
+      result = result.replace(bareBlobPattern, (_m, blobUrl, blobPath) => {
+        const proxyUrl = `${environment.apiUrl}/documents/blob-proxy?url=${encodeURIComponent(blobUrl)}`;
+        const fileName = decodeURIComponent(blobPath.split('/').pop() || 'document');
+        return `<a href="${proxyUrl}" target="_blank" rel="noopener noreferrer" class="doc-citation">${fileName}</a>`;
+      });
+
+      // ── Category 2: External non-blob URLs → download cards ──
+      const docExtensions = 'pdf|docx?|xlsx?|pptx?|csv|txt|md|zip|json|xml|html';
+
+      // Helper: returns true for URLs that should NOT become download cards
+      const isNonDownloadUrl = (url: string): boolean => {
+        // Internal API routes (grounding proxy, blob-proxy, etc.)
+        if (url.startsWith(environment.apiUrl) || url.startsWith('/api')) return true;
+        // Relative filenames (no scheme) — handled by grounding auto-linker
+        if (!url.includes('://')) return true;
+        // Azure Blob Storage URLs — already rewritten to blob-proxy above
+        if (/\.blob\.core\.(?:windows\.net|usgovcloudapi\.net|chinacloudapi\.cn)/i.test(url)) return true;
+        return false;
+      };
+
+      // Rewrite <a> tags whose href ends in a document extension
+      const docLinkPattern = new RegExp(
+        `(<a\\s[^>]*href=")(([^"]+\\.(${docExtensions})(?:\\?[^"]*)?))("[^>]*>)([\\s\\S]*?)(</a>)`, 'gi'
+      );
+      result = result.replace(docLinkPattern, (match, _prefix, fullUrl, _path, _ext, _suffix, _linkText, _closeTag) => {
+        if (isNonDownloadUrl(fullUrl)) return match;
+        const fileName = this.extractFileName(fullUrl);
+        return this.buildDownloadCard(fullUrl, fileName);
+      });
+
+      // Convert bare external document URLs in text (not inside <a> tags)
+      const bareDocUrlPattern = new RegExp(
+        `(?<!href="|">)(https?://[^\\s<"]+\\.(${docExtensions})(?:\\?[^\\s<"]*)?)`, 'gi'
+      );
+      result = result.replace(bareDocUrlPattern, (match, fullUrl) => {
+        if (isNonDownloadUrl(fullUrl)) return match;
+        const fileName = this.extractFileName(fullUrl);
+        return this.buildDownloadCard(fullUrl, fileName);
       });
     }
     
@@ -1101,10 +1275,63 @@ export class MessageComponent implements DoCheck, OnInit {
    * Convert tool names to more readable format
    */
   private humanizeToolName(toolName: string): string {
-    // Convert snake_case or camelCase to readable text
     return toolName
       .replace(/_/g, ' ')
       .replace(/([a-z])([A-Z])/g, '$1 $2')
       .toLowerCase();
+  }
+
+  /** Extract the filename from a URL, stripping query params and path. */
+  private extractFileName(url: string): string {
+    try {
+      const pathname = new URL(url).pathname;
+      const name = decodeURIComponent(pathname.split('/').pop() || 'document');
+      return name;
+    } catch {
+      const lastSegment = url.split('/').pop() || 'document';
+      return lastSegment.split('?')[0];
+    }
+  }
+
+  /** Build the HTML for a download card. */
+  private buildDownloadCard(url: string, fileName: string): string {
+    return `<div class="mcp-download-card">` +
+      `<span class="material-icons mcp-download-icon">description</span>` +
+      `<span class="mcp-download-name" title="${fileName}">${fileName}</span>` +
+      `<a href="${url}" class="mcp-download-btn" target="_blank" rel="noopener noreferrer">` +
+      `<span class="material-icons">download</span> Download</a></div>`;
+  }
+
+  /** Trigger a browser file download from a fetched blob response. */
+  private triggerDownload(body: Blob | null, fileName: string, contentType: string | null): void {
+    if (!body) return;
+    const blobUrl = URL.createObjectURL(new Blob([body], { type: contentType || 'application/octet-stream' }));
+    const a = document.createElement('a');
+    a.href = blobUrl;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+  }
+
+  /**
+   * Parse input fields from the assistant message content.
+   * Only shown on the last assistant message and when role is 'assistant'.
+   * Results are cached to avoid re-parsing on every change detection cycle.
+   */
+  getParsedFields(): ParsedInputField[] {
+    if (this.message.role !== 'assistant' || !this.isLastAssistantMessage) return [];
+    if (this.cachedContent === this.message.content) {
+      return this.cachedParsedFields || [];
+    }
+    this.cachedContent = this.message.content;
+    this.cachedParsedFields = parseInputFields(this.message.content);
+    return this.cachedParsedFields;
+  }
+
+  onWizardSubmit(formText: string): void {
+    this.formSubmitted = true;
+    this.formSubmit.emit(formText);
   }
 }
