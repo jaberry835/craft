@@ -66,7 +66,7 @@ from starlette.middleware.cors import CORSMiddleware
 # Import tool registration functions
 try:
     logger.info("📦 Importing tool registration functions...")
-    from tools import register_adx_tools, register_fictional_api_tools, register_document_tools, register_rag_tools, register_company_and_device_tools, register_postgres_tools, register_translation_tools, register_computer_vision_tools, register_knowledge_base_tools
+    from tools import register_adx_tools, register_fictional_api_tools, register_document_tools, register_rag_tools, register_company_and_device_tools, register_postgres_tools, register_translation_tools, register_computer_vision_tools, register_knowledge_base_tools, register_policy_document_tools
     logger.info("✅ Tool imports successful")
 except ImportError as e:
     logger.error(f"❌ Failed to import tools: {e}")
@@ -92,7 +92,7 @@ class MCPMiddleware(BaseHTTPMiddleware):
       5. Handles first-request initialisation delay and body parsing for MCP POST requests.
     """
 
-    _SKIP_AUTH_PATHS = ("/health", "/.well-known/", "/debug/", "/api/tools")
+    _SKIP_AUTH_PATHS = ("/health", "/.well-known/", "/debug/", "/api/tools", "/api/download/")
 
     def __init__(self, app):
         super().__init__(app)
@@ -290,6 +290,8 @@ register_computer_vision_tools(mcp)
 logger.info("✅ Computer Vision tools registered")
 register_knowledge_base_tools(mcp)
 logger.info("✅ Knowledge Base tools registered")
+register_policy_document_tools(mcp)
+logger.info("✅ Policy Document tools registered")
 logger.info("🎉 All tools registered successfully")
 
 
@@ -635,12 +637,53 @@ async def root(request):
     })
 
 # Mount routes using Route() objects instead of deprecated @app.route decorator
+
+# Import generated-document registry so the download endpoint can look up files
+from tools.policy_document_tools import _generated_documents
+from services.blob_storage_service import download_blob_bytes as _download_blob
+from starlette.responses import Response
+
+
+async def download_document_endpoint(request):
+    """Serve a generated policy document by document_id.
+
+    The UI renders a download card when the agent returns this URL.
+    No credentials are needed by the caller — the server fetches from
+    blob storage with its own service principal.
+    """
+    document_id = request.path_params.get("document_id", "")
+    meta = _generated_documents.get(document_id)
+    if meta is None:
+        return JSONResponse(
+            {"error": "Document not found", "document_id": document_id},
+            status_code=404,
+        )
+
+    try:
+        file_bytes = _download_blob(meta["container"], meta["blob_path"])
+    except Exception as exc:
+        logger.error(f"Download failed for {document_id}: {exc}")
+        return JSONResponse(
+            {"error": "Failed to retrieve document from storage"},
+            status_code=502,
+        )
+
+    return Response(
+        content=file_bytes,
+        media_type=meta["content_type"],
+        headers={
+            "Content-Disposition": f'attachment; filename="{meta["file_name"]}"',
+        },
+    )
+
+
 app.routes.extend([
     Route("/health", health_endpoint),
     Route("/.well-known/oauth-authorization-server", oauth_metadata),
     Route("/.well-known/mcp-oauth", mcp_oauth_metadata),
     Route("/oauth/redirect/{port:path}", oauth_redirect_handler_with_port),
     Route("/oauth/redirect", oauth_redirect_handler),
+    Route("/api/download/{document_id}", download_document_endpoint),
     Route("/api/tools", list_tools_endpoint),
     Route("/debug/tools", debug_tools_endpoint),
     Route("/", root),

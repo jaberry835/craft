@@ -23,6 +23,10 @@ openai>=1.0.0
 msal>=1.24.0
 cryptography>=41.0.0
 
+# Office document generation
+python-docx>=1.1.0
+openpyxl>=3.1.2
+
 # Application Insights
 opencensus-ext-azure>=1.1.9
 opencensus-ext-logging>=0.1.1
