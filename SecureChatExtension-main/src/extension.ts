@@ -66,6 +66,12 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     context.subscriptions.push(
+        vscode.commands.registerCommand('junior.openChatTab', () => {
+            chatViewProvider.openInTab();
+        })
+    );
+
+    context.subscriptions.push(
         vscode.commands.registerCommand('junior.newSession', () => {
             chatViewProvider.newSession();
         })

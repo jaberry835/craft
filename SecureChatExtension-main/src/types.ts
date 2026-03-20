@@ -146,6 +146,7 @@ export type WebviewMessage =
     | { type: 'selectModelById'; deploymentId: string }
     | { type: 'attachFile' }
     | { type: 'confirmAction'; actionId: string; approved: boolean; allowSession?: boolean; category?: string }
+    | { type: 'continueIteration'; shouldContinue: boolean }
     | { type: 'fileChangeAction'; action: 'keep' | 'undo' }
     | { type: 'fileChangeFileAction'; file: string; action: 'keep' | 'undo' }
     | { type: 'openFileDiff'; file: string }
@@ -176,6 +177,7 @@ export type ExtensionMessage =
     | { type: 'fileChangeFileResolved'; file: string; action: 'kept' | 'undone' }
     | { type: 'fileChangeResolved'; action: 'kept' | 'undone' }
     | { type: 'agentDone' }
+    | { type: 'continueIteration'; iterationCount: number }
     | { type: 'progressCardStart'; title: string }
     | { type: 'progressCardStep'; icon: 'search' | 'read' | 'edit' | 'run' | 'check' | 'loading' | 'done' | 'error'; label: string; detail?: string; status?: 'running' | 'done' | 'error'; toolName?: string }
     | { type: 'progressCardEnd' }

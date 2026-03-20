@@ -32,6 +32,15 @@ window.onerror = function(msg, src, line, col, err) {
     let pcBatchState = null; // tracks consecutive same-tool batching: { toolName, icon, count, items[], stepEl }
     let pcCurrentPlanTitle = null; // the plan step title the active card is tracking
 
+    // ── Streaming state ──
+    let streamRawText = '';          // full accumulated raw text during streaming
+    let streamBuffer = '';           // characters waiting to be flushed to display
+    let streamRenderTimer = null;    // debounce timer for markdown re-render
+    let streamDrainTimer = null;     // interval timer for smooth character drain
+    const STREAM_DRAIN_INTERVAL = 12;  // ms between drain ticks — controls typing speed
+    const STREAM_DRAIN_CHARS = 3;      // chars per drain tick
+    const STREAM_RENDER_DEBOUNCE = 80; // ms debounce for markdown re-render
+
     // Progress card icon map (icon name → unicode/emoji)
     const PC_ICONS = {
         search: '\uD83D\uDD0D',   // 🔍
@@ -321,6 +330,60 @@ window.onerror = function(msg, src, line, col, err) {
         });
     }
 
+    // ── Progressive markdown rendering during streaming ──
+
+    /** Render accumulated streamRawText as markdown into currentContentEl */
+    function renderStreamMarkdown() {
+        if (!currentContentEl) { return; }
+        // Save scroll position intent
+        var atBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 40;
+        currentContentEl.innerHTML = renderMarkdownLite(streamRawText);
+        if (atBottom) { scrollToBottom(); }
+    }
+
+    /** Schedule a debounced markdown re-render */
+    function scheduleStreamRender() {
+        if (streamRenderTimer) { clearTimeout(streamRenderTimer); }
+        streamRenderTimer = setTimeout(function() {
+            streamRenderTimer = null;
+            renderStreamMarkdown();
+        }, STREAM_RENDER_DEBOUNCE);
+    }
+
+    /** Start the smooth drain interval that moves chars from buffer to rawText */
+    function startStreamDrain() {
+        if (streamDrainTimer) { return; } // already running
+        streamDrainTimer = setInterval(function() {
+            if (streamBuffer.length === 0) {
+                clearInterval(streamDrainTimer);
+                streamDrainTimer = null;
+                // Final render when buffer empties
+                scheduleStreamRender();
+                return;
+            }
+            // Drain a batch of characters
+            var count = Math.min(STREAM_DRAIN_CHARS, streamBuffer.length);
+            // Don't break in the middle of a word — extend to next space/newline if close
+            if (count < streamBuffer.length) {
+                var next = streamBuffer.indexOf(' ', count);
+                var nextNl = streamBuffer.indexOf('\n', count);
+                if (next === -1 || (nextNl !== -1 && nextNl < next)) { next = nextNl; }
+                if (next !== -1 && next - count < 8) { count = next + 1; }
+            }
+            streamRawText += streamBuffer.slice(0, count);
+            streamBuffer = streamBuffer.slice(count);
+            scheduleStreamRender();
+        }, STREAM_DRAIN_INTERVAL);
+    }
+
+    /** Flush all buffered text immediately (used on endAssistantMessage) */
+    function flushStreamBuffer() {
+        if (streamDrainTimer) { clearInterval(streamDrainTimer); streamDrainTimer = null; }
+        if (streamRenderTimer) { clearTimeout(streamRenderTimer); streamRenderTimer = null; }
+        streamRawText += streamBuffer;
+        streamBuffer = '';
+    }
+
     function escapeHtml(text) {
         const div = document.createElement('div');
         div.textContent = text;
@@ -450,21 +513,24 @@ window.onerror = function(msg, src, line, col, err) {
                 currentContentEl.className = 'content';
                 currentAssistantEl.appendChild(currentContentEl);
                 messagesEl.appendChild(currentAssistantEl);
+                streamRawText = '';
+                streamBuffer = '';
                 scrollToBottom();
                 break;
             }
             case 'appendAssistantText': {
                 if (currentContentEl) {
-                    currentContentEl.textContent += msg.text;
+                    streamBuffer += msg.text;
+                    startStreamDrain();
                 }
-                scrollToBottom();
                 break;
             }
             case 'endAssistantMessage': {
+                flushStreamBuffer();
                 if (currentContentEl) {
-                    var rawText = (currentContentEl.textContent || '').trim();
+                    var rawText = streamRawText.trim();
                     if (rawText.length > 0) {
-                        currentContentEl.innerHTML = renderMarkdownLite(currentContentEl.textContent || '');
+                        currentContentEl.innerHTML = renderMarkdownLite(streamRawText);
                     } else {
                         // Remove empty assistant bubble (model only made tool calls, no text)
                         if (currentAssistantEl && currentAssistantEl.parentNode) {
@@ -474,6 +540,8 @@ window.onerror = function(msg, src, line, col, err) {
                 }
                 currentAssistantEl = null;
                 currentContentEl = null;
+                streamRawText = '';
+                streamBuffer = '';
                 scrollToBottom();
                 break;
             }
@@ -559,6 +627,28 @@ window.onerror = function(msg, src, line, col, err) {
                 });
                 dialog.querySelector('.btn-deny').addEventListener('click', () => {
                     vscode.postMessage({ type: 'confirmAction', actionId: msg.actionId, approved: false });
+                    dialog.remove();
+                });
+                messagesEl.appendChild(dialog);
+                scrollToBottom();
+                break;
+            }
+            case 'continueIteration': {
+                const dialog = document.createElement('div');
+                dialog.className = 'continue-iteration-dialog';
+                dialog.innerHTML =
+                    '<p>Continue to iterate?</p>' +
+                    '<div class="continue-subtitle">Junior has been working on this problem for a while (' + msg.iterationCount + ' iterations). It can continue to iterate, or you can send a new message to refine your prompt.</div>' +
+                    '<div class="continue-actions">' +
+                        '<button class="btn-continue">Continue</button>' +
+                        '<button class="btn-pause">Pause</button>' +
+                    '</div>';
+                dialog.querySelector('.btn-continue').addEventListener('click', () => {
+                    vscode.postMessage({ type: 'continueIteration', shouldContinue: true });
+                    dialog.remove();
+                });
+                dialog.querySelector('.btn-pause').addEventListener('click', () => {
+                    vscode.postMessage({ type: 'continueIteration', shouldContinue: false });
                     dialog.remove();
                 });
                 messagesEl.appendChild(dialog);
@@ -763,6 +853,9 @@ window.onerror = function(msg, src, line, col, err) {
                 inputEl.placeholder = 'Ask Junior anything...';
                 inputEl.focus();
                 if (workingEl) { workingEl.classList.remove('active'); }
+                // Remove any lingering continue-iteration dialog
+                const continueDialog = messagesEl.querySelector('.continue-iteration-dialog');
+                if (continueDialog) { continueDialog.remove(); }
                 // Fully release the progress card reference on agent completion
                 activeProgressCard = null;
                 activeProgressTimeline = null;

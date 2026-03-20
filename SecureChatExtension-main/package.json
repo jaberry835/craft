@@ -47,6 +47,11 @@
         "icon": "$(comment-discussion)"
       },
       {
+        "command": "junior.openChatTab",
+        "title": "Junior: Open Chat in Editor Tab",
+        "icon": "$(window)"
+      },
+      {
         "command": "junior.newSession",
         "title": "Junior: New Chat Session",
         "icon": "$(add)"

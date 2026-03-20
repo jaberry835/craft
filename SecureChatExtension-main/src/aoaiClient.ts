@@ -236,14 +236,17 @@ export class AzureOpenAIClient {
                     ? Math.min(err.retryAfter, 120)
                     : Math.min(10 * Math.pow(2, attempt), 120);
                 // Notify via a custom event so the UI can show the wait
-                if ((this as any)._onRetry) { (this as any)._onRetry(waitSec, attempt + 1, maxRetries); }
-                await new Promise<void>((resolve) => {
-                    const timer = setTimeout(resolve, waitSec * 1000);
-                    if (abortSignal) {
-                        const onAbort = () => { clearTimeout(timer); resolve(); };
-                        abortSignal.addEventListener('abort', onAbort, { once: true });
-                    }
-                });
+                // Countdown: notify the UI every second so it can show a live timer
+                for (let remaining = waitSec; remaining > 0; remaining--) {
+                    if (abortSignal?.aborted) { throw new Error('Aborted'); }
+                    if ((this as any)._onRetry) { (this as any)._onRetry(remaining, attempt + 1, maxRetries); }
+                    await new Promise<void>((resolve) => {
+                        const timer = setTimeout(resolve, 1000);
+                        if (abortSignal) {
+                            abortSignal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+                        }
+                    });
+                }
                 if (abortSignal?.aborted) { throw new Error('Aborted'); }
             }
         }
@@ -274,6 +277,7 @@ export class AzureOpenAIClient {
                 url,
                 {
                     method: 'POST',
+                    timeout: 120_000, // 2-minute socket timeout to prevent indefinite hangs
                     headers: {
                         'Content-Type': 'application/json',
                         'api-key': apiKey
@@ -301,23 +305,34 @@ export class AzureOpenAIClient {
                     }
 
                     res.setEncoding('utf8');
+                    const STREAM_STALL_TIMEOUT = 90_000; // 90s — if no SSE chunk arrives in this window, bail
                     const iterable: AsyncIterable<string> = {
                         [Symbol.asyncIterator]() {
                             return {
                                 next() {
-                                    return new Promise((innerResolve) => {
+                                    return new Promise((innerResolve, innerReject) => {
+                                        const stallTimer = setTimeout(() => {
+                                            res.removeListener('data', onData);
+                                            res.removeListener('end', onEnd);
+                                            res.removeListener('error', onError);
+                                            res.destroy();
+                                            innerReject(new Error('Stream stalled — no data received for 90s. The server may be overloaded.'));
+                                        }, STREAM_STALL_TIMEOUT);
                                         const onData = (chunk: string) => {
+                                            clearTimeout(stallTimer);
                                             res.removeListener('data', onData);
                                             res.removeListener('end', onEnd);
                                             res.removeListener('error', onError);
                                             innerResolve({ value: chunk, done: false });
                                         };
                                         const onEnd = () => {
+                                            clearTimeout(stallTimer);
                                             res.removeListener('data', onData);
                                             res.removeListener('error', onError);
                                             innerResolve({ value: '', done: true });
                                         };
                                         const onError = (err: Error) => {
+                                            clearTimeout(stallTimer);
                                             res.removeListener('data', onData);
                                             res.removeListener('end', onEnd);
                                             innerResolve({ value: '', done: true });
@@ -341,6 +356,10 @@ export class AzureOpenAIClient {
                 }, { once: true });
             }
 
+            req.on('timeout', () => {
+                req.destroy();
+                reject(new Error('Request timed out after 120s — the server may be overloaded.'));
+            });
             req.on('error', reject);
             req.write(body);
             req.end();

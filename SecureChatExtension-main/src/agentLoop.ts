@@ -98,6 +98,8 @@ export class AgentLoop {
     private contextManager = new ContextManager();
     /** Cached tool name → definition map for argument validation. */
     private toolSchemaMap: Map<string, ToolDefinition> = new Map();
+    /** Pending continuation promise — set when the agent hits maxIterations and pauses */
+    private pendingContinuation: { resolve: (shouldContinue: boolean) => void } | null = null;
     /** Files edited during the current agent run (relative paths). */
     private editedFiles: Set<string> = new Set();
 
@@ -183,7 +185,20 @@ export class AgentLoop {
             this.abortController.abort();
             this.abortController = null;
         }
+        // Reject any pending continuation prompt
+        if (this.pendingContinuation) {
+            this.pendingContinuation.resolve(false);
+            this.pendingContinuation = null;
+        }
         this.running = false;
+    }
+
+    /** Called by chatViewProvider when the user clicks Continue or Pause */
+    resolveContinuation(shouldContinue: boolean) {
+        if (this.pendingContinuation) {
+            this.pendingContinuation.resolve(shouldContinue);
+            this.pendingContinuation = null;
+        }
     }
 
     /** Map a tool name + args to a progress card icon and human-readable label */
@@ -313,10 +328,10 @@ export class AgentLoop {
 
         try {
             // Show status when the API is rate-limited and retrying
-            this.aoaiClient.setRetryCallback((waitSec, attempt, maxRetries) => {
+            this.aoaiClient.setRetryCallback((remainingSec, attempt, maxRetries) => {
                 this.callbacks.sendToWebview({
                     type: 'setStatus',
-                    status: `Rate limited — retrying in ${waitSec}s (attempt ${attempt}/${maxRetries})...`
+                    status: `Rate limited — retrying in ${remainingSec}s (attempt ${attempt}/${maxRetries})...`
                 });
             });
 
@@ -569,13 +584,28 @@ export class AgentLoop {
                 // Signal end of this tool batch (frontend may merge with next if same title)
                 this.callbacks.sendToWebview({ type: 'progressCardEnd' });
 
-            }
+                // When hitting the iteration limit, ask the user if they want to continue
+                if (iteration >= this.maxIterations && this.running) {
+                    this.callbacks.sendToWebview({ type: 'continueIteration', iterationCount: iteration });
+                    this.callbacks.sendToWebview({ type: 'setStatus', status: `Paused at ${iteration} iterations — waiting for your decision...` });
 
-            if (iteration >= this.maxIterations) {
-                this.callbacks.sendToWebview({
-                    type: 'error',
-                    message: `Agent reached maximum iterations (${this.maxIterations}). The agent stopped to prevent an infinite loop.`
-                });
+                    const shouldContinue = await new Promise<boolean>(resolve => {
+                        this.pendingContinuation = { resolve };
+                    });
+
+                    if (shouldContinue) {
+                        // Reset the iteration counter so the agent gets another full batch
+                        iteration = 0;
+                        this.callbacks.sendToWebview({ type: 'setStatus', status: 'Continuing...' });
+                    } else {
+                        this.callbacks.sendToWebview({
+                            type: 'appendAssistantText',
+                            text: '\n\n*[Paused by user after ' + this.maxIterations + ' iterations.]*'
+                        });
+                        break;
+                    }
+                }
+
             }
         } catch (e: unknown) {
             if ((e as Error).name !== 'AbortError') {

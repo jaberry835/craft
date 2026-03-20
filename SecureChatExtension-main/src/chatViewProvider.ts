@@ -15,6 +15,7 @@ import { TokenTracker } from './tokenTracker';
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
     private webviewView?: vscode.WebviewView;
+    private webviewPanel?: vscode.WebviewPanel;
     private agentLoop?: AgentLoop;
     private log: (msg: string) => void;
 
@@ -28,6 +29,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         private tokenTracker?: TokenTracker
     ) {
         this.log = log || (() => {});
+    }
+
+    /** The active webview, whether from the sidebar view or an editor panel tab. */
+    private get webview(): vscode.Webview | undefined {
+        return this.webviewPanel?.webview ?? this.webviewView?.webview;
     }
 
     resolveWebviewView(
@@ -53,12 +59,48 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         });
     }
 
+    /** Open the chat as an editor tab (WebviewPanel). */
+    openInTab(): void {
+        // If already open, just reveal it
+        if (this.webviewPanel) {
+            this.webviewPanel.reveal();
+            return;
+        }
+
+        const panel = vscode.window.createWebviewPanel(
+            'junior.chatTab',
+            'Junior Chat',
+            vscode.ViewColumn.One,
+            {
+                enableScripts: true,
+                retainContextWhenHidden: true,
+                localResourceRoots: [this.extensionUri]
+            }
+        );
+
+        this.webviewPanel = panel;
+        panel.iconPath = vscode.Uri.joinPath(this.extensionUri, 'media', 'icon.svg');
+        panel.webview.html = this.getHtmlContent(panel.webview);
+
+        panel.webview.onDidReceiveMessage((msg: WebviewMessage) => {
+            this.handleWebviewMessage(msg);
+        });
+
+        panel.onDidDispose(() => {
+            this.webviewPanel = undefined;
+        });
+    }
+
     focusView(): void {
-        this.webviewView?.show(false);
+        if (this.webviewPanel) {
+            this.webviewPanel.reveal();
+        } else {
+            this.webviewView?.show(false);
+        }
     }
 
     sendToWebview(msg: ExtensionMessage) {
-        this.webviewView?.webview.postMessage(msg);
+        this.webview?.postMessage(msg);
     }
 
     notifyModelChanged(model: string) {
@@ -128,6 +170,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                         this.builtinTools.allowForSession(msg.category);
                     }
                     this.builtinTools.resolveConfirmation(msg.actionId, msg.approved);
+                    break;
+                case 'continueIteration':
+                    this.agentLoop?.resolveContinuation(msg.shouldContinue);
                     break;
                 case 'fileChangeAction':
                     this.handleFileChangeAction(msg.action);
@@ -727,6 +772,37 @@ body { display: flex; flex-direction: column; }
     border: 1px solid var(--border);
     color: var(--fg);
 }
+
+/* CONTINUE ITERATION DIALOG */
+.continue-iteration-dialog {
+    background: var(--tool-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px;
+    margin: 4px 0;
+    flex-shrink: 0;
+}
+.continue-iteration-dialog p { margin-bottom: 8px; font-size: 12px; color: var(--fg); }
+.continue-iteration-dialog .continue-subtitle { font-size: 11px; color: var(--muted-fg, #888); margin-bottom: 8px; }
+.continue-iteration-dialog .continue-actions { display: flex; gap: 6px; }
+.continue-iteration-dialog button {
+    font-size: 12px;
+    padding: 4px 12px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+}
+.continue-iteration-dialog .btn-continue {
+    background: var(--btn-bg);
+    color: var(--btn-fg);
+}
+.continue-iteration-dialog .btn-continue:hover { background: var(--btn-hover); }
+.continue-iteration-dialog .btn-pause {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--fg);
+}
+.continue-iteration-dialog .btn-pause:hover { background: var(--tool-bg); }
 
 /* DIFF PREVIEW */
 .diff-preview {
