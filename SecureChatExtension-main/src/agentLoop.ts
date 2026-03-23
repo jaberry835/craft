@@ -788,6 +788,7 @@ export class AgentLoop {
 
                 let assistantText = '';
                 let toolCalls: ToolCall[] = [];
+                let assistantBubbleStarted = false;
 
                 try {
                     const stream = this.aoaiClient.streamChat(
@@ -801,6 +802,12 @@ export class AgentLoop {
                         if (!this.running) { break; }
 
                         if (chunk.type === 'text') {
+                            if (!assistantBubbleStarted) {
+                                completeActiveWorkingBlock();
+                                storeWorkingPhases();
+                                this.callbacks.sendToWebview({ type: 'startAssistantMessage' });
+                                assistantBubbleStarted = true;
+                            }
                             assistantText += chunk.text;
                             this.callbacks.sendToWebview({ type: 'appendAssistantText', text: chunk.text });
                         } else if (chunk.type === 'toolCalls') {
@@ -896,7 +903,9 @@ export class AgentLoop {
 
                     if (autofixContinue) {
                         // The agent is continuing — render any text as an inline narration row
-                        if (assistantText.trim()) {
+                        if (assistantBubbleStarted) {
+                            this.callbacks.sendToWebview({ type: 'endAssistantMessage' });
+                        } else if (assistantText.trim()) {
                             completeActiveWorkingBlock();
                             this.callbacks.sendToWebview({ type: 'narrationText', text: assistantText.trim() });
                         }
@@ -905,9 +914,12 @@ export class AgentLoop {
                     }
 
                     // Done — show final text as a full chat bubble
-                    completeActiveWorkingBlock();
-                    storeWorkingPhases();
-                    if (assistantText) {
+                    if (assistantBubbleStarted) {
+                        // Bubble was opened during streaming — just close it
+                        this.callbacks.sendToWebview({ type: 'endAssistantMessage' });
+                    } else if (assistantText) {
+                        completeActiveWorkingBlock();
+                        storeWorkingPhases();
                         this.callbacks.sendToWebview({ type: 'startAssistantMessage' });
                         this.callbacks.sendToWebview({ type: 'appendAssistantText', text: assistantText });
                         this.callbacks.sendToWebview({ type: 'endAssistantMessage' });
