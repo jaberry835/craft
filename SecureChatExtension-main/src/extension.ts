@@ -35,7 +35,8 @@ export function activate(context: vscode.ExtensionContext) {
 
     const builtinTools = new BuiltinTools(workspaceIndexer, symbolIndexer, semanticIndexer);
     mcpClient = new McpClient();
-    const sessionManager = new SessionManager(context.workspaceState);
+    const sessionStorageDir = vscode.Uri.joinPath(context.storageUri ?? context.globalStorageUri, 'sessions').fsPath;
+    const sessionManager = new SessionManager(sessionStorageDir, context.workspaceState);
     const tokenTracker = new TokenTracker(log);
 
     chatViewProvider = new ChatViewProvider(
@@ -290,6 +291,7 @@ function sendSelectionToChat(prefix: string) {
 }
 
 export function deactivate() {
+    chatViewProvider?.saveCurrentSession();
     mcpClient?.dispose();
 }
 

@@ -25,6 +25,10 @@ export interface ChatMessage {
     tool_calls?: ToolCall[];
     tool_call_id?: string;
     name?: string;
+    /** Original display text for user messages (before slash-command expansion) */
+    displayText?: string;
+    /** Structured working phases rendered in the chat UI for assistant tool turns. */
+    workingPhases?: WorkingBlock[];
 }
 
 export interface FileAttachment {
@@ -136,6 +140,52 @@ export interface AgentPlanStep {
     status: 'pending' | 'in_progress' | 'completed' | 'failed';
 }
 
+export type WorkingBlockStatus = 'in_progress' | 'completed';
+
+export type WorkingActionType =
+    | 'read'
+    | 'search'
+    | 'review'
+    | 'create'
+    | 'edit'
+    | 'todo'
+    | 'analyze'
+    | 'run'
+    | 'check'
+    | 'other';
+
+export interface WorkingBlockProgressEntry {
+    id: string;
+    kind: 'progress';
+    text: string;
+    createdAt: number;
+}
+
+export interface WorkingBlockActionEntry {
+    id: string;
+    kind: 'action';
+    text: string;
+    createdAt: number;
+    actionType: WorkingActionType;
+    status: 'running' | 'done' | 'error';
+    detail?: string;
+    filePath?: string;
+    toolName?: string;
+    icon?: string;
+}
+
+export type WorkingBlockEntry = WorkingBlockProgressEntry | WorkingBlockActionEntry;
+
+export interface WorkingBlock {
+    id: string;
+    status: WorkingBlockStatus;
+    title: string;
+    summary?: string;
+    entries: WorkingBlockEntry[];
+    startedAt: number;
+    completedAt?: number;
+}
+
 // ── Webview Message Types ──
 
 export type WebviewMessage =
@@ -154,6 +204,8 @@ export type WebviewMessage =
     | { type: 'deleteSession'; sessionId: string }
     | { type: 'requestSessionList' }
     | { type: 'showTokenUsage' }
+    | { type: 'requestSlashCommands' }
+    | { type: 'openFile'; filePath: string }
     | { type: 'ready' };
 
 export type ExtensionMessage =
@@ -178,9 +230,13 @@ export type ExtensionMessage =
     | { type: 'fileChangeResolved'; action: 'kept' | 'undone' }
     | { type: 'agentDone' }
     | { type: 'continueIteration'; iterationCount: number }
-    | { type: 'progressCardStart'; title: string }
-    | { type: 'progressCardStep'; icon: 'search' | 'read' | 'edit' | 'run' | 'check' | 'loading' | 'done' | 'error'; label: string; detail?: string; status?: 'running' | 'done' | 'error'; toolName?: string }
-    | { type: 'progressCardEnd' }
+    | { type: 'workingBlockStarted'; block: WorkingBlock }
+    | { type: 'workingTextAppended'; blockId: string; entry: WorkingBlockProgressEntry }
+    | { type: 'workingActionAdded'; blockId: string; entry: WorkingBlockActionEntry }
+    | { type: 'workingActionUpdated'; blockId: string; entryId: string; status: 'running' | 'done' | 'error'; text?: string; detail?: string; filePath?: string; icon?: string }
+    | { type: 'workingBlockCompleted'; blockId: string; summary: string; completedAt: number }
+    | { type: 'narrationText'; text: string }
     | { type: 'terminalOutput'; line: string }
-    | { type: 'tokenUsage'; totalTokens: string; chatTokens: string; inlineTokens: string; chatPct: string; inlinePct: string; requests: number; chatPrompt: string; chatCompletion: string; inlinePrompt: string; inlineCompletion: string; chatPromptPct: string; chatCompletionPct: string; inlinePromptPct: string; inlineCompletionPct: string; chatRequests: number; inlineRequests: number; windowPct: number; contextWindow: string };
+    | { type: 'tokenUsage'; totalTokens: string; chatTokens: string; inlineTokens: string; chatPct: string; inlinePct: string; requests: number; chatPrompt: string; chatCompletion: string; inlinePrompt: string; inlineCompletion: string; chatPromptPct: string; chatCompletionPct: string; inlinePromptPct: string; inlineCompletionPct: string; chatRequests: number; inlineRequests: number; windowPct: number; contextWindow: string }
+    | { type: 'slashCommands'; commands: Array<{ name: string; description: string }> };
 

@@ -12,7 +12,7 @@ import { McpClient } from './mcpClient';
 import { ContextManager } from './contextManager';
 import { validateToolArgs, buildToolSchemaMap } from './toolValidator';
 import { getSetting } from './config';
-import { ChatMessage, ContentPart, ToolCall, ToolDefinition, ToolResult, ExtensionMessage, AgentPlanStep } from './types';
+import { ChatMessage, ContentPart, ToolCall, ToolDefinition, ToolResult, ExtensionMessage, AgentPlanStep, WorkingActionType, WorkingBlock, WorkingBlockActionEntry, WorkingBlockProgressEntry } from './types';
 import { TokenTracker } from './tokenTracker';
 
 export interface AgentCallbacks {
@@ -86,12 +86,33 @@ const SYSTEM_PROMPT = `You are Junior Agent, a highly capable AI coding assistan
 - As you begin each step, call update_plan_step with status "in_progress".
 - When you finish a step, call update_plan_step with status "completed".
 - If a step fails, call update_plan_step with status "failed".
-- Keep step titles short (under 10 words). Example: "Read the relevant source files", "Add validation to handleSubmit", "Run build to verify".`;
+- Keep step titles short (under 10 words). Example: "Read the relevant source files", "Add validation to handleSubmit", "Run build to verify".
+
+## Narration
+- IMPORTANT: Always include a brief text explanation in your response alongside tool calls. Never return only tool calls with no content.
+- Before reading files, briefly say what you're looking for and why.
+- After reviewing code, summarize what you found and what you'll do next.
+- When transitioning between plan steps, explain what you just accomplished and what comes next.
+- Keep narration concise — 1-3 sentences. The user should always understand your thought process.`;
+
+type WorkingIcon = 'search' | 'read' | 'edit' | 'run' | 'check' | 'loading' | 'done' | 'error';
+
+interface ToolProgressDescriptor {
+    icon: WorkingIcon;
+    label: string;
+    doneLabel: string;
+    detail?: string;
+    filePath?: string;
+    actionType: WorkingActionType;
+    progressGroup: 'inspect' | 'edit' | 'check' | 'run' | 'todo' | 'other';
+    progressText?: string;
+}
 
 export class AgentLoop {
     private messages: ChatMessage[] = [];
     private abortController: AbortController | null = null;
     private running = false;
+    private cancelled = false;
     private maxIterations: number;
     /** Dynamic plan steps set by the model via set_plan / update_plan_step tools */
     private planSteps: AgentPlanStep[] = [];
@@ -181,6 +202,7 @@ export class AgentLoop {
     }
 
     cancel() {
+        this.cancelled = true;
         if (this.abortController) {
             this.abortController.abort();
             this.abortController = null;
@@ -201,54 +223,315 @@ export class AgentLoop {
         }
     }
 
-    /** Map a tool name + args to a progress card icon and human-readable label */
-    private describeToolForProgress(name: string, args: Record<string, unknown>): { icon: 'search' | 'read' | 'edit' | 'run' | 'check' | 'loading'; label: string; detail?: string } {
+    private nextUiId(prefix: string): string {
+        return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    }
+
+    private createWorkingBlock(title: string): WorkingBlock {
+        return {
+            id: this.nextUiId('working'),
+            status: 'in_progress',
+            title,
+            entries: [],
+            startedAt: Date.now()
+        };
+    }
+
+    private createWorkingProgressEntry(text: string): WorkingBlockProgressEntry {
+        return {
+            id: this.nextUiId('progress'),
+            kind: 'progress',
+            text,
+            createdAt: Date.now()
+        };
+    }
+
+    private isVisibleWorkingTool(name: string): boolean {
+        return name !== 'set_plan' && name !== 'update_plan_step';
+    }
+
+    private buildWorkingSummary(block: WorkingBlock): string {
+        const actions = block.entries.filter((entry): entry is WorkingBlockActionEntry => entry.kind === 'action');
+        if (actions.length === 0) {
+            return block.title;
+        }
+
+        const counts = new Map<WorkingActionType, number>();
+        for (const action of actions) {
+            counts.set(action.actionType, (counts.get(action.actionType) || 0) + 1);
+        }
+
+        const describeBucket = (actionType: WorkingActionType, count: number): string => {
+            switch (actionType) {
+                case 'read':
+                case 'review':
+                    return `Reviewed ${count} file${count === 1 ? '' : 's'}`;
+                case 'search':
+                    return count === 1 ? 'Ran 1 search' : `Ran ${count} searches`;
+                case 'create': {
+                    if (count === 1) {
+                        const single = actions.find(action => action.actionType === actionType);
+                        return single?.text || 'Created 1 file';
+                    }
+                    return `Created ${count} files`;
+                }
+                case 'edit': {
+                    if (count === 1) {
+                        const single = actions.find(action => action.actionType === actionType);
+                        return single?.text || 'Updated 1 file';
+                    }
+                    return `Updated ${count} files`;
+                }
+                case 'todo':
+                    return count === 1 ? 'Created 1 todo' : `Created ${count} todos`;
+                case 'analyze':
+                    return count === 1 ? 'Analyzed 1 item' : `Analyzed ${count} items`;
+                case 'run':
+                    return count === 1 ? 'Ran 1 command' : `Ran ${count} commands`;
+                case 'check':
+                    return count === 1 ? 'Checked 1 item' : `Checked ${count} items`;
+                default:
+                    return count === 1 ? 'Completed 1 action' : `Completed ${count} actions`;
+            }
+        };
+
+        const seen = new Set<WorkingActionType>();
+        const parts: string[] = [];
+        for (const action of actions) {
+            if (seen.has(action.actionType)) {
+                continue;
+            }
+            seen.add(action.actionType);
+            parts.push(describeBucket(action.actionType, counts.get(action.actionType) || 0));
+            if (parts.length >= 2) {
+                break;
+            }
+        }
+
+        if (parts.length === 0) {
+            return block.title;
+        }
+
+        return parts.join(' and ');
+    }
+
+    /** Map a tool name + args to a working block action descriptor. */
+    private describeToolForProgress(name: string, args: Record<string, unknown>): ToolProgressDescriptor {
         switch (name) {
-            case 'grep_search':
-                return { icon: 'search', label: `Searched for regex ${typeof args.pattern === 'string' ? `\`${args.pattern}\`` : ''}`, detail: typeof args.include === 'string' ? `(${args.include})` : undefined };
+            case 'grep_search': {
+                const pat = typeof args.pattern === 'string' ? ` \`${args.pattern}\`` : '';
+                return {
+                    icon: 'search',
+                    label: `Searching for${pat}`,
+                    doneLabel: `Searched for${pat}`,
+                    detail: typeof args.include === 'string' ? `(${args.include})` : undefined,
+                    actionType: 'search',
+                    progressGroup: 'inspect',
+                    progressText: 'Inspecting the workspace and gathering relevant context.'
+                };
+            }
             case 'search_files':
-                return { icon: 'search', label: `Searched files: ${args.query || ''}` };
+                return {
+                    icon: 'search',
+                    label: `Searching files: ${args.query || ''}`,
+                    doneLabel: `Searched files: ${args.query || ''}`,
+                    actionType: 'search',
+                    progressGroup: 'inspect',
+                    progressText: 'Inspecting the workspace and gathering relevant context.'
+                };
             case 'semantic_search':
-                return { icon: 'search', label: `Semantic search: ${args.query || ''}` };
+                return {
+                    icon: 'search',
+                    label: `Searching: ${args.query || ''}`,
+                    doneLabel: `Searched: ${args.query || ''}`,
+                    actionType: 'search',
+                    progressGroup: 'inspect',
+                    progressText: 'Inspecting the workspace and gathering relevant context.'
+                };
             case 'find_symbol':
-                return { icon: 'search', label: `Found symbol: ${args.name || ''}` };
+                return {
+                    icon: 'search',
+                    label: `Finding symbol: ${args.name || ''}`,
+                    doneLabel: `Found symbol: ${args.name || ''}`,
+                    actionType: 'search',
+                    progressGroup: 'inspect',
+                    progressText: 'Inspecting the workspace and gathering relevant context.'
+                };
             case 'go_to_definition':
-                return { icon: 'search', label: `Go to definition: ${args.symbol || ''}` };
+                return {
+                    icon: 'search',
+                    label: `Resolving definition: ${args.symbol || ''}`,
+                    doneLabel: `Resolved definition: ${args.symbol || ''}`,
+                    actionType: 'search',
+                    progressGroup: 'inspect',
+                    progressText: 'Inspecting the workspace and gathering relevant context.'
+                };
             case 'find_references':
-                return { icon: 'search', label: `Find references: ${args.symbol || ''}` };
+                return {
+                    icon: 'search',
+                    label: `Finding references: ${args.symbol || ''}`,
+                    doneLabel: `Found references: ${args.symbol || ''}`,
+                    actionType: 'search',
+                    progressGroup: 'inspect',
+                    progressText: 'Inspecting the workspace and gathering relevant context.'
+                };
             case 'read_file':
-                return { icon: 'read', label: `Read ${this.shortPath(args.path)}`, detail: args.startLine ? `lines ${args.startLine} to ${args.endLine || ''}` : undefined };
+                return {
+                    icon: 'read',
+                    label: `Reading ${this.shortPath(args.path)}`,
+                    doneLabel: `Read ${this.shortPath(args.path)}`,
+                    detail: args.startLine ? `lines ${args.startLine} to ${args.endLine || ''}` : undefined,
+                    filePath: typeof args.path === 'string' ? args.path : undefined,
+                    actionType: 'read',
+                    progressGroup: 'inspect',
+                    progressText: 'Reviewing the current implementation before making changes.'
+                };
             case 'get_document_symbols':
-                return { icon: 'read', label: `Loaded symbols for ${this.shortPath(args.path)}` };
+                return {
+                    icon: 'read',
+                    label: `Loading symbols for ${this.shortPath(args.path)}`,
+                    doneLabel: `Loaded symbols for ${this.shortPath(args.path)}`,
+                    filePath: typeof args.path === 'string' ? args.path : undefined,
+                    actionType: 'review',
+                    progressGroup: 'inspect',
+                    progressText: 'Reviewing the current implementation before making changes.'
+                };
             case 'list_directory':
-                return { icon: 'read', label: `Listed ${this.shortPath(args.path) || '.'}` };
+                return {
+                    icon: 'read',
+                    label: `Listing ${this.shortPath(args.path) || '.'}`,
+                    doneLabel: `Listed ${this.shortPath(args.path) || '.'}`,
+                    actionType: 'review',
+                    progressGroup: 'inspect',
+                    progressText: 'Inspecting the workspace layout and relevant files.'
+                };
             case 'get_file_tree':
-                return { icon: 'read', label: 'Loaded workspace file tree' };
+                return {
+                    icon: 'read',
+                    label: 'Loading workspace file tree',
+                    doneLabel: 'Loaded workspace file tree',
+                    actionType: 'review',
+                    progressGroup: 'inspect',
+                    progressText: 'Inspecting the workspace layout and relevant files.'
+                };
             case 'get_open_editors':
-                return { icon: 'read', label: 'Checked open editors' };
+                return {
+                    icon: 'read',
+                    label: 'Checking open editors',
+                    doneLabel: 'Checked open editors',
+                    actionType: 'review',
+                    progressGroup: 'inspect',
+                    progressText: 'Inspecting the current editor context before continuing.'
+                };
             case 'get_diagnostics':
-                return { icon: 'check', label: `Diagnostics${args.path ? ' for ' + this.shortPath(args.path) : ''}` };
+                return {
+                    icon: 'check',
+                    label: `Checking diagnostics${args.path ? ' for ' + this.shortPath(args.path) : ''}`,
+                    doneLabel: `Checked diagnostics${args.path ? ' for ' + this.shortPath(args.path) : ''}`,
+                    filePath: typeof args.path === 'string' ? args.path : undefined,
+                    actionType: 'check',
+                    progressGroup: 'check',
+                    progressText: 'Checking the current state for errors before moving on.'
+                };
             case 'write_file':
-                return { icon: 'edit', label: `Created ${this.shortPath(args.path)}` };
+                return {
+                    icon: 'edit',
+                    label: `Creating ${this.shortPath(args.path)}`,
+                    doneLabel: `Created ${this.shortPath(args.path)}`,
+                    filePath: typeof args.path === 'string' ? args.path : undefined,
+                    actionType: 'create',
+                    progressGroup: 'edit',
+                    progressText: 'Updating the implementation for this phase.'
+                };
             case 'edit_file':
-                return { icon: 'edit', label: `Edited ${this.shortPath(args.path)}` };
-            case 'replace_lines':
-                return { icon: 'edit', label: `Rewrote lines ${args.start_line}–${args.end_line} in ${this.shortPath(args.path)}` };
+                return {
+                    icon: 'edit',
+                    label: `Editing ${this.shortPath(args.path)}`,
+                    doneLabel: `Edited ${this.shortPath(args.path)}`,
+                    filePath: typeof args.path === 'string' ? args.path : undefined,
+                    actionType: 'edit',
+                    progressGroup: 'edit',
+                    progressText: 'Updating the implementation for this phase.'
+                };
+            case 'replace_lines': {
+                const start = Number(args.start_line) || 1;
+                const newLineCount = typeof args.new_content === 'string' ? args.new_content.split('\n').length : 0;
+                const actualEnd = start + Math.max(newLineCount, 1) - 1;
+                return {
+                    icon: 'edit',
+                    label: `Rewriting lines ${start}–${actualEnd} in ${this.shortPath(args.path)}`,
+                    doneLabel: `Rewrote lines ${start}–${actualEnd} in ${this.shortPath(args.path)}`,
+                    filePath: typeof args.path === 'string' ? args.path : undefined,
+                    actionType: 'edit',
+                    progressGroup: 'edit',
+                    progressText: 'Updating the implementation for this phase.'
+                };
+            }
             case 'delete_file':
-                return { icon: 'edit', label: `Deleted ${this.shortPath(args.path)}` };
+                return {
+                    icon: 'edit',
+                    label: `Deleting ${this.shortPath(args.path)}`,
+                    doneLabel: `Deleted ${this.shortPath(args.path)}`,
+                    filePath: typeof args.path === 'string' ? args.path : undefined,
+                    actionType: 'edit',
+                    progressGroup: 'edit',
+                    progressText: 'Updating the implementation for this phase.'
+                };
             case 'apply_code_action':
-                return { icon: 'edit', label: `Applied code action at ${this.shortPath(args.path)}` };
+                return {
+                    icon: 'edit',
+                    label: `Applying code action at ${this.shortPath(args.path)}`,
+                    doneLabel: `Applied code action at ${this.shortPath(args.path)}`,
+                    filePath: typeof args.path === 'string' ? args.path : undefined,
+                    actionType: 'edit',
+                    progressGroup: 'edit',
+                    progressText: 'Updating the implementation for this phase.'
+                };
             case 'run_terminal_command':
-                return { icon: 'run', label: `Ran: ${this.truncateStr(String(args.command || ''), 60)}` };
+                return {
+                    icon: 'run',
+                    label: `Running: ${this.truncateStr(String(args.command || ''), 60)}`,
+                    doneLabel: `Ran: ${this.truncateStr(String(args.command || ''), 60)}`,
+                    actionType: 'run',
+                    progressGroup: 'run',
+                    progressText: 'Running commands to validate the current changes.'
+                };
             case 'set_plan':
-                return { icon: 'loading', label: 'Setting plan' };
+                return {
+                    icon: 'loading',
+                    label: 'Setting plan',
+                    doneLabel: 'Set plan',
+                    actionType: 'todo',
+                    progressGroup: 'todo'
+                };
             case 'update_plan_step':
-                return { icon: 'loading', label: 'Updating plan step' };
+                return {
+                    icon: 'loading',
+                    label: 'Updating plan step',
+                    doneLabel: 'Updated plan step',
+                    actionType: 'todo',
+                    progressGroup: 'todo'
+                };
             default:
                 if (name.startsWith('mcp_')) {
-                    return { icon: 'run', label: `MCP: ${name.replace(/^mcp_/, '')}` };
+                    const short = name.replace(/^mcp_/, '');
+                    return {
+                        icon: 'run',
+                        label: `Running MCP: ${short}`,
+                        doneLabel: `MCP: ${short}`,
+                        actionType: 'other',
+                        progressGroup: 'other',
+                        progressText: 'Working through the next tool actions.'
+                    };
                 }
-                return { icon: 'loading', label: `Running: ${name}` };
+                return {
+                    icon: 'loading',
+                    label: `Running: ${name}`,
+                    doneLabel: `Completed: ${name}`,
+                    actionType: 'other',
+                    progressGroup: 'other',
+                    progressText: 'Working through the next tool actions.'
+                };
         }
     }
 
@@ -263,14 +546,31 @@ export class AgentLoop {
         return s.length <= max ? s : s.slice(0, max) + '...';
     }
 
+    private friendlyToolStatus(name: string): string {
+        switch (name) {
+            case 'read_file': case 'get_document_symbols': case 'get_open_editors': case 'get_file_tree': case 'list_directory':
+                return 'Reading...';
+            case 'grep_search': case 'search_files': case 'semantic_search': case 'find_symbol': case 'go_to_definition': case 'find_references':
+                return 'Searching...';
+            case 'edit_file': case 'write_file': case 'replace_lines': case 'delete_file': case 'apply_code_action':
+                return 'Editing...';
+            case 'run_terminal_command':
+                return 'Running command...';
+            case 'get_diagnostics':
+                return 'Checking...';
+            default:
+                return name.startsWith('mcp_') ? 'Running tool...' : 'Working...';
+        }
+    }
+
     /** Run the agent loop: send user message, process tool calls iteratively */
-    async run(userMessage: string, images?: string[], files?: { name: string; content: string }[]): Promise<void> {
+    async run(userMessage: string, images?: string[], files?: { name: string; content: string }[], displayText?: string): Promise<void> {
         if (this.running) { return; }
         this.running = true;
+        this.cancelled = false;
         this.abortController = new AbortController();
         this.planSteps = [];
         this.editedFiles.clear();
-        let activeCardTitle: string | null = null;
         let autofixCycles = 0;
         let contextRecoveryAttempts = 0;
         let reasoningMode = false;
@@ -311,9 +611,13 @@ export class AgentLoop {
                 }
             }
 
-            this.messages.push({ role: 'user', content: parts });
+            const userMsg: ChatMessage = { role: 'user', content: parts };
+            if (displayText) { userMsg.displayText = displayText; }
+            this.messages.push(userMsg);
         } else {
-            this.messages.push({ role: 'user', content: userMessage });
+            const userMsg: ChatMessage = { role: 'user', content: userMessage };
+            if (displayText) { userMsg.displayText = displayText; }
+            this.messages.push(userMsg);
         }
 
         // Gather all tool definitions
@@ -336,10 +640,139 @@ export class AgentLoop {
             });
 
             let iteration = 0;
-            activeCardTitle = null;
+
+            // ── Working block state: persists across iterations so actions group together ──
+            let activeWorkingBlock: WorkingBlock | null = null;
+            let lastProgressGroup: ToolProgressDescriptor['progressGroup'] | null = null;
+            const allWorkingPhases: WorkingBlock[] = [];
+            /** The most recent assistant message with tool_calls (for storing working phases on). */
+            let lastToolAssistantMsg: ChatMessage | null = null;
+
+            const currentWorkingTitle = (): string => this.planSteps.find(s => s.status === 'in_progress')?.title || 'Working';
+
+            const ensureWorkingBlock = (): WorkingBlock => {
+                const nextTitle = currentWorkingTitle();
+                if (activeWorkingBlock && activeWorkingBlock.status === 'in_progress') {
+                    if (activeWorkingBlock.title === nextTitle) {
+                        return activeWorkingBlock;
+                    }
+                    if (activeWorkingBlock.entries.length === 0) {
+                        activeWorkingBlock.title = nextTitle;
+                        return activeWorkingBlock;
+                    }
+                    const summary = this.buildWorkingSummary(activeWorkingBlock);
+                    activeWorkingBlock.status = 'completed';
+                    activeWorkingBlock.summary = summary;
+                    activeWorkingBlock.completedAt = Date.now();
+                    this.callbacks.sendToWebview({
+                        type: 'workingBlockCompleted',
+                        blockId: activeWorkingBlock.id,
+                        summary,
+                        completedAt: activeWorkingBlock.completedAt
+                    });
+                    activeWorkingBlock = null;
+                    lastProgressGroup = null;
+                }
+
+                const block = this.createWorkingBlock(nextTitle);
+                allWorkingPhases.push(block);
+                activeWorkingBlock = block;
+                lastProgressGroup = null;
+                this.callbacks.sendToWebview({ type: 'workingBlockStarted', block });
+                return block;
+            };
+
+            const appendWorkingText = (text?: string) => {
+                const trimmed = text?.trim();
+                if (!trimmed) { return; }
+                const block = ensureWorkingBlock();
+                const lastEntry = block.entries[block.entries.length - 1];
+                if (lastEntry?.kind === 'progress' && lastEntry.text === trimmed) { return; }
+                const entry = this.createWorkingProgressEntry(trimmed);
+                block.entries.push(entry);
+                this.callbacks.sendToWebview({ type: 'workingTextAppended', blockId: block.id, entry });
+            };
+
+            const addWorkingAction = (desc: ToolProgressDescriptor, status: WorkingBlockActionEntry['status'], toolName: string): WorkingBlockActionEntry | null => {
+                if (!this.isVisibleWorkingTool(toolName)) { return null; }
+                const block = ensureWorkingBlock();
+                if (desc.progressText && lastProgressGroup !== desc.progressGroup) {
+                    appendWorkingText(desc.progressText);
+                    lastProgressGroup = desc.progressGroup;
+                }
+                const entry: WorkingBlockActionEntry = {
+                    id: this.nextUiId('action'),
+                    kind: 'action',
+                    text: status === 'running' ? desc.label : desc.doneLabel,
+                    createdAt: Date.now(),
+                    actionType: desc.actionType,
+                    status,
+                    detail: desc.detail,
+                    filePath: desc.filePath,
+                    toolName,
+                    icon: desc.icon
+                };
+                block.entries.push(entry);
+                this.callbacks.sendToWebview({ type: 'workingActionAdded', blockId: block.id, entry });
+                return entry;
+            };
+
+            const updateWorkingAction = (entry: WorkingBlockActionEntry | null, desc: ToolProgressDescriptor, status: WorkingBlockActionEntry['status']) => {
+                if (!entry || !activeWorkingBlock) { return; }
+                entry.status = status;
+                entry.text = status === 'running' ? desc.label : desc.doneLabel;
+                entry.detail = desc.detail;
+                entry.filePath = desc.filePath;
+                entry.icon = status === 'error' ? 'error' : desc.icon;
+                this.callbacks.sendToWebview({
+                    type: 'workingActionUpdated',
+                    blockId: activeWorkingBlock.id,
+                    entryId: entry.id,
+                    status,
+                    text: entry.text,
+                    detail: entry.detail,
+                    filePath: entry.filePath,
+                    icon: entry.icon
+                });
+            };
+
+            const completeActiveWorkingBlock = () => {
+                if (!activeWorkingBlock || activeWorkingBlock.status !== 'in_progress') { return; }
+                if (activeWorkingBlock.entries.length === 0) {
+                    allWorkingPhases.pop();
+                    this.callbacks.sendToWebview({
+                        type: 'workingBlockCompleted',
+                        blockId: activeWorkingBlock.id,
+                        summary: '',
+                        completedAt: Date.now()
+                    });
+                    activeWorkingBlock = null;
+                    lastProgressGroup = null;
+                    return;
+                }
+                activeWorkingBlock.status = 'completed';
+                activeWorkingBlock.summary = this.buildWorkingSummary(activeWorkingBlock);
+                activeWorkingBlock.completedAt = Date.now();
+                this.callbacks.sendToWebview({
+                    type: 'workingBlockCompleted',
+                    blockId: activeWorkingBlock.id,
+                    summary: activeWorkingBlock.summary,
+                    completedAt: activeWorkingBlock.completedAt
+                });
+                activeWorkingBlock = null;
+                lastProgressGroup = null;
+            };
+
+            /** Flush all accumulated working phases onto the last tool-using assistant message. */
+            const storeWorkingPhases = () => {
+                if (lastToolAssistantMsg && allWorkingPhases.length > 0) {
+                    lastToolAssistantMsg.workingPhases = [...allWorkingPhases];
+                }
+            };
+
             while (iteration < this.maxIterations && this.running) {
                 iteration++;
-                this.callbacks.sendToWebview({ type: 'setStatus', status: `Thinking${iteration > 1 ? ` (iteration ${iteration})` : ''}...` });
+                this.callbacks.sendToWebview({ type: 'setStatus', status: 'Thinking...' });
 
                 // Trim context if approaching the window limit
                 this.messages = this.contextManager.trimIfNeeded(this.messages);
@@ -351,14 +784,10 @@ export class AgentLoop {
                     break;
                 }
 
-                this.callbacks.sendToWebview({ type: 'setStatus', status: `Thinking${iteration > 1 ? ` (iteration ${iteration})` : ''}...` });
-
-                // Stream the response
-                this.callbacks.sendToWebview({ type: 'startAssistantMessage' });
+                this.callbacks.sendToWebview({ type: 'setStatus', status: 'Thinking...' });
 
                 let assistantText = '';
                 let toolCalls: ToolCall[] = [];
-                let streamFailed = false;
 
                 try {
                     const stream = this.aoaiClient.streamChat(
@@ -388,17 +817,12 @@ export class AgentLoop {
 
                     if (isInvalidPrompt && contextRecoveryAttempts < MAX_CONTEXT_RECOVERY_ATTEMPTS) {
                         contextRecoveryAttempts++;
-                        this.callbacks.sendToWebview({ type: 'endAssistantMessage' });
 
                         if (contextRecoveryAttempts === 1) {
                             // First attempt: emergency trim (context overflow)
                             this.callbacks.sendToWebview({
                                 type: 'setStatus',
                                 status: 'Prompt too large for model — trimming context...'
-                            });
-                            this.callbacks.sendToWebview({
-                                type: 'appendAssistantText',
-                                text: '\n\n*[Context exceeded model limit — automatically trimming and retrying...]*\n\n'
                             });
                             this.messages = this.contextManager.emergencyTrim(this.messages);
                         } else if (contextRecoveryAttempts === 2) {
@@ -408,10 +832,6 @@ export class AgentLoop {
                             this.callbacks.sendToWebview({
                                 type: 'setStatus',
                                 status: 'Retrying with reasoning-compatible parameters...'
-                            });
-                            this.callbacks.sendToWebview({
-                                type: 'appendAssistantText',
-                                text: '\n\n*[Switching to reasoning-model compatible parameters and retrying...]*\n\n'
                             });
                         } else {
                             // Third attempt: fall back to a different deployment
@@ -425,10 +845,6 @@ export class AgentLoop {
                                     type: 'setStatus',
                                     status: `Switching to ${label} to continue...`
                                 });
-                                this.callbacks.sendToWebview({
-                                    type: 'appendAssistantText',
-                                    text: `\n\n*[Falling back to ${label} to continue...]*\n\n`
-                                });
                             } else {
                                 // No fallback available — rethrow
                                 throw streamErr;
@@ -439,8 +855,6 @@ export class AgentLoop {
                     // Not recoverable — rethrow to the outer catch
                     throw streamErr;
                 }
-
-                this.callbacks.sendToWebview({ type: 'endAssistantMessage' });
                 // Reset recovery counter on successful streaming
                 contextRecoveryAttempts = 0;
 
@@ -453,22 +867,50 @@ export class AgentLoop {
                 };
                 if (toolCalls.length > 0) {
                     assistantMsg.tool_calls = toolCalls;
+                    lastToolAssistantMsg = assistantMsg;
+
+                    // When the LLM produces narration alongside tool calls, show it as
+                    // an inline narration row between working blocks (GHCP-style).
+                    if (assistantText.trim()) {
+                        completeActiveWorkingBlock();
+                        this.callbacks.sendToWebview({ type: 'narrationText', text: assistantText.trim() });
+                    }
                 }
                 this.messages.push(assistantMsg);
 
-                // If no tool calls, check for unfixed errors before ending
+                // If no tool calls, check autofix FIRST so intermediate text
+                // can be shown as a narration row instead of a final chat bubble.
                 if (toolCalls.length === 0) {
+                    let autofixContinue = false;
                     if (autofixCycles < MAX_AUTOFIX_CYCLES && this.editedFiles.size > 0) {
                         const errorSummary = await this.checkEditedFileDiagnostics();
                         if (errorSummary) {
+                            autofixContinue = true;
                             autofixCycles++;
                             this.messages.push({
                                 role: 'system',
                                 content: `[Auto-fix] The following errors were detected in files you edited. Please fix them before finishing:\n${errorSummary}`
                             });
-                            this.callbacks.sendToWebview({ type: 'setStatus', status: `Auto-fixing errors (cycle ${autofixCycles}/${MAX_AUTOFIX_CYCLES})...` });
-                            continue;
                         }
+                    }
+
+                    if (autofixContinue) {
+                        // The agent is continuing — render any text as an inline narration row
+                        if (assistantText.trim()) {
+                            completeActiveWorkingBlock();
+                            this.callbacks.sendToWebview({ type: 'narrationText', text: assistantText.trim() });
+                        }
+                        this.callbacks.sendToWebview({ type: 'setStatus', status: `Auto-fixing errors (cycle ${autofixCycles}/${MAX_AUTOFIX_CYCLES})...` });
+                        continue;
+                    }
+
+                    // Done — show final text as a full chat bubble
+                    completeActiveWorkingBlock();
+                    storeWorkingPhases();
+                    if (assistantText) {
+                        this.callbacks.sendToWebview({ type: 'startAssistantMessage' });
+                        this.callbacks.sendToWebview({ type: 'appendAssistantText', text: assistantText });
+                        this.callbacks.sendToWebview({ type: 'endAssistantMessage' });
                     }
                     break;
                 }
@@ -483,15 +925,14 @@ export class AgentLoop {
 
                 const allReadOnly = toolCalls.every(tc => READ_ONLY_TOOLS.has(tc.function.name));
 
-                // Start or reuse progress card for this batch of tool calls
-                const currentStep = this.planSteps.find(s => s.status === 'in_progress');
-                const cardTitle = currentStep ? currentStep.title : `Working`;
-                this.callbacks.sendToWebview({ type: 'progressCardStart', title: cardTitle });
-                activeCardTitle = cardTitle;
-
                 if (allReadOnly && toolCalls.length > 1) {
                     // ── Parallel execution for read-only tool calls ──
-                    this.callbacks.sendToWebview({ type: 'setStatus', status: `Running ${toolCalls.length} tools in parallel...` });
+                    this.callbacks.sendToWebview({ type: 'setStatus', status: `Reading ${toolCalls.length} files...` });
+                    if (toolCalls.some(tc => this.isVisibleWorkingTool(tc.function.name))) {
+                        appendWorkingText('Reviewing the relevant files and symbols for this phase.');
+                    }
+
+                    const actionEntries = new Map<string, WorkingBlockActionEntry | null>();
 
                     // Show all tool calls and emit progress steps
                     for (const tc of toolCalls) {
@@ -501,7 +942,7 @@ export class AgentLoop {
                             type: 'toolCall', name: tc.function.name, args: tc.function.arguments, id: tc.id
                         });
                         const desc = this.describeToolForProgress(tc.function.name, args);
-                        this.callbacks.sendToWebview({ type: 'progressCardStep', icon: desc.icon, label: desc.label, detail: desc.detail, status: 'running', toolName: tc.function.name });
+                        actionEntries.set(tc.id, addWorkingAction(desc, 'running', tc.function.name));
                     }
 
                     // Execute all in parallel
@@ -524,17 +965,22 @@ export class AgentLoop {
                             this.editedFiles.add(args.path);
                         }
                         const desc = this.describeToolForProgress(tc.function.name, args);
-                        this.callbacks.sendToWebview({ type: 'progressCardStep', icon: result.success ? 'done' : 'error', label: desc.label, detail: desc.detail, status: result.success ? 'done' : 'error', toolName: tc.function.name });
+                        updateWorkingAction(actionEntries.get(tc.id) || null, desc, result.success ? 'done' : 'error');
                         this.messages.push({
                             role: 'tool', content: result.result, tool_call_id: tc.id, name: tc.function.name
                         });
                     }
                 } else {
                     // ── Sequential execution (writes / mixed / single tool) ──
+                    // Pre-create working block so toolCall events are suppressed in the webview
+                    if (toolCalls.some(tc => this.isVisibleWorkingTool(tc.function.name))) {
+                        ensureWorkingBlock();
+                    }
                     for (const tc of toolCalls) {
                         if (!this.running) { break; }
 
-                        this.callbacks.sendToWebview({ type: 'setStatus', status: `Running: ${tc.function.name}` });
+                        const friendlyStatus = this.friendlyToolStatus(tc.function.name);
+                        this.callbacks.sendToWebview({ type: 'setStatus', status: friendlyStatus });
 
                         let args: Record<string, unknown>;
                         try {
@@ -552,7 +998,7 @@ export class AgentLoop {
 
                         // Emit progress step as "running"
                         const desc = this.describeToolForProgress(tc.function.name, args);
-                        this.callbacks.sendToWebview({ type: 'progressCardStep', icon: desc.icon, label: desc.label, detail: desc.detail, status: 'running', toolName: tc.function.name });
+                        const actionEntry = addWorkingAction(desc, 'running', tc.function.name);
 
                         const result = await this.executeToolWithRetry(tc.function.name, args);
 
@@ -569,7 +1015,7 @@ export class AgentLoop {
                         });
 
                         // Update the last progress step with the result
-                        this.callbacks.sendToWebview({ type: 'progressCardStep', icon: result.success ? 'done' : 'error', label: desc.label, detail: desc.detail, status: result.success ? 'done' : 'error', toolName: tc.function.name });
+                        updateWorkingAction(actionEntry, desc, result.success ? 'done' : 'error');
 
                         // Add tool result to history
                         this.messages.push({
@@ -581,8 +1027,8 @@ export class AgentLoop {
                     }
                 }
 
-                // Signal end of this tool batch (frontend may merge with next if same title)
-                this.callbacks.sendToWebview({ type: 'progressCardEnd' });
+                // DON'T complete the working block here — let it persist across iterations
+                // so actions group together under one block per plan phase.
 
                 // When hitting the iteration limit, ask the user if they want to continue
                 if (iteration >= this.maxIterations && this.running) {
@@ -598,17 +1044,23 @@ export class AgentLoop {
                         iteration = 0;
                         this.callbacks.sendToWebview({ type: 'setStatus', status: 'Continuing...' });
                     } else {
-                        this.callbacks.sendToWebview({
-                            type: 'appendAssistantText',
-                            text: '\n\n*[Paused by user after ' + this.maxIterations + ' iterations.]*'
+                        this.messages.push({
+                            role: 'assistant',
+                            content: `Paused after ${this.maxIterations} iterations.`
                         });
+                        this.callbacks.sendToWebview({ type: 'startAssistantMessage' });
+                        this.callbacks.sendToWebview({ type: 'appendAssistantText', text: `Paused after ${this.maxIterations} iterations.` });
+                        this.callbacks.sendToWebview({ type: 'endAssistantMessage' });
                         break;
                     }
                 }
 
             }
+            // End of while loop — ensure any open working block is completed and phases stored
+            completeActiveWorkingBlock();
+            storeWorkingPhases();
         } catch (e: unknown) {
-            if ((e as Error).name !== 'AbortError') {
+            if (!this.cancelled && (e as Error).name !== 'AbortError') {
                 this.callbacks.sendToWebview({
                     type: 'error',
                     message: `Agent error: ${e instanceof Error ? e.message : String(e)}`
@@ -617,8 +1069,6 @@ export class AgentLoop {
         } finally {
             // Clear any deployment override so subsequent runs use the configured model
             this.aoaiClient.setDeploymentOverride(undefined);
-            // Final close for any lingering card
-            this.callbacks.sendToWebview({ type: 'progressCardEnd' });
             // Mark any remaining pending/in-progress plan steps as completed
             for (const step of this.planSteps) {
                 if (step.status === 'in_progress' || step.status === 'pending') {

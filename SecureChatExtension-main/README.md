@@ -188,6 +188,80 @@ By default, Junior merges `junior.mcp.servers` with external settings listed in 
 
 MCP tools appear alongside built-in tools with names prefixed by their server name (e.g., `mcp_filesystem_read_file`).
 
+### 4. (Optional) Spec Kit Integration — Spec-Driven Development
+
+Junior supports **slash commands** that integrate with [GitHub Spec Kit](https://github.com/github/spec-kit), enabling structured spec-driven development workflows directly from the chat panel.
+
+#### What is Spec Kit?
+
+Spec Kit is an open-source toolkit from GitHub that replaces ad-hoc prompting with a disciplined, multi-step development methodology:
+
+1. **Constitution** — establish project principles and guidelines
+2. **Specify** — define requirements (the *what*, not the *how*)
+3. **Plan** — create a technical implementation plan
+4. **Tasks** — break down into actionable task lists
+5. **Implement** — execute all tasks according to the plan
+
+#### Quick Setup
+
+**Step 1: Install the Spec Kit CLI** (one-time, on one machine):
+
+```bash
+# Install via uv (Python package manager)
+uv tool install specify-cli --from git+https://github.com/github/spec-kit.git
+```
+
+**Step 2: Initialize your project** (one-time per repo):
+
+```bash
+# In your project directory
+specify init . --ai generic --ai-commands-dir .junior/commands
+```
+
+This creates `.junior/commands/` with prompt template `.md` files for each workflow step. **Commit these files** — other developers on the team won't need Spec Kit installed.
+
+**Step 3: Use slash commands in Junior:**
+
+Type `/` in the chat input to see available commands with autocomplete:
+
+| Command | Description |
+|---------|-------------|
+| `/speckit.constitution` | Create or update project governing principles |
+| `/speckit.specify` | Define what you want to build (requirements) |
+| `/speckit.plan` | Create a technical implementation plan |
+| `/speckit.tasks` | Generate actionable task list from the plan |
+| `/speckit.implement` | Execute all tasks to build the feature |
+| `/speckit.clarify` | Clarify underspecified areas |
+| `/speckit.analyze` | Cross-artifact consistency analysis |
+
+You can also append additional context after the command:
+
+```
+/speckit.specify Build a REST API for user management with JWT auth
+```
+
+#### Custom Slash Commands
+
+Slash commands aren't limited to Spec Kit. Any `.md` file placed in the command directories works as a slash command. Junior scans these directories (in priority order):
+
+1. Any directories listed in `junior.slashCommands.directories` (setting)
+2. `.junior/commands/`
+3. `.github/copilot/commands/`
+4. `.github/commands/`
+
+To create a custom command, add a markdown file — e.g., `.junior/commands/review-security.md` — and type `/review-security` in the chat. The file's content is prepended to your message as context for the AI.
+
+#### How It Works
+
+When you type `/commandName [optional text]` in the chat:
+
+1. Junior looks up `commandName.md` in the command directories
+2. The template content is loaded and prepended to your message
+3. The combined prompt is sent to the AI model
+4. The AI follows the template's instructions with your additional context
+
+No runtime dependency on Spec Kit is needed — the prompt templates are plain markdown files.
+
 ## Usage
 
 ### Open the Chat Panel
@@ -211,6 +285,7 @@ Press **Shift+Enter** for a newline without sending.
 | Command | Description |
 |---------|-------------|
 | `Junior: Open Chat` | Focus the chat panel |
+| `Junior: Open Chat in Editor Tab` | Open chat as a top-level editor tab |
 | `Junior: New Chat Session` | Start a fresh conversation |
 | `Junior: Select Model` | Switch between configured deployments |
 | `Junior: Index Workspace` | Re-scan workspace files (manual refresh) |
@@ -259,6 +334,7 @@ Select code in the editor, right-click, and choose:
 | `junior.mcp.servers` | `{}` | MCP server configurations (overrides duplicates from external settings) |
 | `junior.mcp.includeExternalServers` | `true` | Also load MCP servers from external settings keys |
 | `junior.mcp.externalServerSettings` | `["mcp.servers"]` | External settings paths to merge MCP servers from |
+| `junior.slashCommands.directories` | `[]` | Additional directories to scan for slash command `.md` files. Built-in dirs (`.junior/commands`, `.github/copilot/commands`, `.github/commands`) are always scanned |
 | `junior.inlineCompletions.enabled` | `true` | Enable/disable inline ghost-text code completions |
 | `junior.inlineCompletions.deployment` | `""` | Deployment ID for inline completions. Leave empty to use the active chat deployment. A fast model (e.g. `gpt-4o`) is recommended. |
 | `junior.inlineCompletions.timeoutMs` | `5000` | Max time (ms) to wait for a completion response before aborting (1000–30000) |

@@ -1,6 +1,7 @@
 .vscode/**
 src/**
 node_modules/**
+!node_modules/@vscode/codicons/dist/**
 tsconfig.json
 .gitignore
 *.vsix

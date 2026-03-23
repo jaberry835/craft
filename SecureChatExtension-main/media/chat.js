@@ -27,10 +27,12 @@ window.onerror = function(msg, src, line, col, err) {
     let currentAssistantEl = null;
     let currentContentEl = null;
     const toolStateById = new Map();
-    let activeProgressCard = null;  // the current .progress-card element
-    let activeProgressTimeline = null; // the .pc-timeline inside it
-    let pcBatchState = null; // tracks consecutive same-tool batching: { toolName, icon, count, items[], stepEl }
-    let pcCurrentPlanTitle = null; // the plan step title the active card is tracking
+    const workingBlocksById = new Map();
+    const workingEntriesById = new Map();
+    let activeWorkingBlockId = null;
+
+    // Tools that should never render as standalone tool-blocks (pure bookkeeping).
+    const HIDDEN_TOOLS = new Set(['set_plan', 'update_plan_step']);
 
     // ── Streaming state ──
     let streamRawText = '';          // full accumulated raw text during streaming
@@ -43,15 +45,77 @@ window.onerror = function(msg, src, line, col, err) {
 
     // Progress card icon map (icon name → unicode/emoji)
     const PC_ICONS = {
-        search: '\uD83D\uDD0D',   // 🔍
-        read: '\uD83D\uDCC4',     // 📄
-        edit: '\u270F',            // ✏
-        run: '\u25B6',             // ▶
-        check: '\u2714',           // ✔
-        loading: '\u25CF',         // ●
-        done: '\u2713',            // ✓
-        error: '\u2717'            // ✗
+        search: '<i class="codicon codicon-search"></i>',
+        read: '<i class="codicon codicon-file"></i>',
+        edit: '<i class="codicon codicon-edit"></i>',
+        run: '<i class="codicon codicon-play"></i>',
+        check: '<i class="codicon codicon-pass"></i>',
+        loading: '<i class="codicon codicon-loading codicon-modifier-spin"></i>',
+        done: '<i class="codicon codicon-check"></i>',
+        error: '<i class="codicon codicon-error"></i>',
+        create: '<i class="codicon codicon-new-file"></i>',
+        list: '<i class="codicon codicon-list-tree"></i>',
+        terminal: '<i class="codicon codicon-terminal"></i>'
     };
+
+    // File extension → { tag, color } for colored language badges in progress steps
+    var FILE_EXT_BADGES = {
+        '.ts':    { tag: 'TS',   color: '#3178c6' },
+        '.tsx':   { tag: 'TSX',  color: '#3178c6' },
+        '.js':    { tag: 'JS',   color: '#f0db4f' },
+        '.jsx':   { tag: 'JSX',  color: '#f0db4f' },
+        '.json':  { tag: 'JSON', color: '#a8a038' },
+        '.py':    { tag: 'PY',   color: '#3572a5' },
+        '.css':   { tag: 'CSS',  color: '#563d7c' },
+        '.scss':  { tag: 'SCSS', color: '#c6538c' },
+        '.html':  { tag: 'HTML', color: '#e34c26' },
+        '.md':    { tag: 'MD',   color: '#519aba' },
+        '.yaml':  { tag: 'YAML', color: '#cb171e' },
+        '.yml':   { tag: 'YML',  color: '#cb171e' },
+        '.sh':    { tag: 'SH',   color: '#4eaa25' },
+        '.ps1':   { tag: 'PS',   color: '#012456' },
+        '.rs':    { tag: 'RS',   color: '#dea584' },
+        '.go':    { tag: 'GO',   color: '#00add8' },
+        '.java':  { tag: 'JAVA', color: '#b07219' },
+        '.cs':    { tag: 'C#',   color: '#178600' },
+        '.cpp':   { tag: 'C++',  color: '#f34b7d' },
+        '.c':     { tag: 'C',    color: '#555555' },
+        '.rb':    { tag: 'RB',   color: '#701516' },
+        '.swift': { tag: 'SWIFT',color: '#f05138' },
+        '.vue':   { tag: 'VUE',  color: '#41b883' },
+        '.svelte':{ tag: 'SVLT', color: '#ff3e00' },
+        '.sql':   { tag: 'SQL',  color: '#e38c00' },
+        '.xml':   { tag: 'XML',  color: '#f26522' },
+        '.toml':  { tag: 'TOML', color: '#9c4121' },
+    };
+
+    /** Extract a file extension badge HTML from a label string, or return '' */
+    function fileBadgeHtml(label) {
+        if (!label) return '';
+        // Match common file name patterns (name.ext) in the label
+        var m = label.match(/[\w.\-\/\\]+\.(\w+)/);
+        if (!m) return '';
+        var ext = '.' + m[1].toLowerCase();
+        var badge = FILE_EXT_BADGES[ext];
+        if (!badge) return '';
+        return ' <span class="pc-file-badge" style="background:' + badge.color + '">' + badge.tag + '</span>';
+    }
+
+    /** Render label HTML with the file path portion as a clickable link */
+    function labelWithFileLink(label, filePath) {
+        if (!label) return '';
+        if (!filePath) return escapeHtml(label) + fileBadgeHtml(label);
+        // Find the file path portion in the label (last path-like segment)
+        var m = label.match(/([\w.\-\/\\]+\.(\w+))/);
+        if (!m) return escapeHtml(label) + fileBadgeHtml(label);
+        var fileName = m[1];
+        var idx = label.indexOf(fileName);
+        var before = label.substring(0, idx);
+        var after = label.substring(idx + fileName.length);
+        return escapeHtml(before) +
+            '<span class="pc-file-link">' + escapeHtml(fileName) + '</span>' +
+            escapeHtml(after) + fileBadgeHtml(label);
+    }
 
     // ── History toggle (triggered by extension command) ──
     function toggleHistoryPanel() {
@@ -78,7 +142,6 @@ window.onerror = function(msg, src, line, col, err) {
             item.querySelector('.hi-title').addEventListener('click', () => {
                 vscode.postMessage({ type: 'switchSession', sessionId: s.id });
                 historyPanel.classList.remove('open');
-                btnHistory.classList.remove('active');
             });
             item.querySelector('.hi-delete').addEventListener('click', (e) => {
                 e.stopPropagation();
@@ -113,6 +176,8 @@ window.onerror = function(msg, src, line, col, err) {
     // Send message on Enter
     inputEl.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
+            // Don't send if slash autocomplete is open (handled by capture listener)
+            if (slashAutocompleteEl && slashAutocompleteEl.classList.contains('open')) { return; }
             e.preventDefault();
             sendCurrentMessage();
         }
@@ -128,6 +193,7 @@ window.onerror = function(msg, src, line, col, err) {
         inputEl.value = '';
         inputEl.style.height = 'auto';
         clearAttachments();
+        closeSlashAutocomplete();
     }
 
 
@@ -278,6 +344,113 @@ window.onerror = function(msg, src, line, col, err) {
             attachPreview.style.display = 'none';
         }
     }
+
+    // ── Slash Command Autocomplete ──
+    var slashCommands = [];  // populated from extension
+    var slashActiveIndex = -1;
+    var slashAutocompleteEl = document.getElementById('slash-autocomplete');
+    var slashPendingRequest = false;
+
+    function updateSlashAutocomplete() {
+        if (!slashAutocompleteEl) { return; }
+        var text = inputEl.value;
+
+        // Only trigger when first char is / and cursor is in the command portion
+        var match = text.match(/^\/(\S*)$/);
+        if (!match) {
+            closeSlashAutocomplete();
+            return;
+        }
+
+        // Request fresh command list from the extension when needed
+        if (slashCommands.length === 0) {
+            if (!slashPendingRequest) {
+                slashPendingRequest = true;
+                vscode.postMessage({ type: 'requestSlashCommands' });
+            }
+            return;
+        }
+
+        var filter = match[1].toLowerCase();
+        var filtered = slashCommands.filter(function(c) {
+            return c.name.toLowerCase().indexOf('/' + filter) === 0 || c.name.toLowerCase().indexOf(filter) !== -1;
+        });
+
+        if (filtered.length === 0) {
+            closeSlashAutocomplete();
+            return;
+        }
+
+        slashActiveIndex = 0;
+        slashAutocompleteEl.innerHTML = '';
+        filtered.forEach(function(cmd, idx) {
+            var item = document.createElement('div');
+            item.className = 'slash-item' + (idx === 0 ? ' active' : '');
+            item.innerHTML = '<span class="slash-name">' + escapeHtml(cmd.name) + '</span>' +
+                '<span class="slash-desc">' + escapeHtml(cmd.description) + '</span>';
+            item.addEventListener('mousedown', function(e) {
+                e.preventDefault();
+                selectSlashCommand(cmd.name);
+            });
+            slashAutocompleteEl.appendChild(item);
+        });
+        slashAutocompleteEl.classList.add('open');
+    }
+
+    function closeSlashAutocomplete() {
+        if (slashAutocompleteEl) {
+            slashAutocompleteEl.classList.remove('open');
+            slashAutocompleteEl.innerHTML = '';
+        }
+        slashActiveIndex = -1;
+        // Reset so next / will request fresh commands from disk
+        slashCommands = [];
+        slashPendingRequest = false;
+    }
+
+    function selectSlashCommand(name) {
+        inputEl.value = name + ' ';
+        inputEl.focus();
+        closeSlashAutocomplete();
+        // Resize textarea
+        inputEl.style.height = 'auto';
+        inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + 'px';
+    }
+
+    // Hook into input events for slash autocomplete
+    inputEl.addEventListener('input', function() {
+        updateSlashAutocomplete();
+    });
+
+    // Keyboard navigation inside autocomplete
+    inputEl.addEventListener('keydown', function(e) {
+        if (!slashAutocompleteEl || !slashAutocompleteEl.classList.contains('open')) { return; }
+        var items = slashAutocompleteEl.querySelectorAll('.slash-item');
+        if (items.length === 0) { return; }
+
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            if (slashActiveIndex < items.length - 1) { slashActiveIndex++; }
+            items.forEach(function(it, i) { it.classList.toggle('active', i === slashActiveIndex); });
+            items[slashActiveIndex].scrollIntoView({ block: 'nearest' });
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            if (slashActiveIndex > 0) { slashActiveIndex--; }
+            items.forEach(function(it, i) { it.classList.toggle('active', i === slashActiveIndex); });
+            items[slashActiveIndex].scrollIntoView({ block: 'nearest' });
+        } else if (e.key === 'Tab' || (e.key === 'Enter' && slashActiveIndex >= 0)) {
+            e.preventDefault();
+            e.stopPropagation();
+            var activeItem = items[slashActiveIndex];
+            if (activeItem) {
+                var name = activeItem.querySelector('.slash-name').textContent;
+                selectSlashCommand(name);
+            }
+        } else if (e.key === 'Escape') {
+            e.preventDefault();
+            closeSlashAutocomplete();
+        }
+    }, true);  // use capture to intercept before the Enter-to-send handler
 
     function showLocalError(text) {
         const el = document.createElement('div');
@@ -452,6 +625,11 @@ window.onerror = function(msg, src, line, col, err) {
             return codeBlocks[parseInt(idx, 10)] || '';
         });
 
+        // Strip excess blank lines around block-level elements to avoid double-spacing
+        // with white-space:pre-wrap (block margins + visible newlines = too much space).
+        html = html.replace(/\n{2,}(?=<(?:h[1-3]|ul|ol|div|pre)[\s>])/g, '\n');
+        html = html.replace(/(<\/(?:h[1-3]|ul|ol|div|pre)>)\n{2,}/g, '$1\n');
+
         // Final guard: drop any <hr> tags that could have slipped from model text transforms.
         html = html.replace(/<hr\s*\/?>/gi, '');
         // Final guard: remove any line that is still only rule-like punctuation after transforms.
@@ -550,8 +728,8 @@ window.onerror = function(msg, src, line, col, err) {
                     name: msg.name,
                     args: safeParseJson(msg.args || '{}')
                 });
-                // When a progress card is active, suppress the standalone tool-block
-                if (activeProgressCard) { break; }
+                // Suppress plan-management tools and any tool covered by a working block
+                if (HIDDEN_TOOLS.has(msg.name) || activeWorkingBlockId) { break; }
                 const block = document.createElement('div');
                 block.className = 'tool-block';
                 block.dataset.toolId = msg.id;
@@ -570,8 +748,9 @@ window.onerror = function(msg, src, line, col, err) {
                 break;
             }
             case 'toolResult': {
-                // When a progress card is active, suppress the standalone tool-block result
-                if (activeProgressCard) {
+                // Suppress plan-management tools and tools covered by a working block
+                var _toolState = toolStateById.get(msg.id);
+                if ((_toolState && HIDDEN_TOOLS.has(_toolState.name)) || activeWorkingBlockId) {
                     toolStateById.delete(msg.id);
                     break;
                 }
@@ -656,6 +835,17 @@ window.onerror = function(msg, src, line, col, err) {
                 break;
             }
             case 'fileChangeTick': {
+                // Update working block entry with diff stats
+                for (var [, eRec] of workingEntriesById) {
+                    if (eRec.entry.filePath && msg.file &&
+                        (eRec.entry.filePath === msg.file ||
+                         eRec.entry.filePath.endsWith('/' + msg.file) ||
+                         eRec.entry.filePath.endsWith('\\' + msg.file))) {
+                        eRec.entry.additions = msg.additions;
+                        eRec.entry.deletions = msg.deletions;
+                        renderWorkingActionRow(eRec.el, eRec.entry);
+                    }
+                }
                 const dock = document.getElementById('file-change-dock');
                 if (!dock) break;
                 dock.classList.remove('hidden');
@@ -769,24 +959,6 @@ window.onerror = function(msg, src, line, col, err) {
             }
             case 'agentPlan': {
                 renderPlan(msg.steps);
-                // Detect plan step change and split the progress card
-                if (msg.steps && activeProgressCard) {
-                    var inProgress = msg.steps.find(function(s) { return s.status === 'in_progress'; });
-                    var newPlanTitle = inProgress ? inProgress.title : null;
-                    if (newPlanTitle && newPlanTitle !== pcCurrentPlanTitle) {
-                        var hasSteps = activeProgressCard.querySelectorAll('.pc-step').length > 0;
-                        if (hasSteps) {
-                            // Card has content — close it and open a new one for the new step
-                            closeCurrentProgressCard();
-                            openProgressCard(newPlanTitle);
-                        } else {
-                            // Card is brand new (no steps yet) — just update the title to match
-                            var titleEl = activeProgressCard.querySelector('.pc-title-text');
-                            if (titleEl) { titleEl.textContent = newPlanTitle; }
-                            pcCurrentPlanTitle = newPlanTitle;
-                        }
-                    }
-                }
                 break;
             }
             case 'sessionCleared': {
@@ -798,10 +970,9 @@ window.onerror = function(msg, src, line, col, err) {
                 }
                 currentAssistantEl = null;
                 currentContentEl = null;
-                activeProgressCard = null;
-                activeProgressTimeline = null;
-                pcBatchState = null;
-                pcCurrentPlanTitle = null;
+                workingBlocksById.clear();
+                workingEntriesById.clear();
+                activeWorkingBlockId = null;
                 clearAttachments();
                 renderPlan([]);
                 // Reset file-change dock
@@ -830,14 +1001,20 @@ window.onerror = function(msg, src, line, col, err) {
                     statusEl.classList.add('active');
                     inputEl.disabled = true;
                     inputEl.placeholder = 'Agent is working...';
-                    // Show inline spinner at bottom of messages
-                    if (workingEl) {
-                        workingTextEl.textContent = msg.status;
-                        workingEl.classList.add('active');
-                        // Keep spinner at the very end
-                        messagesEl.appendChild(workingEl);
-                        scrollToBottom();
+                    var liveBlock = getActiveWorkingBlock();
+                    if (liveBlock) {
+                        setWorkingBlockStatusText(liveBlock, msg.status);
                     }
+                    if (liveBlock) {
+                        if (workingEl) { workingEl.classList.remove('active'); }
+                    } else {
+                        if (workingEl) {
+                            workingTextEl.textContent = 'Thinking';
+                            workingEl.classList.add('active');
+                            messagesEl.appendChild(workingEl);
+                        }
+                    }
+                    scrollToBottom();
                 } else {
                     statusEl.textContent = '';
                     statusEl.classList.remove('active');
@@ -845,6 +1022,10 @@ window.onerror = function(msg, src, line, col, err) {
                     inputEl.placeholder = 'Ask Junior anything...';
                     inputEl.focus();
                     if (workingEl) { workingEl.classList.remove('active'); }
+                    var activeBlock = getActiveWorkingBlock();
+                    if (activeBlock) {
+                        setWorkingBlockStatusText(activeBlock, '');
+                    }
                 }
                 break;
             }
@@ -856,11 +1037,11 @@ window.onerror = function(msg, src, line, col, err) {
                 // Remove any lingering continue-iteration dialog
                 const continueDialog = messagesEl.querySelector('.continue-iteration-dialog');
                 if (continueDialog) { continueDialog.remove(); }
-                // Fully release the progress card reference on agent completion
-                activeProgressCard = null;
-                activeProgressTimeline = null;
-                pcBatchState = null;
-                pcCurrentPlanTitle = null;
+                const liveBlock = getActiveWorkingBlock();
+                if (liveBlock) {
+                    finalizeWorkingBlock(liveBlock, liveBlock.data.summary || liveBlock.data.title, true);
+                }
+                activeWorkingBlockId = null;
                 break;
             }
             case 'fileAttached': {
@@ -884,134 +1065,47 @@ window.onerror = function(msg, src, line, col, err) {
                 toggleHistoryPanel();
                 break;
             }
-            case 'progressCardStart': {
-                var newTitle = msg.title || 'Working';
-                // Reuse the existing card if it has the same title (even if marked done from previous iteration)
-                if (activeProgressCard) {
-                    var existingTitle = activeProgressCard.querySelector('.pc-title-text');
-                    var existingTitleText = existingTitle ? existingTitle.textContent.replace(/\s*\(\d+ steps?\)$/, '') : '';
-                    if (existingTitleText === newTitle) {
-                        // Re-activate the existing card
-                        activeProgressCard.classList.remove('done');
-                        activeProgressCard.classList.add('expanded');
-                        activeProgressTimeline = activeProgressCard.querySelector('.pc-timeline');
-                        // Restore title without the step-count suffix
-                        if (existingTitle) { existingTitle.textContent = newTitle; }
-                        pcCurrentPlanTitle = newTitle;
-                        scrollToBottom();
-                        break;
+            case 'workingBlockStarted': {
+                if (activeWorkingBlockId && activeWorkingBlockId !== msg.block.id) {
+                    const previousBlock = getActiveWorkingBlock();
+                    if (previousBlock) {
+                        previousBlock.el.classList.remove('live');
                     }
-                    // Different title — close the old card properly
-                    closeCurrentProgressCard();
-                    activeProgressCard = null;
-                    activeProgressTimeline = null;
                 }
-                openProgressCard(newTitle);
+                createWorkingBlock(msg.block);
+                activeWorkingBlockId = msg.block.id;
                 scrollToBottom();
                 break;
             }
-            case 'progressCardStep': {
-                if (!activeProgressTimeline) { break; }
-                var icon = PC_ICONS[msg.icon] || '\u25CF';
-                var statusCls = msg.status || 'running';
-                var toolName = msg.toolName || '';
-
-                // Skip meta-tools from the progress card
-                if (toolName === 'set_plan' || toolName === 'update_plan_step') { break; }
-
-                // ── Batch-completion update: tool just finished ──
-                if (statusCls === 'done' || statusCls === 'error') {
-                    // If we're batching this tool, just increment the done count
-                    if (pcBatchState && pcBatchState.toolName === toolName && pcBatchState.stepEl) {
-                        pcBatchState.doneCount = (pcBatchState.doneCount || 0) + 1;
-                        if (statusCls === 'error') { pcBatchState.hasError = true; }
-                        // If all items in the batch are done, finalize the line
-                        if (pcBatchState.doneCount >= pcBatchState.count) {
-                            finalizeBatchStep();
-                        }
-                        scrollToBottom();
-                        break;
-                    }
-                    // Not batching — try to update a matching running step
-                    var runningSteps = activeProgressTimeline.querySelectorAll('.pc-step.running');
-                    var updated = false;
-                    for (var i = 0; i < runningSteps.length; i++) {
-                        var stepLabel = runningSteps[i].querySelector('.pc-step-label');
-                        if (stepLabel && stepLabel.textContent === msg.label) {
-                            runningSteps[i].className = 'pc-step ' + statusCls;
-                            var stepIcon = runningSteps[i].querySelector('.pc-step-icon');
-                            if (stepIcon) { stepIcon.textContent = statusCls === 'done' ? PC_ICONS.done : PC_ICONS.error; }
-                            updated = true;
-                            break;
-                        }
-                    }
-                    if (updated) { scrollToBottom(); break; }
-                }
-
-                // ── New "running" step ──
-                if (statusCls === 'running') {
-                    // Check if this is a consecutive call of the same tool → batch it
-                    if (pcBatchState && pcBatchState.toolName === toolName && pcBatchState.stepEl) {
-                        pcBatchState.count++;
-                        pcBatchState.items.push(msg.label);
-                        // Update the label in-place to show the current item
-                        var lbl = pcBatchState.stepEl.querySelector('.pc-step-label');
-                        if (lbl) { lbl.textContent = msg.label; }
-                        var det = pcBatchState.stepEl.querySelector('.pc-step-detail');
-                        if (det) { det.textContent = '(' + pcBatchState.count + ')'; }
-                        scrollToBottom();
-                        break;
-                    }
-                    // Finalize any previous batch before starting a new line
-                    if (pcBatchState && pcBatchState.stepEl) {
-                        finalizeBatchStep();
-                    }
-                    // Remove any streaming terminal output block from the previous step
-                    var prevTermBlock = activeProgressTimeline.querySelector('.pc-terminal-output');
-                    if (prevTermBlock) { prevTermBlock.parentNode.removeChild(prevTermBlock); }
-                    // Start a new batch tracker
-                    pcBatchState = { toolName: toolName, icon: msg.icon, count: 1, doneCount: 0, items: [msg.label], stepEl: null, hasError: false };
-                }
-
-                // Create new step element
-                var step = document.createElement('div');
-                step.className = 'pc-step ' + statusCls;
-                step.innerHTML =
-                    '<span class="pc-step-icon">' + icon + '</span>' +
-                    '<span class="pc-step-label">' + escapeHtml(msg.label || '') + '</span>' +
-                    (msg.detail ? '<span class="pc-step-detail">' + escapeHtml(msg.detail) + '</span>' : '') +
-                    '<span class="pc-step-status-dot"></span>';
-                activeProgressTimeline.appendChild(step);
-                // Track the DOM element for in-place updates
-                if (pcBatchState && statusCls === 'running') {
-                    pcBatchState.stepEl = step;
-                }
+            case 'workingTextAppended': {
+                appendWorkingTextEntry(msg.blockId, msg.entry);
+                scrollToBottom();
+                break;
+            }
+            case 'workingActionAdded': {
+                appendWorkingActionEntry(msg.blockId, msg.entry);
+                scrollToBottom();
+                break;
+            }
+            case 'workingActionUpdated': {
+                updateWorkingActionEntry(msg.blockId, msg.entryId, msg);
                 scrollToBottom();
                 break;
             }
             case 'terminalOutput': {
-                // Stream terminal lines into an output block within the current progress card
-                if (activeProgressTimeline) {
-                    var termBlock = activeProgressTimeline.querySelector('.pc-terminal-output');
-                    if (!termBlock) {
-                        termBlock = document.createElement('pre');
-                        termBlock.className = 'pc-terminal-output';
-                        activeProgressTimeline.appendChild(termBlock);
-                    }
-                    var lineEl = document.createElement('span');
-                    lineEl.textContent = msg.line + '\n';
-                    termBlock.appendChild(lineEl);
-                    // Cap visible lines at 100
-                    while (termBlock.childNodes.length > 100) {
-                        termBlock.removeChild(termBlock.firstChild);
-                    }
-                    scrollToBottom();
-                }
+                appendWorkingTerminalOutput(msg.line);
                 break;
             }
-            case 'progressCardEnd': {
-                closeCurrentProgressCard();
-                // Keep activeProgressCard reference alive for potential reuse
+            case 'workingBlockCompleted': {
+                completeWorkingBlock(msg.blockId, msg.summary, msg.completedAt);
+                scrollToBottom();
+                break;
+            }
+            case 'narrationText': {
+                var narRow = document.createElement('div');
+                narRow.className = 'narration-row';
+                narRow.innerHTML = renderMarkdownLite(msg.text);
+                messagesEl.appendChild(narRow);
                 scrollToBottom();
                 break;
             }
@@ -1056,106 +1150,207 @@ window.onerror = function(msg, src, line, col, err) {
                 }
                 break;
             }
+            case 'slashCommands': {
+                slashCommands = msg.commands || [];
+                slashPendingRequest = false;
+                // Re-trigger autocomplete now that we have the list
+                updateSlashAutocomplete();
+                break;
+            }
         }
     });
 
-    /** Close the current progress card — finalize batches, remove if empty, mark done */
-    function closeCurrentProgressCard() {
-        if (pcBatchState && pcBatchState.stepEl) {
-            finalizeBatchStep();
-        }
-        pcBatchState = null;
-        if (!activeProgressCard) { return; }
-        var hasSteps = activeProgressCard.querySelectorAll('.pc-step').length > 0;
-        if (!hasSteps) {
-            // Empty card — remove entirely
-            if (activeProgressCard.parentNode) {
-                activeProgressCard.parentNode.removeChild(activeProgressCard);
+    function getActiveWorkingBlock() {
+        if (!activeWorkingBlockId) { return null; }
+        return workingBlocksById.get(activeWorkingBlockId) || null;
+    }
+
+    function createWorkingBlock(block) {
+        var card = document.createElement('div');
+        card.className = 'working-block live expanded';
+        card.dataset.blockId = block.id;
+        card.innerHTML =
+            '<div class="working-block-header">' +
+                '<div class="wb-header-copy">' +
+                    '<span class="wb-leading">Working</span>' +
+                    '<span class="wb-title">' + escapeHtml(block.title || 'Working') + '</span>' +
+                    '<span class="wb-summary"></span>' +
+                '</div>' +
+                '<span class="wb-chevron">\u25B6</span>' +
+            '</div>' +
+            '<div class="working-block-body">' +
+                '<div class="wb-entries"></div>' +
+                '<div class="wb-live-status"><span class="wb-live-text">Working</span></div>' +
+            '</div>';
+
+        var header = card.querySelector('.working-block-header');
+        header.addEventListener('click', function() {
+            if (card.classList.contains('completed')) {
+                card.classList.toggle('expanded');
             }
-            activeProgressCard = null;
-            activeProgressTimeline = null;
-            pcCurrentPlanTitle = null;
+        });
+
+        messagesEl.appendChild(card);
+        workingBlocksById.set(block.id, {
+            data: block,
+            el: card,
+            entriesEl: card.querySelector('.wb-entries'),
+            summaryEl: card.querySelector('.wb-summary'),
+            titleEl: card.querySelector('.wb-title'),
+            statusEl: card.querySelector('.wb-live-status'),
+            statusTextEl: card.querySelector('.wb-live-text')
+        });
+    }
+
+    function setWorkingBlockStatusText(record, text) {
+        if (!record || !record.statusEl || !record.statusTextEl) { return; }
+        var trimmed = (text || '').trim();
+        if (!trimmed) {
+            record.statusEl.style.display = 'none';
+            record.statusTextEl.textContent = '';
             return;
         }
-        activeProgressCard.classList.add('done');
-        // Mark any still-running steps as done
-        var leftover = activeProgressCard.querySelectorAll('.pc-step.running');
-        for (var j = 0; j < leftover.length; j++) {
-            leftover[j].className = 'pc-step done';
-            var ico = leftover[j].querySelector('.pc-step-icon');
-            if (ico) { ico.textContent = PC_ICONS.done; }
-        }
-        // Update title to show step count (only if not already suffixed)
-        var titleEl = activeProgressCard.querySelector('.pc-title-text');
-        var stepCount = activeProgressCard.querySelectorAll('.pc-step').length;
-        if (titleEl && stepCount > 0 && !/\(\d+ steps?\)$/.test(titleEl.textContent)) {
-            titleEl.textContent = titleEl.textContent + ' (' + stepCount + ' step' + (stepCount !== 1 ? 's' : '') + ')';
-        }
-        // Keep reference alive for potential reuse by next progressCardStart
+        record.statusEl.style.display = 'flex';
+        record.statusTextEl.textContent = trimmed;
     }
 
-    /** Open a new progress card with the given title */
-    function openProgressCard(title) {
-        var card = document.createElement('div');
-        card.className = 'progress-card expanded';
-        card.innerHTML =
-            '<div class="progress-card-header">' +
-                '<span class="pc-spinner"></span>' +
-                '<span class="pc-done-icon">\u2713</span>' +
-                '<span class="pc-title-text">' + escapeHtml(title) + '</span>' +
-                '<span class="pc-toggle">\u25B6</span>' +
+    function createWorkingEntryElement(entry) {
+        var row = document.createElement('div');
+        row.className = 'wb-entry ' + entry.kind + (entry.kind === 'action' ? ' ' + entry.status : '');
+        row.dataset.entryId = entry.id;
+
+        if (entry.kind === 'progress') {
+            row.innerHTML =
+                '<span class="wb-progress-marker"></span>' +
+                '<div class="wb-progress-text">' + renderMarkdownLite(entry.text) + '</div>';
+            return row;
+        }
+
+        row.innerHTML =
+            '<span class="wb-action-icon">' + (PC_ICONS[entry.icon || 'loading'] || PC_ICONS.loading) + '</span>' +
+            '<div class="wb-action-copy">' +
+                '<div class="wb-action-text"></div>' +
+                '<div class="wb-action-detail"></div>' +
             '</div>' +
-            '<div class="progress-card-body">' +
-                '<div class="pc-timeline"></div>' +
-            '</div>';
-        card.querySelector('.progress-card-header').addEventListener('click', function() {
-            card.classList.toggle('expanded');
-        });
-        messagesEl.appendChild(card);
-        activeProgressCard = card;
-        activeProgressTimeline = card.querySelector('.pc-timeline');
-        pcCurrentPlanTitle = title;
+            '<span class="wb-action-diff"></span>';
+        renderWorkingActionRow(row, entry);
+        return row;
     }
 
-    /** Finalize a batched progress step — collapse "Reading X..." into "Read N files" */
-    function finalizeBatchStep() {
-        if (!pcBatchState || !pcBatchState.stepEl) { return; }
-        var el = pcBatchState.stepEl;
-        var count = pcBatchState.count;
-        var hasErr = pcBatchState.hasError;
-        var batchIcon = pcBatchState.icon || 'done';
+    function renderWorkingActionRow(row, entry) {
+        row.className = 'wb-entry action ' + entry.status;
+        var iconEl = row.querySelector('.wb-action-icon');
+        if (iconEl) {
+            iconEl.innerHTML = PC_ICONS[entry.icon || (entry.status === 'done' ? 'done' : entry.status === 'error' ? 'error' : 'loading')] || PC_ICONS.loading;
+        }
+        var textEl = row.querySelector('.wb-action-text');
+        if (textEl) {
+            textEl.innerHTML = entry.filePath ? labelWithFileLink(entry.text, entry.filePath) : escapeHtml(entry.text) + fileBadgeHtml(entry.text);
+            var fileLink = textEl.querySelector('.pc-file-link');
+            if (fileLink && entry.filePath) {
+                fileLink.addEventListener('click', function(e) {
+                    e.stopPropagation();
+                    vscode.postMessage({ type: 'openFile', filePath: entry.filePath });
+                });
+            }
+        }
+        var detailEl = row.querySelector('.wb-action-detail');
+        if (detailEl) {
+            detailEl.textContent = entry.detail || '';
+            detailEl.style.display = entry.detail ? 'block' : 'none';
+        }
+        var diffEl = row.querySelector('.wb-action-diff');
+        if (diffEl && entry.additions != null) {
+            diffEl.innerHTML = '<span class="diff-add">+' + entry.additions + '</span><span class="diff-del">-' + entry.deletions + '</span>';
+        } else if (diffEl) {
+            diffEl.innerHTML = '';
+        }
+    }
 
-        // Build summary label
-        var summaryLabel;
-        var tn = pcBatchState.toolName;
-        if (count <= 1) {
-            // Single item — keep original label, just mark done
-            summaryLabel = null;
-        } else if (tn === 'read_file') {
-            summaryLabel = 'Read ' + count + ' files';
-        } else if (tn === 'grep_search' || tn === 'search_files' || tn === 'semantic_search') {
-            summaryLabel = 'Ran ' + count + ' searches';
-        } else if (tn === 'edit_file' || tn === 'write_file') {
-            summaryLabel = 'Edited ' + count + ' files';
-        } else if (tn === 'list_directory') {
-            summaryLabel = 'Listed ' + count + ' directories';
-        } else if (tn === 'find_references' || tn === 'go_to_definition' || tn === 'find_symbol' || tn === 'get_document_symbols') {
-            summaryLabel = 'Resolved ' + count + ' symbols';
+    function appendWorkingTextEntry(blockId, entry) {
+        var record = workingBlocksById.get(blockId);
+        if (!record) { return; }
+        record.data.entries.push(entry);
+        var row = createWorkingEntryElement(entry);
+        record.entriesEl.appendChild(row);
+        workingEntriesById.set(entry.id, { blockId: blockId, entry: entry, el: row });
+    }
+
+    function appendWorkingActionEntry(blockId, entry) {
+        var record = workingBlocksById.get(blockId);
+        if (!record) { return; }
+        record.data.entries.push(entry);
+        var row = createWorkingEntryElement(entry);
+        record.entriesEl.appendChild(row);
+        workingEntriesById.set(entry.id, { blockId: blockId, entry: entry, el: row });
+    }
+
+    function updateWorkingActionEntry(blockId, entryId, patch) {
+        var record = workingBlocksById.get(blockId);
+        var entryRecord = workingEntriesById.get(entryId);
+        if (!record || !entryRecord) { return; }
+        entryRecord.entry.status = patch.status;
+        if (patch.text) { entryRecord.entry.text = patch.text; }
+        if (typeof patch.detail === 'string') { entryRecord.entry.detail = patch.detail; }
+        if (typeof patch.filePath === 'string') { entryRecord.entry.filePath = patch.filePath; }
+        if (typeof patch.icon === 'string') { entryRecord.entry.icon = patch.icon; }
+        renderWorkingActionRow(entryRecord.el, entryRecord.entry);
+    }
+
+    function appendWorkingTerminalOutput(line) {
+        var record = getActiveWorkingBlock();
+        if (!record) { return; }
+        var termBlock = record.el.querySelector('.wb-terminal-output');
+        if (!termBlock) {
+            termBlock = document.createElement('pre');
+            termBlock.className = 'wb-terminal-output';
+            record.entriesEl.appendChild(termBlock);
+        }
+        var lineEl = document.createElement('span');
+        lineEl.textContent = line + '\n';
+        termBlock.appendChild(lineEl);
+        while (termBlock.childNodes.length > 100) {
+            termBlock.removeChild(termBlock.firstChild);
+        }
+        scrollToBottom();
+    }
+
+    function finalizeWorkingBlock(record, summary, collapse) {
+        if (!record) { return; }
+        record.data.status = 'completed';
+        record.data.summary = summary || record.data.title || 'Completed';
+        record.el.classList.remove('live');
+        record.el.classList.add('completed');
+        // Replace header: show summary as the leading text (like GHCP "Created 5 todos and reviewed 6 files")
+        var leadingEl = record.el.querySelector('.wb-leading');
+        if (leadingEl) {
+            leadingEl.textContent = record.data.summary;
+        }
+        record.titleEl.style.display = 'none';
+        record.summaryEl.textContent = '';
+        setWorkingBlockStatusText(record, '');
+        if (collapse) {
+            record.el.classList.remove('expanded');
         } else {
-            summaryLabel = count + '\u00D7 ' + tn;
+            record.el.classList.add('expanded');
         }
+    }
 
-        // Update the DOM
-        el.className = 'pc-step ' + (hasErr ? 'error' : 'done');
-        var stepIcon = el.querySelector('.pc-step-icon');
-        if (stepIcon) { stepIcon.textContent = hasErr ? PC_ICONS.error : PC_ICONS[batchIcon] || PC_ICONS.done; }
-        if (summaryLabel) {
-            var lbl = el.querySelector('.pc-step-label');
-            if (lbl) { lbl.textContent = summaryLabel; }
+    function completeWorkingBlock(blockId, summary, completedAt) {
+        var record = workingBlocksById.get(blockId);
+        if (!record) { return; }
+        record.data.completedAt = completedAt;
+        // If the block has no entries, remove it from the DOM entirely
+        var entryCount = record.entriesEl ? record.entriesEl.children.length : 0;
+        if (entryCount === 0) {
+            if (record.el.parentNode) { record.el.parentNode.removeChild(record.el); }
+            workingBlocksById.delete(blockId);
+        } else {
+            finalizeWorkingBlock(record, summary, true);
         }
-        // Remove the running count detail
-        var det = el.querySelector('.pc-step-detail');
-        if (det && count > 1) { det.textContent = ''; }
+        if (activeWorkingBlockId === blockId) {
+            activeWorkingBlockId = null;
+        }
     }
 
     function formatJson(str) {

@@ -1,7 +1,12 @@
 /**
- * Session Manager — persists chat sessions to VS Code's workspace-scoped storage.
+ * Session Manager — persists chat sessions to a JSON file on disk.
  *
- * Sessions are scoped per workspace so opening a different project starts fresh.
+ * Uses synchronous file writes (writeFileSync) so that data survives
+ * even if the extension host process is terminated immediately after
+ * deactivate() — unlike Memento which relies on async IPC that can
+ * be cut short when VS Code closes.
+ *
+ * Sessions are scoped per workspace via the storageDir path.
  *
  * Limits:
  *  - MAX_SESSIONS (20): oldest sessions are pruned when exceeded.
@@ -9,44 +14,99 @@
  *    are trimmed before persistence to stay within storage budget.
  *  - Base64 image data is stripped from persisted messages.
  */
+import * as fs from 'fs';
+import * as path from 'path';
 import * as vscode from 'vscode';
 import { ChatSession, ChatMessage } from './types';
 
 const MAX_SESSIONS = 20;
 const MAX_MESSAGE_LENGTH = 8000;
+const SESSIONS_FILE = 'sessions.json';
+
+interface SessionsOnDisk {
+    activeId?: string;
+    sessions: Record<string, ChatSession>;
+}
 
 export class SessionManager {
-    private static STORAGE_KEY = 'securechat.sessions';
-    private static ACTIVE_KEY = 'securechat.activeSession';
     private currentSession: ChatSession;
     private sessions: Map<string, ChatSession> = new Map();
+    private filePath: string;
 
-    constructor(private globalState: vscode.Memento) {
+    constructor(private storageDir: string, legacyState?: vscode.Memento) {
+        // Ensure the storage directory exists
+        fs.mkdirSync(this.storageDir, { recursive: true });
+        this.filePath = path.join(this.storageDir, SESSIONS_FILE);
+
+        // One-time migration: if no file on disk yet, pull from legacy Memento
+        if (legacyState && !fs.existsSync(this.filePath)) {
+            this.migrateFromMemento(legacyState);
+        }
+
         this.loadSessions();
         // Restore the last active session, or create a new one
-        const activeId = this.globalState.get<string>(SessionManager.ACTIVE_KEY);
+        const activeId = this.loadActiveId();
         if (activeId && this.sessions.has(activeId)) {
             this.currentSession = this.sessions.get(activeId)!;
         } else {
-            this.currentSession = this.createNewSession();
+            this.currentSession = this.initBlankSession();
         }
     }
 
+    /** Synchronous in-memory session init (no persistence) — used only by constructor. */
+    private initBlankSession(): ChatSession {
+        const session: ChatSession = {
+            id: `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+            title: 'New Chat',
+            messages: [],
+            createdAt: Date.now(),
+            updatedAt: Date.now()
+        };
+        this.sessions.set(session.id, session);
+        return session;
+    }
+
+    private loadActiveId(): string | undefined {
+        try {
+            const raw = fs.readFileSync(this.filePath, 'utf-8');
+            const data: SessionsOnDisk = JSON.parse(raw);
+            return data.activeId;
+        } catch {
+            return undefined;
+        }
+    }
+
+    /** One-time migration: seed file from legacy workspaceState Memento. */
+    private migrateFromMemento(state: vscode.Memento) {
+        const raw = state.get<Record<string, ChatSession>>('securechat.sessions', {});
+        const activeId = state.get<string>('securechat.activeSession');
+        if (Object.keys(raw).length === 0) { return; }
+        const data: SessionsOnDisk = { activeId, sessions: raw };
+        fs.writeFileSync(this.filePath, JSON.stringify(data), 'utf-8');
+    }
+
     private loadSessions() {
-        const raw = this.globalState.get<Record<string, ChatSession>>(SessionManager.STORAGE_KEY, {});
-        for (const [id, session] of Object.entries(raw)) {
-            this.sessions.set(id, session);
+        try {
+            const raw = fs.readFileSync(this.filePath, 'utf-8');
+            const data: SessionsOnDisk = JSON.parse(raw);
+            for (const [id, session] of Object.entries(data.sessions || {})) {
+                this.sessions.set(id, session);
+            }
+        } catch {
+            // File doesn't exist yet or is corrupt — start fresh
         }
     }
 
     private saveSessions() {
         this.pruneOldSessions();
-        const obj: Record<string, ChatSession> = {};
+        const data: SessionsOnDisk = {
+            activeId: this.currentSession.id,
+            sessions: {}
+        };
         for (const [id, session] of this.sessions) {
-            obj[id] = session;
+            data.sessions[id] = session;
         }
-        this.globalState.update(SessionManager.STORAGE_KEY, obj);
-        this.globalState.update(SessionManager.ACTIVE_KEY, this.currentSession.id);
+        fs.writeFileSync(this.filePath, JSON.stringify(data), 'utf-8');
     }
 
     /** Drop oldest sessions beyond MAX_SESSIONS. */
