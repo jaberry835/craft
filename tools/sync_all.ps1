@@ -12,6 +12,8 @@ $repos = @(
     @{ Url = "https://github.com/adamruderman/WebScrapeAndIndex"; Branch = "main" }
     @{ Url = "https://github.com/adamruderman/SecureAPI"; Branch = "main" } 
     @{ Url = "https://github.com/adamruderman/McpServer"; Branch = "main" }
+    @{ Url = "https://github.com/adamruderman/SecureChatExtension"; Branch = "main" }
+   
      
 )
 
