@@ -14,12 +14,17 @@ import { SessionManager } from './sessionManager';
 import { ExtensionMessage, WebviewMessage, WorkingBlock, WorkingBlockActionEntry, WorkingActionType } from './types';
 import { getSetting, updateSetting } from './config';
 import { TokenTracker } from './tokenTracker';
+import { InlineDiffDecorator } from './inlineDiffDecorator';
+
+/** Minimum interval (ms) between consecutive agent loop submissions */
+const MIN_SUBMISSION_INTERVAL_MS = 2000;
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
     private webviewView?: vscode.WebviewView;
     private webviewPanel?: vscode.WebviewPanel;
     private agentLoop?: AgentLoop;
     private log: (msg: string) => void;
+    private lastSubmissionTime = 0;
 
     constructor(
         private extensionUri: vscode.Uri,
@@ -28,9 +33,33 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         private mcpClient: McpClient,
         private sessionManager: SessionManager,
         log?: (msg: string) => void,
-        private tokenTracker?: TokenTracker
+        private tokenTracker?: TokenTracker,
+        private inlineDiffDecorator?: InlineDiffDecorator
     ) {
         this.log = log || (() => {});
+        // When a file is fully resolved via inline diff CodeLens, update the dock
+        if (this.inlineDiffDecorator) {
+            this.inlineDiffDecorator.setDiffLookup((fsPath) => this.builtinTools.getTouchedFileInfoByPath(fsPath));
+            this.inlineDiffDecorator.setFileResolvedCallback((relPath, action) => {
+                if (action === 'keep') {
+                    this.builtinTools.keepFile(relPath);
+                } else {
+                    this.builtinTools.undoFile(relPath);
+                }
+                this.sendToWebview({
+                    type: 'fileChangeFileResolved',
+                    file: relPath,
+                    action: action === 'keep' ? 'kept' : 'undone'
+                });
+                // Check if all files resolved
+                if (!this.builtinTools.hasPendingFiles() && this.pendingFileChangeResolve) {
+                    const res = this.pendingFileChangeResolve;
+                    this.pendingFileChangeResolve = undefined;
+                    this.sendToWebview({ type: 'fileChangeResolved', action: 'kept' });
+                    res('keep');
+                }
+            });
+        }
     }
 
     /** The active webview, whether from the sidebar view or an editor panel tab. */
@@ -202,6 +231,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 case 'openFileDiff':
                     this.builtinTools.openDiffForFile(msg.file);
                     break;
+                case 'requestFileDiff':
+                    this.sendToWebview({
+                        type: 'fileDiffContent',
+                        file: msg.file,
+                        diff: this.builtinTools.getDiffForFile(msg.file)
+                    });
+                    break;
+                case 'showInlineDiff':
+                    this.showInlineDiffForFile(msg.file);
+                    break;
                 case 'openFile':
                     this.openFileInEditor(msg.filePath);
                     break;
@@ -242,6 +281,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     private async handleUserMessage(text: string, images?: string[], files?: { name: string; content: string }[]) {
         if (!text.trim() && (!images || images.length === 0) && (!files || files.length === 0)) { return; }
+
+        // Rate-limit: prevent rapid-fire submissions from stacking API calls
+        const now = Date.now();
+        const elapsed = now - this.lastSubmissionTime;
+        if (elapsed < MIN_SUBMISSION_INTERVAL_MS && this.lastSubmissionTime > 0) {
+            this.sendToWebview({ type: 'error', message: 'Please wait a moment before sending another message.' });
+            return;
+        }
+        this.lastSubmissionTime = now;
 
         // Keep original text for display, resolve slash commands for the AI
         const displayText = text;
@@ -321,6 +369,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     await this.builtinTools.keepAllChanges();
                     this.sendToWebview({ type: 'fileChangeResolved', action: 'kept' });
                 }
+                // Clear inline diff decorations
+                this.inlineDiffDecorator?.clearAll();
                 resolve();
             };
             // Timeout: auto-keep after 5 minutes
@@ -362,6 +412,29 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             await this.builtinTools.closeDiffEditors();
             res('keep'); // resolve the promise so the agent loop continues
         }
+    }
+
+    private async showInlineDiffForFile(relPath: string): Promise<void> {
+        const info = this.builtinTools.getTouchedFileInfo(relPath);
+        if (!info) {
+            // Touched file data may have been cleared — just open the file.
+            // If the decorator already has diff state, onDidChangeActiveTextEditor
+            // will re-apply decorations automatically.
+            const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            if (root) {
+                const absPath = require('path').join(root, relPath);
+                try {
+                    const uri = vscode.Uri.file(absPath);
+                    await vscode.window.showTextDocument(uri, { preview: false, preserveFocus: false });
+                } catch { /* file may not exist */ }
+            }
+            return;
+        }
+        if (!this.inlineDiffDecorator) {
+            this.builtinTools.openDiffForFile(relPath);
+            return;
+        }
+        await this.inlineDiffDecorator.showFile(relPath, info.absPath, info.originalContent);
     }
 
     private async handleAttachFile() {
@@ -585,6 +658,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         let pendingBlock: WorkingBlock | null = null;
         let pendingEntries: WorkingBlockActionEntry[] = [];
 
+        // When working phases are stored, narration texts from earlier iterations
+        // are queued and interleaved with phases when we encounter the message
+        // that carries the workingPhases array.
+        const pendingNarrations: string[] = [];
+
         const flushPendingBlock = () => {
             if (!pendingBlock || pendingEntries.length === 0) {
                 pendingBlock = null;
@@ -624,8 +702,21 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 }
             } else if (msg.role === 'assistant') {
                 if (msg.workingPhases && msg.workingPhases.length > 0) {
+                    // Collect narration from THIS message (last iteration) into the queue
+                    if (msg.tool_calls && msg.tool_calls.length > 0
+                        && msg.content && typeof msg.content === 'string' && msg.content.trim()) {
+                        pendingNarrations.push(msg.content.trim());
+                    }
+
+                    // Interleave queued narrations with working phases.
+                    // narration[i] corresponds to phase[i].
                     flushPendingBlock();
-                    for (const phase of msg.workingPhases) {
+                    for (let i = 0; i < msg.workingPhases.length; i++) {
+                        const phase = msg.workingPhases[i];
+                        // Emit narration for this phase if available
+                        if (i < pendingNarrations.length && pendingNarrations[i]) {
+                            this.sendToWebview({ type: 'narrationText', text: pendingNarrations[i] });
+                        }
                         const block: WorkingBlock = {
                             ...phase,
                             entries: []
@@ -645,8 +736,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                             completedAt: phase.completedAt || phase.startedAt
                         });
                     }
+                    // Emit any remaining narrations that didn't have a matching phase
+                    for (let i = msg.workingPhases.length; i < pendingNarrations.length; i++) {
+                        if (pendingNarrations[i]) {
+                            this.sendToWebview({ type: 'narrationText', text: pendingNarrations[i] });
+                        }
+                    }
+                    pendingNarrations.length = 0;
+                } else if (hasStoredPhases && msg.tool_calls && msg.tool_calls.length > 0) {
+                    // Queue narration for interleaving with phases later
+                    if (msg.content && typeof msg.content === 'string' && msg.content.trim()) {
+                        pendingNarrations.push(msg.content.trim());
+                    }
                 } else if (!hasStoredPhases && msg.tool_calls && msg.tool_calls.length > 0) {
-                    // Emit any narration text before adding tool actions
+                    // Emit narration immediately (no phases to interleave with)
                     if (msg.content && typeof msg.content === 'string' && msg.content.trim()) {
                         flushPendingBlock();
                         this.sendToWebview({ type: 'narrationText', text: msg.content.trim() });
@@ -1175,6 +1278,79 @@ body { display: flex; flex-direction: column; }
 .diff-preview .diff-del { color: #f44747; text-decoration: line-through; }
 .diff-preview .diff-ctx { opacity: 0.55; }
 
+/* INLINE DIFF IN DOCK */
+.dock-file-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.dock-file-toggle {
+    font-size: 8px;
+    cursor: pointer;
+    color: var(--fg);
+    opacity: 0.6;
+    transition: transform 0.15s;
+    user-select: none;
+    flex-shrink: 0;
+    width: 10px;
+    text-align: center;
+}
+.dock-file-toggle.expanded { transform: rotate(90deg); }
+.dock-file-toggle:hover { opacity: 1; }
+.dock-inline-diff {
+    margin: 2px 0 6px 16px;
+    border-radius: 4px;
+    background: var(--code-bg, rgba(0,0,0,0.2));
+    overflow: hidden;
+}
+.dock-inline-diff.hidden { display: none; }
+.dock-diff-loading, .dock-diff-empty {
+    padding: 8px 12px;
+    font-size: 11px;
+    opacity: 0.6;
+    font-style: italic;
+}
+.dock-diff-content {
+    margin: 0;
+    padding: 0;
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 11px;
+    line-height: 1.5;
+    overflow-x: auto;
+    max-height: 300px;
+    overflow-y: auto;
+}
+.diff-line {
+    display: flex;
+    padding: 0 8px;
+    white-space: pre;
+    min-height: 18px;
+}
+.diff-line-add { background: rgba(78, 201, 78, 0.12); }
+.diff-line-del { background: rgba(244, 71, 71, 0.12); }
+.diff-line-ctx { opacity: 0.6; }
+.diff-line-sep {
+    opacity: 0.3;
+    justify-content: center;
+    font-size: 10px;
+    padding: 2px 8px;
+}
+.diff-gutter {
+    width: 16px;
+    flex-shrink: 0;
+    text-align: center;
+    user-select: none;
+    opacity: 0.7;
+}
+.diff-line-add .diff-gutter { color: #4ec94e; }
+.diff-line-del .diff-gutter { color: #f44747; }
+.diff-text { flex: 1; }
+.dock-file-actions .file-btn-editor {
+    font-size: 11px;
+    opacity: 0.5;
+}
+.dock-file-actions .file-btn-editor:hover { opacity: 1; }
+
 /* FILE CHANGE DOCK */
 #file-change-dock {
     background: var(--tool-bg);
@@ -1223,8 +1399,7 @@ body { display: flex; flex-direction: column; }
 #file-change-dock.expanded .dock-files { display: block; }
 .dock-file-entry {
     display: flex;
-    align-items: center;
-    gap: 6px;
+    flex-direction: column;
     padding: 2px 0;
     font-family: var(--vscode-editor-font-family, monospace);
     font-size: 11px;
@@ -1403,7 +1578,7 @@ body { display: flex; flex-direction: column; }
 /* Inline narration rows between working blocks (GHCP-style agent chatter) */
 .narration-row {
     padding: 6px 16px;
-    color: var(--vscode-descriptionForeground, #b2b8bf);
+    color: var(--fg);
     font-size: 12.5px;
     line-height: 1.5;
 }

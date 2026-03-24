@@ -10,15 +10,22 @@ import { SemanticIndexer } from './semanticIndexer';
 import { getSetting, updateSetting } from './config';
 import { InlineCompletionProvider } from './inlineCompletionProvider';
 import { TokenTracker } from './tokenTracker';
+import { InlineDiffDecorator } from './inlineDiffDecorator';
 
 let chatViewProvider: ChatViewProvider;
 let mcpClient: McpClient;
 export const outputChannel = vscode.window.createOutputChannel('Junior');
 
-function log(msg: string) {
+type LogLevel = 'INFO' | 'WARN' | 'ERROR';
+
+function log(msg: string, level: LogLevel = 'INFO') {
     const ts = new Date().toISOString();
-    outputChannel.appendLine(`[${ts}] ${msg}`);
+    outputChannel.appendLine(`[${ts}] [${level}] ${msg}`);
 }
+
+function logInfo(msg: string) { log(msg, 'INFO'); }
+function logWarn(msg: string) { log(msg, 'WARN'); }
+function logError(msg: string) { log(msg, 'ERROR'); }
 
 export function activate(context: vscode.ExtensionContext) {
     log('Junior extension activating...');
@@ -39,6 +46,35 @@ export function activate(context: vscode.ExtensionContext) {
     const sessionManager = new SessionManager(sessionStorageDir, context.workspaceState);
     const tokenTracker = new TokenTracker(log);
 
+    // ── Inline Diff Decorator ──
+    const inlineDiffDecorator = new InlineDiffDecorator();
+
+    context.subscriptions.push(
+        vscode.languages.registerCodeLensProvider({ scheme: 'file' }, inlineDiffDecorator)
+    );
+    context.subscriptions.push({ dispose: () => inlineDiffDecorator.dispose() });
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('junior.inlineDiff.acceptHunk', (fsPath: string, hunkIndex: number) => {
+            inlineDiffDecorator.acceptHunk(fsPath, hunkIndex);
+        })
+    );
+    context.subscriptions.push(
+        vscode.commands.registerCommand('junior.inlineDiff.rejectHunk', async (fsPath: string, hunkIndex: number) => {
+            await inlineDiffDecorator.rejectHunk(fsPath, hunkIndex);
+        })
+    );
+    context.subscriptions.push(
+        vscode.commands.registerCommand('junior.inlineDiff.acceptFile', (fsPath: string) => {
+            inlineDiffDecorator.acceptFile(fsPath);
+        })
+    );
+    context.subscriptions.push(
+        vscode.commands.registerCommand('junior.inlineDiff.rejectFile', async (fsPath: string) => {
+            await inlineDiffDecorator.rejectFile(fsPath);
+        })
+    );
+
     chatViewProvider = new ChatViewProvider(
         context.extensionUri,
         aoaiClient,
@@ -46,7 +82,8 @@ export function activate(context: vscode.ExtensionContext) {
         mcpClient,
         sessionManager,
         log,
-        tokenTracker
+        tokenTracker,
+        inlineDiffDecorator
     );
 
     // Register the webview provider
@@ -126,7 +163,7 @@ export function activate(context: vscode.ExtensionContext) {
                     }
                 );
             } catch (err: any) {
-                log(`indexWorkspace error: ${err.message}\n${err.stack}`);
+                logError(`indexWorkspace error: ${err.message}\n${err.stack}`);
                 vscode.window.showErrorMessage(`Junior: Indexing failed — ${err.message}`);
             }
         })
@@ -174,7 +211,7 @@ export function activate(context: vscode.ExtensionContext) {
                     log('QuickPick dismissed without selection');
                 }
             } catch (err: any) {
-                log(`selectModel error: ${err.message}\n${err.stack}`);
+                logError(`selectModel error: ${err.message}\n${err.stack}`);
                 vscode.window.showErrorMessage(`Junior: Select Model failed — ${err.message}`);
             }
         })
@@ -203,7 +240,7 @@ export function activate(context: vscode.ExtensionContext) {
                     vscode.window.showInformationMessage(`Junior: Disconnected ${name}.`);
                 }
             } catch (err: any) {
-                log(`manageMcpServers error: ${err.message}\n${err.stack}`);
+                logError(`manageMcpServers error: ${err.message}\n${err.stack}`);
                 vscode.window.showErrorMessage(`Junior: MCP server operation failed — ${err.message}`);
             }
         })
@@ -268,11 +305,58 @@ export function activate(context: vscode.ExtensionContext) {
             await symbolIndexer.indexWorkspace(workspaceIndexer);
             await semanticIndexer.indexWorkspace(workspaceIndexer, undefined, undefined, changed);
             log(`Index loaded: ${workspaceIndexer.getFileCount()} files (${changed.size} changed), ${semanticIndexer.getChunkCount()} semantic chunks.`);
-        })().catch((e) => log(`Workspace/symbol/semantic indexing failed: ${e}`));
+        })().catch((e) => logError(`Workspace/symbol/semantic indexing failed: ${e}`));
     }
 
     // Connect MCP servers from settings
-    mcpClient.connectConfiguredServers().catch((e) => log(`MCP connect failed: ${e}`));
+    mcpClient.connectConfiguredServers().catch((e) => logError(`MCP connect failed: ${e}`));
+
+    // ── File watchers for incremental indexing ──
+    if (vscode.workspace.workspaceFolders) {
+        const watcher = vscode.workspace.createFileSystemWatcher('**/*');
+
+        // Debounce: collect changed URIs and flush periodically
+        let pendingUpdates = new Set<string>();
+        let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+
+        const scheduleFlush = () => {
+            if (debounceTimer) { return; }
+            debounceTimer = setTimeout(async () => {
+                debounceTimer = undefined;
+                const uris = [...pendingUpdates];
+                pendingUpdates.clear();
+                for (const fsPath of uris) {
+                    const uri = vscode.Uri.file(fsPath);
+                    const relPath = vscode.workspace.asRelativePath(uri, false);
+                    try {
+                        const changed = await workspaceIndexer.updateFile(uri);
+                        if (changed) {
+                            await symbolIndexer.indexFile(uri, relPath);
+                            await semanticIndexer.reindexFile(uri, relPath);
+                        }
+                    } catch (e) {
+                        logWarn(`Incremental index failed for ${relPath}: ${e}`);
+                    }
+                }
+            }, 1500);
+        };
+
+        const onFileChanged = (uri: vscode.Uri) => {
+            pendingUpdates.add(uri.fsPath);
+            scheduleFlush();
+        };
+
+        watcher.onDidChange(onFileChanged);
+        watcher.onDidCreate(onFileChanged);
+        watcher.onDidDelete((uri) => {
+            const relPath = vscode.workspace.asRelativePath(uri, false);
+            workspaceIndexer.removeFile(uri);
+            symbolIndexer.removeFile(relPath);
+            semanticIndexer.removeFile(relPath);
+        });
+
+        context.subscriptions.push(watcher);
+    }
 
     log('Junior extension activated successfully.');
 }
@@ -291,8 +375,16 @@ function sendSelectionToChat(prefix: string) {
 }
 
 export function deactivate() {
-    chatViewProvider?.saveCurrentSession();
-    mcpClient?.dispose();
+    try {
+        chatViewProvider?.saveCurrentSession();
+    } catch (e) {
+        // Best-effort — extension host may be shutting down
+    }
+    try {
+        mcpClient?.dispose();
+    } catch (e) {
+        // Best-effort — extension host may be shutting down
+    }
 }
 
 

@@ -60,9 +60,15 @@ export class McpClient {
     private connections: Map<string, McpConnection> = new Map();
     private mcpToolNameMap: Map<string, { serverName: string; toolName: string }> = new Map();
     private outputChannel: vscode.OutputChannel;
+    private healthCheckInterval: ReturnType<typeof setInterval> | undefined;
+    /** Interval between stdio health checks (ms) */
+    private static readonly HEALTH_CHECK_INTERVAL_MS = 30_000;
+    /** Timeout for a single health ping (ms) */
+    private static readonly HEALTH_PING_TIMEOUT_MS = 5_000;
 
     constructor() {
         this.outputChannel = vscode.window.createOutputChannel('Junior MCP');
+        this.startHealthChecks();
     }
 
     /** Load MCP server configs from VS Code settings and connect to each */
@@ -635,8 +641,35 @@ export class McpClient {
     }
 
     dispose() {
+        if (this.healthCheckInterval) {
+            clearInterval(this.healthCheckInterval);
+            this.healthCheckInterval = undefined;
+        }
         this.disconnectAll();
         this.outputChannel.dispose();
+    }
+
+    /** Periodically ping stdio connections to detect hung/dead servers */
+    private startHealthChecks() {
+        this.healthCheckInterval = setInterval(() => {
+            for (const [name, conn] of this.connections) {
+                if (conn.transport !== 'stdio') { continue; }
+                // Check if the process is still alive
+                if (conn.process.exitCode !== null) {
+                    this.outputChannel.appendLine(`MCP health: "${name}" process exited (code ${conn.process.exitCode}). Removing.`);
+                    this.connections.delete(name);
+                    continue;
+                }
+                // Send a lightweight ping (tools/list is safe and idempotent)
+                this.sendRequest(conn, 'ping', {}, McpClient.HEALTH_PING_TIMEOUT_MS).catch(() => {
+                    // ping may not be supported — try tools/list as fallback
+                    this.sendRequest(conn, 'tools/list', {}, McpClient.HEALTH_PING_TIMEOUT_MS).catch(() => {
+                        this.outputChannel.appendLine(`MCP health: "${name}" is unresponsive. Disconnecting.`);
+                        this.disconnectServer(name);
+                    });
+                });
+            }
+        }, McpClient.HEALTH_CHECK_INTERVAL_MS);
     }
 }
 

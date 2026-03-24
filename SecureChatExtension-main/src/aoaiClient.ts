@@ -103,7 +103,7 @@ export class AzureOpenAIClient {
         tools: ToolDefinition[],
         abortSignal?: AbortSignal,
         options?: { reasoningMode?: boolean; maxTokens?: number; temperature?: number; stop?: string[] }
-    ): AsyncGenerator<{ type: 'text'; text: string } | { type: 'toolCalls'; calls: ToolCall[] } | { type: 'usage'; usage: TokenUsage } | { type: 'done' }> {
+    ): AsyncGenerator<{ type: 'text'; text: string } | { type: 'toolCallStarted' } | { type: 'toolCalls'; calls: ToolCall[] } | { type: 'usage'; usage: TokenUsage } | { type: 'done' }> {
         const config = await this.getConfigAsync();
         const base = (config.provider === 'apim' ? config.apimBaseUrl : config.endpoint).replace(/\/+$/, '');
         const url = new URL(
@@ -181,7 +181,10 @@ export class AzureOpenAIClient {
                 }
 
                 if (choice.delta.tool_calls) {
-                    hasToolCalls = true;
+                    if (!hasToolCalls) {
+                        hasToolCalls = true;
+                        yield { type: 'toolCallStarted' };
+                    }
                     for (const tc of choice.delta.tool_calls) {
                         const existing = toolCallAccumulator.get(tc.index);
                         if (!existing) {

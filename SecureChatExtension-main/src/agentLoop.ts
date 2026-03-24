@@ -789,6 +789,23 @@ export class AgentLoop {
                 let assistantText = '';
                 let toolCalls: ToolCall[] = [];
                 let assistantBubbleStarted = false;
+                let toolCallDetected = false;
+                let textAlreadyRendered = false;
+                let pendingTextBuffer = '';
+                let flushTimer: ReturnType<typeof setTimeout> | undefined;
+
+                // Flush buffered text into a streaming chat bubble
+                const flushBufferAsBubble = () => {
+                    if (flushTimer) { clearTimeout(flushTimer); flushTimer = undefined; }
+                    if (!assistantBubbleStarted && pendingTextBuffer) {
+                        completeActiveWorkingBlock();
+                        storeWorkingPhases();
+                        this.callbacks.sendToWebview({ type: 'startAssistantMessage' });
+                        assistantBubbleStarted = true;
+                        this.callbacks.sendToWebview({ type: 'appendAssistantText', text: pendingTextBuffer });
+                        pendingTextBuffer = '';
+                    }
+                };
 
                 try {
                     const stream = this.aoaiClient.streamChat(
@@ -802,21 +819,47 @@ export class AgentLoop {
                         if (!this.running) { break; }
 
                         if (chunk.type === 'text') {
-                            if (!assistantBubbleStarted) {
-                                completeActiveWorkingBlock();
-                                storeWorkingPhases();
-                                this.callbacks.sendToWebview({ type: 'startAssistantMessage' });
-                                assistantBubbleStarted = true;
-                            }
                             assistantText += chunk.text;
-                            this.callbacks.sendToWebview({ type: 'appendAssistantText', text: chunk.text });
+                            if (toolCallDetected) {
+                                // Tool calls already detected — buffer silently for narration
+                            } else if (assistantBubbleStarted) {
+                                // Bubble already flushed — continue streaming into it
+                                this.callbacks.sendToWebview({ type: 'appendAssistantText', text: chunk.text });
+                            } else {
+                                // Buffer text and schedule a flush after 250ms.
+                                // If tool_calls arrive before the timer fires, the text
+                                // becomes narration instead of a chat bubble.
+                                pendingTextBuffer += chunk.text;
+                                if (!flushTimer) {
+                                    flushTimer = setTimeout(() => {
+                                        flushTimer = undefined;
+                                        flushBufferAsBubble();
+                                    }, 250);
+                                }
+                            }
+                        } else if (chunk.type === 'toolCallStarted') {
+                            toolCallDetected = true;
+                            // Cancel the flush timer — text will be narration, not a bubble
+                            if (flushTimer) { clearTimeout(flushTimer); flushTimer = undefined; }
+                            if (assistantBubbleStarted) {
+                                // Bubble already opened (timer fired before toolCallStarted).
+                                // The text is already visible in the bubble — just close it
+                                // and mark as rendered so we don't duplicate as narration.
+                                this.callbacks.sendToWebview({ type: 'endAssistantMessage' });
+                                assistantBubbleStarted = false;
+                                textAlreadyRendered = true;
+                            }
                         } else if (chunk.type === 'toolCalls') {
                             toolCalls = chunk.calls;
                         } else if (chunk.type === 'usage' && this.tokenTracker) {
                             this.tokenTracker.record('chat', chunk.usage);
                         }
                     }
+                    // Clean up flush timer
+                    if (flushTimer) { clearTimeout(flushTimer); flushTimer = undefined; }
                 } catch (streamErr: any) {
+                    // Clean up flush timer on error
+                    if (flushTimer) { clearTimeout(flushTimer); flushTimer = undefined; }
                     // Detect invalid_prompt / context-too-large errors (400) and attempt recovery
                     const isInvalidPrompt = streamErr.statusCode === 400 &&
                         (streamErr.errorCode === 'invalid_prompt' ||
@@ -876,9 +919,9 @@ export class AgentLoop {
                     assistantMsg.tool_calls = toolCalls;
                     lastToolAssistantMsg = assistantMsg;
 
-                    // When the LLM produces narration alongside tool calls, show it as
-                    // an inline narration row between working blocks (GHCP-style).
-                    if (assistantText.trim()) {
+                    // Show narration text alongside tool calls (GHCP-style).
+                    // Skip if text was already rendered in a bubble (timer fired before toolCallStarted).
+                    if (assistantText.trim() && !textAlreadyRendered) {
                         completeActiveWorkingBlock();
                         this.callbacks.sendToWebview({ type: 'narrationText', text: assistantText.trim() });
                     }
@@ -918,6 +961,7 @@ export class AgentLoop {
                         // Bubble was opened during streaming — just close it
                         this.callbacks.sendToWebview({ type: 'endAssistantMessage' });
                     } else if (assistantText) {
+                        // Text was buffered (short response or timer hadn't fired)
                         completeActiveWorkingBlock();
                         storeWorkingPhases();
                         this.callbacks.sendToWebview({ type: 'startAssistantMessage' });
@@ -957,8 +1001,11 @@ export class AgentLoop {
                         actionEntries.set(tc.id, addWorkingAction(desc, 'running', tc.function.name));
                     }
 
-                    // Execute all in parallel
+                    // Execute all in parallel (with cancellation check)
                     const results = await Promise.all(toolCalls.map(async (tc) => {
+                        if (this.cancelled) {
+                            return { tc, result: { success: false, result: 'Cancelled by user.' } };
+                        }
                         let args: Record<string, unknown>;
                         try { args = JSON.parse(tc.function.arguments); } catch { args = {}; }
                         const result = await this.executeToolWithRetry(tc.function.name, args);
@@ -1157,6 +1204,11 @@ export class AgentLoop {
     }
 
     private async executeTool(name: string, args: Record<string, unknown>): Promise<ToolResult> {
+        // Bail early if the run was cancelled
+        if (this.cancelled) {
+            return { success: false, result: 'Cancelled by user.' };
+        }
+
         // Validate arguments against the tool's schema
         const toolDef = this.toolSchemaMap.get(name);
         if (toolDef) {

@@ -200,6 +200,8 @@ export type WebviewMessage =
     | { type: 'fileChangeAction'; action: 'keep' | 'undo' }
     | { type: 'fileChangeFileAction'; file: string; action: 'keep' | 'undo' }
     | { type: 'openFileDiff'; file: string }
+    | { type: 'requestFileDiff'; file: string }
+    | { type: 'showInlineDiff'; file: string }
     | { type: 'switchSession'; sessionId: string }
     | { type: 'deleteSession'; sessionId: string }
     | { type: 'requestSessionList' }
@@ -226,6 +228,7 @@ export type ExtensionMessage =
     | { type: 'sessionList'; sessions: Array<{ id: string; title: string; updatedAt: number; messageCount: number }>; activeId: string }
     | { type: 'sessionSwitched' }
     | { type: 'fileChangeTick'; file: string; additions: number; deletions: number }
+    | { type: 'fileDiffContent'; file: string; diff: string }
     | { type: 'fileChangeFileResolved'; file: string; action: 'kept' | 'undone' }
     | { type: 'fileChangeResolved'; action: 'kept' | 'undone' }
     | { type: 'agentDone' }

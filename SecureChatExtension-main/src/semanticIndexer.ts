@@ -119,6 +119,48 @@ export class SemanticIndexer {
         return this.chunks.length;
     }
 
+    /** Incrementally re-index a single file (called on save). Replaces its chunks in-place. */
+    async reindexFile(uri: vscode.Uri, relativePath: string): Promise<void> {
+        try {
+            const bytes = await vscode.workspace.fs.readFile(uri);
+            const content = Buffer.from(bytes).toString('utf8');
+
+            // Remove old chunks for this file
+            this.chunks = this.chunks.filter(c => c.filePath !== relativePath);
+
+            // Chunk and add new entries
+            const newChunks = this.chunkFile(relativePath, content);
+            this.chunks.push(...newChunks);
+
+            // Rebuild document frequency
+            this.rebuildDocFreq();
+            this.saveCache();
+        } catch {
+            // File may be unreadable (binary, etc.)
+        }
+    }
+
+    /** Remove all chunks for a file from the index */
+    removeFile(relativePath: string): void {
+        const before = this.chunks.length;
+        this.chunks = this.chunks.filter(c => c.filePath !== relativePath);
+        if (this.chunks.length !== before) {
+            this.rebuildDocFreq();
+            this.saveCache();
+        }
+    }
+
+    /** Rebuild the document frequency map from current chunks */
+    private rebuildDocFreq(): void {
+        this.docFreq.clear();
+        for (const chunk of this.chunks) {
+            const seen = new Set<string>(chunk.termFreq.keys());
+            for (const term of seen) {
+                this.docFreq.set(term, (this.docFreq.get(term) || 0) + 1);
+            }
+        }
+    }
+
     search(query: string, maxResults: number = 8): Array<{ filePath: string; startLine: number; endLine: number; score: number; text: string }> {
         const terms = this.tokenize(query);
         if (terms.length === 0 || this.chunks.length === 0) {

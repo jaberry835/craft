@@ -86,6 +86,25 @@ export class SymbolIndexer {
         return this.symbolsByFile.size;
     }
 
+    /** Re-index symbols for a single file (incremental update on save) */
+    async indexFile(uri: vscode.Uri, relativePath: string): Promise<void> {
+        try {
+            const symbols = await this.getDocumentSymbols(uri);
+            if (symbols.length > 0) {
+                this.symbolsByFile.set(relativePath, symbols);
+            } else {
+                this.symbolsByFile.delete(relativePath);
+            }
+        } catch {
+            // Skip files whose symbol provider fails
+        }
+    }
+
+    /** Remove a file from the symbol index */
+    removeFile(relativePath: string): void {
+        this.symbolsByFile.delete(relativePath);
+    }
+
     private async getDocumentSymbols(uri: vscode.Uri): Promise<SymbolEntry[]> {
         const symbols = await vscode.commands.executeCommand<(vscode.DocumentSymbol[] | vscode.SymbolInformation[]) | undefined>(
             'vscode.executeDocumentSymbolProvider',

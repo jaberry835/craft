@@ -858,17 +858,47 @@ window.onerror = function(msg, src, line, col, err) {
                     entry.className = 'dock-file-entry';
                     entry.dataset.file = msg.file;
                     entry.innerHTML =
-                        '<span class="dock-file-name" title="Click to review changes">' + escapeHtml(msg.file) + '</span>' +
-                        '<span class="dock-file-counts">' +
-                            '<span class="dock-add">+' + msg.additions + '</span>' +
-                            '<span class="dock-del">-' + msg.deletions + '</span>' +
-                        '</span>' +
-                        '<span class="dock-file-actions">' +
-                            '<button class="file-btn-keep" title="Keep this file">&#10003;</button>' +
-                            '<button class="file-btn-undo" title="Undo this file">&#8617;</button>' +
-                        '</span>';
-                    // Click file name to open diff
+                        '<div class="dock-file-row">' +
+                            '<span class="dock-file-toggle">&#9654;</span>' +
+                            '<span class="dock-file-name" title="Click to review changes in editor">' + escapeHtml(msg.file) + '</span>' +
+                            '<span class="dock-file-counts">' +
+                                '<span class="dock-add">+' + msg.additions + '</span>' +
+                                '<span class="dock-del">-' + msg.deletions + '</span>' +
+                            '</span>' +
+                            '<span class="dock-file-actions">' +
+                                '<button class="file-btn-editor" title="Open side-by-side diff">&#128462;</button>' +
+                                '<button class="file-btn-keep" title="Keep this file">&#10003;</button>' +
+                                '<button class="file-btn-undo" title="Undo this file">&#8617;</button>' +
+                            '</span>' +
+                        '</div>' +
+                        '<div class="dock-inline-diff hidden" data-diff-file="' + escapeHtml(msg.file) + '">' +
+                            '<div class="dock-diff-loading">Loading diff\u2026</div>' +
+                        '</div>';
+                    // Click file name to open inline diff in main editor (GHCP-style)
                     entry.querySelector('.dock-file-name').addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        vscode.postMessage({ type: 'showInlineDiff', file: msg.file });
+                    });
+                    // Click toggle arrow to expand/collapse sidebar diff preview
+                    const toggleDiff = (e) => {
+                        e.stopPropagation();
+                        const diffPanel = entry.querySelector('.dock-inline-diff');
+                        const toggle = entry.querySelector('.dock-file-toggle');
+                        const isHidden = diffPanel.classList.contains('hidden');
+                        if (isHidden) {
+                            diffPanel.classList.remove('hidden');
+                            toggle.classList.add('expanded');
+                            if (diffPanel.querySelector('.dock-diff-loading')) {
+                                vscode.postMessage({ type: 'requestFileDiff', file: msg.file });
+                            }
+                        } else {
+                            diffPanel.classList.add('hidden');
+                            toggle.classList.remove('expanded');
+                        }
+                    };
+                    entry.querySelector('.dock-file-toggle').addEventListener('click', toggleDiff);
+                    // Open side-by-side VS Code diff editor
+                    entry.querySelector('.file-btn-editor').addEventListener('click', (e) => {
                         e.stopPropagation();
                         vscode.postMessage({ type: 'openFileDiff', file: msg.file });
                     });
@@ -882,6 +912,21 @@ window.onerror = function(msg, src, line, col, err) {
                         vscode.postMessage({ type: 'fileChangeFileAction', file: msg.file, action: 'undo' });
                     });
                     filesEl.appendChild(entry);
+                } else {
+                    // Update counts on existing entry
+                    const addEl = existing.querySelector('.dock-add');
+                    const delEl = existing.querySelector('.dock-del');
+                    if (addEl) addEl.textContent = '+' + msg.additions;
+                    if (delEl) delEl.textContent = '-' + msg.deletions;
+                    // Invalidate cached diff so next expand re-fetches
+                    const diffPanel = existing.querySelector('.dock-inline-diff');
+                    if (diffPanel && !diffPanel.classList.contains('hidden')) {
+                        // Diff is visible — re-fetch updated content
+                        vscode.postMessage({ type: 'requestFileDiff', file: msg.file });
+                    } else if (diffPanel) {
+                        // Mark as needing reload
+                        diffPanel.innerHTML = '<div class="dock-diff-loading">Loading diff\u2026</div>';
+                    }
                 }
 
                 // Update summary counts
@@ -895,6 +940,34 @@ window.onerror = function(msg, src, line, col, err) {
                     allEntries.length === 1 ? '1 file changed' : allEntries.length + ' files changed';
                 dock.querySelector('.dock-counts .dock-add').textContent = '+' + totalAdd;
                 dock.querySelector('.dock-counts .dock-del').textContent = '-' + totalDel;
+                break;
+            }
+            case 'fileDiffContent': {
+                const diffPanel = document.querySelector('.dock-inline-diff[data-diff-file="' + CSS.escape(msg.file) + '"]');
+                if (!diffPanel) break;
+                if (!msg.diff) {
+                    diffPanel.innerHTML = '<div class="dock-diff-empty">No changes detected</div>';
+                    break;
+                }
+                // Parse diff lines and render with syntax highlighting
+                const lines = msg.diff.split('\n');
+                let html = '<pre class="dock-diff-content">';
+                for (let i = 0; i < lines.length; i++) {
+                    const line = lines[i];
+                    const escaped = escapeHtml(line.length > 2 ? line.substring(2) : '');
+                    const prefix = line.substring(0, 2);
+                    if (prefix === '+ ') {
+                        html += '<div class="diff-line diff-line-add"><span class="diff-gutter">+</span><span class="diff-text">' + escaped + '</span></div>';
+                    } else if (prefix === '- ') {
+                        html += '<div class="diff-line diff-line-del"><span class="diff-gutter">\u2212</span><span class="diff-text">' + escaped + '</span></div>';
+                    } else if (line === '  ---') {
+                        html += '<div class="diff-line diff-line-sep"><span class="diff-gutter">\u22EE</span><span class="diff-text">\u2500\u2500\u2500</span></div>';
+                    } else {
+                        html += '<div class="diff-line diff-line-ctx"><span class="diff-gutter"> </span><span class="diff-text">' + escapeHtml(line.length > 2 ? line.substring(2) : line) + '</span></div>';
+                    }
+                }
+                html += '</pre>';
+                diffPanel.innerHTML = html;
                 break;
             }
             case 'fileChangeResolved': {

@@ -29,6 +29,8 @@ export class BuiltinTools {
     private originalContentProvider?: vscode.Disposable;
     /** Background terminal processes tracked by ID. */
     private backgroundProcesses: Map<string, { proc: cp.ChildProcess; output: string[]; command: string; startedAt: number; exited: boolean; exitCode: number | null }> = new Map();
+    /** Maximum number of concurrent background processes */
+    private static readonly MAX_BACKGROUND_PROCESSES = 10;
 
     constructor(
         private workspaceIndexer: WorkspaceIndexer,
@@ -232,6 +234,42 @@ export class BuiltinTools {
         return this.touchedFiles.size > 0;
     }
 
+    /** Get the original content and absolute path for a touched file */
+    getTouchedFileInfo(relPath: string): { absPath: string; originalContent: string } | undefined {
+        for (const [absPath, info] of this.touchedFiles) {
+            if (info.relPath === relPath) {
+                return { absPath, originalContent: info.originalContent };
+            }
+        }
+        return undefined;
+    }
+
+    /** Get touched file info by absolute/fs path */
+    getTouchedFileInfoByPath(fsPath: string): { relPath: string; originalContent: string } | undefined {
+        const info = this.touchedFiles.get(fsPath);
+        if (!info) { return undefined; }
+        return { relPath: info.relPath, originalContent: info.originalContent };
+    }
+
+    /** Get all touched file relative paths */
+    getTouchedFileRelPaths(): string[] {
+        return Array.from(this.touchedFiles.values()).map(v => v.relPath);
+    }
+
+    /** Get unified diff string for a specific file (for inline diff rendering) */
+    getDiffForFile(relPath: string): string {
+        for (const [absPath, info] of this.touchedFiles) {
+            if (info.relPath === relPath) {
+                let currentContent = '';
+                try {
+                    currentContent = require('fs').readFileSync(absPath, 'utf8') as string;
+                } catch { return ''; }
+                return this.buildInlineDiff(info.originalContent, currentContent);
+            }
+        }
+        return '';
+    }
+
     /** Open diff editors for all touched files (on-disk original vs dirty buffer) */
     async openDiffEditors(): Promise<void> {
         for (const [absPath, info] of this.touchedFiles) {
@@ -320,8 +358,15 @@ export class BuiltinTools {
     private validatePath(filePath: string): string | null {
         const root = this.getWorkspaceRoot();
         if (!root) { return null; }
+        // Block null bytes (can bypass path checks in some runtimes)
+        if (filePath.includes('\0')) { return null; }
+        // Block UNC paths on Windows (\\server\share)
+        if (/^[\\/]{2}/.test(filePath)) { return null; }
         const resolved = path.resolve(root, filePath);
-        if (!resolved.startsWith(root + path.sep) && resolved !== root) {
+        // Normalize both to handle trailing separators and case on Windows
+        const normalizedResolved = path.normalize(resolved);
+        const normalizedRoot = path.normalize(root);
+        if (!normalizedResolved.startsWith(normalizedRoot + path.sep) && normalizedResolved !== normalizedRoot) {
             return null;
         }
         return resolved;
@@ -358,13 +403,17 @@ export class BuiltinTools {
         return new Promise((resolve) => {
             this.pendingConfirmations.set(actionId, { resolve });
             this.onConfirmRequest!(actionId, description, category, diff);
-            // Timeout after 60s — auto-reject
+            // Timeout after 120s — auto-reject with visible feedback
             setTimeout(() => {
                 if (this.pendingConfirmations.has(actionId)) {
                     this.pendingConfirmations.delete(actionId);
+                    // Notify the user visibly so they know what happened
+                    vscode.window.showWarningMessage(
+                        'Junior: Action confirmation timed out and was automatically declined. You can re-run the task to try again.'
+                    );
                     resolve(false);
                 }
-            }, 60000);
+            }, 120000);
         });
     }
 
@@ -1212,8 +1261,41 @@ export class BuiltinTools {
             const timeoutMs = Math.min(Math.max(Number(args.timeout_ms) || 30000, 5000), 120000);
             const background = args.background === true || args.background === 'true';
 
-            // Block dangerous commands
-            const dangerous = [/rm\s+-rf\s+\//, /format\s+[a-z]:/i, /del\s+\/s\s+\/q\s+[a-z]:/i];
+            // Block dangerous commands — comprehensive patterns for both Unix and Windows
+            const dangerous: RegExp[] = [
+                // Unix destructive removals
+                /rm\s+.*-[a-z]*r[a-z]*f[^a-z]|rm\s+.*-[a-z]*f[a-z]*r[^a-z]/i,  // rm -rf, rm -fr, and flag combos
+                /rm\s+.*\s+\/(?:\s|$)/,                       // rm ... / (root)
+                /rm\s+.*~\//,                                  // rm ~/
+                /rm\s+.*\$HOME/i,                               // rm $HOME
+                /rm\s+.*\/\*/,                                 // rm /*
+                /find\s+\/\s+.*-delete/i,                      // find / -delete
+                /mkfs\./i,                                      // mkfs.ext4 etc.
+                /dd\s+.*of=\/dev\//i,                          // dd of=/dev/
+                /chmod\s+.*-R\s+777\s+\//i,                    // chmod -R 777 /
+                /chown\s+.*-R\s+.*\s+\//i,                     // chown -R ... /
+                // Dangerous environment/disk operations
+                /:(){ :|:& };:/,                                // fork bomb
+                />\/dev\/sd[a-z]/i,                             // overwrite raw disk
+                // Windows destructive commands
+                /format\s+[a-z]:/i,                             // format C:
+                /del\s+\/[sfq].*[a-z]:\\?$/i,                  // del /s /q C:\
+                /del\s+\/[sfq].*\\\*/i,                        // del /s \*
+                /rd\s+\/[sq].*[a-z]:\\?$/i,                    // rd /s /q C:\
+                /rmdir\s+\/[sq].*[a-z]:\\?$/i,                 // rmdir /s /q C:\
+                // PowerShell destructive commands
+                /Remove-Item\s+.*-Recurse.*[\/\\]\s*$/i,       // Remove-Item -Recurse /
+                /Remove-Item\s+.*-Recurse.*[a-z]:\\?\s*$/i,    // Remove-Item -Recurse C:\
+                /Remove-Item\s+.*~[\/\\]?\s/i,                 // Remove-Item ~/
+                /Clear-Content\s+.*[a-z]:\\?\s*$/i,            // Clear-Content C:\
+                /Stop-Computer/i,                               // shutdown
+                /Restart-Computer/i,                            // reboot
+                // Cross-platform dangerous actions
+                /shutdown\s/i,                                  // shutdown
+                /reboot\b/i,                                    // reboot
+                /init\s+0/,                                     // init 0
+                /halt\b/i,                                      // halt
+            ];
             for (const d of dangerous) {
                 if (d.test(command)) {
                     return { success: false, result: 'Command blocked — potentially destructive system-wide command.' };
@@ -1238,6 +1320,20 @@ export class BuiltinTools {
             });
 
             if (background) {
+                // Clean up exited background processes before adding new ones
+                for (const [id, bg] of this.backgroundProcesses) {
+                    if (bg.exited) { this.backgroundProcesses.delete(id); }
+                }
+
+                // Enforce cap on concurrent background processes
+                if (this.backgroundProcesses.size >= BuiltinTools.MAX_BACKGROUND_PROCESSES) {
+                    proc.kill();
+                    return {
+                        success: false,
+                        result: `Too many background processes (limit: ${BuiltinTools.MAX_BACKGROUND_PROCESSES}). Use check_terminal_output to review existing processes, or wait for some to finish.`
+                    };
+                }
+
                 // Background mode — return immediately with a process ID
                 const procId = `bg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
                 const entry = { proc, output: [] as string[], command, startedAt: Date.now(), exited: false, exitCode: null as number | null };

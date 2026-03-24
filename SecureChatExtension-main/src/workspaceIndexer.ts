@@ -139,6 +139,50 @@ export class WorkspaceIndexer {
         return Array.from(this.files.keys()).filter(p => p.toLowerCase().includes(lower));
     }
 
+    /** Incrementally update a single file in the index (called on save). Returns true if the file was new or changed. */
+    async updateFile(uri: vscode.Uri): Promise<boolean> {
+        const maxFileSize = getSetting<number>('workspace.maxFileSize') || 100000;
+        try {
+            const stat = await vscode.workspace.fs.stat(uri);
+            if (stat.size > maxFileSize) { return false; }
+
+            const relativePath = vscode.workspace.asRelativePath(uri, false);
+            const existing = this.files.get(relativePath);
+
+            // Skip if unchanged
+            if (existing && existing.size === stat.size && existing.mtime === stat.mtime) {
+                return false;
+            }
+
+            const ext = path.extname(uri.fsPath).toLowerCase();
+            const language = this.guessLanguage(ext);
+            this.files.set(relativePath, {
+                relativePath,
+                uri,
+                size: stat.size,
+                language,
+                mtime: stat.mtime,
+            });
+            this.lastChangedFiles = new Set([relativePath]);
+            this.tree = this.buildTree();
+            this.saveCache();
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    /** Remove a file from the index (called on delete) */
+    removeFile(uri: vscode.Uri): boolean {
+        const relativePath = vscode.workspace.asRelativePath(uri, false);
+        const removed = this.files.delete(relativePath);
+        if (removed) {
+            this.tree = this.buildTree();
+            this.saveCache();
+        }
+        return removed;
+    }
+
     // ── Cache persistence ──
 
     private getCachePath(): string | undefined {
