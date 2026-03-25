@@ -40,8 +40,6 @@ export function validateToolArgs(
         }
     }
 
-    // If no parameters provided at all, but schema expects some, report that   
-    
     // Check each provided argument against the schema
     for (const [key, value] of Object.entries(args)) {
         const propSchema = schema.properties[key] as Record<string, unknown> | undefined;

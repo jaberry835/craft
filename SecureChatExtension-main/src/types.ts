@@ -5,7 +5,7 @@
 // ── Azure OpenAI Types ──
 
 export interface AoaiConfig {
-    provider: 'direct' | 'apim';
+    provider: 'direct' | 'apim' | 'openai';
     endpoint: string;
     apimBaseUrl: string;
     apiKey: string;

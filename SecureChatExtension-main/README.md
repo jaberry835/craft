@@ -1,15 +1,15 @@
 # Junior — AI Assistant for Offline Environments
 
-A VS Code extension that provides a **Copilot-like autonomous agent** powered by **Azure OpenAI**, designed for air-gapped / offline developer environments with no internet access and no GitHub Copilot availability.
+A VS Code extension that provides a **Copilot-like autonomous agent** powered by **Azure OpenAI** or **OpenAI**, designed for air-gapped / offline developer environments with no internet access and no GitHub Copilot availability.
 
 ## Features
 
 - **Agent Mode** — Autonomous tool-calling loop: the AI reads files, edits code, runs terminal commands, and searches your workspace without manual intervention.
 - **Built-in Tools** — 20 workspace tools: `read_file`, `write_file`, `edit_file`, `delete_file`, `list_directory`, `search_files`, `grep_search`, `semantic_search`, `get_file_tree`, `get_document_symbols`, `find_symbol`, `go_to_definition`, `find_references`, `rename_symbol`, `run_terminal_command`, `get_diagnostics`, `get_open_editors`, `apply_code_action`, `set_plan`, `update_plan_step`.
 - **MCP (Model Context Protocol)** — Connect external MCP tool servers over stdio for extensible tool capabilities.
-- **Azure OpenAI Streaming** — Direct HTTPS connection to your Azure OpenAI resource with streaming responses (no SDK, zero external runtime dependencies). Supports both direct AOAI and API Management (APIM) proxy connections.
+- **Azure OpenAI & OpenAI Streaming** — Direct HTTPS connection to Azure OpenAI, OpenAI, or any compatible endpoint with streaming responses (no SDK, zero external runtime dependencies). Supports direct AOAI, API Management (APIM) proxy, and OpenAI API connections.
 - **Multi-Model Selection** — Configure multiple deployments and switch between them from the chat panel.
-- **Inline Code Completions** — Ghost-text suggestions (like GitHub Copilot) powered by your Azure OpenAI deployment. Supports a separate fast model for completions, debounced triggering, and aggressive cancellation for responsive UX.
+- **Inline Code Completions** — Ghost-text suggestions (like GitHub Copilot) powered by your Azure OpenAI or OpenAI model. Supports a separate fast model for completions, debounced triggering, and aggressive cancellation for responsive UX.
 - **Confirmation Dialogs** — Approve or deny file writes, deletions, and terminal commands before execution.
 - **Context Menu Actions** — Right-click selected code to Explain, Review, or Fix it.
 - **Session Persistence** — Chat history is persisted across VS Code restarts.
@@ -17,8 +17,8 @@ A VS Code extension that provides a **Copilot-like autonomous agent** powered by
 ## Requirements
 
 - VS Code 1.85.0 or later
-- Network access to your **Azure OpenAI** resource (internal network; no public internet required)
-- An Azure OpenAI deployment that supports function/tool calling (e.g., `gpt-4o`, `gpt-4-turbo`, `gpt-35-turbo-1106` or newer)
+- Network access to your **Azure OpenAI** resource (internal network; no public internet required), **or** network access to the **OpenAI API** (api.openai.com)
+- A model that supports function/tool calling (e.g., `gpt-4o`, `gpt-4.1`, `gpt-4-turbo`, `o4-mini`, or newer)
 
 ## Setup
 
@@ -42,9 +42,9 @@ Then in VS Code:
 
 For extension development/testing, you can still press **F5** to launch the Extension Development Host.
 
-### 2. Configure Azure OpenAI
+### 2. Configure Your AI Provider
 
-Junior supports two connection modes: **direct** to an Azure OpenAI resource, or through an **API Management (APIM)** proxy.
+Junior supports three connection modes: **direct** to an Azure OpenAI resource, through an **API Management (APIM)** proxy, or to the **OpenAI API**.
 
 #### Option A — Direct Azure OpenAI
 
@@ -92,6 +92,35 @@ If your Azure OpenAI is behind an APIM gateway, set the provider to `apim` and s
 The APIM endpoint must expose the standard Azure OpenAI Chat Completions API path (`/openai/deployments/{deployment-id}/chat/completions`). The API key is sent in the `api-key` header, which works with both direct AOAI and most APIM configurations.
 
 > **Note:** Deployments must be configured manually in `junior.azureOpenAI.deployments` — they are not auto-discovered. The `deploymentId` values must match the deployment names in your Azure OpenAI resource exactly.
+
+#### Option C — OpenAI API
+
+To connect directly to the OpenAI API (or any OpenAI-compatible endpoint such as OpenRouter or a local Ollama server):
+
+```jsonc
+{
+  "junior.azureOpenAI.provider": "openai",
+  "junior.azureOpenAI.openaiBaseUrl": "https://api.openai.com/v1",
+  "junior.azureOpenAI.deployments": [
+    { "name": "GPT-4o", "deploymentId": "gpt-4o" },
+    { "name": "GPT-4o Mini", "deploymentId": "gpt-4o-mini" },
+    { "name": "o4-mini", "deploymentId": "o4-mini" }
+  ],
+  "junior.azureOpenAI.activeDeployment": "gpt-4o"
+}
+```
+
+The API key is sent as a `Bearer` token in the `Authorization` header. The `deployments` list and **Junior: Select Model** picker work the same way as with Azure — just use model names (e.g. `gpt-4o`) instead of deployment IDs. The `apiVersion` field is ignored for OpenAI.
+
+**Compatible endpoints:**
+
+| Service | `openaiBaseUrl` | Notes |
+|---------|-----------------|-------|
+| OpenAI | `https://api.openai.com/v1` (default) | Use your OpenAI API key |
+| GitHub Models | `https://models.inference.ai.azure.com` | Use a GitHub fine-grained PAT with Models read permission |
+| OpenRouter | `https://openrouter.ai/api/v1` | Use your OpenRouter key; some models are free |
+| Ollama (local) | `http://localhost:11434/v1` | Any non-empty string as API key |
+| LM Studio (local) | `http://localhost:1234/v1` | Any non-empty string as API key |
 
 #### Store your API key
 
@@ -147,36 +176,62 @@ You can mix both transports — servers with `command` use stdio, servers with `
 
 By default, Junior merges `junior.mcp.servers` with external settings listed in `junior.mcp.externalServerSettings` (defaults to `["mcp.servers"]`). If two settings define the same server name, `junior.mcp.servers` wins. Set `junior.mcp.includeExternalServers` to `false` to only use Junior's own setting.
 
-**Complete example (all features configured):**
+**Complete example — OpenAI provider (all settings shown):**
 
 ```jsonc
 {
-  // ── Azure OpenAI connection ──
-  "junior.azureOpenAI.provider": "direct",           // or "apim" for API Management proxy
-  "junior.azureOpenAI.endpoint": "https://your-resource.openai.azure.com",
-  "junior.azureOpenAI.apiVersion": "2025-03-01-preview",
-  "junior.azureOpenAI.deployments": [
-    {
-      "name": "GPT-4o",
-      "deploymentId": "gpt-4o",
-      "apiVersion": "2025-03-01-preview"
-    },
-    {
-      "name": "GPT-4o Mini",
-      "deploymentId": "gpt-4o-mini",
-      "apiVersion": "2025-03-01-preview"
-    }
+  // ── Provider & connection ──
+  "junior.azureOpenAI.provider": "openai",             // "direct" | "apim" | "openai"
+  "junior.azureOpenAI.openaiBaseUrl": "https://api.openai.com/v1", // base URL (include /v1 for OpenAI; omit for GitHub Models)
+
+  // ── Models (shared across all providers) ──
+  "junior.azureOpenAI.deployments": [                  // list of models to pick from
+    { "name": "GPT-4o", "deploymentId": "gpt-4o" },
+    { "name": "GPT-4o Mini", "deploymentId": "gpt-4o-mini" },
+    { "name": "o4-mini", "deploymentId": "o4-mini" }
   ],
-  "junior.azureOpenAI.activeDeployment": "gpt-4o",
+  "junior.azureOpenAI.activeDeployment": "gpt-4o",     // currently selected model
+
+  // ── Azure OpenAI settings (used when provider is "direct" or "apim") ──
+  "junior.azureOpenAI.endpoint": "",                   // Azure OpenAI resource URL
+  "junior.azureOpenAI.apimBaseUrl": "",                // APIM gateway URL (when provider is "apim")
+  "junior.azureOpenAI.apiVersion": "2025-03-01-preview", // Azure API version
+
+  // ── Model behavior ──
+  "junior.maxTokens": 16384,                           // max completion tokens per response
+  "junior.temperature": 0.3,                           // response temperature (0.0–1.0)
+
+  // ── Agent settings ──
+  "junior.agent.maxIterations": 25,                    // max tool-call loops per turn
+  "junior.agent.contextWindow": 128000,                // model context window size (tokens)
+  "junior.agent.contextThreshold": 0.7,                // fraction of context window before summarizing (0.3–0.95)
+  "junior.agent.confirmWrites": true,                  // confirm before file write/delete
+  "junior.agent.confirmTerminal": true,                // confirm before terminal commands
+
+  // ── Workspace indexing ──
+  "junior.workspace.maxFileSize": 100000,              // max file size (bytes) to index
+  "junior.workspace.excludePatterns": [
+    "**/node_modules/**",
+    "**/.git/**",
+    "**/bin/**",
+    "**/obj/**",
+    "**/out/**",
+    "**/dist/**",
+    "**/*.min.js",
+    "**/*.map"
+  ],
 
   // ── Inline completions (ghost text) ──
-  "junior.inlineCompletions.enabled": true,           // toggle inline suggestions on/off
-  "junior.inlineCompletions.deployment": "gpt-4o-mini", // fast model for completions (leave "" to use active chat model)
-  "junior.inlineCompletions.timeoutMs": 5000,         // abort if model doesn't respond within this time (1000–30000)
-  "junior.inlineCompletions.candidates": 1,           // number of alternatives (1–3); cycle with Alt+] / Alt+[
+  "junior.inlineCompletions.enabled": true,            // toggle inline suggestions on/off
+  "junior.inlineCompletions.deployment": "gpt-4o-mini",// model for completions (leave "" to use the chat model)
+  "junior.inlineCompletions.timeoutMs": 5000,          // abort if no response within this time (1000–30000)
+  "junior.inlineCompletions.candidates": 1,            // number of alternatives (1–3); cycle with Alt+] / Alt+[
+
+  // ── Slash commands ──
+  "junior.slashCommands.directories": [],              // additional dirs to scan for .md slash commands
 
   // ── MCP servers ──
-  "junior.mcp.includeExternalServers": true,          // also load servers from mcp.servers
+  "junior.mcp.includeExternalServers": true,           // also load servers from mcp.servers
   "junior.mcp.externalServerSettings": [
     "mcp.servers"
   ],
@@ -315,14 +370,15 @@ Select code in the editor, right-click, and choose:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `junior.azureOpenAI.provider` | `"direct"` | Connection mode: `direct` for AOAI, `apim` for API Management proxy |
+| `junior.azureOpenAI.provider` | `"direct"` | Connection mode: `Azure OpenAI`, `API Management (APIM)`, or `OpenAI / Compatible` |
+| `junior.azureOpenAI.openaiBaseUrl` | `"https://api.openai.com/v1"` | OpenAI-compatible API base URL. Include `/v1` for OpenAI; omit for GitHub Models (used when provider is `openai`) |
+| `junior.azureOpenAI.deployments` | `[]` | List of `{ name, deploymentId, apiVersion? }` — models available for selection. Works with all providers. |
+| `junior.azureOpenAI.activeDeployment` | `""` | Currently active model — Azure deployment ID or OpenAI model name |
 | `junior.azureOpenAI.endpoint` | `""` | Azure OpenAI endpoint URL (used when provider is `direct`) |
 | `junior.azureOpenAI.apimBaseUrl` | `""` | APIM gateway base URL with path prefix (used when provider is `apim`) |
-| `junior.azureOpenAI.apiKey` | `""` | API key |
-| `junior.azureOpenAI.deployments` | `[]` | List of `{ name, deploymentId, apiVersion }` — configured manually |
-| `junior.azureOpenAI.activeDeployment` | `""` | Currently active deployment ID |
-| `junior.azureOpenAI.apiVersion` | `"2025-03-01-preview"` | Default API version (>= `2024-08-01` required for token usage tracking) |
-| `junior.maxTokens` | `4096` | Max tokens per response |
+| `junior.azureOpenAI.apiKey` | `""` | API key (prefer using **Junior: Set API Key** for secure storage) |
+| `junior.azureOpenAI.apiVersion` | `"2025-03-01-preview"` | Azure API version (>= `2024-08-01` required for token usage tracking) |
+| `junior.maxTokens` | `16384` | Max completion tokens per response |
 | `junior.temperature` | `0.3` | Response temperature (0–1) |
 | `junior.workspace.maxFileSize` | `100000` | Max file size (bytes) to index |
 | `junior.workspace.excludePatterns` | `[...]` | Glob patterns excluded from indexing |
@@ -336,7 +392,7 @@ Select code in the editor, right-click, and choose:
 | `junior.mcp.externalServerSettings` | `["mcp.servers"]` | External settings paths to merge MCP servers from |
 | `junior.slashCommands.directories` | `[]` | Additional directories to scan for slash command `.md` files. Built-in dirs (`.junior/commands`, `.github/copilot/commands`, `.github/commands`) are always scanned |
 | `junior.inlineCompletions.enabled` | `true` | Enable/disable inline ghost-text code completions |
-| `junior.inlineCompletions.deployment` | `""` | Deployment ID for inline completions. Leave empty to use the active chat deployment. A fast model (e.g. `gpt-4o`) is recommended. |
+| `junior.inlineCompletions.deployment` | `""` | Deployment ID or OpenAI model name for inline completions. Leave empty to use the active chat model. A fast model (e.g. `gpt-4o-mini`) is recommended. |
 | `junior.inlineCompletions.timeoutMs` | `5000` | Max time (ms) to wait for a completion response before aborting (1000–30000) |
 | `junior.inlineCompletions.candidates` | `1` | Number of alternative completions to fetch (1–3). Cycle with Alt+] / Alt+[ |
 

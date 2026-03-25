@@ -5,11 +5,13 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as cp from 'child_process';
+import * as fs from 'fs';
 import { ToolDefinition, ToolResult, ToolHandler } from './types';
 import { WorkspaceIndexer } from './workspaceIndexer';
 import { SymbolIndexer } from './symbolIndexer';
 import { SemanticIndexer } from './semanticIndexer';
 import { getSetting } from './config';
+import { countLineChanges } from './diffUtils';
 
 export class BuiltinTools {
     private handlers: Map<string, ToolHandler> = new Map();
@@ -101,16 +103,10 @@ export class BuiltinTools {
         if (!info) { return; }
         let newContent = '';
         try {
-            newContent = require('fs').readFileSync(absPath, 'utf8') as string;
+            newContent = fs.readFileSync(absPath, 'utf8');
         } catch { return; }
-        const oldLines = info.originalContent.split('\n');
-        const newLines = newContent.split('\n');
-        const oldSet = new Set(oldLines);
-        const newSet = new Set(newLines);
-        let adds = 0, dels = 0;
-        for (const l of newLines) { if (!oldSet.has(l)) { adds++; } }
-        for (const l of oldLines) { if (!newSet.has(l)) { dels++; } }
-        this.onFileTouched(relPath, adds, dels);
+        const { additions, deletions } = countLineChanges(info.originalContent, newContent);
+        this.onFileTouched(relPath, additions, deletions);
     }
 
     /** Returns summary of pending file changes (snapshot vs current disk content) */
@@ -121,13 +117,10 @@ export class BuiltinTools {
         for (const [absPath, info] of this.touchedFiles) {
             files.push(info.relPath);
             try {
-                const diskBytes = require('fs').readFileSync(absPath, 'utf8') as string;
-                const newLines = diskBytes.split('\n');
-                const oldLines = info.originalContent.split('\n');
-                const oldSet = new Set(oldLines);
-                const newSet = new Set(newLines);
-                for (const l of newLines) { if (!oldSet.has(l)) { additions++; } }
-                for (const l of oldLines) { if (!newSet.has(l)) { deletions++; } }
+                const diskBytes = fs.readFileSync(absPath, 'utf8');
+                const delta = countLineChanges(info.originalContent, diskBytes);
+                additions += delta.additions;
+                deletions += delta.deletions;
             } catch {
                 // File was deleted? Ignore
             }
@@ -262,7 +255,7 @@ export class BuiltinTools {
             if (info.relPath === relPath) {
                 let currentContent = '';
                 try {
-                    currentContent = require('fs').readFileSync(absPath, 'utf8') as string;
+                    currentContent = fs.readFileSync(absPath, 'utf8');
                 } catch { return ''; }
                 return this.buildInlineDiff(info.originalContent, currentContent);
             }

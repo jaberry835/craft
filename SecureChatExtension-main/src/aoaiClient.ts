@@ -56,7 +56,7 @@ export class AzureOpenAIClient {
     }
 
     getConfig(): AoaiConfig {
-        const provider = (getSetting<string>('azureOpenAI.provider') || 'direct') as 'direct' | 'apim';
+        const provider = (getSetting<string>('azureOpenAI.provider') || 'direct') as 'direct' | 'apim' | 'openai';
         const endpoint = getSetting<string>('azureOpenAI.endpoint') || '';
         const apimBaseUrl = getSetting<string>('azureOpenAI.apimBaseUrl') || '';
         // apiKey is resolved async via getApiKey() — callers that need it should call getConfigAsync()
@@ -70,7 +70,7 @@ export class AzureOpenAIClient {
     }
 
     async getConfigAsync(): Promise<AoaiConfig> {
-        const provider = (getSetting<string>('azureOpenAI.provider') || 'direct') as 'direct' | 'apim';
+        const provider = (getSetting<string>('azureOpenAI.provider') || 'direct') as 'direct' | 'apim' | 'openai';
         const endpoint = getSetting<string>('azureOpenAI.endpoint') || '';
         const apimBaseUrl = getSetting<string>('azureOpenAI.apimBaseUrl') || '';
         const apiKey = await this.getApiKey();
@@ -84,13 +84,18 @@ export class AzureOpenAIClient {
 
     async validate(): Promise<string | null> {
         const c = await this.getConfigAsync();
-        if (c.provider === 'apim') {
+        if (c.provider === 'openai') {
+            if (!c.apiKey) { return 'OpenAI API key is not configured. Run "Junior: Set API Key" to store it securely.'; }
+            if (!c.deploymentId) { return 'No model selected. Run "Junior: Select Model" or add models to the deployments list.'; }
+        } else if (c.provider === 'apim') {
             if (!c.apimBaseUrl) { return 'APIM base URL is not configured. Set junior.azureOpenAI.apimBaseUrl in settings.'; }
+            if (!c.apiKey) { return 'Azure OpenAI API key is not configured. Run "Junior: Set API Key" to store it securely.'; }
+            if (!c.deploymentId) { return 'No model deployment selected. Run "Junior: Select Model".'; }
         } else {
             if (!c.endpoint) { return 'Azure OpenAI endpoint is not configured.'; }
+            if (!c.apiKey) { return 'Azure OpenAI API key is not configured. Run "Junior: Set API Key" to store it securely.'; }
+            if (!c.deploymentId) { return 'No model deployment selected. Run "Junior: Select Model".'; }
         }
-        if (!c.apiKey) { return 'Azure OpenAI API key is not configured. Run "Junior: Set API Key" to store it securely.'; }
-        if (!c.deploymentId) { return 'No model deployment selected. Run "Junior: Select Model".'; }
         return null;
     }
 
@@ -105,10 +110,17 @@ export class AzureOpenAIClient {
         options?: { reasoningMode?: boolean; maxTokens?: number; temperature?: number; stop?: string[] }
     ): AsyncGenerator<{ type: 'text'; text: string } | { type: 'toolCallStarted' } | { type: 'toolCalls'; calls: ToolCall[] } | { type: 'usage'; usage: TokenUsage } | { type: 'done' }> {
         const config = await this.getConfigAsync();
-        const base = (config.provider === 'apim' ? config.apimBaseUrl : config.endpoint).replace(/\/+$/, '');
-        const url = new URL(
-            `${base}/openai/deployments/${encodeURIComponent(config.deploymentId)}/chat/completions?api-version=${config.apiVersion}`
-        );
+
+        let url: URL;
+        if (config.provider === 'openai') {
+            const openaiBase = (getSetting<string>('azureOpenAI.openaiBaseUrl') || 'https://api.openai.com/v1').replace(/\/+$/, '');
+            url = new URL(`${openaiBase}/chat/completions`);
+        } else {
+            const base = (config.provider === 'apim' ? config.apimBaseUrl : config.endpoint).replace(/\/+$/, '');
+            url = new URL(
+                `${base}/openai/deployments/${encodeURIComponent(config.deploymentId)}/chat/completions?api-version=${config.apiVersion}`
+            );
+        }
 
         // In reasoning mode, convert system→developer role and drop temperature
         // to be compatible with reasoning models (o-series, some GPT-5.x variants)
@@ -129,10 +141,12 @@ export class AzureOpenAIClient {
             stream: true,
             ...(supportsStreamOptions ? { stream_options: { include_usage: true } } : {}),
             ...(options?.stop ? { stop: options.stop } : {}),
-            ...(tools.length > 0 ? { tools, tool_choice: 'auto' } : {})
+            ...(tools.length > 0 ? { tools, tool_choice: 'auto' } : {}),
+            // OpenAI requires the model in the body; Azure OpenAI uses the deployment in the URL
+            ...(config.provider === 'openai' ? { model: config.deploymentId } : {})
         });
 
-        const response = await this.httpRequestWithRetry(url, body, config.apiKey, abortSignal);
+        const response = await this.httpRequestWithRetry(url, body, config.apiKey, abortSignal, 3, config.provider);
 
         const toolCallAccumulator: Map<number, { id: string; name: string; arguments: string }> = new Map();
         let hasToolCalls = false;
@@ -227,11 +241,12 @@ export class AzureOpenAIClient {
         body: string,
         apiKey: string,
         abortSignal?: AbortSignal,
-        maxRetries: number = 3
+        maxRetries: number = 3,
+        provider: 'direct' | 'apim' | 'openai' = 'direct'
     ): Promise<AsyncIterable<string>> {
         for (let attempt = 0; attempt <= maxRetries; attempt++) {
             try {
-                return await this.httpRequest(url, body, apiKey, abortSignal);
+                return await this.httpRequest(url, body, apiKey, abortSignal, provider);
             } catch (err: any) {
                 const retryable = err.statusCode === 429 || err.statusCode === 503;
                 if (!retryable || attempt === maxRetries) { throw err; }
@@ -265,7 +280,8 @@ export class AzureOpenAIClient {
         url: URL,
         body: string,
         apiKey: string,
-        abortSignal?: AbortSignal
+        abortSignal?: AbortSignal,
+        provider: 'direct' | 'apim' | 'openai' = 'direct'
     ): Promise<AsyncIterable<string>> {
         return new Promise((resolve, reject) => {
             if (abortSignal?.aborted) {
@@ -276,6 +292,11 @@ export class AzureOpenAIClient {
             const isHttps = url.protocol === 'https:';
             const mod = isHttps ? https : http;
 
+            // OpenAI uses Bearer token auth; Azure uses api-key header
+            const authHeaders = provider === 'openai'
+                ? { 'Authorization': `Bearer ${apiKey}` }
+                : { 'api-key': apiKey };
+
             const req = mod.request(
                 url,
                 {
@@ -283,7 +304,7 @@ export class AzureOpenAIClient {
                     timeout: 120_000, // 2-minute socket timeout to prevent indefinite hangs
                     headers: {
                         'Content-Type': 'application/json',
-                        'api-key': apiKey
+                        ...authHeaders
                     }
                 },
                 (res) => {
@@ -291,7 +312,7 @@ export class AzureOpenAIClient {
                         let errBody = '';
                         res.on('data', (d: Buffer) => { errBody += d.toString(); });
                         res.on('end', () => {
-                            const err = new Error(`Azure OpenAI returned ${res.statusCode}: ${errBody}`) as any;
+                            const err = new Error(`API returned ${res.statusCode}: ${errBody}`) as any;
                             err.statusCode = res.statusCode;
                             err.retryAfter = res.headers['retry-after']
                                 ? parseInt(res.headers['retry-after'] as string, 10) : undefined;
