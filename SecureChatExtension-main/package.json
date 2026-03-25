@@ -2,7 +2,7 @@
   "name": "junior",
   "displayName": "Junior - AI Assistant (Azure OpenAI)",
   "description": "An offline-capable AI coding assistant powered by Azure OpenAI, providing Copilot-like chat, code analysis, editing, and project scaffolding.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "publisher": "MSFT-CSU-ETT",
   "license": "MIT",
   "repository": {
@@ -132,19 +132,9 @@
           "group": "navigation@3"
         },
         {
-          "command": "junior.manageMcpServers",
-          "when": "view == junior.chatView",
-          "group": "navigation@4"
-        },
-        {
           "command": "junior.indexWorkspace",
           "when": "view == junior.chatView",
-          "group": "navigation@5"
-        },
-        {
-          "command": "junior.cancelAgent",
-          "when": "view == junior.chatView",
-          "group": "navigation@6"
+          "group": "navigation@4"
         }
       ],
       "editor/context": [

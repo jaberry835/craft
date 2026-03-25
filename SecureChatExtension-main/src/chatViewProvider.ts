@@ -203,6 +203,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 case 'cancelAgent':
                     this.cancelAgent();
                     break;
+                case 'manageMcpServers':
+                    vscode.commands.executeCommand('junior.manageMcpServers');
+                    break;
                 case 'newSession':
                     this.newSession();
                     break;
@@ -309,7 +312,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 this.builtinTools,
                 this.mcpClient,
                 callbacks,
-                this.tokenTracker
+                this.tokenTracker,
+                this.log
             );
             // After reload, seed with persisted session messages so history isn't lost
             const session = this.sessionManager.getCurrentSession();
@@ -973,6 +977,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 .codicon-play:before { content: "\\eb2c"; }
 .codicon-list-tree:before { content: "\\eb86"; }
 .codicon-pass:before { content: "\\eba4"; }
+.codicon-arrow-up:before { content: "\\eaa1"; }
+.codicon-debug-stop:before { content: "\\eaf7"; }
+.codicon-add:before { content: "\\ea60"; }
 .codicon-loading.codicon-modifier-spin {
     animation: codicon-spin 1.5s steps(30) infinite;
 }
@@ -1792,23 +1799,97 @@ body { display: flex; flex-direction: column; }
 #composer-toolbar {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    border-top: 1px solid var(--border);
+    gap: 2px;
     padding: 4px 6px;
     min-height: 32px;
 }
-#btn-attach {
+/* Shared composer toolbar button base */
+.composer-btn {
     background: none;
     border: none;
     color: var(--fg);
     cursor: pointer;
-    font-size: 15px;
     padding: 4px 6px;
-    border-radius: 4px;
-    opacity: 0.6;
+    border-radius: 6px;
+    opacity: 0.55;
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    transition: opacity 0.12s, background 0.12s;
+}
+.composer-btn:hover {
+    opacity: 1;
+    background: rgba(255,255,255,0.1);
+}
+#btn-attach .codicon { font-size: 14px; }
+
+/* Agent mode label */
+.agent-mode {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: var(--fg);
+    opacity: 0.7;
+    padding: 2px 6px;
+    border-radius: 6px;
+    cursor: default;
+    user-select: none;
     flex-shrink: 0;
 }
-#btn-attach:hover { opacity: 1; background: rgba(255,255,255,0.08); }
+.agent-mode .agent-icon {
+    font-size: 13px;
+    opacity: 0.8;
+}
+
+/* Tools button SVG */
+#btn-tools svg {
+    width: 16px;
+    height: 16px;
+}
+
+/* Spacer pushes tools + send to the right */
+.composer-spacer { flex: 1; }
+
+/* Send / Stop button — same base, slightly larger hit area */
+#btn-send {
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    font-size: 16px;
+}
+#btn-send.stop-mode {
+    border: 1.5px solid var(--fg);
+    color: var(--fg);
+    border-radius: 50%;
+    position: relative;
+    opacity: 0.8;
+    background: none;
+}
+#btn-send.stop-mode:hover {
+    border-color: var(--error-fg);
+    color: var(--error-fg);
+    opacity: 1;
+    background: none;
+}
+#btn-send.stop-mode .codicon {
+    font-size: 14px;
+}
+/* Spinning ring on stop button */
+#btn-send.stop-mode::before {
+    content: '';
+    position: absolute;
+    inset: -3px;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    border-top-color: var(--user-msg);
+    animation: stop-spin 1s linear infinite;
+}
+@keyframes stop-spin {
+    100% { transform: rotate(360deg); }
+}
 
 /* HISTORY PANEL */
 #history-panel {
@@ -2094,10 +2175,14 @@ body { display: flex; flex-direction: column; }
         <div id="slash-autocomplete"></div>
         <textarea id="input" rows="1" placeholder="Ask Junior anything..." autofocus></textarea>
         <div id="composer-toolbar">
-            <button id="btn-attach" title="Attach file">&#128206;</button>
+            <button id="btn-attach" class="composer-btn" title="Attach context"><i class="codicon codicon-add"></i></button>
+            <span class="agent-mode"><span class="agent-icon">&#9672;</span> Agent</span>
             <select id="model-select" title="Choose model deployment">
                 <option value="">Loading models...</option>
             </select>
+            <button id="btn-tools" class="composer-btn" title="MCP Tools"><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="4" width="14" height="1.2" rx="0.6"/><circle cx="10.5" cy="4.6" r="2"/><rect x="1" y="10.8" width="14" height="1.2" rx="0.6"/><circle cx="5.5" cy="11.4" r="2"/></svg></button>
+            <div class="composer-spacer"></div>
+            <button id="btn-send" class="composer-btn" title="Send message (Enter)"><i class="codicon codicon-arrow-up"></i></button>
         </div>
     </div>
     <div class="hint"><span class="hint-text">Enter to send &middot; Shift+Enter for newline &middot; Paste images from clipboard</span><div id="context-meter"><div class="meter-ring"><svg viewBox="0 0 20 20"><circle class="meter-bg" cx="10" cy="10" r="8" /><circle class="meter-fill" cx="10" cy="10" r="8" stroke-dasharray="50.27" stroke-dashoffset="50.27" /></svg></div><span class="meter-label">0 / 128.0K (0%)</span></div></div>

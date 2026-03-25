@@ -645,6 +645,16 @@ export class BuiltinTools {
                 let matchStr = oldStr;
                 let count = content.split(oldStr).length - 1;
 
+                // Fast path: if the file uses CRLF but the model sent LF, try with normalized line endings
+                if (count === 0 && content.includes('\r\n') && !oldStr.includes('\r\n')) {
+                    const crlfOld = oldStr.replace(/\n/g, '\r\n');
+                    const crlfCount = content.split(crlfOld).length - 1;
+                    if (crlfCount === 1) {
+                        matchStr = crlfOld;
+                        count = 1;
+                    }
+                }
+
                 // Fallback: try whitespace-normalized matching
                 if (count === 0) {
                     const normalize = (s: string) => s.replace(/\r\n/g, '\n').replace(/[ \t]+/g, ' ').replace(/ *\n/g, '\n');
@@ -705,7 +715,12 @@ export class BuiltinTools {
                 if (count > 1) {
                     return { success: false, result: `old_string found ${count} times. Must match exactly once. Add more context.` };
                 }
-                const updated = content.replace(matchStr, newStr);
+                // Preserve the file's line-ending style in the replacement text
+                let effectiveNewStr = newStr;
+                if (matchStr.includes('\r\n') && !newStr.includes('\r\n')) {
+                    effectiveNewStr = newStr.replace(/\n/g, '\r\n');
+                }
+                const updated = content.replace(matchStr, effectiveNewStr);
 
                 // Write updated content to disk so git detects the change
                 await vscode.workspace.fs.writeFile(uri, Buffer.from(updated, 'utf8'));

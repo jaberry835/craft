@@ -21,6 +21,8 @@ export class TokenTracker {
         chat: { promptTokens: 0, completionTokens: 0, requests: 0 },
         inline: { promptTokens: 0, completionTokens: 0, requests: 0 }
     };
+    /** Current context size in tokens (set by the agent loop after each API call). */
+    private currentContextTokens = 0;
     private log: (msg: string) => void;
     private webviewSender?: (msg: ExtensionMessage) => void;
 
@@ -55,6 +57,14 @@ export class TokenTracker {
         for (const key of Object.keys(this.usage) as UsageSource[]) {
             this.usage[key] = { promptTokens: 0, completionTokens: 0, requests: 0 };
         }
+        this.currentContextTokens = 0;
+        this.updateStatusBar();
+        this.pushToWebview();
+    }
+
+    /** Update the current context size (estimated tokens in the message array). */
+    setContextSize(tokens: number) {
+        this.currentContextTokens = tokens;
         this.updateStatusBar();
         this.pushToWebview();
     }
@@ -104,9 +114,11 @@ export class TokenTracker {
         const total = this.totalTokens();
         const requests = this.usage.chat.requests + this.usage.inline.requests;
         const contextWindow = getSetting<number>('agent.contextWindow', 128000) ?? 128000;
-        const windowPct = Math.min(100, Math.round(total / contextWindow * 100));
+        // Ring shows current context burden, not cumulative total
+        const contextTokens = this.currentContextTokens || total;
+        const windowPct = Math.min(100, Math.round(contextTokens / contextWindow * 100));
         const circle = this.circleForPct(windowPct);
-        this.statusBar.text = `${circle} ${this.formatTokens(total)} · ${windowPct}%`;
+        this.statusBar.text = `${circle} ${this.formatTokens(contextTokens)} · ${windowPct}%`;
 
         const chat = this.usage.chat;
         const inline = this.usage.inline;
@@ -119,7 +131,7 @@ export class TokenTracker {
         md.supportThemeIcons = true;
 
         md.appendMarkdown(`**Session Token Usage**\n\n`);
-        md.appendMarkdown(`${circle} **${this.formatTokens(total)} tokens** &nbsp;&nbsp; ${windowPct}% of ${this.formatTokens(contextWindow)} context window &nbsp;&nbsp; ${requests} requests\n\n`);
+        md.appendMarkdown(`${circle} **${this.formatTokens(contextTokens)} context** &nbsp;&nbsp; ${windowPct}% of ${this.formatTokens(contextWindow)} window &nbsp;&nbsp; ${this.formatTokens(total)} total &nbsp;&nbsp; ${requests} requests\n\n`);
         md.appendMarkdown(`---\n\n`);
 
         // Chat section
@@ -173,7 +185,7 @@ export class TokenTracker {
             inlineCompletionPct: pct(inline.completionTokens),
             chatRequests: chat.requests,
             inlineRequests: inline.requests,
-            windowPct: Math.min(100, Math.round(total / ((getSetting<number>('agent.contextWindow', 128000) ?? 128000)) * 100)),
+            windowPct: Math.min(100, Math.round((this.currentContextTokens || total) / ((getSetting<number>('agent.contextWindow', 128000) ?? 128000)) * 100)),
             contextWindow: this.formatTokens(getSetting<number>('agent.contextWindow', 128000) ?? 128000)
         });
     }

@@ -21,11 +21,14 @@ window.onerror = function(msg, src, line, col, err) {
     const workingTextEl = document.getElementById('working-text');
 
     const btnAttach = document.getElementById('btn-attach');
+    const btnSend = document.getElementById('btn-send');
+    const btnTools = document.getElementById('btn-tools');
     const attachPreview = document.getElementById('attach-preview');
     const historyPanel = document.getElementById('history-panel');
     const historyList = document.getElementById('history-list');
     let currentAssistantEl = null;
     let currentContentEl = null;
+    let agentRunning = false;
     const toolStateById = new Map();
     const workingBlocksById = new Map();
     const workingEntriesById = new Map();
@@ -40,7 +43,8 @@ window.onerror = function(msg, src, line, col, err) {
     let streamRenderTimer = null;    // debounce timer for markdown re-render
     let streamDrainTimer = null;     // interval timer for smooth character drain
     const STREAM_DRAIN_INTERVAL = 12;  // ms between drain ticks — controls typing speed
-    const STREAM_DRAIN_CHARS = 3;      // chars per drain tick
+    const STREAM_DRAIN_CHARS = 3;      // chars per drain tick (for real-time streaming)
+    const STREAM_DRAIN_CHARS_FAST = 6;  // chars per drain tick (for buffered/bulk text)
     const STREAM_RENDER_DEBOUNCE = 80; // ms debounce for markdown re-render
 
     // Progress card icon map (icon name → unicode/emoji)
@@ -199,6 +203,36 @@ window.onerror = function(msg, src, line, col, err) {
 
     if (btnAttach) {
         btnAttach.addEventListener('click', () => vscode.postMessage({ type: 'attachFile' }));
+    }
+
+    // Send / Stop button
+    if (btnSend) {
+        btnSend.addEventListener('click', () => {
+            if (agentRunning) {
+                vscode.postMessage({ type: 'cancelAgent' });
+            } else {
+                sendCurrentMessage();
+            }
+        });
+    }
+
+    // MCP Tools button
+    if (btnTools) {
+        btnTools.addEventListener('click', () => vscode.postMessage({ type: 'manageMcpServers' }));
+    }
+
+    function setAgentRunning(running) {
+        agentRunning = running;
+        if (!btnSend) return;
+        if (running) {
+            btnSend.classList.add('stop-mode');
+            btnSend.innerHTML = '<i class=\"codicon codicon-debug-stop\"></i>';
+            btnSend.title = 'Stop agent (cancel)';
+        } else {
+            btnSend.classList.remove('stop-mode');
+            btnSend.innerHTML = '<i class=\"codicon codicon-arrow-up\"></i>';
+            btnSend.title = 'Send message (Enter)';
+        }
     }
 
     var contextMeterEl = document.getElementById('context-meter');
@@ -497,8 +531,12 @@ window.onerror = function(msg, src, line, col, err) {
         }).join('');
     }
 
+    var _scrollPending = false;
     function scrollToBottom() {
+        if (_scrollPending) { return; }
+        _scrollPending = true;
         requestAnimationFrame(() => {
+            _scrollPending = false;
             messagesEl.scrollTop = messagesEl.scrollHeight;
         });
     }
@@ -534,8 +572,9 @@ window.onerror = function(msg, src, line, col, err) {
                 scheduleStreamRender();
                 return;
             }
-            // Drain a batch of characters
-            var count = Math.min(STREAM_DRAIN_CHARS, streamBuffer.length);
+            // Use faster rate when a large chunk is buffered (e.g. final response dump)
+            var base = streamBuffer.length > 80 ? STREAM_DRAIN_CHARS_FAST : STREAM_DRAIN_CHARS;
+            var count = Math.min(base, streamBuffer.length);
             // Don't break in the middle of a word — extend to next space/newline if close
             if (count < streamBuffer.length) {
                 var next = streamBuffer.indexOf(' ', count);
@@ -549,12 +588,35 @@ window.onerror = function(msg, src, line, col, err) {
         }, STREAM_DRAIN_INTERVAL);
     }
 
-    /** Flush all buffered text immediately (used on endAssistantMessage) */
+    /** Flush all buffered text immediately (used when tearing down without animation) */
     function flushStreamBuffer() {
         if (streamDrainTimer) { clearInterval(streamDrainTimer); streamDrainTimer = null; }
         if (streamRenderTimer) { clearTimeout(streamRenderTimer); streamRenderTimer = null; }
         streamRawText += streamBuffer;
         streamBuffer = '';
+    }
+
+    /** Finalize the assistant message after the drain completes naturally */
+    var pendingEndMessage = null;
+    function finalizeAssistantMessage() {
+        if (!pendingEndMessage) { return; }
+        var els = pendingEndMessage;
+        pendingEndMessage = null;
+        if (els.contentEl) {
+            var rawText = streamRawText.trim();
+            if (rawText.length > 0) {
+                els.contentEl.innerHTML = renderMarkdownLite(streamRawText);
+            } else {
+                if (els.assistantEl && els.assistantEl.parentNode) {
+                    els.assistantEl.parentNode.removeChild(els.assistantEl);
+                }
+            }
+        }
+        currentAssistantEl = null;
+        currentContentEl = null;
+        streamRawText = '';
+        streamBuffer = '';
+        scrollToBottom();
     }
 
     function escapeHtml(text) {
@@ -704,23 +766,51 @@ window.onerror = function(msg, src, line, col, err) {
                 break;
             }
             case 'endAssistantMessage': {
-                flushStreamBuffer();
-                if (currentContentEl) {
-                    var rawText = streamRawText.trim();
-                    if (rawText.length > 0) {
-                        currentContentEl.innerHTML = renderMarkdownLite(streamRawText);
-                    } else {
-                        // Remove empty assistant bubble (model only made tool calls, no text)
-                        if (currentAssistantEl && currentAssistantEl.parentNode) {
-                            currentAssistantEl.parentNode.removeChild(currentAssistantEl);
+                // If drain is still running, let it finish naturally then finalize
+                if (streamBuffer.length > 0 || streamDrainTimer) {
+                    pendingEndMessage = { contentEl: currentContentEl, assistantEl: currentAssistantEl };
+                    // Patch the drain loop to call finalizeAssistantMessage when done
+                    if (streamDrainTimer) { clearInterval(streamDrainTimer); streamDrainTimer = null; }
+                    streamDrainTimer = setInterval(function() {
+                        if (streamBuffer.length === 0) {
+                            clearInterval(streamDrainTimer);
+                            streamDrainTimer = null;
+                            scheduleStreamRender();
+                            // Allow the last render to paint before finalizing
+                            setTimeout(finalizeAssistantMessage, STREAM_RENDER_DEBOUNCE + 20);
+                            return;
+                        }
+                        var base = streamBuffer.length > 80 ? STREAM_DRAIN_CHARS_FAST : STREAM_DRAIN_CHARS;
+                        var count = Math.min(base, streamBuffer.length);
+                        if (count < streamBuffer.length) {
+                            var next = streamBuffer.indexOf(' ', count);
+                            var nextNl = streamBuffer.indexOf('\n', count);
+                            if (next === -1 || (nextNl !== -1 && nextNl < next)) { next = nextNl; }
+                            if (next !== -1 && next - count < 8) { count = next + 1; }
+                        }
+                        streamRawText += streamBuffer.slice(0, count);
+                        streamBuffer = streamBuffer.slice(count);
+                        scheduleStreamRender();
+                    }, STREAM_DRAIN_INTERVAL);
+                } else {
+                    // Nothing buffered — finalize immediately
+                    flushStreamBuffer();
+                    if (currentContentEl) {
+                        var rawText = streamRawText.trim();
+                        if (rawText.length > 0) {
+                            currentContentEl.innerHTML = renderMarkdownLite(streamRawText);
+                        } else {
+                            if (currentAssistantEl && currentAssistantEl.parentNode) {
+                                currentAssistantEl.parentNode.removeChild(currentAssistantEl);
+                            }
                         }
                     }
+                    currentAssistantEl = null;
+                    currentContentEl = null;
+                    streamRawText = '';
+                    streamBuffer = '';
+                    scrollToBottom();
                 }
-                currentAssistantEl = null;
-                currentContentEl = null;
-                streamRawText = '';
-                streamBuffer = '';
-                scrollToBottom();
                 break;
             }
             case 'toolCall': {
@@ -835,9 +925,11 @@ window.onerror = function(msg, src, line, col, err) {
                 break;
             }
             case 'fileChangeTick': {
-                // Update working block entry with diff stats
+                // Update working block entry with diff stats — only for write/edit actions
+                var WRITE_ACTION_TYPES = { create: true, edit: true };
                 for (var [, eRec] of workingEntriesById) {
                     if (eRec.entry.filePath && msg.file &&
+                        WRITE_ACTION_TYPES[eRec.entry.actionType] &&
                         (eRec.entry.filePath === msg.file ||
                          eRec.entry.filePath.endsWith('/' + msg.file) ||
                          eRec.entry.filePath.endsWith('\\' + msg.file))) {
@@ -1036,6 +1128,13 @@ window.onerror = function(msg, src, line, col, err) {
             }
             case 'sessionCleared': {
                 messagesEl.innerHTML = '';
+                // Cancel any pending stream drain
+                if (streamDrainTimer) { clearInterval(streamDrainTimer); streamDrainTimer = null; }
+                if (streamRenderTimer) { clearTimeout(streamRenderTimer); streamRenderTimer = null; }
+                pendingEndMessage = null;
+                streamBuffer = '';
+                streamRawText = '';
+                setAgentRunning(false);
                 // Re-insert the working indicator (it was removed by innerHTML clear)
                 if (workingEl) {
                     workingEl.classList.remove('active');
@@ -1074,6 +1173,7 @@ window.onerror = function(msg, src, line, col, err) {
                     statusEl.classList.add('active');
                     inputEl.disabled = true;
                     inputEl.placeholder = 'Agent is working...';
+                    setAgentRunning(true);
                     var liveBlock = getActiveWorkingBlock();
                     if (liveBlock) {
                         setWorkingBlockStatusText(liveBlock, msg.status);
@@ -1094,6 +1194,7 @@ window.onerror = function(msg, src, line, col, err) {
                     inputEl.disabled = false;
                     inputEl.placeholder = 'Ask Junior anything...';
                     inputEl.focus();
+                    setAgentRunning(false);
                     if (workingEl) { workingEl.classList.remove('active'); }
                     var activeBlock = getActiveWorkingBlock();
                     if (activeBlock) {
@@ -1106,6 +1207,7 @@ window.onerror = function(msg, src, line, col, err) {
                 inputEl.disabled = false;
                 inputEl.placeholder = 'Ask Junior anything...';
                 inputEl.focus();
+                setAgentRunning(false);
                 if (workingEl) { workingEl.classList.remove('active'); }
                 // Remove any lingering continue-iteration dialog
                 const continueDialog = messagesEl.querySelector('.continue-iteration-dialog');

@@ -21,7 +21,7 @@ export interface AgentCallbacks {
 }
 
 /** Tools that are never worth retrying (user-cancelled or confirmed unique) */
-const NO_RETRY_TOOLS = new Set(['run_terminal_command', 'apply_code_action', 'edit_file', 'set_plan', 'update_plan_step']);
+const NO_RETRY_TOOLS = new Set(['run_terminal_command', 'apply_code_action', 'edit_file', 'write_file', 'replace_lines', 'delete_file', 'set_plan', 'update_plan_step']);
 
 /** Max number of automatic retries per tool call */
 const MAX_TOOL_RETRIES = 1;
@@ -72,7 +72,8 @@ export class AgentLoop {
         private builtinTools: BuiltinTools,
         private mcpClient: McpClient,
         private callbacks: AgentCallbacks,
-        private tokenTracker?: TokenTracker
+        private tokenTracker?: TokenTracker,
+        private log?: (msg: string) => void
     ) {
         this.maxIterations = getSetting<number>('agent.maxIterations') ?? 25;
     }
@@ -194,7 +195,8 @@ export class AgentLoop {
     }
 
     private buildWorkingSummary(block: WorkingBlock): string {
-        const actions = block.entries.filter((entry): entry is WorkingBlockActionEntry => entry.kind === 'action');
+        // Only count successful actions in the summary — failed ones shouldn't inflate counts
+        const actions = block.entries.filter((entry): entry is WorkingBlockActionEntry => entry.kind === 'action' && entry.status !== 'error');
         if (actions.length === 0) {
             return block.title;
         }
@@ -663,7 +665,13 @@ export class AgentLoop {
             const updateWorkingAction = (entry: WorkingBlockActionEntry | null, desc: ToolProgressDescriptor, status: WorkingBlockActionEntry['status']) => {
                 if (!entry || !activeWorkingBlock) { return; }
                 entry.status = status;
-                entry.text = status === 'running' ? desc.label : desc.doneLabel;
+                if (status === 'done') {
+                    entry.text = desc.doneLabel;
+                } else if (status === 'error') {
+                    entry.text = `Failed: ${desc.doneLabel}`;
+                } else {
+                    entry.text = desc.label;
+                }
                 entry.detail = desc.detail;
                 entry.filePath = desc.filePath;
                 entry.icon = status === 'error' ? 'error' : desc.icon;
@@ -718,7 +726,17 @@ export class AgentLoop {
                 this.callbacks.sendToWebview({ type: 'setStatus', status: 'Thinking...' });
 
                 // Trim context if approaching the window limit
+                const preTriMessages = this.messages;
                 this.messages = this.contextManager.trimIfNeeded(this.messages);
+                if (this.messages !== preTriMessages) {
+                    this.callbacks.sendToWebview({ type: 'setStatus', status: 'Compacting conversation...' });
+                    this.log?.('Context compacted: trimmed conversation to fit context window.');
+                }
+
+                // Update the token tracker with current context size
+                if (this.tokenTracker) {
+                    this.tokenTracker.setContextSize(this.contextManager.estimateTotalTokens(this.messages));
+                }
 
                 // Validate the client
                 const validation = await this.aoaiClient.validate();
@@ -810,6 +828,7 @@ export class AgentLoop {
 
                     if (isInvalidPrompt && contextRecoveryAttempts < MAX_CONTEXT_RECOVERY_ATTEMPTS) {
                         contextRecoveryAttempts++;
+                        this.log?.(`[WARN] Context recovery attempt ${contextRecoveryAttempts}/${MAX_CONTEXT_RECOVERY_ATTEMPTS}: ${streamErr.message}`);
 
                         if (contextRecoveryAttempts === 1) {
                             // First attempt: emergency trim (context overflow)
@@ -846,6 +865,7 @@ export class AgentLoop {
                         continue; // retry the while-loop iteration
                     }
                     // Not recoverable — rethrow to the outer catch
+                    this.log?.(`[ERROR] Stream error (not recoverable): ${streamErr.message}`);
                     throw streamErr;
                 }
                 // Reset recovery counter on successful streaming
@@ -1063,9 +1083,12 @@ export class AgentLoop {
             storeWorkingPhases();
         } catch (e: unknown) {
             if (!this.cancelled && (e as Error).name !== 'AbortError') {
+                const errMsg = e instanceof Error ? e.message : String(e);
+                const stack = e instanceof Error ? e.stack : '';
+                this.log?.(`[ERROR] Agent loop error: ${errMsg}${stack ? '\n' + stack : ''}`);
                 this.callbacks.sendToWebview({
                     type: 'error',
-                    message: `Agent error: ${e instanceof Error ? e.message : String(e)}`
+                    message: `Agent error: ${errMsg}`
                 });
             }
         } finally {
@@ -1172,6 +1195,7 @@ export class AgentLoop {
             return this.mcpClient.callTool(name, args);
         }
 
+        this.log?.(`Unknown tool called: ${name}`);
         return { success: false, result: `Unknown tool: ${name}` };
     }
 

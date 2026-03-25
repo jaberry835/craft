@@ -208,6 +208,7 @@ export type WebviewMessage =
     | { type: 'showTokenUsage' }
     | { type: 'requestSlashCommands' }
     | { type: 'openFile'; filePath: string }
+    | { type: 'manageMcpServers' }
     | { type: 'ready' };
 
 export type ExtensionMessage =
