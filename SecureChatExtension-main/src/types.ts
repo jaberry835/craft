@@ -102,6 +102,19 @@ export type ToolHandler = (args: Record<string, unknown>) => Promise<ToolResult>
 
 // ── MCP Types ──
 
+export interface McpAuthSessionConfig {
+    /** VS Code authentication provider ID (for example: github) */
+    providerId: string;
+    /** Optional scopes to request from the auth provider */
+    scopes?: string[];
+    /** Header name to populate with the access token. Defaults to Authorization. */
+    tokenHeader?: string;
+    /** Prefix added before the token value. Defaults to Bearer. */
+    tokenScheme?: string;
+    /** Prompt the user to sign in if no session is already available. */
+    createIfNone?: boolean;
+}
+
 export interface McpServerConfig {
     /** stdio transport: command to spawn */
     command?: string;
@@ -112,6 +125,8 @@ export interface McpServerConfig {
     url?: string;
     /** HTTP transport: extra headers (e.g. Authorization) */
     headers?: Record<string, string>;
+    /** HTTP transport: populate auth headers from a VS Code auth provider session */
+    authSession?: McpAuthSessionConfig;
 }
 
 export interface McpToolInfo {

@@ -27,6 +27,10 @@ Desktop.ini
 # npm debug logs
 npm-debug.log*
 
+# Temporary inspection output
+tmp-vsix-inspect/
+
 # Environment / secrets
 .env
 .env.*
+package-lock.json

@@ -15,6 +15,8 @@ import { ExtensionMessage, WebviewMessage, WorkingBlock, WorkingBlockActionEntry
 import { getSetting, updateSetting } from './config';
 import { TokenTracker } from './tokenTracker';
 import { InlineDiffDecorator } from './inlineDiffDecorator';
+import { RetrievalRanker } from './retrievalRanker';
+import { RepoPatternStore } from './repoPatternStore';
 
 /** Minimum interval (ms) between consecutive agent loop submissions */
 const MIN_SUBMISSION_INTERVAL_MS = 2000;
@@ -31,6 +33,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         private aoaiClient: AzureOpenAIClient,
         private builtinTools: BuiltinTools,
         private mcpClient: McpClient,
+        private retrievalRanker: RetrievalRanker,
+        private repoPatternStore: RepoPatternStore,
         private sessionManager: SessionManager,
         log?: (msg: string) => void,
         private tokenTracker?: TokenTracker,
@@ -311,6 +315,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 this.aoaiClient,
                 this.builtinTools,
                 this.mcpClient,
+                this.retrievalRanker,
+                this.repoPatternStore,
                 callbacks,
                 this.tokenTracker,
                 this.log
@@ -874,6 +880,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             return parts.length > 3 ? parts.slice(-3).join('/') : p;
         };
         const trunc = (s: string, max: number) => s.length <= max ? s : s.slice(0, max) + '...';
+        const choose = (doneText: string, failText: string) => success ? doneText : failText;
 
         const buildEntry = (
             text: string,
@@ -896,37 +903,37 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
         switch (name) {
             case 'grep_search':
-                return buildEntry(`Searched for regex ${typeof args.pattern === 'string' ? `\`${args.pattern}\`` : ''}`, 'search', 'search', typeof args.include === 'string' ? `(${args.include})` : undefined);
+                return buildEntry(choose(`Searched for regex ${typeof args.pattern === 'string' ? `\`${args.pattern}\`` : ''}`, `Search failed for regex ${typeof args.pattern === 'string' ? `\`${args.pattern}\`` : ''}`), 'search', 'search', typeof args.include === 'string' ? `(${args.include})` : undefined);
             case 'search_files':
-                return buildEntry(`Searched files: ${args.query || ''}`, 'search', 'search');
+                return buildEntry(choose(`Searched files: ${args.query || ''}`, `File search failed: ${args.query || ''}`), 'search', 'search');
             case 'semantic_search':
-                return buildEntry(`Semantic search: ${args.query || ''}`, 'search', 'search');
+                return buildEntry(choose(`Semantic search: ${args.query || ''}`, `Semantic search failed: ${args.query || ''}`), 'search', 'search');
             case 'find_symbol':
-                return buildEntry(`Found symbol: ${args.name || ''}`, 'search', 'search');
+                return buildEntry(choose(`Found symbol: ${args.name || ''}`, `Symbol lookup failed: ${args.name || ''}`), 'search', 'search');
             case 'read_file':
-                return buildEntry(`Read ${shortPath(args.path)}`, 'read', 'read', args.startLine ? `lines ${args.startLine} to ${args.endLine || ''}` : undefined, typeof args.path === 'string' ? args.path : undefined);
+                return buildEntry(choose(`Read ${shortPath(args.path)}`, `Failed to read ${shortPath(args.path)}`), 'read', 'read', args.startLine ? `lines ${args.startLine} to ${args.endLine || ''}` : undefined, typeof args.path === 'string' ? args.path : undefined);
             case 'list_directory':
-                return buildEntry(`Listed ${shortPath(args.path) || '.'}`, 'review', 'read');
+                return buildEntry(choose(`Listed ${shortPath(args.path) || '.'}`, `Failed to list ${shortPath(args.path) || '.'}`), 'review', 'read');
             case 'get_file_tree':
-                return buildEntry('Loaded workspace file tree', 'review', 'read');
+                return buildEntry(choose('Loaded workspace file tree', 'Failed to load workspace file tree'), 'review', 'read');
             case 'get_diagnostics':
-                return buildEntry(`Checked diagnostics${args.path ? ' for ' + shortPath(args.path) : ''}`, 'check', 'check', undefined, typeof args.path === 'string' ? args.path : undefined);
+                return buildEntry(choose(`Checked diagnostics${args.path ? ' for ' + shortPath(args.path) : ''}`, `Failed to check diagnostics${args.path ? ' for ' + shortPath(args.path) : ''}`), 'check', 'check', undefined, typeof args.path === 'string' ? args.path : undefined);
             case 'write_file':
-                return buildEntry(`Created ${shortPath(args.path)}`, 'create', 'edit', undefined, typeof args.path === 'string' ? args.path : undefined);
+                return buildEntry(choose(`Created ${shortPath(args.path)}`, `Failed to create ${shortPath(args.path)}`), 'create', 'edit', undefined, typeof args.path === 'string' ? args.path : undefined);
             case 'edit_file':
-                return buildEntry(`Edited ${shortPath(args.path)}`, 'edit', 'edit', undefined, typeof args.path === 'string' ? args.path : undefined);
+                return buildEntry(choose(`Edited ${shortPath(args.path)}`, `Failed to edit ${shortPath(args.path)}`), 'edit', 'edit', undefined, typeof args.path === 'string' ? args.path : undefined);
             case 'replace_lines': {
                 const rlStart = Number(args.start_line) || 1;
                 const rlNewLines = typeof args.new_content === 'string' ? args.new_content.split('\n').length : 0;
                 const rlEnd = rlStart + Math.max(rlNewLines, 1) - 1;
-                return buildEntry(`Rewrote lines ${rlStart}–${rlEnd} in ${shortPath(args.path)}`, 'edit', 'edit', undefined, typeof args.path === 'string' ? args.path : undefined);
+                return buildEntry(choose(`Rewrote lines ${rlStart}–${rlEnd} in ${shortPath(args.path)}`, `Failed to rewrite lines ${rlStart}–${rlEnd} in ${shortPath(args.path)}`), 'edit', 'edit', undefined, typeof args.path === 'string' ? args.path : undefined);
             }
             case 'delete_file':
-                return buildEntry(`Deleted ${shortPath(args.path)}`, 'edit', 'edit', undefined, typeof args.path === 'string' ? args.path : undefined);
+                return buildEntry(choose(`Deleted ${shortPath(args.path)}`, `Failed to delete ${shortPath(args.path)}`), 'edit', 'edit', undefined, typeof args.path === 'string' ? args.path : undefined);
             case 'run_terminal_command':
-                return buildEntry(`Ran: ${trunc(String(args.command || ''), 60)}`, 'run', 'run');
+                return buildEntry(choose(`Ran: ${trunc(String(args.command || ''), 60)}`, `Command failed: ${trunc(String(args.command || ''), 60)}`), 'run', 'run');
             case 'check_terminal_output':
-                return buildEntry(`Checked terminal: ${args.process_id || ''}`, 'check', 'check');
+                return buildEntry(choose(`Checked terminal: ${args.process_id || ''}`, `Failed terminal check: ${args.process_id || ''}`), 'check', 'check');
             default:
                 if (name.startsWith('mcp_')) {
                     return buildEntry(`MCP: ${name.replace(/^mcp_/, '')}`, 'other', 'run');
@@ -1876,6 +1883,19 @@ body { display: flex; flex-direction: column; }
 }
 #btn-send.stop-mode .codicon {
     font-size: 14px;
+}
+.agent-stop-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 15px;
+    height: 15px;
+    color: var(--error-fg);
+}
+.agent-stop-icon svg {
+    width: 15px;
+    height: 15px;
+    display: block;
 }
 /* Spinning ring on stop button */
 #btn-send.stop-mode::before {

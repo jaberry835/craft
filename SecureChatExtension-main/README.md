@@ -32,7 +32,14 @@ Use the helper script from the project root:
 
 # Or build and print install path/instructions
 .\deploy.ps1 install
+
+# Build VSIX with custom default junior.* settings baked in
+.\deploy.ps1 build -DefaultSettings .\settings.default.json
 ```
+
+`-DefaultSettings` accepts a JSON object of `junior.*` keys and values. During packaging, those values temporarily override `package.json` defaults so the generated `.vsix` ships with your preset defaults. The working tree `package.json` is restored after the build.
+
+These are extension defaults, not direct edits to VS Code's `settings.json`. They apply only when the user has not already set a value for that `junior.*` setting, and they do not affect non-`junior.*` settings from other extensions or VS Code itself.
 
 Then in VS Code:
 1. Open **Command Palette** (`Ctrl+Shift+P`)
@@ -157,6 +164,21 @@ Add MCP tool servers to extend the agent's capabilities. Junior supports two tra
 }
 ```
 
+Quick test example using the reference MCP server:
+
+```jsonc
+{
+  "junior.mcp.servers": {
+    "everything": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-everything"]
+    }
+  }
+}
+```
+
+After saving settings, run **Junior: Manage MCP Servers** and choose **Connect All Configured Servers** to reload MCP connections without restarting VS Code.
+
 **HTTP** — connect to a remote MCP server endpoint:
 
 ```jsonc
@@ -171,6 +193,25 @@ Add MCP tool servers to extend the agent's capabilities. Junior supports two tra
   }
 }
 ```
+
+If the MCP server supports bearer tokens and you want Junior to reuse an existing VS Code authentication session, add `authSession`:
+
+```jsonc
+{
+  "junior.mcp.servers": {
+    "github": {
+      "url": "https://api.githubcopilot.com/mcp/",
+      "authSession": {
+        "providerId": "github"
+      }
+    }
+  }
+}
+```
+
+For GitHub's hosted MCP server at `https://api.githubcopilot.com/mcp/`, Junior will also try to reuse an existing VS Code GitHub login automatically when no `Authorization` header is configured. If no compatible session is available, configure `headers.Authorization` with a PAT instead.
+
+For HTTP MCP servers that respond with `401 Unauthorized` and a `WWW-Authenticate` challenge, Junior will also retry once using the configured `authSession` provider. This helps with remote MCP servers that follow OAuth challenge flows but still rely on a known VS Code auth provider such as `github` or `microsoft`.
 
 You can mix both transports — servers with `command` use stdio, servers with `url` use HTTP.
 
@@ -607,6 +648,5 @@ Key UI features:
 ## License
 
 MIT
-
 
 

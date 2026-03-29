@@ -11,6 +11,8 @@ import { InlineCompletionProvider } from './inlineCompletionProvider';
 import { TokenTracker } from './tokenTracker';
 import { InlineDiffDecorator } from './inlineDiffDecorator';
 import { registerCommands } from './commandRegistrar';
+import { RetrievalRanker } from './retrievalRanker';
+import { RepoPatternStore } from './repoPatternStore';
 
 let chatViewProvider: ChatViewProvider;
 let mcpClient: McpClient;
@@ -40,9 +42,12 @@ export function activate(context: vscode.ExtensionContext) {
     semanticIndexer.setStoragePath(indexStorageDir);
 
     const builtinTools = new BuiltinTools(workspaceIndexer, symbolIndexer, semanticIndexer);
+    const retrievalRanker = new RetrievalRanker(workspaceIndexer, symbolIndexer, semanticIndexer);
     mcpClient = new McpClient();
     const sessionStorageDir = vscode.Uri.joinPath(context.storageUri ?? context.globalStorageUri, 'sessions').fsPath;
+    const repoMemoryDir = vscode.Uri.joinPath(context.storageUri ?? context.globalStorageUri, 'agent').fsPath;
     const sessionManager = new SessionManager(sessionStorageDir, context.workspaceState);
+    const repoPatternStore = new RepoPatternStore(repoMemoryDir);
     const tokenTracker = new TokenTracker(log);
 
     // ── Inline Diff Decorator ──
@@ -79,6 +84,8 @@ export function activate(context: vscode.ExtensionContext) {
         aoaiClient,
         builtinTools,
         mcpClient,
+        retrievalRanker,
+        repoPatternStore,
         sessionManager,
         log,
         tokenTracker,

@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.1.1 — 2026-03-27
+
+### Agent Mode Improvements
+
+- **Improved agent autonomy during issue investigation** — Junior now does a better job of gathering likely context before asking the user to point it at files. The agent can use active editor context, diagnostics, semantic retrieval, symbol matches, and ranked likely files to orient itself earlier in a run.
+- **Added structured working memory for the current task** — the agent now keeps a compact in-run memory of the objective, relevant files, findings, diagnostics, and failed attempts so it is less likely to rediscover the same context repeatedly.
+- **Added lightweight repo-scoped learned memory** — Junior can now retain a small amount of repository-specific signal across tasks, such as commonly relevant files and previously successful validation commands, while keeping the prompt injection conservative.
+- **Reduced prompt bloat from memory injection** — task and repo memory are now injected more selectively so later iterations stay lighter on token usage, which helps on lower-capacity development endpoints.
+- **Improved retrieval prioritization** — likely files are now ranked using a combination of diagnostics, semantic matches, symbol matches, active file bias, and explicit user mentions instead of relying on a single heuristic.
+
+### UI
+
+- **Updated the running-agent stop icon** — the animated processing/stop button now shows an agent-style mark inside the circle instead of the previous generic stop glyph, while keeping the existing ring animation and cancel behavior.
+
+### MCP Compatibility
+
+- **Fixed stdio MCP transport for current Node MCP servers** — Junior now speaks newline-delimited JSON over stdio, which matches the current MCP Node SDK transport instead of the older `Content-Length` framing.
+- **Kept backward-compatible stdio parsing** — the MCP client still accepts legacy `Content-Length` framed responses while also handling newline-delimited JSON-RPC messages.
+- **Improved Windows stdio server startup** — local MCP servers launched through commands like `npx` now connect correctly on Windows, including reference servers such as `@modelcontextprotocol/server-everything`.
+- **GitHub remote MCP can reuse a VS Code GitHub login** — HTTP MCP servers can now populate bearer auth from a VS Code authentication provider session, and GitHub's hosted MCP endpoint is auto-detected when no explicit `Authorization` header is configured.
+- **HTTP MCP auth now retries on OAuth challenges** — when an HTTP MCP server returns `401` with `WWW-Authenticate`, Junior can retry once using a configured or inferred VS Code auth provider session, making the flow more general than the GitHub-only happy path.
+
+### Documentation
+
+- **Added a concrete stdio MCP example to the README** — the setup docs now include a ready-to-copy `server-everything` configuration for quickly validating MCP connectivity.
+- **Documented MCP reconnect workflow** — the README now points users to **Junior: Manage MCP Servers** to reconnect configured servers after changing settings.
+
+### Build & Distribution
+
+- **Build-time default settings override for VSIX packaging** — `deploy.ps1` now supports `-DefaultSettings` to supply a JSON file of `junior.*` values that temporarily override contributed setting defaults in `package.json` during packaging.
+- **Packaged defaults stay safe by default** — baked-in values ship as extension defaults inside the VSIX rather than rewriting a user's `settings.json`. Experienced users can still override any `junior.*` setting in user/workspace settings, including MCP-related settings such as `junior.mcp.servers`.
+- **Clearer build guidance** — the deploy script and README now explicitly warn that non-`junior.*` settings are ignored by this feature and that existing user/workspace settings take precedence over packaged defaults.
+
+
 ## 1.1.0 — 2026-03-25
 
 ### UI Polish & Streaming

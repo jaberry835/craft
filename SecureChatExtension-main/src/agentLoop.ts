@@ -15,6 +15,9 @@ import { getSetting } from './config';
 import { ChatMessage, ContentPart, ToolCall, ToolDefinition, ToolResult, ExtensionMessage, AgentPlanStep, WorkingActionType, WorkingBlock, WorkingBlockActionEntry, WorkingBlockProgressEntry } from './types';
 import { TokenTracker } from './tokenTracker';
 import { SYSTEM_PROMPT } from './agentPrompt';
+import { AgentTaskMemory } from './taskMemory';
+import { RetrievalRanker } from './retrievalRanker';
+import { RepoPatternStore } from './repoPatternStore';
 
 export interface AgentCallbacks {
     sendToWebview(msg: ExtensionMessage): void;
@@ -44,6 +47,7 @@ interface ToolProgressDescriptor {
     icon: WorkingIcon;
     label: string;
     doneLabel: string;
+    failLabel?: string;
     detail?: string;
     filePath?: string;
     actionType: WorkingActionType;
@@ -66,11 +70,18 @@ export class AgentLoop {
     private pendingContinuation: { resolve: (shouldContinue: boolean) => void } | null = null;
     /** Files edited during the current agent run (relative paths). */
     private editedFiles: Set<string> = new Set();
+    /** Structured working memory for the current conversation. */
+    private taskMemory = new AgentTaskMemory();
+    /** Last memory revisions injected into a model request for this run. */
+    private lastInjectedTaskMemoryVersion = -1;
+    private lastInjectedRepoMemoryVersion = -1;
 
     constructor(
         private aoaiClient: AzureOpenAIClient,
         private builtinTools: BuiltinTools,
         private mcpClient: McpClient,
+        private retrievalRanker: RetrievalRanker,
+        private repoPatternStore: RepoPatternStore,
         private callbacks: AgentCallbacks,
         private tokenTracker?: TokenTracker,
         private log?: (msg: string) => void
@@ -84,11 +95,17 @@ export class AgentLoop {
 
     setMessages(messages: ChatMessage[]) {
         this.messages = messages;
+        this.taskMemory.reset();
+        this.lastInjectedTaskMemoryVersion = -1;
+        this.lastInjectedRepoMemoryVersion = -1;
     }
 
     clearMessages() {
         this.messages = [];
         this.planSteps = [];
+        this.taskMemory.reset();
+        this.lastInjectedTaskMemoryVersion = -1;
+        this.lastInjectedRepoMemoryVersion = -1;
     }
 
     /**
@@ -269,6 +286,7 @@ export class AgentLoop {
                     icon: 'search',
                     label: `Searching for${pat}`,
                     doneLabel: `Searched for${pat}`,
+                    failLabel: `Search failed for${pat}`,
                     detail: typeof args.include === 'string' ? `(${args.include})` : undefined,
                     actionType: 'search',
                     progressGroup: 'inspect',
@@ -280,6 +298,7 @@ export class AgentLoop {
                     icon: 'search',
                     label: `Searching files: ${args.query || ''}`,
                     doneLabel: `Searched files: ${args.query || ''}`,
+                    failLabel: `File search failed: ${args.query || ''}`,
                     actionType: 'search',
                     progressGroup: 'inspect',
                     progressText: 'Inspecting the workspace and gathering relevant context.'
@@ -289,6 +308,7 @@ export class AgentLoop {
                     icon: 'search',
                     label: `Searching: ${args.query || ''}`,
                     doneLabel: `Searched: ${args.query || ''}`,
+                    failLabel: `Search failed: ${args.query || ''}`,
                     actionType: 'search',
                     progressGroup: 'inspect',
                     progressText: 'Inspecting the workspace and gathering relevant context.'
@@ -325,6 +345,7 @@ export class AgentLoop {
                     icon: 'read',
                     label: `Reading ${this.shortPath(args.path)}`,
                     doneLabel: `Read ${this.shortPath(args.path)}`,
+                    failLabel: `Failed to read ${this.shortPath(args.path)}`,
                     detail: args.startLine ? `lines ${args.startLine} to ${args.endLine || ''}` : undefined,
                     filePath: typeof args.path === 'string' ? args.path : undefined,
                     actionType: 'read',
@@ -373,6 +394,7 @@ export class AgentLoop {
                     icon: 'check',
                     label: `Checking diagnostics${args.path ? ' for ' + this.shortPath(args.path) : ''}`,
                     doneLabel: `Checked diagnostics${args.path ? ' for ' + this.shortPath(args.path) : ''}`,
+                    failLabel: `Failed to check diagnostics${args.path ? ' for ' + this.shortPath(args.path) : ''}`,
                     filePath: typeof args.path === 'string' ? args.path : undefined,
                     actionType: 'check',
                     progressGroup: 'check',
@@ -383,6 +405,7 @@ export class AgentLoop {
                     icon: 'edit',
                     label: `Creating ${this.shortPath(args.path)}`,
                     doneLabel: `Created ${this.shortPath(args.path)}`,
+                    failLabel: `Failed to create ${this.shortPath(args.path)}`,
                     filePath: typeof args.path === 'string' ? args.path : undefined,
                     actionType: 'create',
                     progressGroup: 'edit',
@@ -393,6 +416,7 @@ export class AgentLoop {
                     icon: 'edit',
                     label: `Editing ${this.shortPath(args.path)}`,
                     doneLabel: `Edited ${this.shortPath(args.path)}`,
+                    failLabel: `Failed to edit ${this.shortPath(args.path)}`,
                     filePath: typeof args.path === 'string' ? args.path : undefined,
                     actionType: 'edit',
                     progressGroup: 'edit',
@@ -406,6 +430,7 @@ export class AgentLoop {
                     icon: 'edit',
                     label: `Rewriting lines ${start}–${actualEnd} in ${this.shortPath(args.path)}`,
                     doneLabel: `Rewrote lines ${start}–${actualEnd} in ${this.shortPath(args.path)}`,
+                    failLabel: `Failed to rewrite lines ${start}–${actualEnd} in ${this.shortPath(args.path)}`,
                     filePath: typeof args.path === 'string' ? args.path : undefined,
                     actionType: 'edit',
                     progressGroup: 'edit',
@@ -417,6 +442,7 @@ export class AgentLoop {
                     icon: 'edit',
                     label: `Deleting ${this.shortPath(args.path)}`,
                     doneLabel: `Deleted ${this.shortPath(args.path)}`,
+                    failLabel: `Failed to delete ${this.shortPath(args.path)}`,
                     filePath: typeof args.path === 'string' ? args.path : undefined,
                     actionType: 'edit',
                     progressGroup: 'edit',
@@ -427,6 +453,7 @@ export class AgentLoop {
                     icon: 'edit',
                     label: `Applying code action at ${this.shortPath(args.path)}`,
                     doneLabel: `Applied code action at ${this.shortPath(args.path)}`,
+                    failLabel: `Failed code action at ${this.shortPath(args.path)}`,
                     filePath: typeof args.path === 'string' ? args.path : undefined,
                     actionType: 'edit',
                     progressGroup: 'edit',
@@ -437,6 +464,7 @@ export class AgentLoop {
                     icon: 'run',
                     label: `Running: ${this.truncateStr(String(args.command || ''), 60)}`,
                     doneLabel: `Ran: ${this.truncateStr(String(args.command || ''), 60)}`,
+                    failLabel: `Command failed: ${this.truncateStr(String(args.command || ''), 60)}`,
                     actionType: 'run',
                     progressGroup: 'run',
                     progressText: 'Running commands to validate the current changes.'
@@ -516,12 +544,15 @@ export class AgentLoop {
         this.abortController = new AbortController();
         this.planSteps = [];
         this.editedFiles.clear();
+        this.lastInjectedTaskMemoryVersion = -1;
+        this.lastInjectedRepoMemoryVersion = -1;
         let autofixCycles = 0;
         let contextRecoveryAttempts = 0;
         let reasoningMode = false;
 
         // Add system prompt if first message
         if (this.messages.length === 0) {
+            this.taskMemory.reset();
             let prompt = SYSTEM_PROMPT;
             const customInstructions = this.loadCustomInstructions();
             if (customInstructions) {
@@ -565,6 +596,8 @@ export class AgentLoop {
             this.messages.push(userMsg);
         }
 
+        this.taskMemory.noteUserRequest(displayText || userMessage);
+
         // Gather all tool definitions
         const tools = this.getAllToolDefinitions();
         this.toolSchemaMap = buildToolSchemaMap(tools);
@@ -574,6 +607,8 @@ export class AgentLoop {
         if (contextPack) {
             this.messages.push({ role: 'system', content: contextPack });
         }
+
+        await this.performAutonomousInvestigation(userMessage);
 
         try {
             // Show status when the API is rate-limited and retrying
@@ -662,17 +697,19 @@ export class AgentLoop {
                 return entry;
             };
 
-            const updateWorkingAction = (entry: WorkingBlockActionEntry | null, desc: ToolProgressDescriptor, status: WorkingBlockActionEntry['status']) => {
+            const updateWorkingAction = (entry: WorkingBlockActionEntry | null, desc: ToolProgressDescriptor, status: WorkingBlockActionEntry['status'], resultText?: string) => {
                 if (!entry || !activeWorkingBlock) { return; }
                 entry.status = status;
                 if (status === 'done') {
                     entry.text = desc.doneLabel;
                 } else if (status === 'error') {
-                    entry.text = `Failed: ${desc.doneLabel}`;
+                    entry.text = desc.failLabel || `Failed: ${desc.label}`;
                 } else {
                     entry.text = desc.label;
                 }
-                entry.detail = desc.detail;
+                entry.detail = status === 'error'
+                    ? this.summarizeToolError(resultText || '', desc.detail)
+                    : desc.detail;
                 entry.filePath = desc.filePath;
                 entry.icon = status === 'error' ? 'error' : desc.icon;
                 this.callbacks.sendToWebview({
@@ -733,9 +770,11 @@ export class AgentLoop {
                     this.log?.('Context compacted: trimmed conversation to fit context window.');
                 }
 
+                const requestMessages = this.buildRequestMessages(iteration);
+
                 // Update the token tracker with current context size
                 if (this.tokenTracker) {
-                    this.tokenTracker.setContextSize(this.contextManager.estimateTotalTokens(this.messages));
+                    this.tokenTracker.setContextSize(this.contextManager.estimateTotalTokens(requestMessages));
                 }
 
                 // Validate the client
@@ -770,7 +809,7 @@ export class AgentLoop {
 
                 try {
                     const stream = this.aoaiClient.streamChat(
-                        this.messages,
+                        requestMessages,
                         tools,
                         this.abortController.signal,
                         { reasoningMode }
@@ -987,7 +1026,8 @@ export class AgentLoop {
                             this.editedFiles.add(args.path);
                         }
                         const desc = this.describeToolForProgress(tc.function.name, args);
-                        updateWorkingAction(actionEntries.get(tc.id) || null, desc, result.success ? 'done' : 'error');
+                        this.recordMemoryFromToolResult(tc.function.name, args, result.result, result.success);
+                        updateWorkingAction(actionEntries.get(tc.id) || null, desc, result.success ? 'done' : 'error', result.result);
                         this.messages.push({
                             role: 'tool', content: result.result, tool_call_id: tc.id, name: tc.function.name
                         });
@@ -1037,7 +1077,8 @@ export class AgentLoop {
                         });
 
                         // Update the last progress step with the result
-                        updateWorkingAction(actionEntry, desc, result.success ? 'done' : 'error');
+                        updateWorkingAction(actionEntry, desc, result.success ? 'done' : 'error', result.result);
+                        this.recordMemoryFromToolResult(tc.function.name, args, result.result, result.success);
 
                         // Add tool result to history
                         this.messages.push({
@@ -1221,6 +1262,191 @@ export class AgentLoop {
             retry.result = `[Retry also failed] ${retry.result}`;
         }
         return retry;
+    }
+
+    private buildRequestMessages(iteration: number): ChatMessage[] {
+        const requestMessages = [...this.messages];
+        const includeFullTaskMemory = iteration <= 2;
+        const taskMemoryChanged = this.taskMemory.getVersion() !== this.lastInjectedTaskMemoryVersion;
+        const repoMemoryChanged = this.repoPatternStore.getVersion() !== this.lastInjectedRepoMemoryVersion;
+
+        const taskPrompt = (includeFullTaskMemory || taskMemoryChanged)
+            ? this.taskMemory.buildSystemMessage(includeFullTaskMemory
+                ? { maxRelevantFiles: 8, maxDiagnostics: 8, maxFindings: 6, maxSearches: 4, maxFailures: 4 }
+                : { maxRelevantFiles: 4, maxDiagnostics: 4, maxFindings: 3, maxSearches: 2, maxFailures: 2 })
+            : '';
+
+        const repoPrompt = (iteration === 1 || repoMemoryChanged)
+            ? this.repoPatternStore.buildSystemMessage(iteration === 1
+                ? { maxFiles: 4, maxCommands: 2 }
+                : { maxFiles: 2, maxCommands: 1 })
+            : '';
+
+        const maxExtraTokens = includeFullTaskMemory ? 1400 : 600;
+        let extraTokens = 0;
+
+        if (taskPrompt) {
+            const msg: ChatMessage = { role: 'system', content: taskPrompt };
+            const tokens = this.contextManager.estimateMessageTokens(msg);
+            if (tokens <= maxExtraTokens) {
+                requestMessages.push(msg);
+                extraTokens += tokens;
+                this.lastInjectedTaskMemoryVersion = this.taskMemory.getVersion();
+            }
+        }
+
+        if (repoPrompt) {
+            const msg: ChatMessage = { role: 'system', content: repoPrompt };
+            const tokens = this.contextManager.estimateMessageTokens(msg);
+            if (extraTokens + tokens <= maxExtraTokens) {
+                requestMessages.push(msg);
+                this.lastInjectedRepoMemoryVersion = this.repoPatternStore.getVersion();
+            }
+        }
+
+        return requestMessages;
+    }
+
+    private recordMemoryFromToolResult(name: string, args: Record<string, unknown>, result: string, success: boolean) {
+        this.taskMemory.noteToolResult(name, args, result, success);
+
+        if (!success) { return; }
+
+        if (typeof args.path === 'string') {
+            this.repoPatternStore.noteRelevantFile(args.path);
+        }
+        if (name === 'run_terminal_command' && typeof args.command === 'string') {
+            this.repoPatternStore.noteSuccessfulCommand(args.command);
+        }
+    }
+
+    private async performAutonomousInvestigation(userMessage: string): Promise<void> {
+        const enabled = getSetting<boolean>('agent.autoInvestigate') ?? true;
+        if (!enabled) { return; }
+
+        const issueLike = /(issue|bug|error|warning|problem|broken|failing|fails|failure|exception|stack trace|diagnostic|not working|doesn't|doesnt|wrong)/i.test(userMessage);
+        const maxCandidates = getSetting<number>('agent.autoInvestigateMaxFiles') ?? 4;
+        const activeEditor = vscode.window.activeTextEditor;
+        const activeFile = activeEditor
+            ? vscode.workspace.asRelativePath(activeEditor.document.uri, false)
+            : '';
+
+        if (activeFile) {
+            this.taskMemory.noteRelevantFile(activeFile, 'active editor');
+        }
+
+        const mentionedFiles = userMessage.match(/\b[\w./-]+\.(?:ts|tsx|js|jsx|json|md|css|scss|html|yml|yaml|ps1)\b/g) || [];
+        for (const filePath of mentionedFiles) {
+            this.taskMemory.noteRelevantFile(filePath, 'mentioned by the user');
+            const search = await this.runInternalBuiltinTool('search_files', { query: path.basename(filePath) });
+            if (search?.success) {
+                this.taskMemory.noteToolResult('search_files', { query: path.basename(filePath) }, search.result, true);
+            }
+        }
+
+        const diagnostics = issueLike ? this.collectWorkspaceDiagnostics(8) : [];
+        if (issueLike) {
+            this.callbacks.sendToWebview({ type: 'setStatus', status: 'Investigating likely issue context...' });
+            if (diagnostics.length > 0) {
+                this.taskMemory.noteDiagnostics(diagnostics);
+                this.taskMemory.noteRelevantFiles(this.extractDiagnosticPaths(diagnostics), 'diagnostic location');
+                this.taskMemory.noteFinding(`There are ${diagnostics.length} visible diagnostics that may explain the issue.`);
+            }
+        }
+
+        const ranked = this.retrievalRanker.rank(userMessage, {
+            activeFile,
+            mentionedFiles,
+            diagnostics: diagnostics.map(line => this.parseDiagnosticLine(line)).filter(Boolean) as Array<{ filePath: string; severity: 'Error' | 'Warning'; message: string }>,
+            maxCandidates
+        });
+
+        for (const candidate of ranked) {
+            const primaryReason = candidate.reasons[0] || 'ranked as relevant context';
+            this.taskMemory.noteRelevantFile(candidate.filePath, primaryReason);
+        }
+        if (ranked.length > 0) {
+            this.taskMemory.noteFinding(`Ranked likely files: ${ranked.slice(0, 3).map(candidate => `${candidate.filePath} (${candidate.reasons[0] || 'relevant'})`).join(', ')}.`);
+        }
+
+        const semanticQuery = activeFile
+            ? `${userMessage} active file ${activeFile}`
+            : userMessage;
+        const semantic = await this.runInternalBuiltinTool('semantic_search', {
+            query: semanticQuery,
+            maxResults: String(maxCandidates)
+        });
+        if (semantic?.success && !/^No semantic matches found/i.test(semantic.result)) {
+            this.taskMemory.noteToolResult('semantic_search', { query: semanticQuery }, semantic.result, true);
+            const files = semantic.result
+                .split(/\r?\n/)
+                .map(line => line.match(/^Match \d+: ([\w./-]+\.[\w]+):(\d+)-/)?.[1])
+                .filter(Boolean) as string[];
+            if (files.length > 0) {
+                this.taskMemory.noteFinding(`Semantic retrieval suggests starting with ${files.slice(0, 3).join(', ')}.`);
+            }
+        }
+    }
+
+    private collectWorkspaceDiagnostics(limit: number): string[] {
+        const out: string[] = [];
+        for (const [uri, diags] of vscode.languages.getDiagnostics() as [vscode.Uri, vscode.Diagnostic[]][]) {
+            const relPath = vscode.workspace.asRelativePath(uri, false);
+            for (const diag of diags) {
+                if (diag.severity > vscode.DiagnosticSeverity.Warning) { continue; }
+                const severity = diag.severity === vscode.DiagnosticSeverity.Error ? 'Error' : 'Warning';
+                out.push(`${relPath}:${diag.range.start.line + 1}: [${severity}] ${diag.message}`);
+                if (out.length >= limit) {
+                    return out;
+                }
+            }
+        }
+        return out;
+    }
+
+    private extractDiagnosticPaths(lines: string[]): string[] {
+        const out: string[] = [];
+        for (const line of lines) {
+            const match = line.match(/^([\w./-]+\.[\w]+):(\d+)/);
+            if (match) {
+                out.push(match[1]);
+            }
+        }
+        return Array.from(new Set(out));
+    }
+
+    private parseDiagnosticLine(line: string): { filePath: string; severity: 'Error' | 'Warning'; message: string } | null {
+        const match = line.match(/^([\w./-]+\.[\w]+):(\d+): \[(Error|Warning)\] (.+)$/);
+        if (!match) { return null; }
+        return {
+            filePath: match[1],
+            severity: match[3] as 'Error' | 'Warning',
+            message: match[4]
+        };
+    }
+
+    private summarizeToolError(resultText: string, fallback?: string): string | undefined {
+        const trimmed = resultText.trim();
+        if (!trimmed) {
+            return fallback;
+        }
+        const firstLine = trimmed.split(/\r?\n/, 1)[0].trim();
+        if (!firstLine) {
+            return fallback;
+        }
+        return firstLine.length > 160 ? `${firstLine.slice(0, 157)}...` : firstLine;
+    }
+
+    private async runInternalBuiltinTool(name: string, args: Record<string, unknown>): Promise<ToolResult | null> {
+        const handler = this.builtinTools.getHandler(name);
+        if (!handler) { return null; }
+        try {
+            return await handler(args);
+        } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : String(err);
+            this.taskMemory.noteFailedAction(name, message);
+            return { success: false, result: message };
+        }
     }
 
     /**

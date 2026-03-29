@@ -3,14 +3,14 @@
  * MCP servers.  Performs the JSON-RPC initialize/initialized handshake, discovers
  * tools, and proxies tool calls for the agent loop.
  *
- * stdio:  spawns a local process, communicates via Content-Length framed JSON-RPC
+ * stdio:  spawns a local process, communicates via newline-delimited JSON-RPC
  * HTTP:   POSTs JSON-RPC to a remote endpoint, reads JSON responses
  */
 import * as vscode from 'vscode';
 import * as cp from 'child_process';
 import * as http from 'http';
 import * as https from 'https';
-import { McpServerConfig, McpToolInfo, ToolDefinition, ToolResult } from './types';
+import { McpAuthSessionConfig, McpServerConfig, McpToolInfo, ToolDefinition, ToolResult } from './types';
 import { getSetting } from './config';
 
 interface JsonRpcRequest {
@@ -44,13 +44,14 @@ interface StdioConnection extends McpConnectionBase {
     transport: 'stdio';
     process: cp.ChildProcess;
     pendingRequests: Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>;
-    buffer: string;
+    buffer: Buffer;
 }
 
 interface HttpConnection extends McpConnectionBase {
     transport: 'http';
     baseUrl: string;
     headers: Record<string, string>;
+    authSessionConfig?: McpAuthSessionConfig;
     sessionId?: string;
 }
 
@@ -149,6 +150,123 @@ export class McpClient {
         return typeof config.command === 'string' || typeof config.url === 'string';
     }
 
+    private hasAuthorizationHeader(headers: Record<string, string>): boolean {
+        return Object.keys(headers).some(key => key.toLowerCase() === 'authorization');
+    }
+
+    private getImplicitAuthSessionConfig(config: McpServerConfig): McpAuthSessionConfig | undefined {
+        if (!config.url) {
+            return undefined;
+        }
+
+        try {
+            const parsed = new URL(config.url);
+            const isGitHubRemoteMcp = parsed.protocol === 'https:'
+                && parsed.hostname === 'api.githubcopilot.com'
+                && parsed.pathname.startsWith('/mcp');
+
+            if (!isGitHubRemoteMcp) {
+                if (parsed.protocol === 'https:' && /(?:login\.microsoftonline\.com|login\.microsoft\.com|login\.windows\.net)$/i.test(parsed.hostname)) {
+                    return {
+                        providerId: 'microsoft',
+                        scopes: [],
+                        tokenHeader: 'Authorization',
+                        tokenScheme: 'Bearer',
+                        createIfNone: true
+                    };
+                }
+
+                return undefined;
+            }
+
+            return {
+                providerId: 'github',
+                scopes: ['repo', 'workflow', 'user:email', 'read:user'],
+                tokenHeader: 'Authorization',
+                tokenScheme: 'Bearer',
+                createIfNone: true
+            };
+        } catch {
+            return undefined;
+        }
+    }
+
+    private async resolveHttpHeaders(name: string, config: McpServerConfig): Promise<Record<string, string>> {
+        const headers = { ...(config.headers || {}) };
+        if (this.hasAuthorizationHeader(headers)) {
+            return headers;
+        }
+
+        const authConfig = config.authSession || this.getImplicitAuthSessionConfig(config);
+        if (!authConfig) {
+            return headers;
+        }
+
+        try {
+            const session = authConfig.createIfNone
+                ? await vscode.authentication.getSession(authConfig.providerId, authConfig.scopes || [], { createIfNone: true })
+                : await vscode.authentication.getSession(authConfig.providerId, authConfig.scopes || [], { silent: true });
+
+            if (!session?.accessToken) {
+                this.outputChannel.appendLine(`MCP: no ${authConfig.providerId} auth session available for "${name}"; continuing without auth header`);
+                return headers;
+            }
+
+            const tokenHeader = authConfig.tokenHeader || 'Authorization';
+            const tokenScheme = authConfig.tokenScheme ?? 'Bearer';
+            headers[tokenHeader] = tokenScheme ? `${tokenScheme} ${session.accessToken}` : session.accessToken;
+            this.outputChannel.appendLine(`MCP: using VS Code ${authConfig.providerId} session for "${name}"`);
+        } catch (e: unknown) {
+            this.outputChannel.appendLine(`MCP: auth session lookup failed for "${name}": ${e instanceof Error ? e.message : String(e)}`);
+        }
+
+        return headers;
+    }
+
+    private getEffectiveAuthSessionConfig(config: McpServerConfig): McpAuthSessionConfig | undefined {
+        return config.authSession || this.getImplicitAuthSessionConfig(config);
+    }
+
+    private async resolveChallengeHeaders(
+        name: string,
+        authConfig: McpAuthSessionConfig | undefined,
+        wwwAuthenticate: string,
+        existingHeaders: Record<string, string>
+    ): Promise<Record<string, string> | undefined> {
+        if (!authConfig) {
+            return undefined;
+        }
+
+        try {
+            const session = authConfig.createIfNone
+                ? await vscode.authentication.getSession(
+                    authConfig.providerId,
+                    { wwwAuthenticate, fallbackScopes: authConfig.scopes || [] },
+                    { createIfNone: true }
+                )
+                : await vscode.authentication.getSession(
+                    authConfig.providerId,
+                    { wwwAuthenticate, fallbackScopes: authConfig.scopes || [] },
+                    { silent: true }
+                );
+
+            if (!session?.accessToken) {
+                this.outputChannel.appendLine(`MCP: challenge auth did not yield a ${authConfig.providerId} token for "${name}"`);
+                return undefined;
+            }
+
+            const tokenHeader = authConfig.tokenHeader || 'Authorization';
+            const tokenScheme = authConfig.tokenScheme ?? 'Bearer';
+            const headers = { ...existingHeaders };
+            headers[tokenHeader] = tokenScheme ? `${tokenScheme} ${session.accessToken}` : session.accessToken;
+            this.outputChannel.appendLine(`MCP: resolved OAuth challenge for "${name}" using ${authConfig.providerId}`);
+            return headers;
+        } catch (e: unknown) {
+            this.outputChannel.appendLine(`MCP: challenge auth failed for "${name}": ${e instanceof Error ? e.message : String(e)}`);
+            return undefined;
+        }
+    }
+
     async connectServer(name: string, config: McpServerConfig): Promise<void> {
         // Disconnect old connection if exists
         if (this.connections.has(name)) {
@@ -173,7 +291,9 @@ export class McpClient {
         const proc = cp.spawn(config.command!, config.args || [], {
             cwd,
             env: { ...process.env, ...(config.env || {}) },
-            stdio: ['pipe', 'pipe', 'pipe']
+            stdio: ['pipe', 'pipe', 'pipe'],
+            windowsHide: true,
+            shell: process.platform === 'win32'
         });
 
         const conn: StdioConnection = {
@@ -182,7 +302,7 @@ export class McpClient {
             tools: [],
             nextId: 1,
             pendingRequests: new Map(),
-            buffer: '',
+            buffer: Buffer.alloc(0),
             serverName: name
         };
 
@@ -190,8 +310,13 @@ export class McpClient {
             this.outputChannel.appendLine(`[${name} stderr] ${data.toString()}`);
         });
 
+        proc.on('error', (err: Error) => {
+            this.outputChannel.appendLine(`[${name}] spawn error: ${err.message}`);
+        });
+
         proc.stdout?.on('data', (data: Buffer) => {
-            conn.buffer += data.toString();
+            this.outputChannel.appendLine(`[${name} stdout] received ${data.length} bytes`);
+            conn.buffer = Buffer.concat([conn.buffer, data]);
             this.processStdioBuffer(conn);
         });
 
@@ -207,7 +332,7 @@ export class McpClient {
                 protocolVersion: '2024-11-05',
                 capabilities: {},
                 clientInfo: { name: 'Junior', version: '1.0.0' }
-            }, 10000);
+            }, 30000);
 
             this.sendNotification(conn, 'initialized', {});
 
@@ -233,11 +358,14 @@ export class McpClient {
 
     private async connectHttpServer(name: string, config: McpServerConfig): Promise<void> {
         this.outputChannel.appendLine(`[${name}] Connecting to MCP server (HTTP): ${config.url}`);
+        const headers = await this.resolveHttpHeaders(name, config);
+        const authSessionConfig = this.getEffectiveAuthSessionConfig(config);
 
         const conn: HttpConnection = {
             transport: 'http',
             baseUrl: config.url!.replace(/\/+$/, ''),
-            headers: config.headers || {},
+            headers,
+            authSessionConfig,
             tools: [],
             nextId: 1,
             serverName: name
@@ -281,7 +409,7 @@ export class McpClient {
     }
 
     /** Send a JSON-RPC request over HTTP. Handles both JSON and SSE responses. */
-    private httpPost(conn: HttpConnection, body: string, timeoutMs: number): Promise<{ body: string; headers: http.IncomingHttpHeaders; contentType: string }> {
+    private httpPost(conn: HttpConnection, body: string, timeoutMs: number, allowAuthRetry = true): Promise<{ body: string; headers: http.IncomingHttpHeaders; contentType: string }> {
         return new Promise((resolve, reject) => {
             const parsed = new URL(conn.baseUrl);
             const isHttps = parsed.protocol === 'https:';
@@ -326,6 +454,19 @@ export class McpClient {
 
                     if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
                         resolve({ body: responseBody, headers: res.headers, contentType: ct });
+                    } else if (allowAuthRetry && res.statusCode === 401 && typeof res.headers['www-authenticate'] === 'string') {
+                        const challenge = res.headers['www-authenticate'];
+                        this.resolveChallengeHeaders(conn.serverName, conn.authSessionConfig, challenge, conn.headers)
+                            .then(updatedHeaders => {
+                                if (!updatedHeaders) {
+                                    reject(new Error(`HTTP ${res.statusCode}: ${responseBody.slice(0, 500)}`));
+                                    return;
+                                }
+
+                                conn.headers = updatedHeaders;
+                                this.httpPost(conn, body, timeoutMs, false).then(resolve, reject);
+                            })
+                            .catch(reject);
                     } else {
                         reject(new Error(`HTTP ${res.statusCode}: ${responseBody.slice(0, 500)}`));
                     }
@@ -481,9 +622,8 @@ export class McpClient {
             return;
         }
         const msg: JsonRpcNotification = { jsonrpc: '2.0', method, params };
-        const payload = JSON.stringify(msg);
-        const frame = `Content-Length: ${Buffer.byteLength(payload)}\r\n\r\n${payload}`;
-        (conn as StdioConnection).process.stdin?.write(frame);
+        const payload = `${JSON.stringify(msg)}\n`;
+        (conn as StdioConnection).process.stdin?.write(payload);
     }
 
     // ── HTTP request ──
@@ -570,8 +710,7 @@ export class McpClient {
     private sendStdioRequest(conn: StdioConnection, method: string, params: unknown, timeoutMs: number): Promise<unknown> {
         const id = conn.nextId++;
         const msg: JsonRpcRequest = { jsonrpc: '2.0', id, method, params };
-        const payload = JSON.stringify(msg);
-        const frame = `Content-Length: ${Buffer.byteLength(payload)}\r\n\r\n${payload}`;
+        const payload = `${JSON.stringify(msg)}\n`;
 
         return new Promise((resolve, reject) => {
             const timer = setTimeout(() => {
@@ -584,7 +723,7 @@ export class McpClient {
                 reject: (err) => { clearTimeout(timer); reject(err); }
             });
 
-            conn.process.stdin?.write(frame, (err) => {
+            conn.process.stdin?.write(payload, (err) => {
                 if (err) {
                     clearTimeout(timer);
                     conn.pendingRequests.delete(id);
@@ -596,47 +735,77 @@ export class McpClient {
 
     private processStdioBuffer(conn: StdioConnection) {
         while (true) {
-            // Look for Content-Length header
-            const headerEnd = conn.buffer.indexOf('\r\n\r\n');
-            if (headerEnd === -1) { break; }
+            if (conn.buffer.length === 0) {
+                break;
+            }
 
-            const header = conn.buffer.slice(0, headerEnd);
-            const match = header.match(/Content-Length:\s*(\d+)/i);
-            if (!match) {
-                // Skip malformed data
-                conn.buffer = conn.buffer.slice(headerEnd + 4);
+            // Legacy framing support: Content-Length headers.
+            const headerMarker = Buffer.from('Content-Length:', 'utf8');
+            if (conn.buffer.subarray(0, headerMarker.length).equals(headerMarker)) {
+                const crlfHeaderEnd = conn.buffer.indexOf(Buffer.from('\r\n\r\n', 'utf8'));
+                const lfHeaderEnd = conn.buffer.indexOf(Buffer.from('\n\n', 'utf8'));
+                const headerEnd = crlfHeaderEnd !== -1 ? crlfHeaderEnd : lfHeaderEnd;
+                const separatorLength = crlfHeaderEnd !== -1 ? 4 : 2;
+                if (headerEnd === -1) {
+                    break;
+                }
+
+                const header = conn.buffer.toString('utf8', 0, headerEnd);
+                const match = header.match(/Content-Length:\s*(\d+)/i);
+                if (!match) {
+                    conn.buffer = conn.buffer.subarray(headerEnd + separatorLength);
+                    continue;
+                }
+
+                const contentLength = parseInt(match[1], 10);
+                const bodyStart = headerEnd + separatorLength;
+                if (conn.buffer.length < bodyStart + contentLength) {
+                    break;
+                }
+
+                const body = conn.buffer.toString('utf8', bodyStart, bodyStart + contentLength);
+                conn.buffer = conn.buffer.subarray(bodyStart + contentLength);
+                this.handleStdioMessage(conn, body);
                 continue;
             }
 
-            const contentLength = parseInt(match[1], 10);
-            const bodyStart = headerEnd + 4;
-            if (conn.buffer.length < bodyStart + contentLength) {
-                break; // Wait for more data
+            // Current MCP SDK framing: one JSON-RPC message per line.
+            const newlineIndex = conn.buffer.indexOf(0x0a);
+            if (newlineIndex === -1) {
+                break;
             }
 
-            const body = conn.buffer.slice(bodyStart, bodyStart + contentLength);
-            conn.buffer = conn.buffer.slice(bodyStart + contentLength);
+            const line = conn.buffer.toString('utf8', 0, newlineIndex).replace(/\r$/, '').trim();
+            conn.buffer = conn.buffer.subarray(newlineIndex + 1);
+            if (!line) {
+                continue;
+            }
 
-            try {
-                const parsed = JSON.parse(body) as JsonRpcResponse;
-                if ('id' in parsed && parsed.id != null) {
-                    const pending = conn.pendingRequests.get(parsed.id);
-                    if (pending) {
-                        conn.pendingRequests.delete(parsed.id);
-                        if (parsed.error) {
-                            pending.reject(new Error(parsed.error.message));
-                        } else {
-                            pending.resolve(parsed.result);
-                        }
+            this.handleStdioMessage(conn, line);
+        }
+    }
+
+    private handleStdioMessage(conn: StdioConnection, body: string) {
+        try {
+            const parsed = JSON.parse(body) as JsonRpcResponse | JsonRpcNotification;
+            if ('id' in parsed && parsed.id != null) {
+                const pending = conn.pendingRequests.get(parsed.id);
+                if (pending) {
+                    conn.pendingRequests.delete(parsed.id);
+                    if ('error' in parsed && parsed.error) {
+                        pending.reject(new Error(parsed.error.message));
+                    } else if ('result' in parsed) {
+                        pending.resolve(parsed.result);
+                    } else {
+                        pending.resolve(undefined);
                     }
                 }
-                // Notifications (no id) are logged but not processed
-                if (!('id' in parsed)) {
-                    this.outputChannel.appendLine(`[${conn.serverName}] notification: ${body}`);
-                }
-            } catch (e) {
-                this.outputChannel.appendLine(`[${conn.serverName}] Parse error: ${body.slice(0, 200)}`);
+                return;
             }
+
+            this.outputChannel.appendLine(`[${conn.serverName}] notification: ${body.slice(0, 300)}`);
+        } catch {
+            this.outputChannel.appendLine(`[${conn.serverName}] Parse error: ${body.slice(0, 200)}`);
         }
     }
 

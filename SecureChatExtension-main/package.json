@@ -2,8 +2,8 @@
   "name": "junior",
   "displayName": "Junior - AI Assistant (Azure OpenAI)",
   "description": "An offline-capable AI coding assistant powered by Azure OpenAI, providing Copilot-like chat, code analysis, editing, and project scaffolding.",
-  "version": "1.1.0",
-  "publisher": "MSFT-CSU-ETT",
+  "version": "1.1.1",
+  "publisher": "Microsoft",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -18,7 +18,8 @@
     "Programming Languages"
   ],
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onView:junior.chatView"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -332,6 +333,18 @@
             "type": "boolean",
             "default": true,
             "description": "Ask for user confirmation before running terminal commands"
+          },
+          "junior.agent.autoInvestigate": {
+            "type": "boolean",
+            "default": true,
+            "description": "Before the first model call, automatically gather likely issue context from diagnostics, active files, and semantic retrieval."
+          },
+          "junior.agent.autoInvestigateMaxFiles": {
+            "type": "number",
+            "default": 4,
+            "minimum": 1,
+            "maximum": 8,
+            "description": "Maximum number of likely files to pull into the agent's preflight investigation summary."
           }
         }
       },
@@ -389,6 +402,38 @@
                         "type": "string"
                       },
                       "description": "Extra HTTP headers (e.g. Authorization) for the MCP server"
+                    },
+                    "authSession": {
+                      "type": "object",
+                      "description": "Populate auth headers for an HTTP MCP server from a VS Code authentication provider session.",
+                      "properties": {
+                        "providerId": {
+                          "type": "string",
+                          "description": "VS Code authentication provider ID, for example github"
+                        },
+                        "scopes": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          },
+                          "description": "Optional scopes to request from the auth provider"
+                        },
+                        "tokenHeader": {
+                          "type": "string",
+                          "description": "Header name that should receive the access token"
+                        },
+                        "tokenScheme": {
+                          "type": "string",
+                          "description": "Prefix to prepend before the access token, for example Bearer"
+                        },
+                        "createIfNone": {
+                          "type": "boolean",
+                          "description": "Prompt the user to sign in if no matching session is already available"
+                        }
+                      },
+                      "required": [
+                        "providerId"
+                      ]
                     }
                   }
                 }

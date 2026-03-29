@@ -46,6 +46,7 @@ window.onerror = function(msg, src, line, col, err) {
     const STREAM_DRAIN_CHARS = 3;      // chars per drain tick (for real-time streaming)
     const STREAM_DRAIN_CHARS_FAST = 6;  // chars per drain tick (for buffered/bulk text)
     const STREAM_RENDER_DEBOUNCE = 80; // ms debounce for markdown re-render
+    const AGENT_STOP_ICON = '<span class="agent-stop-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M9 4.75a3 3 0 0 1 6 0v.55h.75A2.25 2.25 0 0 1 18 7.55v6.7a4.25 4.25 0 0 1-4.25 4.25h-3.5A4.25 4.25 0 0 1 6 14.25v-6.7A2.25 2.25 0 0 1 8.25 5.3H9v-.55Zm1.5 0v.55h3v-.55a1.5 1.5 0 0 0-3 0ZM8.25 6.8a.75.75 0 0 0-.75.75v6.7A2.75 2.75 0 0 0 10.25 17h3.5a2.75 2.75 0 0 0 2.75-2.75v-6.7a.75.75 0 0 0-.75-.75h-7.5Z" fill="currentColor"></path><circle cx="10" cy="11" r="1.1" fill="currentColor"></circle><circle cx="14" cy="11" r="1.1" fill="currentColor"></circle><path d="M9.6 14.1a.75.75 0 0 1 .75-.6h3.3a.75.75 0 0 1 .58 1.22 3 3 0 0 1-5.2 0 .75.75 0 0 1-.13-.62Z" fill="currentColor"></path></svg></span>';
 
     // Progress card icon map (icon name → unicode/emoji)
     const PC_ICONS = {
@@ -226,7 +227,7 @@ window.onerror = function(msg, src, line, col, err) {
         if (!btnSend) return;
         if (running) {
             btnSend.classList.add('stop-mode');
-            btnSend.innerHTML = '<i class=\"codicon codicon-debug-stop\"></i>';
+            btnSend.innerHTML = AGENT_STOP_ICON;
             btnSend.title = 'Stop agent (cancel)';
         } else {
             btnSend.classList.remove('stop-mode');
@@ -1547,7 +1548,17 @@ window.onerror = function(msg, src, line, col, err) {
     function summarizeToolActivity(name, args, success) {
         const a = args || {};
         if (!success) {
-            return 'Failed: ' + name;
+            switch (name) {
+                case 'read_file': return 'Failed to read file: ' + (a.path || '(unknown)');
+                case 'write_file': return 'Failed to write file: ' + (a.path || '(unknown)');
+                case 'edit_file': return 'Failed to edit file: ' + (a.path || '(unknown)');
+                case 'delete_file': return 'Failed to delete file: ' + (a.path || '(unknown)');
+                case 'list_directory': return 'Failed to list directory: ' + (a.path || '.');
+                case 'search_files': return 'File search failed: ' + (a.query || '(query)');
+                case 'grep_search': return 'Text search failed: ' + (a.pattern || '(pattern)');
+                case 'run_terminal_command': return 'Command failed: ' + (a.command || '(command)');
+                default: return 'Failed: ' + name;
+            }
         }
 
         switch (name) {
