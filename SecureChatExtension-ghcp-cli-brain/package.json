@@ -1,0 +1,583 @@
+{
+  "name": "junior",
+  "displayName": "Junior - AI Junior Programmer (Copilot CLI)",
+  "description": "An offline-capable AI coding assistant powered by Github Copilot CLI, providing Copilot-like chat, code analysis, editing, and project scaffolding.",
+  "version": "2.0.0",
+  "publisher": "Microsoft",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": ""
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "AI",
+    "Chat",
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:junior.chatView"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "junior",
+          "title": "Junior",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "junior": [
+        {
+          "type": "webview",
+          "id": "junior.chatView",
+          "name": "Chat"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "junior.openChat",
+        "title": "Junior: Open Chat",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "junior.openChatTab",
+        "title": "Junior: Open Chat in Editor Tab",
+        "icon": "$(window)"
+      },
+      {
+        "command": "junior.newSession",
+        "title": "Junior: New Chat Session",
+        "icon": "$(add)"
+      },
+      {
+        "command": "junior.indexWorkspace",
+        "title": "Junior: Index Workspace",
+        "icon": "$(search)"
+      },
+      {
+        "command": "junior.selectModel",
+        "title": "Junior: Select Model",
+        "icon": "$(server)"
+      },
+      {
+        "command": "junior.explainSelection",
+        "title": "Junior: Explain Selected Code"
+      },
+      {
+        "command": "junior.reviewSelection",
+        "title": "Junior: Review Selected Code"
+      },
+      {
+        "command": "junior.fixSelection",
+        "title": "Junior: Fix Selected Code"
+      },
+      {
+        "command": "junior.manageMcpServers",
+        "title": "Junior: Manage MCP Servers",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "junior.cancelAgent",
+        "title": "Junior: Cancel Agent Run",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "junior.toggleHistory",
+        "title": "Junior: Toggle Chat History",
+        "icon": "$(history)"
+      },
+      {
+        "command": "junior.setApiKey",
+        "title": "Junior: Set API Key",
+        "icon": "$(key)"
+      },
+      {
+        "command": "junior.triggerInlineCompletion",
+        "title": "Junior: Trigger Inline Completion",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "junior.showTokenUsage",
+        "title": "Junior: Show Token Usage",
+        "icon": "$(dashboard)"
+      },
+      {
+        "command": "junior.resetTokenUsage",
+        "title": "Junior: Reset Token Usage Counters",
+        "icon": "$(clear-all)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "junior.newSession",
+          "when": "view == junior.chatView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "junior.toggleHistory",
+          "when": "view == junior.chatView",
+          "group": "navigation@2"
+        },
+        {
+          "command": "junior.selectModel",
+          "when": "view == junior.chatView",
+          "group": "navigation@3"
+        },
+        {
+          "command": "junior.indexWorkspace",
+          "when": "view == junior.chatView",
+          "group": "navigation@4"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "junior.explainSelection",
+          "group": "junior@1",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "junior.reviewSelection",
+          "group": "junior@2",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "junior.fixSelection",
+          "group": "junior@3",
+          "when": "editorHasSelection"
+        }
+      ]
+    },
+    "configuration": [
+      {
+        "title": "Provider",
+        "properties": {
+          "junior.azureOpenAI.provider": {
+            "type": "string",
+            "enum": [
+              "direct",
+              "apim",
+              "openai"
+            ],
+            "enumItemLabels": [
+              "Azure OpenAI",
+              "API Management (APIM)",
+              "OpenAI / Compatible"
+            ],
+            "default": "direct",
+            "enumDescriptions": [
+              "Direct connection to an Azure OpenAI endpoint",
+              "Connection via an API Management proxy",
+              "Connection to the OpenAI API or any OpenAI-compatible endpoint"
+            ],
+            "description": "How to connect: 'Azure OpenAI' for a direct AOAI endpoint, 'API Management' for an APIM proxy, 'OpenAI / Compatible' for the OpenAI API or compatible endpoints (GitHub Models, Ollama, etc.)",
+            "order": 0
+          }
+        }
+      },
+      {
+        "title": "OpenAI / Compatible API",
+        "properties": {
+          "junior.azureOpenAI.openaiBaseUrl": {
+            "type": "string",
+            "default": "https://api.openai.com/v1",
+            "description": "Base URL for the OpenAI-compatible API. Include /v1 for OpenAI proper. Examples: 'https://api.openai.com/v1' (OpenAI), 'https://models.inference.ai.azure.com' (GitHub Models), 'http://localhost:11434/v1' (Ollama). Used when provider is 'openai'.",
+            "order": 1
+          }
+        }
+      },
+      {
+        "title": "Models",
+        "properties": {
+          "junior.azureOpenAI.deployments": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "Display name for the model"
+                },
+                "deploymentId": {
+                  "type": "string",
+                  "description": "Azure deployment ID or OpenAI model name (e.g. gpt-4o)"
+                },
+                "apiVersion": {
+                  "type": "string",
+                  "description": "API version — used for Azure OpenAI only (e.g., 2025-03-01-preview)"
+                }
+              }
+            },
+            "default": [],
+            "description": "List of models available for selection. For Azure, use your deployment IDs. For OpenAI, use model names (e.g. gpt-4o, gpt-4.1). Works with all providers.",
+            "order": 3
+          },
+          "junior.azureOpenAI.activeDeployment": {
+            "type": "string",
+            "default": "",
+            "description": "Currently active model — Azure deployment ID or OpenAI model name, depending on provider.",
+            "order": 4
+          }
+        }
+      },
+      {
+        "title": "Azure OpenAI",
+        "properties": {
+          "junior.azureOpenAI.endpoint": {
+            "type": "string",
+            "default": "",
+            "description": "Azure OpenAI endpoint URL (e.g., https://your-resource.openai.azure.com). Used when provider is 'direct'.",
+            "order": 5
+          },
+          "junior.azureOpenAI.apimBaseUrl": {
+            "type": "string",
+            "default": "",
+            "description": "APIM gateway base URL including path prefix (e.g., https://my-apim.azure-api.net/foundryapi). Used when provider is 'apim'.",
+            "order": 6
+          },
+          "junior.azureOpenAI.apiVersion": {
+            "type": "string",
+            "default": "2025-03-01-preview",
+            "description": "Azure OpenAI API version. Used when provider is 'direct' or 'apim'.",
+            "order": 7
+          }
+        }
+      },
+      {
+        "title": "Authentication",
+        "properties": {
+          "junior.azureOpenAI.apiKey": {
+            "type": "string",
+            "default": "",
+            "description": "API key (fallback — prefer using 'Junior: Set API Key' for secure storage). Sent as 'api-key' header for Azure OpenAI, or 'Bearer' token for OpenAI.",
+            "order": 8
+          }
+        }
+      },
+      {
+        "title": "Model Behavior",
+        "properties": {
+          "junior.maxTokens": {
+            "type": "number",
+            "default": 16384,
+            "description": "Maximum completion tokens in AI response (output limit, not context window)."
+          },
+          "junior.temperature": {
+            "type": "number",
+            "default": 0.3,
+            "description": "Temperature for AI responses (0.0 - 1.0)"
+          }
+        }
+      },
+      {
+        "title": "Workspace Indexing",
+        "properties": {
+          "junior.workspace.maxFileSize": {
+            "type": "number",
+            "default": 100000,
+            "description": "Maximum file size in bytes to index"
+          },
+          "junior.workspace.excludePatterns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": [
+              "**/node_modules/**",
+              "**/.git/**",
+              "**/bin/**",
+              "**/obj/**",
+              "**/out/**",
+              "**/dist/**",
+              "**/*.min.js",
+              "**/*.map"
+            ],
+            "description": "Glob patterns to exclude from workspace indexing"
+          }
+        }
+      },
+      {
+        "title": "Agent",
+        "properties": {
+          "junior.agent.provider": {
+            "type": "string",
+            "enum": [
+              "native",
+              "copilot-cli"
+            ],
+            "default": "native",
+            "enumItemLabels": [
+              "Junior Native Runtime",
+              "GitHub Copilot CLI Runtime"
+            ],
+            "description": "Agent backend to use for chat turns. 'native' uses Junior's built-in Azure/OpenAI loop. 'copilot-cli' delegates the agent runtime to a local GitHub Copilot CLI ACP server."
+          },
+          "junior.agent.maxIterations": {
+            "type": "number",
+            "default": 25,
+            "description": "Maximum number of tool-call iterations per agent turn"
+          },
+          "junior.agent.contextWindow": {
+            "type": "number",
+            "default": 128000,
+            "description": "Model context window size in tokens. Older messages are summarized when approaching this limit. Common values: 128000 (GPT-4o/4.1), 200000 (Claude)."
+          },
+          "junior.agent.contextThreshold": {
+            "type": "number",
+            "default": 0.7,
+            "minimum": 0.3,
+            "maximum": 0.95,
+            "description": "Fraction of the context window (0.3–0.95) at which older messages are summarized. Lower values trim more aggressively."
+          },
+          "junior.agent.confirmWrites": {
+            "type": "boolean",
+            "default": true,
+            "description": "Ask for user confirmation before writing/deleting files"
+          },
+          "junior.agent.confirmTerminal": {
+            "type": "boolean",
+            "default": true,
+            "description": "Ask for user confirmation before running terminal commands"
+          },
+          "junior.agent.autoInvestigate": {
+            "type": "boolean",
+            "default": true,
+            "description": "Before the first model call, automatically gather likely issue context from diagnostics, active files, and semantic retrieval."
+          },
+          "junior.agent.autoInvestigateMaxFiles": {
+            "type": "number",
+            "default": 4,
+            "minimum": 1,
+            "maximum": 8,
+            "description": "Maximum number of likely files to pull into the agent's preflight investigation summary."
+          },
+          "junior.copilotCli.path": {
+            "type": "string",
+            "default": "copilot",
+            "description": "Executable path for GitHub Copilot CLI when agent.provider is set to 'copilot-cli'."
+          },
+          "junior.copilotCli.home": {
+            "type": "string",
+            "default": "",
+            "description": "Optional COPILOT_HOME override used when launching the Copilot CLI runtime."
+          },
+          "junior.copilotCli.model": {
+            "type": "string",
+            "default": "",
+            "description": "Active model for the Copilot CLI runtime. Select from the models listed in junior.copilotCli.models or enter any model name supported by the CLI."
+          },
+          "junior.copilotCli.models": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string", "description": "Display name for the model" },
+                "id": { "type": "string", "description": "Model ID passed to the Copilot CLI (COPILOT_MODEL)" }
+              },
+              "required": ["name", "id"]
+            },
+            "default": [],
+            "description": "List of models available for selection in the model picker. Each entry has a display name and an id passed to the Copilot CLI. An entry with an empty id means 'use the Copilot CLI default model'. Use settings.default.json with deploy.ps1 to bake in a customer-specific list."
+          },
+          "junior.copilotCli.additionalArgs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": [],
+            "description": "Additional command-line arguments passed to Copilot CLI when running as an ACP server."
+          }
+        }
+      },
+      {
+        "title": "MCP Servers",
+        "properties": {
+          "junior.mcp.servers": {
+            "type": "object",
+            "default": {},
+            "description": "MCP server configurations. Each key is a server name. Use { command, args?, env?, cwd? } for stdio or { url, headers? } for HTTP transport. Entries here override duplicate names loaded from external settings.",
+            "additionalProperties": {
+              "type": "object",
+              "oneOf": [
+                {
+                  "required": [
+                    "command"
+                  ],
+                  "properties": {
+                    "command": {
+                      "type": "string",
+                      "description": "Command to launch the MCP server (stdio transport)"
+                    },
+                    "args": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "Arguments for the MCP server command"
+                    },
+                    "env": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      },
+                      "description": "Environment variables for the MCP server"
+                    },
+                    "cwd": {
+                      "type": "string",
+                      "description": "Working directory for the MCP server"
+                    }
+                  }
+                },
+                {
+                  "required": [
+                    "url"
+                  ],
+                  "properties": {
+                    "url": {
+                      "type": "string",
+                      "description": "HTTP endpoint URL for the MCP server (HTTP transport)"
+                    },
+                    "headers": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      },
+                      "description": "Extra HTTP headers (e.g. Authorization) for the MCP server"
+                    },
+                    "authSession": {
+                      "type": "object",
+                      "description": "Populate auth headers for an HTTP MCP server from a VS Code authentication provider session.",
+                      "properties": {
+                        "providerId": {
+                          "type": "string",
+                          "description": "VS Code authentication provider ID, for example github"
+                        },
+                        "scopes": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          },
+                          "description": "Optional scopes to request from the auth provider"
+                        },
+                        "tokenHeader": {
+                          "type": "string",
+                          "description": "Header name that should receive the access token"
+                        },
+                        "tokenScheme": {
+                          "type": "string",
+                          "description": "Prefix to prepend before the access token, for example Bearer"
+                        },
+                        "createIfNone": {
+                          "type": "boolean",
+                          "description": "Prompt the user to sign in if no matching session is already available"
+                        }
+                      },
+                      "required": [
+                        "providerId"
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "junior.mcp.includeExternalServers": {
+            "type": "boolean",
+            "default": true,
+            "description": "Also load MCP servers from other VS Code settings keys (for example, mcp.servers from the official MCP extension)."
+          },
+          "junior.mcp.externalServerSettings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": [
+              "mcp.servers"
+            ],
+            "description": "List of settings paths to read additional MCP server definitions from. Format: \"section.key\"."
+          }
+        }
+      },
+      {
+        "title": "Inline Completions",
+        "properties": {
+          "junior.inlineCompletions.enabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "Enable inline code completions (ghost text)"
+          },
+          "junior.inlineCompletions.deployment": {
+            "type": "string",
+            "default": "",
+            "description": "Model for inline completions: Azure deployment ID (provider 'direct'/'apim') or OpenAI model name (provider 'openai'). Leave empty to use the active chat model. A fast model (e.g. gpt-4o-mini) is recommended."
+          },
+          "junior.inlineCompletions.timeoutMs": {
+            "type": "number",
+            "default": 5000,
+            "minimum": 1000,
+            "maximum": 30000,
+            "description": "Maximum time in milliseconds to wait for an inline completion response before aborting. Lower values feel snappier but may discard slower responses."
+          },
+          "junior.inlineCompletions.candidates": {
+            "type": "number",
+            "default": 1,
+            "minimum": 1,
+            "maximum": 3,
+            "description": "Number of alternative completions to fetch (1–3). Use Alt+] / Alt+[ to cycle between candidates. Higher values use more API calls per suggestion."
+          }
+        }
+      },
+      {
+        "title": "Slash Commands",
+        "properties": {
+          "junior.slashCommands.directories": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": [],
+            "description": "Additional directories to scan for slash command .md files. Relative paths are resolved from the workspace root. Built-in directories (.junior/commands, .github/copilot/commands, .github/commands) are always scanned."
+          }
+        }
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "junior.openChat",
+        "key": "ctrl+shift+i",
+        "mac": "cmd+shift+i"
+      },
+      {
+        "command": "junior.triggerInlineCompletion",
+        "key": "alt+oem_5",
+        "mac": "alt+oem_5",
+        "when": "editorTextFocus"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.37",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "@vscode/codicons": "^0.0.45",
+    "@vscode/vsce": "^2.22.0",
+    "eslint": "^8.0.0",
+    "typescript": "^5.3.0"
+  }
+}

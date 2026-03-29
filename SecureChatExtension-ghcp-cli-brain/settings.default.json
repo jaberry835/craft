@@ -1,0 +1,25 @@
+{
+    "junior.copilotCli.models": [
+        { "name": "Claude Sonnet 4 (Copilot default)", "id": "" },
+        { "name": "Claude Sonnet 4.6", "id": "claude-sonnet-4.6" },
+        { "name": "Claude Sonnet 4.5", "id": "claude-sonnet-4.5" },
+        { "name": "Claude Opus 4.6", "id": "claude-opus-4.6" },
+        { "name": "Claude Opus 4.5", "id": "claude-opus-4.5" },
+        { "name": "Claude Haiku 4.5", "id": "claude-haiku-4.5" },
+        { "name": "GPT-5.4", "id": "gpt-5.4" },
+        { "name": "GPT-5.3 Codex", "id": "gpt-5.3-codex" },
+        { "name": "GPT-5.2 Codex", "id": "gpt-5.2-codex" },
+        { "name": "GPT-5.2", "id": "gpt-5.2" },
+        { "name": "GPT-5.1", "id": "gpt-5.1" },
+        { "name": "GPT-5.4 Mini", "id": "gpt-5.4-mini" },
+        { "name": "GPT-4.1", "id": "gpt-4.1" }
+    ],
+    "junior.inlineCompletions.enabled": true,
+    "junior.inlineCompletions.deployment": "gpt-4o",
+    "junior.azureOpenAI.deployments": [
+        { "name": "GPT-4o", "deploymentId": "gpt-4o", "apiVersion": "2025-03-01-preview" }
+    ],
+    "junior.azureOpenAI.apimBaseUrl": "https://rudeaoaiapi.azure-api.net/foundryapi",
+    "junior.azureOpenAI.provider": "apim",
+    "junior.azureOpenAI.apiVersion": "2025-03-01-preview"
+}
