@@ -19,10 +19,10 @@
     "juniorgh.api.models": [
         { "name": "GPT-4o", "id": "gpt-4o", "apiVersion": "2025-03-01-preview" }
     ],
-    "juniorgh.apim.baseUrl": "https://rudeaoaiapi.azure-api.net/foundryapi",
+    "juniorgh.apim.baseUrl": "https://your-apim.azure-api.net/foundryapi",
     "juniorgh.api.provider": "apim",
     "juniorgh.azure.apiVersion": "2025-03-01-preview",
-    "juniorgh.copilotCli.providerBaseUrl": "https://rudeaoaiapi.azure-api.net/foundryapi",
+    "juniorgh.copilotCli.providerBaseUrl": "https://your-apim.azure-api.net/foundryapi",
     "juniorgh.copilotCli.providerType": "azure",
     "juniorgh.copilotCli.providerApiKey": "",
     "juniorgh.copilotCli.providerAzureApiVersion": "2025-03-01-preview",
@@ -31,3 +31,4 @@
     "juniorgh.mcp.externalServerSettings": ["mcp.servers"],
     "juniorgh.mcp.servers": {}
 }
+

@@ -29,9 +29,9 @@
 
 ### Build & Distribution
 
-- **Build-time default settings override for VSIX packaging** — `deploy.ps1` now supports `-DefaultSettings` to supply a JSON file of `junior.*` values that temporarily override contributed setting defaults in `package.json` during packaging.
-- **Packaged defaults stay safe by default** — baked-in values ship as extension defaults inside the VSIX rather than rewriting a user's `settings.json`. Experienced users can still override any `junior.*` setting in user/workspace settings, including MCP-related settings such as `junior.mcp.servers`.
-- **Clearer build guidance** — the deploy script and README now explicitly warn that non-`junior.*` settings are ignored by this feature and that existing user/workspace settings take precedence over packaged defaults.
+- **Build-time default settings override for VSIX packaging** — `deploy.ps1` now supports `-DefaultSettings` to supply a JSON file of `juniorgh.*` values that temporarily override contributed setting defaults in `package.json` during packaging.
+- **Packaged defaults stay safe by default** — baked-in values ship as extension defaults inside the VSIX rather than rewriting a user's `settings.json`. Experienced users can still override any `juniorgh.*` setting in user/workspace settings, including MCP-related settings such as `juniorgh.mcp.servers`.
+- **Clearer build guidance** — the deploy script and README now explicitly warn that non-`juniorgh.*` settings are ignored by this feature and that existing user/workspace settings take precedence over packaged defaults.
 
 
 ## 1.1.0 — 2026-03-25
@@ -73,3 +73,4 @@
   - **Send / Stop button** — an `↑` arrow on the right sends the message; while the agent is running it morphs into a circular stop button with a spinning ring animation
 - **Decluttered top bar** — removed the Stop Agent and Manage MCP Servers buttons from the sidebar title bar (both now live in the composer toolbar)
 - **Consistent button styling** — all composer toolbar buttons share a uniform transparent style with subtle rounded hover highlights
+

@@ -29,7 +29,7 @@ export class TokenTracker {
     constructor(log?: (msg: string) => void) {
         this.log = log || (() => {});
         this.statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 0);
-        this.statusBar.name = 'Junior Token Usage';
+        this.statusBar.name = 'JuniorGH Token Usage';
         this.updateStatusBar();
         this.statusBar.show();
         this.log('TokenTracker: initialized');
@@ -151,7 +151,7 @@ export class TokenTracker {
         md.appendMarkdown(`| $(symbol-number) Requests | ${inline.requests} | |\n\n`);
 
         md.appendMarkdown(`---\n\n`);
-        md.appendMarkdown(`[$(trash) Reset Counters](command:junior.resetTokenUsage)`);
+        md.appendMarkdown(`[$(trash) Reset Counters](command:juniorgh.resetTokenUsage)`);
 
         this.statusBar.tooltip = md;
     }

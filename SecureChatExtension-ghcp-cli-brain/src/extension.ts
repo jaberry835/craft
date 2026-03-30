@@ -12,7 +12,7 @@ import { registerCommands } from './commandRegistrar';
 
 let chatViewProvider: ChatViewProvider;
 let mcpClient: McpClient;
-export const outputChannel = vscode.window.createOutputChannel('Junior');
+export const outputChannel = vscode.window.createOutputChannel('JuniorGH');
 
 type LogLevel = 'INFO' | 'WARN' | 'ERROR';
 
@@ -25,7 +25,7 @@ function logWarn(msg: string) { log(msg, 'WARN'); }
 function logError(msg: string) { log(msg, 'ERROR'); }
 
 export function activate(context: vscode.ExtensionContext) {
-    log('Junior extension activating...');
+    log('JuniorGH extension activating...');
     const aoaiClient = new AzureOpenAIClient();
     aoaiClient.setSecretStorage(context.secrets);
     const workspaceIndexer = new WorkspaceIndexer();
@@ -46,12 +46,13 @@ export function activate(context: vscode.ExtensionContext) {
         context.extensionUri,
         sessionManager,
         log,
-        tokenTracker
+        tokenTracker,
+        mcpClient
     );
 
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(
-            'junior.chatView',
+            'juniorgh.chatView',
             chatViewProvider,
             { webviewOptions: { retainContextWhenHidden: true } }
         )
@@ -138,7 +139,7 @@ export function activate(context: vscode.ExtensionContext) {
         context.subscriptions.push(watcher);
     }
 
-    log('Junior extension activated successfully.');
+    log('JuniorGH extension activated successfully.');
 }
 
 export function deactivate() {

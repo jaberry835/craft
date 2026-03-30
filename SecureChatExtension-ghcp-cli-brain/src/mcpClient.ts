@@ -68,8 +68,18 @@ export class McpClient {
     private static readonly HEALTH_PING_TIMEOUT_MS = 5_000;
 
     constructor() {
-        this.outputChannel = vscode.window.createOutputChannel('Junior MCP');
+        this.outputChannel = vscode.window.createOutputChannel('JuniorGH MCP');
         this.startHealthChecks();
+    }
+
+    /**
+     * Return the merged set of configured MCP server entries (own + external),
+     * suitable for forwarding to the Copilot CLI ACP session/new and session/load
+     * calls as the `mcpServers` array.
+     */
+    getServerConfigs(): Array<McpServerConfig & { name: string }> {
+        const servers = this.getConfiguredServers();
+        return Object.entries(servers).map(([name, config]) => ({ name, ...config }));
     }
 
     /** Load MCP server configs from VS Code settings and connect to each */
@@ -112,7 +122,7 @@ export class McpClient {
                 }
 
                 if (combinedServers[name]) {
-                    this.outputChannel.appendLine(`MCP: keeping "${name}" from junior.mcp.servers and ignoring duplicate in "${settingPath}"`);
+                    this.outputChannel.appendLine(`MCP: keeping "${name}" from juniorgh.mcp.servers and ignoring duplicate in "${settingPath}"`);
                     continue;
                 }
 
@@ -331,7 +341,7 @@ export class McpClient {
             await this.sendRequest(conn, 'initialize', {
                 protocolVersion: '2024-11-05',
                 capabilities: {},
-                clientInfo: { name: 'Junior', version: '1.0.0' }
+                clientInfo: { name: 'JuniorGH', version: '1.0.0' }
             }, 30000);
 
             this.sendNotification(conn, 'initialized', {});
@@ -378,7 +388,7 @@ export class McpClient {
             const initResult = await this.sendRequest(conn, 'initialize', {
                 protocolVersion: '2024-11-05',
                 capabilities: {},
-                clientInfo: { name: 'Junior', version: '1.0.0' }
+                clientInfo: { name: 'JuniorGH', version: '1.0.0' }
             }, 15000);
             this.outputChannel.appendLine(`[${name}] Initialize result: ${JSON.stringify(initResult).slice(0, 500)}`);
 

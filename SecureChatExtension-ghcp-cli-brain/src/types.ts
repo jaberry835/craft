@@ -2,10 +2,10 @@
  * Shared types for the Junior agent extension.
  */
 
-// ── Azure OpenAI Types ──
+// ── API Config Types ──
 
 export interface AoaiConfig {
-    provider: 'direct' | 'apim' | 'openai';
+    provider: 'azure' | 'apim' | 'openai';
     endpoint: string;
     apimBaseUrl: string;
     apiKey: string;
@@ -116,6 +116,8 @@ export interface McpAuthSessionConfig {
 }
 
 export interface McpServerConfig {
+    /** Transport type hint from external settings ("stdio", "http", "sse") */
+    type?: string;
     /** stdio transport: command to spawn */
     command?: string;
     args?: string[];
@@ -266,6 +268,7 @@ export type ExtensionMessage =
     | { type: 'workingActionUpdated'; blockId: string; entryId: string; status: 'running' | 'done' | 'error'; text?: string; detail?: string; filePath?: string; icon?: string }
     | { type: 'workingBlockCompleted'; blockId: string; summary: string; completedAt: number }
     | { type: 'narrationText'; text: string }
+    | { type: 'thinkingText'; text: string }
     | { type: 'terminalOutput'; line: string }
     | { type: 'tokenUsage'; totalTokens: string; chatTokens: string; inlineTokens: string; chatPct: string; inlinePct: string; requests: number; chatPrompt: string; chatCompletion: string; inlinePrompt: string; inlineCompletion: string; chatPromptPct: string; chatCompletionPct: string; inlinePromptPct: string; inlineCompletionPct: string; chatRequests: number; inlineRequests: number; windowPct: number; contextWindow: string }
     | { type: 'slashCommands'; commands: Array<{ name: string; description: string }> };

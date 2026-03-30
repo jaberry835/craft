@@ -1,27 +1,22 @@
 import * as vscode from 'vscode';
 
-const PRIMARY_NAMESPACE = 'junior';
-const LEGACY_NAMESPACE = 'securechat';
+const NAMESPACE = 'juniorgh';
 
 /**
- * Read a setting from the new `junior.*` namespace first, then fall back
- * to `securechat.*` for backward compatibility.
+ * Read a setting from the `juniorgh.*` namespace.
  */
 export function getSetting<T>(path: string, defaultValue?: T): T | undefined {
-    const primary = vscode.workspace.getConfiguration(PRIMARY_NAMESPACE).get<T>(path);
-    if (primary !== undefined) { return primary; }
-
-    const legacy = vscode.workspace.getConfiguration(LEGACY_NAMESPACE).get<T>(path);
-    if (legacy !== undefined) { return legacy; }
+    const value = vscode.workspace.getConfiguration(NAMESPACE).get<T>(path);
+    if (value !== undefined) { return value; }
 
     return defaultValue;
 }
 
-/** Update settings in the new `junior.*` namespace. */
+/** Update settings in the `juniorgh.*` namespace. */
 export async function updateSetting(
     path: string,
     value: unknown,
     target: vscode.ConfigurationTarget = vscode.ConfigurationTarget.Global
 ): Promise<void> {
-    await vscode.workspace.getConfiguration(PRIMARY_NAMESPACE).update(path, value, target);
+    await vscode.workspace.getConfiguration(NAMESPACE).update(path, value, target);
 }

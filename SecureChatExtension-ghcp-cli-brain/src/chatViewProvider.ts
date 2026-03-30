@@ -9,7 +9,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { AgentCallbacks } from './agentRuntime';
 import { AgentRuntime } from './agentRuntime';
-import { CopilotCliAcpRuntime } from './copilotCliAcpRuntime';
+import { CopilotCliAcpRuntime, CopilotAuthError } from './copilotCliAcpRuntime';
+import { McpClient } from './mcpClient';
 import { SessionManager } from './sessionManager';
 import { ExtensionMessage, WebviewMessage, WorkingBlock, WorkingBlockActionEntry, WorkingActionType } from './types';
 import { getSetting, updateSetting } from './config';
@@ -29,7 +30,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         private extensionUri: vscode.Uri,
         private sessionManager: SessionManager,
         log?: (msg: string) => void,
-        private tokenTracker?: TokenTracker
+        private tokenTracker?: TokenTracker,
+        private mcpClient?: McpClient
     ) {
         this.log = log || (() => {});
     }
@@ -71,8 +73,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
 
         const panel = vscode.window.createWebviewPanel(
-            'junior.chatTab',
-            'Junior Chat',
+            'juniorgh.chatTab',
+            'JuniorGH Chat',
             vscode.ViewColumn.One,
             {
                 enableScripts: true,
@@ -197,14 +199,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     this.cancelAgent();
                     break;
                 case 'manageMcpServers':
-                    vscode.commands.executeCommand('junior.manageMcpServers');
+                    vscode.commands.executeCommand('juniorgh.manageMcpServers');
                     break;
                 case 'newSession':
                     this.newSession();
                     break;
                 case 'selectModel':
-                    this.log('Executing junior.selectModel command...');
-                    vscode.commands.executeCommand('junior.selectModel');
+                    this.log('Executing juniorgh.selectModel command...');
+                    vscode.commands.executeCommand('juniorgh.selectModel');
                     break;
                 case 'selectModelById':
                     this.handleSelectModelById(msg.deploymentId);
@@ -309,6 +311,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         const slashDisplayText = displayText !== text ? displayText : undefined;
         try {
             await runtime.run(text, images, files, slashDisplayText);
+        } catch (err: any) {
+            if (err instanceof CopilotAuthError) {
+                await this.handleCopilotAuthError();
+                return;
+            }
+            throw err;
         } finally {
             // Always persist — even if cancelled or errored
             this.sessionManager.updateMessages(runtime.getMessages(), runtime.getSessionState?.());
@@ -324,15 +332,52 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         const cliPath = getSetting<string>('copilotCli.path') || 'copilot';
         const copilotHome = getSetting<string>('copilotCli.home');
         const model = getSetting<string>('copilotCli.model') || 'default';
-        const homeSource = copilotHome ? `junior.copilotCli.home=${copilotHome}` : 'COPILOT_HOME from process environment/default CLI location';
+        const homeSource = copilotHome ? `juniorgh.copilotCli.home=${copilotHome}` : 'COPILOT_HOME from process environment/default CLI location';
+
+        const providerBaseUrl = getSetting<string>('copilotCli.providerBaseUrl') || process.env.COPILOT_PROVIDER_BASE_URL || '';
+        const providerType = getSetting<string>('copilotCli.providerType') || process.env.COPILOT_PROVIDER_TYPE || '';
+        const byokInfo = providerBaseUrl
+            ? `, BYOK=${providerType || 'openai'}@${providerBaseUrl}`
+            : '';
 
         this.log(
-            `Endpoint source: provider=copilot-cli, transport=acp-stdio, cliPath=${cliPath}, model=${model}, homeSource=${homeSource}`
+            `Endpoint source: provider=copilot-cli, transport=acp-stdio, cliPath=${cliPath}, model=${model}, homeSource=${homeSource}${byokInfo}`
         );
     }
 
+    /**
+     * Handle a Copilot CLI authentication error by disposing the broken runtime,
+     * informing the user, and offering to run `copilot login` in a terminal.
+     */
+    private async handleCopilotAuthError(): Promise<void> {
+        // Dispose the unauthenticated runtime so the next attempt creates a fresh one
+        this.agentRuntime?.dispose?.();
+        this.agentRuntime = undefined;
+
+        this.sendToWebview({ type: 'agentDone' });
+        this.sendToWebview({
+            type: 'error',
+            message: 'GitHub Copilot CLI is not authenticated. Click the "Login" button in the notification to sign in, then try again.'
+        });
+
+        const cliPath = getSetting<string>('copilotCli.path') || 'copilot';
+        const choice = await vscode.window.showWarningMessage(
+            'GitHub Copilot CLI is not authenticated. Would you like to log in now?',
+            'Login',
+            'Cancel'
+        );
+        if (choice === 'Login') {
+            const terminal = vscode.window.createTerminal({ name: 'Copilot Login' });
+            terminal.show();
+            terminal.sendText(`${cliPath} login`);
+        }
+    }
+
     private createAgentRuntime(callbacks: AgentCallbacks): AgentRuntime {
-        return new CopilotCliAcpRuntime(callbacks, this.log);
+        const getMcpServerConfigs = this.mcpClient
+            ? () => this.mcpClient!.getServerConfigs()
+            : undefined;
+        return new CopilotCliAcpRuntime(callbacks, this.log, this.tokenTracker, getMcpServerConfigs);
     }
 
     private async handleAttachFile() {
@@ -380,7 +425,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
         const custom = getSetting<string[]>('slashCommands.directories') || [];
         const defaults = [
-            path.join(root, '.junior', 'commands'),
+            path.join(root, '.juniorgh', 'commands'),
             path.join(root, '.github', 'copilot', 'commands'),
             path.join(root, '.github', 'commands'),
         ];
@@ -1835,10 +1880,21 @@ body { display: flex; flex-direction: column; }
 .wb-live-status {
     display: flex;
     align-items: center;
-    gap: 6px;
-    margin-top: 6px;
-    font-size: 12px;
+    gap: 8px;
+    margin: 6px 0 4px 0;
+    padding: 0 4px;
+    font-size: 13px;
     color: var(--vscode-descriptionForeground, #b2b8bf);
+}
+.wb-live-status .spinner-sm {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--border);
+    border-top-color: var(--user-msg);
+    border-radius: 50%;
+    animation: spinner-spin 0.8s linear infinite;
+    flex-shrink: 0;
 }
 .wb-live-text, #working-text, .working-block.live .wb-title {
     background: linear-gradient(
@@ -1915,9 +1971,6 @@ body { display: flex; flex-direction: column; }
     font-size: 13px;
     color: var(--fg);
     flex-shrink: 0;
-    background: var(--tool-bg, rgba(255,255,255,0.04));
-    border-radius: 8px;
-    border: 1px solid var(--border);
 }
 #working-indicator .spinner {
     display: inline-block;
@@ -1931,6 +1984,13 @@ body { display: flex; flex-direction: column; }
 }
 #working-indicator.active {
     display: flex;
+}
+#working-indicator #working-text {
+    animation: thinking-pulse 2s ease-in-out infinite;
+}
+@keyframes thinking-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
 }
 
 
@@ -2364,7 +2424,7 @@ body { display: flex; flex-direction: column; }
     <div id="attach-preview"></div>
     <div id="composer-shell" style="position:relative;">
         <div id="slash-autocomplete"></div>
-        <textarea id="input" rows="1" placeholder="Ask Junior anything..." autofocus></textarea>
+        <textarea id="input" rows="1" placeholder="Ask JuniorGH anything..." autofocus></textarea>
         <div id="composer-toolbar">
             <button id="btn-attach" class="composer-btn" title="Attach context"><i class="codicon codicon-add"></i></button>
             <span class="agent-mode"><span class="agent-icon">&#9672;</span> Agent</span>
@@ -2393,6 +2453,7 @@ function getNonce(): string {
     }
     return nonce;
 }
+
 
 
 

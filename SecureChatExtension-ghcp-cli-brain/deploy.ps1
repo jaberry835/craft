@@ -1,12 +1,12 @@
 <#
 .SYNOPSIS
-    Build, install, and uninstall the Junior VS Code extension.
+    Build, install, and uninstall the JuniorGH VS Code extension.
 
 .PARAMETER Action
     The action to perform: build, install, uninstall, or reinstall.
 
 .PARAMETER DefaultSettings
-    Optional path to a JSON file containing `junior.*` settings whose values
+    Optional path to a JSON file containing `juniorgh.*` settings whose values
     should override configuration defaults in package.json for this build.
     These become extension defaults inside the VSIX. They do not modify a
     user's existing settings.json, and any user/workspace setting still wins.
@@ -29,8 +29,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$ExtensionId = "ms-csu-ett.junior"
-$VsixPattern = "junior-*.vsix"
+$ExtensionId = "ms-csu-ett.juniorgh"
+$VsixPattern = "juniorgh-*.vsix"
 
 function Write-Step($msg) { Write-Host "`n>> $msg" -ForegroundColor Cyan }
 function Write-Ok($msg)   { Write-Host "   $msg" -ForegroundColor Green }
@@ -75,12 +75,12 @@ function Set-DefaultSettingsForBuild {
         }
 
         $appliedCount = 0
-        $ignoredNonJuniorCount = 0
+        $ignoredNonJuniorGHCount = 0
         $ignoredUnknownCount = 0
         foreach ($setting in $defaultsJson.PSObject.Properties) {
-            if (-not $setting.Name.StartsWith("junior.")) {
-                Write-Warn "Skipping non-junior setting: $($setting.Name)"
-                $ignoredNonJuniorCount++
+            if (-not $setting.Name.StartsWith("juniorgh.")) {
+                Write-Warn "Skipping non-juniorgh setting: $($setting.Name)"
+                $ignoredNonJuniorGHCount++
                 continue
             }
 
@@ -96,8 +96,8 @@ function Set-DefaultSettingsForBuild {
 
         $packageJson | ConvertTo-Json -Depth 100 | Set-Content -Path $PackageJsonPath -Encoding utf8
         Write-Ok "Applied $appliedCount default setting override(s) to package.json for this build."
-        if ($ignoredNonJuniorCount -gt 0 -or $ignoredUnknownCount -gt 0) {
-            Write-Warn "Ignored $ignoredNonJuniorCount non-junior setting(s) and $ignoredUnknownCount unknown junior setting(s)."
+        if ($ignoredNonJuniorGHCount -gt 0 -or $ignoredUnknownCount -gt 0) {
+            Write-Warn "Ignored $ignoredNonJuniorGHCount non-juniorgh setting(s) and $ignoredUnknownCount unknown juniorgh setting(s)."
         }
         Write-Warn "These values become VSIX defaults only. They do not write into VS Code's settings.json, and existing user/workspace values override them."
     } catch {
@@ -156,7 +156,7 @@ function Invoke-Install {
 
 function Invoke-Uninstall {
     Write-Step "To uninstall, open VS Code and run:"
-    Write-Ok "Ctrl+Shift+P > 'Extensions: Uninstall' on Junior"
+    Write-Ok "Ctrl+Shift+P > 'Extensions: Uninstall' on JuniorGH"
 }
 
 function Invoke-Reinstall {

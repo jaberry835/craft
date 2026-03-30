@@ -1,6 +1,6 @@
-# Junior — VS Code Chat UI for GitHub Copilot CLI
+# JuniorGH — VS Code Chat UI for GitHub Copilot CLI
 
-A VS Code extension that provides a **Copilot-like chat panel** powered by a local **GitHub Copilot CLI** runtime (`copilot --acp --stdio`). Junior is a lightweight UI shell — GitHub's full professional agent (tools, model access, context gathering) runs inside the CLI process.
+A VS Code extension that provides a **Copilot-like chat panel** powered by a local **GitHub Copilot CLI** runtime (`copilot --acp --stdio`). JuniorGH is a lightweight UI shell — GitHub's full professional agent (tools, model access, context gathering) runs inside the CLI process.
 
 ## Features
 
@@ -31,28 +31,28 @@ Use the helper script from the project root:
 # Or build and print install path/instructions
 .\deploy.ps1 install
 
-# Build VSIX with custom default junior.* settings baked in
+# Build VSIX with custom default juniorgh.* settings baked in
 .\deploy.ps1 build -DefaultSettings .\settings.default.json
 ```
 
-`-DefaultSettings` accepts a JSON object of `junior.*` keys and values. During packaging, those values temporarily override `package.json` defaults so the generated `.vsix` ships with your preset defaults. The working tree `package.json` is restored after the build.
+`-DefaultSettings` accepts a JSON object of `juniorgh.*` keys and values. During packaging, those values temporarily override `package.json` defaults so the generated `.vsix` ships with your preset defaults. The working tree `package.json` is restored after the build.
 
 Then in VS Code:
 1. Open **Command Palette** (`Ctrl+Shift+P`)
 2. Run **Extensions: Install from VSIX...**
-3. Select the generated `junior-*.vsix`
+3. Select the generated `juniorgh-*.vsix`
 4. Run **Developer: Reload Window**
 
 ### 2. Configure the Copilot CLI
 
-Junior launches `copilot --acp --stdio` as its chat backend. Optional settings in `settings.json`:
+JuniorGH launches `copilot --acp --stdio` as its chat backend. Optional settings in `settings.json`:
 
 ```jsonc
 {
-  "junior.copilotCli.path": "copilot",                 // Path to copilot binary (default: "copilot")
-  "junior.copilotCli.home": "C:/Tools/copilot-home",   // Override COPILOT_HOME directory
-  "junior.copilotCli.model": "claude-sonnet-4.6",      // Active model (empty = CLI default)
-  "junior.copilotCli.additionalArgs": []                // Extra CLI arguments
+  "juniorgh.copilotCli.path": "copilot",                 // Path to copilot binary (default: "copilot")
+  "juniorgh.copilotCli.home": "C:/Tools/copilot-home",   // Override COPILOT_HOME directory
+  "juniorgh.copilotCli.model": "claude-sonnet-4.6",      // Active model (empty = CLI default)
+  "juniorgh.copilotCli.additionalArgs": []                // Extra CLI arguments
 }
 ```
 
@@ -68,11 +68,11 @@ The CLI will respond with a table of model names, IDs, and tiers. Use those IDs 
 
 #### Configuring the Model Picker
 
-The model picker dropdown is populated from `junior.copilotCli.models`. Since available models vary by customer/license, the extension ships with an empty default list. Configure it per-user in `settings.json`:
+The model picker dropdown is populated from `juniorgh.copilotCli.models`. Since available models vary by customer/license, the extension ships with an empty default list. Configure it per-user in `settings.json`:
 
 ```jsonc
 {
-  "junior.copilotCli.models": [
+  "juniorgh.copilotCli.models": [
     { "name": "Claude Sonnet 4 (default)", "id": "" },
     { "name": "Claude Sonnet 4.6", "id": "claude-sonnet-4.6" },
     { "name": "GPT-5.4", "id": "gpt-5.4" },
@@ -95,18 +95,18 @@ This lets you ship a customer-specific model list without requiring each user to
 
 Inline ghost-text completions use a separate Azure OpenAI / OpenAI connection (independent of the CLI). To enable them:
 
-1. Run **Junior: Set API Key** from the Command Palette to store your key securely
+1. Run **JuniorGH: Set API Key** from the Command Palette to store your key securely
 2. Configure your provider in `settings.json`:
 
 ```jsonc
 {
-  "junior.azureOpenAI.provider": "openai",
-  "junior.azureOpenAI.openaiBaseUrl": "https://api.openai.com/v1",
-  "junior.azureOpenAI.deployments": [
-    { "name": "GPT-4o Mini", "deploymentId": "gpt-4o-mini" }
+  "juniorgh.api.provider": "openai",
+  "juniorgh.openai.baseUrl": "https://api.openai.com/v1",
+  "juniorgh.api.models": [
+    { "name": "GPT-4o Mini", "id": "gpt-4o-mini" }
   ],
-  "junior.inlineCompletions.enabled": true,
-  "junior.inlineCompletions.deployment": "gpt-4o-mini"
+  "juniorgh.inlineCompletions.enabled": true,
+  "juniorgh.inlineCompletions.model": "gpt-4o-mini"
 }
 ```
 
@@ -118,7 +118,7 @@ Add MCP tool servers to extend the agent's capabilities:
 
 ```jsonc
 {
-  "junior.mcp.servers": {
+  "juniorgh.mcp.servers": {
     "filesystem": {
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/dir"]
@@ -131,7 +131,7 @@ Add MCP tool servers to extend the agent's capabilities:
 
 ```jsonc
 {
-  "junior.mcp.servers": {
+  "juniorgh.mcp.servers": {
     "remote-tools": {
       "url": "https://my-mcp-server.internal:8080/mcp",
       "headers": { "Authorization": "Bearer my-token" }
@@ -140,11 +140,11 @@ Add MCP tool servers to extend the agent's capabilities:
 }
 ```
 
-By default, Junior also merges MCP servers from `mcp.servers` (VS Code's built-in MCP setting). Set `junior.mcp.includeExternalServers` to `false` to only use Junior's own setting.
+By default, JuniorGH also merges MCP servers from `mcp.servers` (VS Code's built-in MCP setting). Set `juniorgh.mcp.includeExternalServers` to `false` to only use JuniorGH's own setting.
 
 ### 5. (Optional) Spec Kit Integration — Spec-Driven Development
 
-Junior supports **slash commands** that integrate with [GitHub Spec Kit](https://github.com/github/spec-kit), enabling structured spec-driven development workflows directly from the chat panel.
+JuniorGH supports **slash commands** that integrate with [GitHub Spec Kit](https://github.com/github/spec-kit), enabling structured spec-driven development workflows directly from the chat panel.
 
 #### Quick Setup
 
@@ -153,19 +153,19 @@ Junior supports **slash commands** that integrate with [GitHub Spec Kit](https:/
 uv tool install specify-cli --from git+https://github.com/github/spec-kit.git
 
 # Initialize your project (one-time per repo)
-specify init . --ai generic --ai-commands-dir .junior/commands
+specify init . --ai generic --ai-commands-dir .juniorgh/commands
 ```
 
-This creates `.junior/commands/` with prompt template `.md` files for each workflow step. **Commit these files** — other developers on the team won't need Spec Kit installed.
+This creates `.juniorgh/commands/` with prompt template `.md` files for each workflow step. **Commit these files** — other developers on the team won't need Spec Kit installed.
 
 Type `/` in the chat input to see available commands with autocomplete (e.g. `/speckit.specify`, `/speckit.plan`, `/speckit.implement`).
 
 #### Custom Slash Commands
 
-Any `.md` file placed in the command directories works as a slash command. Junior scans these directories (in priority order):
+Any `.md` file placed in the command directories works as a slash command. JuniorGH scans these directories (in priority order):
 
-1. Any directories listed in `junior.slashCommands.directories` (setting)
-2. `.junior/commands/`
+1. Any directories listed in `juniorgh.slashCommands.directories` (setting)
+2. `.juniorgh/commands/`
 3. `.github/copilot/commands/`
 4. `.github/commands/`
 
@@ -173,9 +173,9 @@ Any `.md` file placed in the command directories works as a slash command. Junio
 
 ### Open the Chat Panel
 
-- Click the **Junior** icon in the Activity Bar (left sidebar), or
+- Click the **JuniorGH** icon in the Activity Bar (left sidebar), or
 - Press `Ctrl+Shift+I`, or
-- Run **Junior: Open Chat** from the Command Palette
+- Run **JuniorGH: Open Chat** from the Command Palette
 
 ### Chat with the Agent
 
@@ -187,35 +187,35 @@ Press **Shift+Enter** for a newline without sending.
 
 | Command | Description |
 |---------|-------------|
-| `Junior: Open Chat` | Focus the chat panel |
-| `Junior: Open Chat in Editor Tab` | Open chat as a top-level editor tab |
-| `Junior: New Chat Session` | Start a fresh conversation |
-| `Junior: Select Model` | Set the Copilot CLI model |
-| `Junior: Index Workspace` | Re-scan workspace files (manual refresh) |
-| `Junior: Explain Selected Code` | Explain highlighted code |
-| `Junior: Review Selected Code` | Code review of selection |
-| `Junior: Fix Selected Code` | Fix issues in selection |
-| `Junior: Manage MCP Servers` | Connect/disconnect MCP servers |
-| `Junior: Cancel Agent Run` | Stop the current agent loop |
-| `Junior: Toggle Chat History` | Show/hide the session history panel |
-| `Junior: Set API Key` | Store API key securely (for inline completions) |
-| `Junior: Trigger Inline Completion` | Manually trigger a ghost-text suggestion (`Alt+\`) |
-| `Junior: Show Token Usage` | Show detailed session token usage breakdown |
-| `Junior: Reset Token Usage` | Reset all session token counters to zero |
+| `JuniorGH: Open Chat` | Focus the chat panel |
+| `JuniorGH: Open Chat in Editor Tab` | Open chat as a top-level editor tab |
+| `JuniorGH: New Chat Session` | Start a fresh conversation |
+| `JuniorGH: Select Model` | Set the Copilot CLI model |
+| `JuniorGH: Index Workspace` | Re-scan workspace files (manual refresh) |
+| `JuniorGH: Explain Selected Code` | Explain highlighted code |
+| `JuniorGH: Review Selected Code` | Code review of selection |
+| `JuniorGH: Fix Selected Code` | Fix issues in selection |
+| `JuniorGH: Manage MCP Servers` | Connect/disconnect MCP servers |
+| `JuniorGH: Cancel Agent Run` | Stop the current agent loop |
+| `JuniorGH: Toggle Chat History` | Show/hide the session history panel |
+| `JuniorGH: Set API Key` | Store API key securely (for inline completions) |
+| `JuniorGH: Trigger Inline Completion` | Manually trigger a ghost-text suggestion (`Alt+\`) |
+| `JuniorGH: Show Token Usage` | Show detailed session token usage breakdown |
+| `JuniorGH: Reset Token Usage` | Reset all session token counters to zero |
 
 ## Architecture
 
-Junior is a thin UI shell. The Copilot CLI does the heavy lifting.
+JuniorGH is a thin UI shell. The Copilot CLI does the heavy lifting.
 
 ```
-┌─────────────────────┐     ACP (JSON-RPC/stdio)     ┌──────────────────┐
-│  Junior Extension   │ ◄──────────────────────────► │  copilot CLI     │
-│                     │                               │                  │
+┌───────────────────────┐     ACP (JSON-RPC/stdio)     ┌──────────────────┐
+│  JuniorGH Extension   │ ◄──────────────────────────► │  copilot CLI     │
+│                       │                               │                  │
 │  chatViewProvider   │   Messages, tool calls,       │  Agent loop      │
 │  copilotCliAcp      │   working blocks, thoughts    │  20+ tools       │
 │  Runtime            │                               │  Model access    │
 │  sessionManager     │                               │  Context mgmt    │
-└─────────────────────┘                               └──────────────────┘
+└───────────────────────┘                               └──────────────────┘
 ```
 
 ```
@@ -244,9 +244,9 @@ media/
 ### How It Works
 
 1. You type a message in the chat panel
-2. Junior sends it to the Copilot CLI over ACP (JSON-RPC over stdio)
+2. JuniorGH sends it to the Copilot CLI over ACP (JSON-RPC over stdio)
 3. The CLI runs its full agent loop — reading files, searching code, editing files, running commands — all using GitHub's professional toolset and models
-4. Tool calls, thoughts, and working progress stream back to Junior for live visualization
+4. Tool calls, thoughts, and working progress stream back to JuniorGH for live visualization
 5. The final response is rendered as streaming markdown in the chat panel
 
 ### Session Persistence
@@ -284,5 +284,6 @@ Press **F5** to launch the Extension Development Host.
 ## License
 
 MIT
+
 
 

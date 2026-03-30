@@ -17,17 +17,16 @@
     "juniorgh.inlineCompletions.enabled": true,
     "juniorgh.inlineCompletions.model": "gpt-4o",
     "juniorgh.api.models": [
-        { "name": "GPT-4o", "id": "gpt-4o", "apiVersion": "2025-03-01-preview" }
+        { "name": "GPT-4o", "id": "gpt-4o" }
     ],
-    "juniorgh.apim.baseUrl": "https://rudeaoaiapi.azure-api.net/foundryapi",
-    "juniorgh.api.provider": "apim",
-    "juniorgh.azure.apiVersion": "2025-03-01-preview",
-    "juniorgh.copilotCli.providerBaseUrl": "https://rudeaoaiapi.azure-api.net/foundryapi",
-    "juniorgh.copilotCli.providerType": "azure",
+    "juniorgh.openai.baseUrl": "https://api.openai.com/v1",
+    "juniorgh.api.provider": "openai",
+    "juniorgh.copilotCli.providerBaseUrl": "https://api.openai.com/v1",
+    "juniorgh.copilotCli.providerType": "openai",
     "juniorgh.copilotCli.providerApiKey": "",
-    "juniorgh.copilotCli.providerAzureApiVersion": "2025-03-01-preview",
 
     "juniorgh.mcp.includeExternalServers": true,
     "juniorgh.mcp.externalServerSettings": ["mcp.servers"],
     "juniorgh.mcp.servers": {}
 }
+

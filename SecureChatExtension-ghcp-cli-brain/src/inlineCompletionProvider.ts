@@ -92,19 +92,19 @@ export class InlineCompletionProvider implements vscode.InlineCompletionItemProv
         private readonly tokenTracker?: TokenTracker
     ) {
         this.statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-        this.statusBar.command = 'junior.triggerInlineCompletion';
+        this.statusBar.command = 'juniorgh.triggerInlineCompletion';
         this.setStatusIdle();
         this.statusBar.show();
     }
 
     private setStatusIdle() {
-        this.statusBar.text = '$(sparkle) Junior';
-        this.statusBar.tooltip = 'Junior inline completions — click or Alt+\\ to trigger';
+        this.statusBar.text = '$(sparkle) JuniorGH';
+        this.statusBar.tooltip = 'JuniorGH inline completions — click or Alt+\\ to trigger';
     }
 
     private setStatusFetching() {
-        this.statusBar.text = '$(loading~spin) Junior';
-        this.statusBar.tooltip = 'Junior: fetching completion…';
+        this.statusBar.text = '$(loading~spin) JuniorGH';
+        this.statusBar.tooltip = 'JuniorGH: fetching completion…';
     }
 
     // ── Main entry point ──
@@ -274,7 +274,7 @@ export class InlineCompletionProvider implements vscode.InlineCompletionItemProv
         }
 
         // Set deployment override once for all parallel calls
-        const completionDeployment = getSetting<string>('inlineCompletions.deployment');
+        const completionDeployment = getSetting<string>('inlineCompletions.model');
         if (completionDeployment) {
             this.aoaiClient.setDeploymentOverride(completionDeployment);
         }
@@ -406,7 +406,7 @@ export class InlineCompletionProvider implements vscode.InlineCompletionItemProv
         position: vscode.Position,
         abortSignal: AbortSignal
     ): Promise<string | undefined> {
-        const completionDeployment = getSetting<string>('inlineCompletions.deployment');
+        const completionDeployment = getSetting<string>('inlineCompletions.model');
         if (completionDeployment) {
             this.aoaiClient.setDeploymentOverride(completionDeployment);
         }

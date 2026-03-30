@@ -21,22 +21,20 @@ export class AzureOpenAIClient {
 
     /** Returns the current effective deployment ID (override or configured). */
     getEffectiveDeployment(): string {
-        return this.deploymentOverride || getSetting<string>('azureOpenAI.activeDeployment') || '';
+        return this.deploymentOverride || getSetting<string>('api.activeModel') || '';
     }
 
     setSecretStorage(secrets: vscode.SecretStorage) {
         this.secrets = secrets;
         // Invalidate cache when secrets change
         secrets.onDidChange(e => {
-            if (e.key === 'junior.apiKey' || e.key === 'securechat.apiKey') { this.cachedSecretKey = undefined; }
+            if (e.key === 'juniorgh.apiKey') { this.cachedSecretKey = undefined; }
         });
     }
 
     async storeApiKey(key: string): Promise<void> {
         if (!this.secrets) { return; }
-        await this.secrets.store('junior.apiKey', key);
-        // Keep legacy key updated for compatibility with older builds.
-        await this.secrets.store('securechat.apiKey', key);
+        await this.secrets.store('juniorgh.apiKey', key);
         this.cachedSecretKey = key;
     }
 
@@ -45,24 +43,24 @@ export class AzureOpenAIClient {
         if (this.cachedSecretKey) { return this.cachedSecretKey; }
         // 2. SecretStorage
         if (this.secrets) {
-            const stored = await this.secrets.get('junior.apiKey') || await this.secrets.get('securechat.apiKey');
+            const stored = await this.secrets.get('juniorgh.apiKey');
             if (stored) {
                 this.cachedSecretKey = stored;
                 return stored;
             }
         }
         // 3. Fallback to settings.json
-        return getSetting<string>('azureOpenAI.apiKey') || '';
+        return getSetting<string>('api.apiKey') || '';
     }
 
     getConfig(): AoaiConfig {
-        const provider = (getSetting<string>('azureOpenAI.provider') || 'direct') as 'direct' | 'apim' | 'openai';
-        const endpoint = getSetting<string>('azureOpenAI.endpoint') || '';
-        const apimBaseUrl = getSetting<string>('azureOpenAI.apimBaseUrl') || '';
+        const provider = (getSetting<string>('api.provider') || 'azure') as 'azure' | 'apim' | 'openai';
+        const endpoint = getSetting<string>('azure.endpoint') || '';
+        const apimBaseUrl = getSetting<string>('apim.baseUrl') || '';
         // apiKey is resolved async via getApiKey() — callers that need it should call getConfigAsync()
-        const apiKey = this.cachedSecretKey || getSetting<string>('azureOpenAI.apiKey') || '';
+        const apiKey = this.cachedSecretKey || getSetting<string>('api.apiKey') || '';
         const deploymentId = this.getEffectiveDeployment();
-        const apiVersion = getSetting<string>('azureOpenAI.apiVersion') || '2024-06-01';
+        const apiVersion = getSetting<string>('azure.apiVersion') || '2024-06-01';
         const maxTokens = getSetting<number>('maxTokens') || 16384;
         const temperature = getSetting<number>('temperature') || 0.3;
 
@@ -70,12 +68,12 @@ export class AzureOpenAIClient {
     }
 
     async getConfigAsync(): Promise<AoaiConfig> {
-        const provider = (getSetting<string>('azureOpenAI.provider') || 'direct') as 'direct' | 'apim' | 'openai';
-        const endpoint = getSetting<string>('azureOpenAI.endpoint') || '';
-        const apimBaseUrl = getSetting<string>('azureOpenAI.apimBaseUrl') || '';
+        const provider = (getSetting<string>('api.provider') || 'azure') as 'azure' | 'apim' | 'openai';
+        const endpoint = getSetting<string>('azure.endpoint') || '';
+        const apimBaseUrl = getSetting<string>('apim.baseUrl') || '';
         const apiKey = await this.getApiKey();
         const deploymentId = this.getEffectiveDeployment();
-        const apiVersion = getSetting<string>('azureOpenAI.apiVersion') || '2024-06-01';
+        const apiVersion = getSetting<string>('azure.apiVersion') || '2024-06-01';
         const maxTokens = getSetting<number>('maxTokens') || 16384;
         const temperature = getSetting<number>('temperature') || 0.3;
 
@@ -85,16 +83,16 @@ export class AzureOpenAIClient {
     async validate(): Promise<string | null> {
         const c = await this.getConfigAsync();
         if (c.provider === 'openai') {
-            if (!c.apiKey) { return 'OpenAI API key is not configured. Run "Junior: Set API Key" to store it securely.'; }
-            if (!c.deploymentId) { return 'No model selected. Run "Junior: Select Model" or add models to the deployments list.'; }
+            if (!c.apiKey) { return 'OpenAI API key is not configured. Run "JuniorGH: Set API Key" to store it securely.'; }
+            if (!c.deploymentId) { return 'No model selected. Run "JuniorGH: Select Model" or add models to the deployments list.'; }
         } else if (c.provider === 'apim') {
-            if (!c.apimBaseUrl) { return 'APIM base URL is not configured. Set junior.azureOpenAI.apimBaseUrl in settings.'; }
-            if (!c.apiKey) { return 'Azure OpenAI API key is not configured. Run "Junior: Set API Key" to store it securely.'; }
-            if (!c.deploymentId) { return 'No model deployment selected. Run "Junior: Select Model".'; }
+            if (!c.apimBaseUrl) { return 'APIM base URL is not configured. Set juniorgh.apim.baseUrl in settings.'; }
+            if (!c.apiKey) { return 'Azure OpenAI API key is not configured. Run "JuniorGH: Set API Key" to store it securely.'; }
+            if (!c.deploymentId) { return 'No model deployment selected. Run "JuniorGH: Select Model".'; }
         } else {
             if (!c.endpoint) { return 'Azure OpenAI endpoint is not configured.'; }
-            if (!c.apiKey) { return 'Azure OpenAI API key is not configured. Run "Junior: Set API Key" to store it securely.'; }
-            if (!c.deploymentId) { return 'No model deployment selected. Run "Junior: Select Model".'; }
+            if (!c.apiKey) { return 'Azure OpenAI API key is not configured. Run "JuniorGH: Set API Key" to store it securely.'; }
+            if (!c.deploymentId) { return 'No model deployment selected. Run "JuniorGH: Select Model".'; }
         }
         return null;
     }
@@ -113,7 +111,7 @@ export class AzureOpenAIClient {
 
         let url: URL;
         if (config.provider === 'openai') {
-            const openaiBase = (getSetting<string>('azureOpenAI.openaiBaseUrl') || 'https://api.openai.com/v1').replace(/\/+$/, '');
+            const openaiBase = (getSetting<string>('openai.baseUrl') || 'https://api.openai.com/v1').replace(/\/+$/, '');
             url = new URL(`${openaiBase}/chat/completions`);
         } else {
             const base = (config.provider === 'apim' ? config.apimBaseUrl : config.endpoint).replace(/\/+$/, '');
@@ -242,7 +240,7 @@ export class AzureOpenAIClient {
         apiKey: string,
         abortSignal?: AbortSignal,
         maxRetries: number = 3,
-        provider: 'direct' | 'apim' | 'openai' = 'direct'
+        provider: 'azure' | 'apim' | 'openai' = 'azure'
     ): Promise<AsyncIterable<string>> {
         for (let attempt = 0; attempt <= maxRetries; attempt++) {
             try {
@@ -281,7 +279,7 @@ export class AzureOpenAIClient {
         body: string,
         apiKey: string,
         abortSignal?: AbortSignal,
-        provider: 'direct' | 'apim' | 'openai' = 'direct'
+        provider: 'azure' | 'apim' | 'openai' = 'azure'
     ): Promise<AsyncIterable<string>> {
         return new Promise((resolve, reject) => {
             if (abortSignal?.aborted) {

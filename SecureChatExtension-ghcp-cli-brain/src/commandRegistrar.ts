@@ -36,37 +36,37 @@ export function registerCommands(deps: CommandRegistrarDeps): void {
     } = deps;
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('junior.openChat', () => {
-            vscode.commands.executeCommand('junior.chatView.focus');
+        vscode.commands.registerCommand('juniorgh.openChat', () => {
+            vscode.commands.executeCommand('juniorgh.chatView.focus');
         })
     );
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('junior.openChatTab', () => {
+        vscode.commands.registerCommand('juniorgh.openChatTab', () => {
             chatViewProvider.openInTab();
         })
     );
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('junior.newSession', () => {
+        vscode.commands.registerCommand('juniorgh.newSession', () => {
             chatViewProvider.newSession();
         })
     );
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('junior.toggleHistory', () => {
+        vscode.commands.registerCommand('juniorgh.toggleHistory', () => {
             chatViewProvider.toggleHistory();
         })
     );
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('junior.cancelAgent', () => {
+        vscode.commands.registerCommand('juniorgh.cancelAgent', () => {
             chatViewProvider.cancelAgent();
         })
     );
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('junior.setApiKey', async () => {
+        vscode.commands.registerCommand('juniorgh.setApiKey', async () => {
             const key = await vscode.window.showInputBox({
                 prompt: 'Enter your Azure OpenAI API key',
                 password: true,
@@ -80,12 +80,12 @@ export function registerCommands(deps: CommandRegistrarDeps): void {
     );
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('junior.indexWorkspace', async () => {
+        vscode.commands.registerCommand('juniorgh.indexWorkspace', async () => {
             try {
                 await vscode.window.withProgress(
                     {
                         location: vscode.ProgressLocation.Notification,
-                        title: 'Junior: Indexing workspace...',
+                        title: 'JuniorGH: Indexing workspace...',
                         cancellable: true
                     },
                     async (progress, token) => {
@@ -96,7 +96,7 @@ export function registerCommands(deps: CommandRegistrarDeps): void {
                         progress.report({ message: 'Indexing semantic chunks...' });
                         await semanticIndexer.indexWorkspace(workspaceIndexer, progress, token, changed);
                         vscode.window.showInformationMessage(
-                            `Junior: Indexed ${workspaceIndexer.getFileCount()} files, ${symbolIndexer.getSymbolFileCount()} symbol files, ${semanticIndexer.getChunkCount()} semantic chunks.`
+                            `JuniorGH: Indexed ${workspaceIndexer.getFileCount()} files, ${symbolIndexer.getSymbolFileCount()} symbol files, ${semanticIndexer.getChunkCount()} semantic chunks.`
                         );
                     }
                 );
@@ -104,13 +104,13 @@ export function registerCommands(deps: CommandRegistrarDeps): void {
                 const message = err instanceof Error ? err.message : String(err);
                 const stack = err instanceof Error ? err.stack : '';
                 logError(`indexWorkspace error: ${message}\n${stack}`);
-                vscode.window.showErrorMessage(`Junior: Indexing failed — ${message}`);
+                vscode.window.showErrorMessage(`JuniorGH: Indexing failed — ${message}`);
             }
         })
     );
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('junior.selectModel', async () => {
+        vscode.commands.registerCommand('juniorgh.selectModel', async () => {
             try {
                 log('selectModel command invoked');
 
@@ -171,20 +171,20 @@ export function registerCommands(deps: CommandRegistrarDeps): void {
                 chatViewProvider.notifyModelChanged(displayName);
                 vscode.window.showInformationMessage(
                     selectedModel
-                        ? `Junior: Model set to ${displayName}`
-                        : 'Junior: Using the Copilot CLI default model.'
+                        ? `JuniorGH: Model set to ${displayName}`
+                        : 'JuniorGH: Using the Copilot CLI default model.'
                 );
             } catch (err: unknown) {
                 const message = err instanceof Error ? err.message : String(err);
                 const stack = err instanceof Error ? err.stack : '';
                 logError(`selectModel error: ${message}\n${stack}`);
-                vscode.window.showErrorMessage(`Junior: Select Model failed — ${message}`);
+                vscode.window.showErrorMessage(`JuniorGH: Select Model failed — ${message}`);
             }
         })
     );
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('junior.manageMcpServers', async () => {
+        vscode.commands.registerCommand('juniorgh.manageMcpServers', async () => {
             try {
                 const connected = mcpClient.getConnectedServers();
                 const items: vscode.QuickPickItem[] = [
@@ -196,57 +196,57 @@ export function registerCommands(deps: CommandRegistrarDeps): void {
                 if (!pick) { return; }
                 if (pick.label.includes('Connect All')) {
                     await mcpClient.connectConfiguredServers();
-                    vscode.window.showInformationMessage(`Junior: ${mcpClient.getToolCount()} MCP tools available.`);
+                    vscode.window.showInformationMessage(`JuniorGH: ${mcpClient.getToolCount()} MCP tools available.`);
                 } else if (pick.label.includes('Disconnect All')) {
                     mcpClient.disconnectAll();
-                    vscode.window.showInformationMessage('Junior: All MCP servers disconnected.');
+                    vscode.window.showInformationMessage('JuniorGH: All MCP servers disconnected.');
                 } else {
                     const name = pick.label.replace('$(debug-disconnect) Disconnect: ', '');
                     mcpClient.disconnectServer(name);
-                    vscode.window.showInformationMessage(`Junior: Disconnected ${name}.`);
+                    vscode.window.showInformationMessage(`JuniorGH: Disconnected ${name}.`);
                 }
             } catch (err: unknown) {
                 const message = err instanceof Error ? err.message : String(err);
                 const stack = err instanceof Error ? err.stack : '';
                 logError(`manageMcpServers error: ${message}\n${stack}`);
-                vscode.window.showErrorMessage(`Junior: MCP server operation failed — ${message}`);
+                vscode.window.showErrorMessage(`JuniorGH: MCP server operation failed — ${message}`);
             }
         })
     );
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('junior.triggerInlineCompletion', () => {
+        vscode.commands.registerCommand('juniorgh.triggerInlineCompletion', () => {
             vscode.commands.executeCommand('editor.action.inlineSuggest.trigger');
         })
     );
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('junior.showTokenUsage', () => {
+        vscode.commands.registerCommand('juniorgh.showTokenUsage', () => {
             tokenTracker.showDetailedUsage();
         })
     );
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('junior.resetTokenUsage', () => {
+        vscode.commands.registerCommand('juniorgh.resetTokenUsage', () => {
             tokenTracker.reset();
-            vscode.window.showInformationMessage('Junior: Token usage counters reset.');
+            vscode.window.showInformationMessage('JuniorGH: Token usage counters reset.');
         })
     );
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('junior.explainSelection', () => {
+        vscode.commands.registerCommand('juniorgh.explainSelection', () => {
             sendSelectionToChat(chatViewProvider, 'Explain this code in detail:\n\n');
         })
     );
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('junior.reviewSelection', () => {
+        vscode.commands.registerCommand('juniorgh.reviewSelection', () => {
             sendSelectionToChat(chatViewProvider, 'Review this code for bugs, security issues, and improvements:\n\n');
         })
     );
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('junior.fixSelection', () => {
+        vscode.commands.registerCommand('juniorgh.fixSelection', () => {
             sendSelectionToChat(chatViewProvider, 'Fix any issues in this code and explain what was wrong:\n\n');
         })
     );
@@ -262,5 +262,6 @@ function sendSelectionToChat(chatViewProvider: ChatViewProvider, prefix: string)
 
     const message = `${prefix}\`\`\`${lang}\n// File: ${file}\n${selection}\n\`\`\``;
     chatViewProvider.sendMessageFromExtension(message);
-    vscode.commands.executeCommand('junior.chatView.focus');
+    vscode.commands.executeCommand('juniorgh.chatView.focus');
 }
+

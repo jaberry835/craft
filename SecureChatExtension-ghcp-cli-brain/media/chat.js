@@ -1,5 +1,5 @@
 // @ts-nocheck
-// Junior webview script — loaded as an external file to avoid template-literal escaping issues.
+// JuniorGH webview script — loaded as an external file to avoid template-literal escaping issues.
 
 // Global error handler — shows any JS errors in the webview UI
 window.onerror = function(msg, src, line, col, err) {
@@ -33,6 +33,33 @@ window.onerror = function(msg, src, line, col, err) {
     const workingBlocksById = new Map();
     const workingEntriesById = new Map();
     let activeWorkingBlockId = null;
+
+    // ── Elapsed timer state ──
+    let agentStartedTime = 0;
+    let elapsedTimerHandle = null;
+
+    function startElapsedTimer() {
+        stopElapsedTimer();
+        elapsedTimerHandle = setInterval(function() {
+            if (!agentRunning || !agentStartedTime) { return; }
+            var secs = Math.floor((Date.now() - agentStartedTime) / 1000);
+            if (secs < 2) { return; } // Don't show for very short waits
+            var elapsed = secs < 60 ? secs + 's' : Math.floor(secs / 60) + 'm ' + (secs % 60) + 's';
+            // Append elapsed time to the working indicator text
+            if (workingEl && workingEl.classList.contains('active')) {
+                var base = workingTextEl.textContent.replace(/\s*\(\d+[ms]\s*\d*[s]?\)$/, '');
+                workingTextEl.textContent = base + ' (' + elapsed + ')';
+            }
+        }, 1000);
+    }
+
+    function stopElapsedTimer() {
+        if (elapsedTimerHandle) {
+            clearInterval(elapsedTimerHandle);
+            elapsedTimerHandle = null;
+        }
+        agentStartedTime = 0;
+    }
 
     // Tools that should never render as standalone tool-blocks (pure bookkeeping).
     const HIDDEN_TOOLS = new Set(['set_plan', 'update_plan_step']);
@@ -934,7 +961,7 @@ window.onerror = function(msg, src, line, col, err) {
                 dialog.className = 'continue-iteration-dialog';
                 dialog.innerHTML =
                     '<p>Continue to iterate?</p>' +
-                    '<div class="continue-subtitle">Junior has been working on this problem for a while (' + msg.iterationCount + ' iterations). It can continue to iterate, or you can send a new message to refine your prompt.</div>' +
+                    '<div class="continue-subtitle">JuniorGH has been working on this problem for a while (' + msg.iterationCount + ' iterations). It can continue to iterate, or you can send a new message to refine your prompt.</div>' +
                     '<div class="continue-actions">' +
                         '<button class="btn-continue">Continue</button>' +
                         '<button class="btn-pause">Pause</button>' +
@@ -1219,7 +1246,7 @@ window.onerror = function(msg, src, line, col, err) {
                     statusEl.textContent = '';
                     statusEl.classList.remove('active');
                     inputEl.disabled = false;
-                    inputEl.placeholder = 'Ask Junior anything...';
+                    inputEl.placeholder = 'Ask JuniorGH anything...';
                     inputEl.focus();
                     setAgentRunning(false);
                     if (workingEl) { workingEl.classList.remove('active'); }
@@ -1232,9 +1259,10 @@ window.onerror = function(msg, src, line, col, err) {
             }
             case 'agentDone': {
                 inputEl.disabled = false;
-                inputEl.placeholder = 'Ask Junior anything...';
+                inputEl.placeholder = 'Ask JuniorGH anything...';
                 inputEl.focus();
                 setAgentRunning(false);
+                stopElapsedTimer();
                 statusEl.textContent = '';
                 statusEl.classList.remove('active');
                 if (workingEl) { workingEl.classList.remove('active'); }
@@ -1254,10 +1282,44 @@ window.onerror = function(msg, src, line, col, err) {
                 inputEl.disabled = true;
                 inputEl.placeholder = 'Agent is working...';
                 setAgentRunning(true);
+                agentStartedTime = Date.now();
+                startElapsedTimer();
                 if (workingEl) {
                     workingTextEl.textContent = 'Thinking...';
                     workingEl.classList.add('active');
                     messagesEl.appendChild(workingEl);
+                }
+                scrollToBottom();
+                break;
+            }
+            case 'thinkingText': {
+                // Live thinking text streamed from the CLI — update the indicator
+                // to show what the agent is actually doing instead of static "Thinking..."
+                var snippet = (msg.text || '').trim();
+                // Truncate long thinking text for the indicator display
+                if (snippet.length > 120) {
+                    snippet = snippet.substring(0, 117) + '…';
+                }
+                if (snippet) {
+                    // When a working block is active, only update its status —
+                    // hide the floating indicator to avoid duplicate text.
+                    if (activeWorkingBlockId) {
+                        var wbRecord = workingBlocksById.get(activeWorkingBlockId);
+                        if (wbRecord) {
+                            setWorkingBlockStatusText(wbRecord, snippet);
+                        }
+                        if (workingEl) { workingEl.classList.remove('active'); }
+                    } else {
+                        if (workingEl) {
+                            workingTextEl.textContent = snippet;
+                            // Re-show indicator if agent is running but it was hidden
+                            // (e.g. after an assistant message was closed during a long pause)
+                            if (agentRunning && !workingEl.classList.contains('active')) {
+                                workingEl.classList.add('active');
+                                messagesEl.appendChild(workingEl);
+                            }
+                        }
+                    }
                 }
                 scrollToBottom();
                 break;
@@ -1412,8 +1474,12 @@ window.onerror = function(msg, src, line, col, err) {
             '</div>' +
             '<div class="working-block-body">' +
                 '<div class="wb-entries"></div>' +
-                '<div class="wb-live-status"><span class="wb-live-text">Working</span></div>' +
             '</div>';
+
+        // Live status sits below the card as a sibling so it's always visible
+        var statusEl = document.createElement('div');
+        statusEl.className = 'wb-live-status';
+        statusEl.innerHTML = '<span class="spinner-sm"></span><span class="wb-live-text">Working</span>';
 
         var header = card.querySelector('.working-block-header');
         header.addEventListener('click', function() {
@@ -1423,14 +1489,15 @@ window.onerror = function(msg, src, line, col, err) {
         });
 
         messagesEl.appendChild(card);
+        messagesEl.appendChild(statusEl);
         workingBlocksById.set(block.id, {
             data: block,
             el: card,
             entriesEl: card.querySelector('.wb-entries'),
             summaryEl: card.querySelector('.wb-summary'),
             titleEl: card.querySelector('.wb-title'),
-            statusEl: card.querySelector('.wb-live-status'),
-            statusTextEl: card.querySelector('.wb-live-text')
+            statusEl: statusEl,
+            statusTextEl: statusEl.querySelector('.wb-live-text')
         });
     }
 
@@ -1444,6 +1511,7 @@ window.onerror = function(msg, src, line, col, err) {
         }
         record.statusEl.style.display = 'flex';
         record.statusTextEl.textContent = trimmed;
+        scrollToBottom();
     }
 
     function createWorkingEntryElement(entry) {
@@ -1505,6 +1573,8 @@ window.onerror = function(msg, src, line, col, err) {
     function scrollWorkingBody(record) {
         var body = record && record.el && record.el.querySelector('.working-block-body');
         if (body) { body.scrollTop = body.scrollHeight; }
+        // Also scroll the outer messages container so new entries stay visible
+        scrollToBottom();
     }
 
     function appendWorkingTextEntry(blockId, entry) {
@@ -1570,7 +1640,10 @@ window.onerror = function(msg, src, line, col, err) {
         }
         record.titleEl.style.display = 'none';
         record.summaryEl.textContent = '';
-        setWorkingBlockStatusText(record, '');
+        // Remove the external live-status element
+        if (record.statusEl && record.statusEl.parentNode) {
+            record.statusEl.parentNode.removeChild(record.statusEl);
+        }
         if (collapse) {
             record.el.classList.remove('expanded');
         } else {
@@ -1582,10 +1655,11 @@ window.onerror = function(msg, src, line, col, err) {
         var record = workingBlocksById.get(blockId);
         if (!record) { return; }
         record.data.completedAt = completedAt;
-        // If the block has no entries, remove it from the DOM entirely
+        // If the block has no entries, remove it and its status element from the DOM entirely
         var entryCount = record.entriesEl ? record.entriesEl.children.length : 0;
         if (entryCount === 0) {
             if (record.el.parentNode) { record.el.parentNode.removeChild(record.el); }
+            if (record.statusEl && record.statusEl.parentNode) { record.statusEl.parentNode.removeChild(record.statusEl); }
             workingBlocksById.delete(blockId);
         } else {
             finalizeWorkingBlock(record, summary, true);
@@ -1682,4 +1756,5 @@ window.onerror = function(msg, src, line, col, err) {
     // Signal ready
     vscode.postMessage({ type: 'ready' });
 })();
+
 
