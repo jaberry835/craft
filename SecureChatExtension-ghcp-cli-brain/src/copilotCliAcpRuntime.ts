@@ -230,6 +230,7 @@ export class CopilotCliAcpRuntime implements AgentRuntime {
                 mcpServers: []
             });
             this.sessionId = state.backendSessionId;
+            await this.applyConfiguredSessionModel('load');
         } catch (err) {
             this.log?.(`ACP session/load failed, creating a fresh session instead: ${String(err)}`);
             this.sessionId = undefined;
@@ -358,7 +359,7 @@ export class CopilotCliAcpRuntime implements AgentRuntime {
         const additionalArgs = getSetting<string[]>('copilotCli.additionalArgs') || [];
         const env = { ...process.env } as NodeJS.ProcessEnv;
         const copilotHome = getSetting<string>('copilotCli.home');
-        const model = getSetting<string>('copilotCli.model');
+        const model = this.getConfiguredModel();
 
         // Prevent Copilot CLI telemetry exporters from inheriting a file/console
         // sink that can materialize stray trace artifacts in the workspace.
@@ -406,7 +407,7 @@ export class CopilotCliAcpRuntime implements AgentRuntime {
             .map(k => `${k}=${k.includes('KEY') || k.includes('TOKEN') ? '***' : env[k]}`);
         this.log?.(`CLI spawn env: ${effective.length > 0 ? effective.join(', ') : '(no COPILOT_PROVIDER_* vars — CLI will use GitHub Copilot auth)'}`);
 
-        const spawnSpec = this.resolveSpawnSpec(cliPath, additionalArgs);
+        const spawnSpec = this.resolveSpawnSpec(cliPath, additionalArgs, model);
         this.log?.(`CLI spawnSpec: command=${spawnSpec.command}, args=${JSON.stringify(spawnSpec.args)}`);
 
         this.proc = cp.spawn(spawnSpec.command, spawnSpec.args, {
@@ -482,10 +483,13 @@ export class CopilotCliAcpRuntime implements AgentRuntime {
         this.log?.('Copilot CLI connected.');
     }
 
-    private resolveSpawnSpec(cliPath: string, additionalArgs: string[]): { command: string; args: string[] } {
+    private resolveSpawnSpec(cliPath: string, additionalArgs: string[], model?: string): { command: string; args: string[] } {
         const builtInMcpsDisabled = additionalArgs.includes('--disable-builtin-mcps');
         const mcpArgs = this.buildMcpCliArgs(builtInMcpsDisabled);
-        const acpArgs = ['--acp', '--stdio', ...mcpArgs, ...additionalArgs];
+        const modelArgs = model && !this.hasExplicitCliModelArg(additionalArgs)
+            ? ['--model', model]
+            : [];
+        const acpArgs = ['--acp', '--stdio', ...mcpArgs, ...modelArgs, ...additionalArgs];
         if (process.platform !== 'win32') {
             return { command: cliPath, args: acpArgs };
         }
@@ -523,6 +527,10 @@ export class CopilotCliAcpRuntime implements AgentRuntime {
         if (path.isAbsolute(cliPath)) {
             return cliPath;
         }
+        const powerShellResolved = this.resolveWindowsCommandPathWithPowerShell(cliPath);
+        if (powerShellResolved) {
+            return powerShellResolved;
+        }
         const whereResult = cp.spawnSync('where.exe', [cliPath], {
             cwd: this.getWorkspaceRoot(),
             encoding: 'utf8'
@@ -538,6 +546,29 @@ export class CopilotCliAcpRuntime implements AgentRuntime {
             }
         }
         return cliPath;
+    }
+
+    private resolveWindowsCommandPathWithPowerShell(cliPath: string): string | undefined {
+        const shellCommand = this.resolvePowerShellCommand();
+        try {
+            const probe = cp.spawnSync(shellCommand, [
+                '-NoProfile',
+                '-NoLogo',
+                '-Command',
+                `try { (Get-Command -Name '${cliPath.replace(/'/g, "''")}' -ErrorAction Stop | Select-Object -First 1 -ExpandProperty Source) } catch { '' }`
+            ], {
+                cwd: this.getWorkspaceRoot(),
+                encoding: 'utf8'
+            });
+            const resolved = probe.stdout?.toString().trim();
+            this.log?.(`Get-Command "${cliPath}": status=${probe.status}, resolved=${resolved || '(none)'}, stderr=${probe.stderr?.toString().trim() || '(none)'}`);
+            if (probe.status === 0 && resolved) {
+                return this.findWindowsCommandCandidate(resolved) || resolved;
+            }
+        } catch (err: unknown) {
+            this.log?.(`Get-Command resolution for "${cliPath}" threw: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        return undefined;
     }
 
     private findWindowsCommandCandidate(basePath: string): string | undefined {
@@ -579,6 +610,25 @@ export class CopilotCliAcpRuntime implements AgentRuntime {
         return 'pwsh';
     }
 
+    private hasExplicitCliModelArg(args: string[]): boolean {
+        for (let index = 0; index < args.length; index += 1) {
+            const arg = args[index];
+            if (arg === '--model') {
+                return true;
+            }
+            if (arg.startsWith('--model=')) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private getConfiguredModel(): string | undefined {
+        const configuredModel = getSetting<string>('copilotCli.model');
+        const trimmedModel = configuredModel?.trim();
+        return trimmedModel ? trimmedModel : undefined;
+    }
+
     private async ensureSession(): Promise<void> {
         if (this.sessionId) {
             return;
@@ -589,6 +639,53 @@ export class CopilotCliAcpRuntime implements AgentRuntime {
         });
         this.sessionId = created.sessionId;
         this.log?.(`session/new result: ${JSON.stringify(created).slice(0, 1500)}`);
+        await this.applyConfiguredSessionModel('new');
+    }
+
+    private async applyConfiguredSessionModel(source: 'new' | 'load'): Promise<void> {
+        const sessionId = this.sessionId;
+        const modelId = this.getConfiguredModel();
+        if (!sessionId || !modelId) {
+            return;
+        }
+
+        const attempts = [
+            {
+                method: 'session/set_model',
+                params: { sessionId, modelId }
+            },
+            {
+                method: 'session/set_config_option',
+                params: { sessionId, configId: 'model', value: modelId }
+            }
+        ];
+
+        let lastError: unknown;
+        for (const attempt of attempts) {
+            try {
+                await this.request(attempt.method, attempt.params);
+                this.log?.(`Applied ACP model via ${attempt.method}: ${modelId} (${source})`);
+                return;
+            } catch (err) {
+                lastError = err;
+                const message = err instanceof Error ? err.message : String(err);
+                if (/method not found/i.test(message)) {
+                    this.log?.(`ACP method unavailable: ${attempt.method} (${source})`);
+                    continue;
+                }
+                if (/invalid model/i.test(message)) {
+                    const warning = `Configured Copilot CLI model "${modelId}" is not available in ACP mode; using the CLI default model instead.`;
+                    this.log?.(warning);
+                    this.callbacks.sendToWebview({ type: 'error', message: warning });
+                    return;
+                }
+                this.log?.(`Failed to apply ACP model via ${attempt.method} (${source}): ${message}`);
+            }
+        }
+
+        if (lastError) {
+            this.log?.(`Unable to apply configured ACP model after session/${source}: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+        }
     }
 
     private buildPromptContent(text: string, images?: string[], files?: { name: string; content: string }[]): AcpContentBlock[] {

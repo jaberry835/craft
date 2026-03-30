@@ -3,7 +3,7 @@
   "remote::https://github.com/adamruderman/McpServer::main": "91cf9e5d61b20256afffc1e0e0aeaef3f64acf9a",
   "remote::https://github.com/adamruderman/Rude-MCPServer::main": "61d32fde0c035fa224dbead24d2c2db2dc24b178",
   "remote::https://github.com/adamruderman/SecureAPI::main": "477d1beb03b58ee6c47ed125e8c94e7e73aa0a65",
-  "remote::https://github.com/adamruderman/SecureChatExtension::ghcp-cli-brain": "79a8de217a336b074bdc9cb30ddded8dd9d6579b",
+  "remote::https://github.com/adamruderman/SecureChatExtension::ghcp-cli-brain": "f915ad57c67adb886c8077adf9931a41bd1001ae",
   "remote::https://github.com/adamruderman/SecureChatExtension::main": "265d6c564d2163861d1cf9187a137a39aa629618",
   "remote::https://github.com/adamruderman/UserAccessChecker-Python::main": "501c9f9f0da72aa8f0dcf2f35c2238fd5328543e",
   "remote::https://github.com/adamruderman/UserAccessCheckerApi::main": "266ddb2ef1bca9a75687c2c11c0a3265bf6d3d64",

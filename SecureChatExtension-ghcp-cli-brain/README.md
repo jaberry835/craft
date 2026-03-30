@@ -56,6 +56,8 @@ JuniorGH launches `copilot --acp --stdio` as its chat backend. Optional settings
 }
 ```
 
+JuniorGH now reapplies the configured model to each ACP session after connect and session restore. In practice, ACP mode still only reliably accepts model IDs surfaced by the Copilot CLI model catalog. If you supply a BYOK deployment ID that ACP does not expose, the CLI falls back to its default model.
+
 #### Discovering Available Models
 
 The models available to you depend on your GitHub Copilot subscription. To find out which models you have access to, ask the Copilot CLI directly:
@@ -64,7 +66,7 @@ The models available to you depend on your GitHub Copilot subscription. To find 
 copilot -p "what models do I have access to"
 ```
 
-The CLI will respond with a table of model names, IDs, and tiers. Use those IDs to populate the model picker.
+The CLI will respond with a table of model names, IDs, and tiers. Use those IDs to populate the model picker. For ACP mode, treat that catalog as the source of truth for selectable model IDs.
 
 #### Configuring the Model Picker
 
@@ -82,6 +84,8 @@ The model picker dropdown is populated from `juniorgh.copilotCli.models`. Since 
 ```
 
 An entry with `"id": ""` means "use the Copilot CLI default model".
+
+If you are using `juniorgh.copilotCli.providerBaseUrl` for Azure OpenAI, OpenAI-compatible, or other BYOK endpoints, keep the model picker aligned with ACP-visible model IDs. A provider deployment name that works with direct `copilot -p` prompting may still be rejected or ignored in ACP mode.
 
 **For enterprise deployments**, bake a model list into the VSIX using `settings.default.json`:
 

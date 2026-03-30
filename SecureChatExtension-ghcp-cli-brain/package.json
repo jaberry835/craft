@@ -377,7 +377,7 @@
           "juniorgh.copilotCli.model": {
             "type": "string",
             "default": "",
-            "description": "Active model for the Copilot CLI runtime. Select from the models listed in juniorgh.copilotCli.models or enter any model name supported by the CLI."
+            "description": "Active model for the Copilot CLI ACP runtime. Prefer a model ID exposed by the Copilot CLI model catalog. Unsupported IDs fall back to the CLI default model."
           },
           "juniorgh.copilotCli.models": {
             "type": "array",
@@ -390,7 +390,7 @@
               "required": ["name", "id"]
             },
             "default": [],
-            "description": "List of models available for selection in the model picker. Each entry has a display name and an id passed to the Copilot CLI. An entry with an empty id means 'use the Copilot CLI default model'. Use settings.default.json with deploy.ps1 to bake in a customer-specific list."
+            "description": "List of models available for selection in the model picker. Each entry has a display name and an id passed to the Copilot CLI ACP session. Use model IDs returned by the Copilot CLI model catalog. An entry with an empty id means 'use the Copilot CLI default model'. Use settings.default.json with deploy.ps1 to bake in a customer-specific list."
           },
           "juniorgh.copilotCli.additionalArgs": {
             "type": "array",
@@ -413,7 +413,7 @@
           "juniorgh.copilotCli.providerBaseUrl": {
             "type": "string",
             "default": "",
-            "description": "BYOK: API endpoint URL (COPILOT_PROVIDER_BASE_URL). Setting this activates Bring-Your-Own-Key mode, bypassing GitHub Copilot authentication."
+            "description": "BYOK: API endpoint URL (COPILOT_PROVIDER_BASE_URL). Setting this activates Bring-Your-Own-Key mode, bypassing GitHub Copilot authentication. In ACP mode, model selection may still be limited to models exposed by the Copilot CLI catalog."
           },
           "juniorgh.copilotCli.providerType": {
             "type": "string",
