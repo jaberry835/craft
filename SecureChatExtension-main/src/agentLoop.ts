@@ -1285,11 +1285,14 @@ export class AgentLoop {
         const maxExtraTokens = includeFullTaskMemory ? 1400 : 600;
         let extraTokens = 0;
 
+        // Collect extra system messages to inject
+        const extraSystemMsgs: ChatMessage[] = [];
+
         if (taskPrompt) {
             const msg: ChatMessage = { role: 'system', content: taskPrompt };
             const tokens = this.contextManager.estimateMessageTokens(msg);
             if (tokens <= maxExtraTokens) {
-                requestMessages.push(msg);
+                extraSystemMsgs.push(msg);
                 extraTokens += tokens;
                 this.lastInjectedTaskMemoryVersion = this.taskMemory.getVersion();
             }
@@ -1299,9 +1302,20 @@ export class AgentLoop {
             const msg: ChatMessage = { role: 'system', content: repoPrompt };
             const tokens = this.contextManager.estimateMessageTokens(msg);
             if (extraTokens + tokens <= maxExtraTokens) {
-                requestMessages.push(msg);
+                extraSystemMsgs.push(msg);
                 this.lastInjectedRepoMemoryVersion = this.repoPatternStore.getVersion();
             }
+        }
+
+        // Insert extra system messages after any leading system messages so they
+        // appear at the top of the conversation, not after user/tool messages.
+        // Trailing system messages violate the API turn structure and cause invalid_prompt.
+        if (extraSystemMsgs.length > 0) {
+            let insertAt = 0;
+            while (insertAt < requestMessages.length && requestMessages[insertAt].role === 'system') {
+                insertAt++;
+            }
+            requestMessages.splice(insertAt, 0, ...extraSystemMsgs);
         }
 
         return requestMessages;
