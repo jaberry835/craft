@@ -38,7 +38,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         private sessionManager: SessionManager,
         log?: (msg: string) => void,
         private tokenTracker?: TokenTracker,
-        private inlineDiffDecorator?: InlineDiffDecorator
+        private inlineDiffDecorator?: InlineDiffDecorator,
+        private globalState?: vscode.Memento
     ) {
         this.log = log || (() => {});
         // When a file is fully resolved via inline diff CodeLens, update the dock
@@ -171,6 +172,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.handleUserMessage(text);
     }
 
+    showSplash(): void {
+        const showOnStartup = this.globalState?.get<boolean>('junior.splashOnStartup', false) ?? false;
+        this.sendToWebview({ type: 'showSplash', showOnStartup });
+    }
+
     newSession() {
         // Save current session's messages before creating a new one
         if (this.agentLoop) {
@@ -275,14 +281,40 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     if (this.tokenTracker) {
                         this.tokenTracker.setWebviewSender((m) => this.sendToWebview(m));
                     }
+                    this.maybeSendSplash();
                     break;
                 case 'requestSlashCommands':
                     this.sendSlashCommands();
+                    break;
+                case 'splashOpenSettings':
+                    vscode.commands.executeCommand('workbench.action.openSettings', 'junior');
+                    break;
+                case 'splashSetApiKey':
+                    vscode.commands.executeCommand('junior.setApiKey');
+                    break;
+                case 'splashDismissed':
+                    if (this.globalState) {
+                        this.globalState.update('junior.splashDismissed', true);
+                        if (msg.showOnStartup) {
+                            this.globalState.update('junior.splashOnStartup', true);
+                        } else {
+                            this.globalState.update('junior.splashOnStartup', false);
+                        }
+                    }
                     break;
             }
         } catch (err: any) {
             this.log(`handleWebviewMessage error: ${err.message}\n${err.stack}`);
             this.sendToWebview({ type: 'error', message: `Internal error: ${err.message}` });
+        }
+    }
+
+    private maybeSendSplash(): void {
+        if (!this.globalState) { return; }
+        const dismissed = this.globalState.get<boolean>('junior.splashDismissed', false);
+        const showOnStartup = this.globalState.get<boolean>('junior.splashOnStartup', false);
+        if (!dismissed || showOnStartup) {
+            this.sendToWebview({ type: 'showSplash', showOnStartup });
         }
     }
 
@@ -1455,18 +1487,20 @@ body { display: flex; flex-direction: column; }
 }
 
 /* ── WORKING BLOCKS (GHCP-style staged activity) ── */
-.working-block {
+.working-block-wrapper {
     margin: 4px 0;
+    flex-shrink: 0;
+}
+.working-block {
     border-radius: 8px;
     border: 1px solid rgba(255,255,255,0.06);
     background: rgba(255,255,255,0.018);
     overflow: hidden;
-    flex-shrink: 0;
 }
-.working-block.live {
+.working-block-wrapper.live .working-block {
     border-color: rgba(55, 148, 255, 0.2);
 }
-.working-block.completed {
+.working-block-wrapper.completed .working-block {
     border-color: rgba(255,255,255,0.04);
 }
 .working-block.completed .working-block-body {
@@ -1544,7 +1578,7 @@ body { display: flex; flex-direction: column; }
     font-size: 10px;
     transition: transform 0.15s ease;
 }
-.working-block.live .wb-chevron {
+.working-block-wrapper.live .wb-chevron {
     opacity: 0.35;
 }
 .working-block.expanded .wb-chevron {
@@ -1553,8 +1587,10 @@ body { display: flex; flex-direction: column; }
 .working-block-body {
     display: none;
     padding: 0 10px 8px 10px;
+    max-height: 300px;
+    overflow-y: auto;
 }
-.working-block.live .working-block-body,
+.working-block-wrapper.live .working-block-body,
 .working-block.expanded .working-block-body {
     display: block;
 }
@@ -1691,11 +1727,14 @@ body { display: flex; flex-direction: column; }
     display: flex;
     align-items: center;
     gap: 6px;
-    margin-top: 6px;
+    padding: 4px 10px 6px;
     font-size: 12px;
     color: var(--vscode-descriptionForeground, #b2b8bf);
 }
-.wb-live-text, #working-text, .working-block.live .wb-leading {
+.working-block-wrapper.completed .wb-live-status {
+    display: none;
+}
+.wb-live-text, #working-text, .working-block-wrapper.live .wb-leading {
     background: linear-gradient(
         90deg,
         var(--fg, #e8eaed) 0%,
@@ -1963,20 +2002,128 @@ body { display: flex; flex-direction: column; }
 
 #model-select {
     width: auto;
-    min-width: 130px;
-    max-width: 210px;
-    background: transparent;
-    color: var(--input-fg);
-    border: 1px solid var(--input-border);
+    min-width: 140px;
+    max-width: 260px;
+    background: var(--vscode-dropdown-background, var(--input-bg, #1e1e1e));
+    color: var(--vscode-dropdown-foreground, var(--input-fg));
+    border: 1px solid var(--vscode-dropdown-border, var(--input-border));
     border-radius: 6px;
-    padding: 3px 7px;
+    padding: 4px 8px;
     font-family: inherit;
-    font-size: 11px;
+    font-size: 12.5px;
     outline: none;
+    cursor: pointer;
 }
 #model-select:focus {
     border-color: var(--vscode-focusBorder, var(--btn-bg));
 }
+#model-select option {
+    background: var(--vscode-dropdown-listBackground, var(--vscode-dropdown-background, #252526));
+    color: var(--vscode-dropdown-foreground, var(--input-fg));
+    padding: 4px 8px;
+    font-size: 12.5px;
+}
+
+/* ATTACHMENT PREVIEW */
+
+/* ── SPLASH SCREEN ── */
+#splash-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+#splash-canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+}
+#splash-card {
+    position: relative;
+    z-index: 1;
+    background: rgba(30, 30, 30, 0.92);
+    border: 1px solid rgba(0, 164, 239, 0.35);
+    border-radius: 16px;
+    padding: 40px 36px 30px;
+    max-width: 380px;
+    width: 90%;
+    text-align: center;
+    box-shadow: 0 0 60px rgba(0, 164, 239, 0.15), 0 4px 30px rgba(0,0,0,0.5);
+    backdrop-filter: blur(8px);
+}
+#splash-card h1 {
+    margin: 0 0 6px;
+    font-size: 28px;
+    font-weight: 700;
+    background: linear-gradient(135deg, #00A4EF, #7FBA00, #FFB900, #F25022);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+#splash-card .splash-subtitle {
+    color: #aaa;
+    font-size: 13px;
+    margin-bottom: 28px;
+}
+.splash-buttons {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 22px;
+}
+.splash-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 11px 18px;
+    border: none;
+    border-radius: 8px;
+    font-size: 13.5px;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    transition: transform 0.15s, box-shadow 0.15s;
+}
+.splash-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+}
+.splash-btn:active { transform: translateY(0); }
+.splash-btn.settings-btn {
+    background: linear-gradient(135deg, #00A4EF, #0078D4);
+    color: #fff;
+}
+.splash-btn.apikey-btn {
+    background: linear-gradient(135deg, #FFB900, #F7630C);
+    color: #1e1e1e;
+}
+.splash-start {
+    display: inline-block;
+    margin: 8px 0 18px;
+    color: #7FBA00;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    border: none;
+    background: none;
+    font-family: inherit;
+    transition: color 0.15s;
+}
+.splash-start:hover { color: #9ee200; text-decoration: underline; }
+.splash-checkbox {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    font-size: 11.5px;
+    color: #888;
+}
+.splash-checkbox input { accent-color: #00A4EF; cursor: pointer; }
+.splash-checkbox label { cursor: pointer; }
 
 /* ATTACHMENT PREVIEW */
 #attach-preview {

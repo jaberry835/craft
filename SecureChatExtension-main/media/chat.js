@@ -266,7 +266,11 @@ window.onerror = function(msg, src, line, col, err) {
         for (const m of models) {
             const opt = document.createElement('option');
             opt.value = m.deploymentId;
-            opt.textContent = m.name;
+            const label = m.name || m.deploymentId;
+            opt.textContent = label !== m.deploymentId
+                ? label + '  (' + m.deploymentId + ')'
+                : label;
+            opt.title = label + (label !== m.deploymentId ? ' — ' + m.deploymentId : '');
             modelSelectEl.appendChild(opt);
         }
         modelSelectEl.disabled = false;
@@ -1329,12 +1333,116 @@ window.onerror = function(msg, src, line, col, err) {
             case 'slashCommands': {
                 slashCommands = msg.commands || [];
                 slashPendingRequest = false;
-                // Re-trigger autocomplete now that we have the list
                 updateSlashAutocomplete();
+                break;
+            }
+            case 'showSplash': {
+                showSplashScreen(msg.showOnStartup);
                 break;
             }
         }
     });
+
+    // ── Splash Screen with Matrix Code Rain ──
+    function showSplashScreen(showOnStartup) {
+        if (document.getElementById('splash-overlay')) { return; }
+
+        var overlay = document.createElement('div');
+        overlay.id = 'splash-overlay';
+
+        // Matrix rain canvas
+        var canvas = document.createElement('canvas');
+        canvas.id = 'splash-canvas';
+        overlay.appendChild(canvas);
+
+        // Content card
+        var card = document.createElement('div');
+        card.id = 'splash-card';
+        card.innerHTML =
+            '<h1>Junior</h1>' +
+            '<p class="splash-subtitle">Your AI junior programmer</p>' +
+            '<div class="splash-buttons">' +
+                '<button class="splash-btn settings-btn" id="splash-settings">' +
+                    '<i class="codicon codicon-gear"></i> Configure Settings' +
+                '</button>' +
+                '<button class="splash-btn apikey-btn" id="splash-apikey">' +
+                    '<i class="codicon codicon-key"></i> Set API Key' +
+                '</button>' +
+            '</div>' +
+            '<button class="splash-start" id="splash-start">Start Coding \u2192</button>' +
+            '<div class="splash-checkbox">' +
+                '<input type="checkbox" id="splash-startup-check"' + (showOnStartup ? ' checked' : '') + '>' +
+                '<label for="splash-startup-check">Show this screen every time you start</label>' +
+            '</div>';
+        overlay.appendChild(card);
+        document.body.appendChild(overlay);
+
+        // Wire buttons
+        document.getElementById('splash-settings').addEventListener('click', function () {
+            vscode.postMessage({ type: 'splashOpenSettings' });
+        });
+        document.getElementById('splash-apikey').addEventListener('click', function () {
+            vscode.postMessage({ type: 'splashSetApiKey' });
+        });
+        document.getElementById('splash-start').addEventListener('click', function () {
+            dismissSplash();
+        });
+
+        function dismissSplash() {
+            var chk = document.getElementById('splash-startup-check');
+            vscode.postMessage({
+                type: 'splashDismissed',
+                showOnStartup: chk ? chk.checked : false
+            });
+            if (rainAnim) { cancelAnimationFrame(rainAnim); rainAnim = null; }
+            overlay.style.opacity = '0';
+            overlay.style.transition = 'opacity 0.4s';
+            setTimeout(function () { overlay.remove(); }, 400);
+        }
+
+        // ── Matrix Rain Animation ──
+        var ctx = canvas.getContext('2d');
+        var rainAnim = null;
+        var columns = [];
+        var msColors = ['#F25022', '#7FBA00', '#00A4EF', '#FFB900'];
+        var chars = '{}[]()<>=/;:.,!@#$%^&*0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef';
+        var fontSize = 14;
+
+        function resizeCanvas() {
+            canvas.width = overlay.clientWidth;
+            canvas.height = overlay.clientHeight;
+            var colCount = Math.floor(canvas.width / fontSize);
+            columns = [];
+            for (var i = 0; i < colCount; i++) {
+                columns[i] = Math.random() * canvas.height / fontSize;
+            }
+        }
+        resizeCanvas();
+        window.addEventListener('resize', resizeCanvas);
+
+        function drawRain() {
+            // Semi-transparent dark overlay for trail effect — blue-tinted
+            ctx.fillStyle = 'rgba(0, 10, 25, 0.06)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.font = fontSize + 'px monospace';
+
+            for (var i = 0; i < columns.length; i++) {
+                var ch = chars[Math.floor(Math.random() * chars.length)];
+                var color = msColors[Math.floor(Math.random() * msColors.length)];
+                ctx.fillStyle = color;
+                var x = i * fontSize;
+                var y = columns[i] * fontSize;
+                ctx.fillText(ch, x, y);
+
+                if (y > canvas.height && Math.random() > 0.975) {
+                    columns[i] = 0;
+                }
+                columns[i]++;
+            }
+            rainAnim = requestAnimationFrame(drawRain);
+        }
+        rainAnim = requestAnimationFrame(drawRain);
+    }
 
     function getActiveWorkingBlock() {
         if (!activeWorkingBlockId) { return null; }
@@ -1342,9 +1450,12 @@ window.onerror = function(msg, src, line, col, err) {
     }
 
     function createWorkingBlock(block) {
+        var wrapper = document.createElement('div');
+        wrapper.className = 'working-block-wrapper live';
+        wrapper.dataset.blockId = block.id;
+
         var card = document.createElement('div');
-        card.className = 'working-block live expanded';
-        card.dataset.blockId = block.id;
+        card.className = 'working-block expanded';
         card.innerHTML =
             '<div class="working-block-header">' +
                 '<div class="wb-header-copy">' +
@@ -1356,25 +1467,31 @@ window.onerror = function(msg, src, line, col, err) {
             '</div>' +
             '<div class="working-block-body">' +
                 '<div class="wb-entries"></div>' +
-                '<div class="wb-live-status"><span class="wb-live-text">Working</span></div>' +
             '</div>';
+        wrapper.appendChild(card);
+
+        var statusEl = document.createElement('div');
+        statusEl.className = 'wb-live-status';
+        statusEl.innerHTML = '<span class="wb-live-text">Working</span>';
+        wrapper.appendChild(statusEl);
 
         var header = card.querySelector('.working-block-header');
         header.addEventListener('click', function() {
-            if (card.classList.contains('completed')) {
+            if (wrapper.classList.contains('completed')) {
                 card.classList.toggle('expanded');
             }
         });
 
-        messagesEl.appendChild(card);
+        messagesEl.appendChild(wrapper);
         workingBlocksById.set(block.id, {
             data: block,
-            el: card,
+            el: wrapper,
+            cardEl: card,
             entriesEl: card.querySelector('.wb-entries'),
             summaryEl: card.querySelector('.wb-summary'),
             titleEl: card.querySelector('.wb-title'),
-            statusEl: card.querySelector('.wb-live-status'),
-            statusTextEl: card.querySelector('.wb-live-text')
+            statusEl: statusEl,
+            statusTextEl: statusEl.querySelector('.wb-live-text')
         });
     }
 
@@ -1443,6 +1560,14 @@ window.onerror = function(msg, src, line, col, err) {
         }
     }
 
+    function scrollWorkingBodyToBottom(record) {
+        if (!record || !record.el) { return; }
+        var body = record.el.querySelector('.working-block-body');
+        if (body) {
+            requestAnimationFrame(function () { body.scrollTop = body.scrollHeight; });
+        }
+    }
+
     function appendWorkingTextEntry(blockId, entry) {
         var record = workingBlocksById.get(blockId);
         if (!record) { return; }
@@ -1450,6 +1575,7 @@ window.onerror = function(msg, src, line, col, err) {
         var row = createWorkingEntryElement(entry);
         record.entriesEl.appendChild(row);
         workingEntriesById.set(entry.id, { blockId: blockId, entry: entry, el: row });
+        scrollWorkingBodyToBottom(record);
     }
 
     function appendWorkingActionEntry(blockId, entry) {
@@ -1459,6 +1585,7 @@ window.onerror = function(msg, src, line, col, err) {
         var row = createWorkingEntryElement(entry);
         record.entriesEl.appendChild(row);
         workingEntriesById.set(entry.id, { blockId: blockId, entry: entry, el: row });
+        scrollWorkingBodyToBottom(record);
     }
 
     function updateWorkingActionEntry(blockId, entryId, patch) {
@@ -1471,6 +1598,7 @@ window.onerror = function(msg, src, line, col, err) {
         if (typeof patch.filePath === 'string') { entryRecord.entry.filePath = patch.filePath; }
         if (typeof patch.icon === 'string') { entryRecord.entry.icon = patch.icon; }
         renderWorkingActionRow(entryRecord.el, entryRecord.entry);
+        scrollWorkingBodyToBottom(record);
     }
 
     function appendWorkingTerminalOutput(line) {
@@ -1488,6 +1616,8 @@ window.onerror = function(msg, src, line, col, err) {
         while (termBlock.childNodes.length > 100) {
             termBlock.removeChild(termBlock.firstChild);
         }
+        termBlock.scrollTop = termBlock.scrollHeight;
+        scrollWorkingBodyToBottom(record);
         scrollToBottom();
     }
 
@@ -1497,7 +1627,8 @@ window.onerror = function(msg, src, line, col, err) {
         record.data.summary = summary || record.data.title || 'Completed';
         record.el.classList.remove('live');
         record.el.classList.add('completed');
-        // Replace header: show summary as the leading text (like GHCP "Created 5 todos and reviewed 6 files")
+        var cardEl = record.cardEl || record.el;
+        cardEl.classList.add('completed');
         var leadingEl = record.el.querySelector('.wb-leading');
         if (leadingEl) {
             leadingEl.textContent = record.data.summary;
@@ -1506,9 +1637,9 @@ window.onerror = function(msg, src, line, col, err) {
         record.summaryEl.textContent = '';
         setWorkingBlockStatusText(record, '');
         if (collapse) {
-            record.el.classList.remove('expanded');
+            cardEl.classList.remove('expanded');
         } else {
-            record.el.classList.add('expanded');
+            cardEl.classList.add('expanded');
         }
     }
 

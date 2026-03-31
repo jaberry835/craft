@@ -655,25 +655,92 @@ export class BuiltinTools {
                     }
                 }
 
-                // Fallback: try whitespace-normalized matching
+                // Fallback 1: indentation-normalized line-by-line matching
+                // Handles tab-vs-spaces, 2-space-vs-4-space, trailing whitespace differences
+                if (count === 0) {
+                    const contentLines = content.split('\n');
+                    const oldLines = oldStr.replace(/\r\n/g, '\n').split('\n');
+                    const trimLine = (s: string) => s.replace(/^[ \t]+/, '').replace(/[ \t]+$/, '');
+                    const trimmedOld = oldLines.map(trimLine);
+
+                    for (let i = 0; i <= contentLines.length - oldLines.length; i++) {
+                        let matches = true;
+                        for (let j = 0; j < oldLines.length; j++) {
+                            if (trimLine(contentLines[i + j]) !== trimmedOld[j]) {
+                                matches = false;
+                                break;
+                            }
+                        }
+                        if (matches) {
+                            const candidate = contentLines.slice(i, i + oldLines.length).join('\n');
+                            // Verify this is the only match
+                            let otherMatch = false;
+                            for (let k = i + 1; k <= contentLines.length - oldLines.length; k++) {
+                                let m2 = true;
+                                for (let j = 0; j < oldLines.length; j++) {
+                                    if (trimLine(contentLines[k + j]) !== trimmedOld[j]) {
+                                        m2 = false;
+                                        break;
+                                    }
+                                }
+                                if (m2) { otherMatch = true; break; }
+                            }
+                            if (!otherMatch) {
+                                matchStr = candidate;
+                                count = 1;
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                // Fallback 2: whitespace-collapsed matching (spaces/tabs → single space)
                 if (count === 0) {
                     const normalize = (s: string) => s.replace(/\r\n/g, '\n').replace(/[ \t]+/g, ' ').replace(/ *\n/g, '\n');
                     const normContent = normalize(content);
                     const normOld = normalize(oldStr);
-                    if (normContent.includes(normOld)) {
-                        // Find the original substring by mapping positions
-                        const idx = normContent.indexOf(normOld);
-                        // Walk original content to find corresponding range
-                        let origIdx = 0, normIdx = 0;
-                        const origChars = content.split('');
-                        while (normIdx < idx && origIdx < content.length) {
-                            const nc = normalize(content.slice(0, origIdx + 1));
-                            normIdx = nc.length;
-                            origIdx++;
+                    const normIdx = normContent.indexOf(normOld);
+                    if (normIdx >= 0 && normContent.indexOf(normOld, normIdx + 1) === -1) {
+                        // Single match — map normalized index back to original via incremental scan
+                        // Build origToNorm: for each original char index, its normalized output length so far
+                        const origToNorm: number[] = new Array(content.length);
+                        let normLen = 0;
+                        let prevWasSpace = false;
+                        let prevWasNewline = false;
+                        for (let oi = 0; oi < content.length; oi++) {
+                            const ch = content[oi];
+                            if (ch === '\r') {
+                                // skip \r (handled as part of \r\n → \n)
+                            } else if (ch === '\n') {
+                                // collapse trailing spaces before newline already handled
+                                normLen++;
+                                prevWasSpace = false;
+                                prevWasNewline = true;
+                            } else if (ch === ' ' || ch === '\t') {
+                                if (!prevWasSpace) {
+                                    normLen++;
+                                    prevWasSpace = true;
+                                }
+                                prevWasNewline = false;
+                            } else {
+                                normLen++;
+                                prevWasSpace = false;
+                                prevWasNewline = false;
+                            }
+                            origToNorm[oi] = normLen;
                         }
-                        // Try expanding from origIdx to find a match
-                        for (let end = origIdx + normOld.length; end <= content.length; end++) {
-                            const candidate = content.slice(origIdx, end);
+                        // Find origStart: first oi where origToNorm[oi] > normIdx
+                        let origStart = 0;
+                        for (let oi = 0; oi < content.length; oi++) {
+                            if (origToNorm[oi] > normIdx) {
+                                origStart = oi;
+                                break;
+                            }
+                        }
+                        // Expand from origStart to find matching candidate
+                        const normEnd = normIdx + normOld.length;
+                        for (let end = origStart + normOld.length; end <= content.length; end++) {
+                            const candidate = content.slice(origStart, end);
                             if (normalize(candidate) === normOld) {
                                 matchStr = candidate;
                                 count = 1;
@@ -686,22 +753,30 @@ export class BuiltinTools {
                 if (count === 0) {
                     // Try to find the best-matching region to help the model
                     const lines = content.split('\n');
-                    const oldFirstLine = oldStr.split('\n')[0].trim();
+                    const oldLines = oldStr.replace(/\r\n/g, '\n').split('\n');
+                    const oldFirstLine = oldLines[0].trim();
+                    const oldLastLine = oldLines[oldLines.length - 1].trim();
                     let bestLine = -1;
                     let bestScore = 0;
                     for (let i = 0; i < lines.length; i++) {
                         const trimmed = lines[i].trim();
                         if (trimmed.length === 0) { continue; }
-                        // Check if first line of old_string is a substring or vice versa
                         if (trimmed.includes(oldFirstLine) || oldFirstLine.includes(trimmed)) {
-                            const score = Math.min(trimmed.length, oldFirstLine.length);
+                            let score = Math.min(trimmed.length, oldFirstLine.length);
+                            // Bonus if the last line also matches nearby
+                            if (oldLastLine && i + oldLines.length - 1 < lines.length) {
+                                const endTrimmed = lines[i + oldLines.length - 1].trim();
+                                if (endTrimmed.includes(oldLastLine) || oldLastLine.includes(endTrimmed)) {
+                                    score += Math.min(endTrimmed.length, oldLastLine.length);
+                                }
+                            }
                             if (score > bestScore) { bestScore = score; bestLine = i; }
                         }
                     }
                     let snippet: string;
                     if (bestLine >= 0) {
-                        const from = Math.max(0, bestLine - 5);
-                        const to = Math.min(lines.length, bestLine + 15);
+                        const from = Math.max(0, bestLine - 3);
+                        const to = Math.min(lines.length, bestLine + oldLines.length + 5);
                         snippet = lines.slice(from, to).map((l, i) => `${from + i + 1}: ${l}`).join('\n');
                         snippet = `Closest match near line ${bestLine + 1}:\n${snippet}`;
                     } else {
@@ -709,7 +784,7 @@ export class BuiltinTools {
                     }
                     return {
                         success: false,
-                        result: `old_string not found in the file (${lines.length} lines). ${snippet}`
+                        result: `old_string not found in the file (${lines.length} lines). Re-read the file to get exact current content, then retry. ${snippet}`
                     };
                 }
                 if (count > 1) {

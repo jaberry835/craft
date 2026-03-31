@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.3— 2026-03-31
+
+### UI
+
+- **Improved model-selector dropdown readability** — increased font size, added proper background/foreground theming via VS Code dropdown variables, widened the max-width to reduce truncation, and styled the option list for better contrast. Dropdown items now show both the display name and deployment ID when they differ, with a tooltip for the full label.
+- **Added welcome splash screen** — first-time users now see a Matrix-style code rain splash screen (in Microsoft brand colors) with quick-access buttons for configuring settings and setting the API key. Includes a "Start Coding" dismissal link and an opt-in checkbox to show the screen on every launch. Reopenable anytime via **Junior: Show Welcome Screen** in the command palette.
+
 ## 1.1.1 — 2026-03-27
 
 ### Agent Mode Improvements

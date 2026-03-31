@@ -227,6 +227,13 @@ export function registerCommands(deps: CommandRegistrarDeps): void {
             sendSelectionToChat(chatViewProvider, 'Fix any issues in this code and explain what was wrong:\n\n');
         })
     );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('junior.showWelcome', () => {
+            vscode.commands.executeCommand('junior.chatView.focus');
+            chatViewProvider.showSplash();
+        })
+    );
 }
 
 function sendSelectionToChat(chatViewProvider: ChatViewProvider, prefix: string): void {

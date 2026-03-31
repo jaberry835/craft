@@ -224,6 +224,9 @@ export type WebviewMessage =
     | { type: 'requestSlashCommands' }
     | { type: 'openFile'; filePath: string }
     | { type: 'manageMcpServers' }
+    | { type: 'splashOpenSettings' }
+    | { type: 'splashSetApiKey' }
+    | { type: 'splashDismissed'; showOnStartup: boolean }
     | { type: 'ready' };
 
 export type ExtensionMessage =
@@ -257,5 +260,6 @@ export type ExtensionMessage =
     | { type: 'narrationText'; text: string }
     | { type: 'terminalOutput'; line: string }
     | { type: 'tokenUsage'; totalTokens: string; chatTokens: string; inlineTokens: string; chatPct: string; inlinePct: string; requests: number; chatPrompt: string; chatCompletion: string; inlinePrompt: string; inlineCompletion: string; chatPromptPct: string; chatCompletionPct: string; inlinePromptPct: string; inlineCompletionPct: string; chatRequests: number; inlineRequests: number; windowPct: number; contextWindow: string }
-    | { type: 'slashCommands'; commands: Array<{ name: string; description: string }> };
+    | { type: 'slashCommands'; commands: Array<{ name: string; description: string }> }
+    | { type: 'showSplash'; showOnStartup: boolean };
 

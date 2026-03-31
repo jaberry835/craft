@@ -89,7 +89,8 @@ export function activate(context: vscode.ExtensionContext) {
         sessionManager,
         log,
         tokenTracker,
-        inlineDiffDecorator
+        inlineDiffDecorator,
+        context.globalState
     );
 
     context.subscriptions.push(
