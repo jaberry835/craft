@@ -29,5 +29,23 @@
     "junior.azureOpenAI.provider": "apim",
     "junior.azureOpenAI.apiVersion": "2025-03-01-preview",
     "junior.temperature": 1,
+
+
+    "junior.agentProvider": "copilot-cli",
+    "junior.copilotCli.path": "C:\\Users\\SystemAdministrator\\AppData\\Local\\GitHubCopilotCLI\\copilot.exe",
+    "junior.copilotCli.home": "",
+    "junior.copilotCli.model": "gpt-4.1",
+    "junior.copilotCli.models": [
+        {
+            "name": "GPT-4.1",
+            "id": "gpt-4.1"
+        }
+    ],
+    "junior.copilotCli.additionalArgs": [],
+    "junior.copilotCli.autoApproveWrites": false,
+    "junior.copilotCli.autoApproveTerminal": false,
+    "junior.copilotCli.providerBaseUrl": "",
+    "junior.copilotCli.providerType": "",
+    "junior.copilotCli.providerApiKey": "",
     "azureFunctions.showProjectWarning": false
 }

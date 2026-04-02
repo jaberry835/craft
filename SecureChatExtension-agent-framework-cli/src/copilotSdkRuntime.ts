@@ -192,9 +192,14 @@ export class CopilotSdkRuntime implements AgentRuntime {
         if (this.client) { return this.client; }
 
         const cliPath = getSetting<string>('copilotCli.path') || 'copilot';
-        const additionalArgs = getSetting<string[]>('copilotCli.additionalArgs') || [];
+        const additionalArgs = [...(getSetting<string[]>('copilotCli.additionalArgs') || [])];
+        const configuredModel = getSetting<string>('copilotCli.model') || '';
 
-        this.log?.(`[copilot-sdk] Creating client (cliPath=${cliPath})`);
+        if (configuredModel && !this.hasCliModelArg(additionalArgs)) {
+            additionalArgs.push('--model', configuredModel);
+        }
+
+        this.log?.(`[copilot-sdk] Creating client (cliPath=${cliPath}, args=${JSON.stringify(additionalArgs)})`);
 
         this.client = new CopilotClient({
             cliPath,
@@ -541,6 +546,19 @@ export class CopilotSdkRuntime implements AgentRuntime {
             }
         }
         return undefined;
+    }
+
+    private hasCliModelArg(args: string[]): boolean {
+        for (let i = 0; i < args.length; i++) {
+            const arg = args[i];
+            if (arg === '--model' || arg === '-m') {
+                return true;
+            }
+            if (arg.startsWith('--model=')) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private shortPath(filePath: string): string {

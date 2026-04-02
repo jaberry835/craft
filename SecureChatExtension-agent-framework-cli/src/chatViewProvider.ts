@@ -2231,6 +2231,10 @@ body { display: flex; flex-direction: column; }
     font-size: 11.5px;
 }
 
+#provider-bar #context-meter {
+    margin-left: auto;
+}
+
 /* ATTACHMENT PREVIEW */
 
 /* ── SPLASH SCREEN ── */
@@ -2422,15 +2426,6 @@ body { display: flex; flex-direction: column; }
     border-radius: 0 0 4px 4px;
 }
 
-#input-area .hint {
-    font-size: 10px;
-    opacity: 0.5;
-    margin-top: 3px;
-    text-align: right;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-}
 #context-meter {
     display: flex;
     align-items: center;
@@ -2564,8 +2559,8 @@ body { display: flex; flex-direction: column; }
             <option value="local">▫ Local</option>
             <option value="copilot-cli">✦ Copilot CLI</option>
         </select>
+        <div id="context-meter"><div class="meter-ring"><svg viewBox="0 0 20 20"><circle class="meter-bg" cx="10" cy="10" r="8" /><circle class="meter-fill" cx="10" cy="10" r="8" stroke-dasharray="50.27" stroke-dashoffset="50.27" /></svg></div><span class="meter-label">0 / 128.0K (0%)</span></div>
     </div>
-    <div class="hint"><div id="context-meter"><div class="meter-ring"><svg viewBox="0 0 20 20"><circle class="meter-bg" cx="10" cy="10" r="8" /><circle class="meter-fill" cx="10" cy="10" r="8" stroke-dasharray="50.27" stroke-dashoffset="50.27" /></svg></div><span class="meter-label">0 / 128.0K (0%)</span></div></div>
 </div>
 
 <script nonce="${nonce}" src="${scriptUri}"></script>
