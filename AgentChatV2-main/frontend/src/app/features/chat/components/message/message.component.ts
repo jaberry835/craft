@@ -21,6 +21,7 @@ interface ChatterEvent {
   tokensInput?: number;     // Input tokens for LLM calls
   tokensOutput?: number;    // Output tokens for LLM calls
   friendlyMessage?: string; // User-friendly description of the action
+  renderHint?: 'json' | 'table' | 'text'; // How to render tool result content
 }
 
 interface DisplayMessage extends Message {
@@ -107,7 +108,13 @@ interface DisplayMessage extends Message {
                     }
                     @if (event.content && event.type === 'tool_result') {
                       <div class="chatter-event-content">
-                        <div class="tool-result">{{ truncateContent(event.content, 300) }}</div>
+                        @if (event.renderHint === 'json') {
+                          <pre class="tool-result tool-result-json">{{ formatJson(event.content) }}</pre>
+                        } @else if (event.renderHint === 'table') {
+                          <div class="tool-result tool-result-table" [innerHTML]="renderTable(event.content)"></div>
+                        } @else {
+                          <div class="tool-result">{{ truncateContent(event.content, 300) }}</div>
+                        }
                       </div>
                     }
                     @if (event.content && event.type === 'reasoning') {
@@ -503,9 +510,42 @@ interface DisplayMessage extends Message {
       background-color: var(--bg-secondary);
       padding: var(--spacing-xs) var(--spacing-sm);
       border-radius: 4px;
-      max-height: 100px;
-      overflow: hidden;
+      max-height: 150px;
+      overflow: auto;
       text-overflow: ellipsis;
+      
+      &.tool-result-json {
+        font-family: 'Consolas', 'Monaco', monospace;
+        font-size: 11px;
+        white-space: pre;
+        margin: 0;
+      }
+      
+      &.tool-result-table {
+        overflow-x: auto;
+        
+        :deep(.tool-table) {
+          width: 100%;
+          border-collapse: collapse;
+          font-size: 11px;
+        }
+        
+        :deep(th), :deep(td) {
+          padding: 4px 8px;
+          border: 1px solid var(--border-color);
+          text-align: left;
+          white-space: nowrap;
+        }
+        
+        :deep(th) {
+          background-color: var(--bg-tertiary);
+          font-weight: 600;
+        }
+        
+        :deep(tr:hover td) {
+          background-color: var(--bg-hover);
+        }
+      }
     }
     
     .delegation-msg {
@@ -1225,6 +1265,46 @@ export class MessageComponent implements DoCheck, OnInit {
   truncateContent(content: string, maxLength: number): string {
     if (content.length <= maxLength) return content;
     return content.substring(0, maxLength) + '...';
+  }
+
+  formatJson(content: string): string {
+    try {
+      return JSON.stringify(JSON.parse(content), null, 2);
+    } catch {
+      return content;
+    }
+  }
+
+  renderTable(content: string): string {
+    const lines = content.trim().split('\n').filter(l => l.trim());
+    if (lines.length < 2) return this.escapeHtml(content);
+
+    // Detect delimiter: pipes or tabs
+    const usesPipes = lines[0].includes('|');
+    const delim = usesPipes ? '|' : '\t';
+
+    const rows = lines
+      .filter(l => !l.match(/^[\s|:-]+$/))  // skip separator rows like |---|---|
+      .map(l => {
+        const cells = l.split(delim).map(c => c.trim()).filter(c => c !== '');
+        return cells;
+      })
+      .filter(r => r.length > 0);
+
+    if (rows.length === 0) return this.escapeHtml(content);
+
+    const headerCells = rows[0].map(c => `<th>${this.escapeHtml(c)}</th>`).join('');
+    const bodyRows = rows.slice(1)
+      .map(r => '<tr>' + r.map(c => `<td>${this.escapeHtml(c)}</td>`).join('') + '</tr>')
+      .join('');
+
+    return `<table class="tool-table"><thead><tr>${headerCells}</tr></thead><tbody>${bodyRows}</tbody></table>`;
+  }
+
+  private escapeHtml(text: string): string {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
   }
   
   /**

@@ -137,6 +137,7 @@ class ChatterEvent:
     tokens_input: Optional[int] = None   # Input tokens used (for LLM calls)
     tokens_output: Optional[int] = None  # Output tokens used (for LLM calls)
     friendly_message: Optional[str] = None  # User-friendly description of the action
+    render_hint: Optional[str] = None  # Hint for frontend rendering: 'json', 'table', 'text'
     
     @staticmethod
     def extract_result_text(result: Any) -> str:
@@ -194,7 +195,42 @@ class ChatterEvent:
             result["tokens_output"] = self.tokens_output
         if self.friendly_message:
             result["friendly_message"] = self.friendly_message
+        if self.render_hint:
+            result["render_hint"] = self.render_hint
         return result
+
+
+def _detect_render_hint(text: str) -> Optional[str]:
+    """
+    Detect the best rendering format for a tool result.
+    Returns 'json', 'table', or None (plain text, no special rendering).
+    """
+    stripped = text.strip()
+    if not stripped:
+        return None
+
+    # JSON object or array
+    if (stripped.startswith('{') and stripped.endswith('}')) or \
+       (stripped.startswith('[') and stripped.endswith(']')):
+        try:
+            import json as _json
+            _json.loads(stripped)
+            return "json"
+        except (ValueError, TypeError):
+            pass
+
+    # Markdown / ASCII table heuristics:
+    # lines with pipes (| col | col |) or tab-separated rows
+    lines = stripped.split('\n')
+    if len(lines) >= 2:
+        pipe_lines = sum(1 for ln in lines if ln.count('|') >= 2)
+        if pipe_lines >= 2:
+            return "table"
+        tab_lines = sum(1 for ln in lines if ln.count('\t') >= 1)
+        if tab_lines >= 2:
+            return "table"
+
+    return None
 
 
 def extract_chatter_from_update(
@@ -247,6 +283,7 @@ def extract_chatter_from_update(
                     duration_ms = (time.time() - st) * 1000
                 result_display = ChatterEvent.extract_result_text(result)
                 original_length = len(result_display)
+                render_hint = _detect_render_hint(result_display)
                 if len(result_display) > 300:
                     result_display = result_display[:300] + "..."
                 friendly_msg = _get_friendly_result_summary(tool_name_result or "", result_display, original_length)
@@ -258,6 +295,7 @@ def extract_chatter_from_update(
                     call_id=call_id,
                     duration_ms=duration_ms,
                     friendly_message=friendly_msg,
+                    render_hint=render_hint,
                 ))
 
         elif content_item.type == 'text_reasoning':

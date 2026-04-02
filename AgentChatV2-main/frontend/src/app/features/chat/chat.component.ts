@@ -25,6 +25,7 @@ export interface ChatterEvent {
   tokensInput?: number;     // Input tokens for LLM calls
   tokensOutput?: number;    // Output tokens for LLM calls
   friendlyMessage?: string; // User-friendly description of the action
+  renderHint?: 'json' | 'table' | 'text'; // How to render tool result content
 }
 
 interface DisplayMessage extends Message {
@@ -1101,6 +1102,7 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
     if (value['tokens_output'] != null) target.tokensOutput = value['tokens_output'] as number;
     if (value['content'] && !target.content) target.content = value['content'] as string;
     if (value['agent_name']) target.agentName = value['agent_name'] as string;
+    if (value['render_hint']) target.renderHint = value['render_hint'] as ChatterEvent['renderHint'];
   }
 
   /**
@@ -1126,6 +1128,7 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
       tokensInput: e['tokens_input'] as number | undefined,
       tokensOutput: e['tokens_output'] as number | undefined,
       friendlyMessage: e['friendly_message'] as string | undefined,
+      renderHint: e['render_hint'] as ChatterEvent['renderHint'],
     }));
     return msg;
   }
