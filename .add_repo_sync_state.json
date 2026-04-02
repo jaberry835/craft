@@ -3,6 +3,7 @@
   "remote::https://github.com/adamruderman/McpServer::main": "91cf9e5d61b20256afffc1e0e0aeaef3f64acf9a",
   "remote::https://github.com/adamruderman/Rude-MCPServer::main": "61d32fde0c035fa224dbead24d2c2db2dc24b178",
   "remote::https://github.com/adamruderman/SecureAPI::main": "477d1beb03b58ee6c47ed125e8c94e7e73aa0a65",
+  "remote::https://github.com/adamruderman/SecureChatExtension::agent-framework-cli": "e2a44320edb8364e2bcb5e376ff5b9004455b3d2",
   "remote::https://github.com/adamruderman/SecureChatExtension::ghcp-cli-brain": "f915ad57c67adb886c8077adf9931a41bd1001ae",
   "remote::https://github.com/adamruderman/SecureChatExtension::main": "75c5add601bf8a85f0fc311973bc409634870cfd",
   "remote::https://github.com/adamruderman/SecureChatExtension::refactor/agent-framework": "48f22d56eb09048c0cb2f0be59287edfa872904a",

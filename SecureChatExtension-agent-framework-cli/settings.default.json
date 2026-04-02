@@ -1,0 +1,33 @@
+{
+    "junior.azureOpenAI.deployments": [
+        {
+        "name": "GPT-5.3 Chat",
+        "deploymentId": "gpt-5.3-chat",
+        "apiVersion": "2025-03-01-preview"
+        },
+        {
+            "name": "GPT-4o",
+            "deploymentId": "gpt-4o",
+            "apiVersion": "2025-03-01-preview"
+        },
+        {
+            "name": "gpt-5.4-mini",
+            "deploymentId": "gpt-5.4-mini",
+            "apiVersion": "2025-03-01-preview"
+        }
+    ],
+    "junior.azureOpenAI.activeDeployment": "gpt-5.3-chat",
+    "junior.inlineCompletions.deployment": "gpt-4o",
+    "junior.mcp.includeExternalServers": true,
+    "junior.mcp.externalServerSettings": [
+    "mcp.servers"
+    ],
+    "junior.mcp.servers": {
+
+    },
+    "junior.azureOpenAI.apimBaseUrl": "https://rudeaoaiapi.azure-api.net/foundryapi",
+    "junior.azureOpenAI.provider": "apim",
+    "junior.azureOpenAI.apiVersion": "2025-03-01-preview",
+    "junior.temperature": 1,
+    "azureFunctions.showProjectWarning": false
+}
