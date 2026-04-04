@@ -177,9 +177,9 @@ function inferFieldType(label: string, hint: string): ParsedInputField['type'] {
           class="btn btn-primary submit-btn"
           (click)="onSubmit()"
           [disabled]="!hasAnyValue() || disabled"
+          aria-label="Submit form"
         >
-          <span class="material-icons">send</span>
-          Submit
+          <span class="material-icons">arrow_upward</span>
         </button>
       </div>
     </div>
@@ -268,14 +268,54 @@ function inferFieldType(label: string, hint: string): ParsedInputField['type'] {
     }
 
     .submit-btn {
-      display: flex;
+      display: inline-flex;
       align-items: center;
-      gap: 6px;
-      padding: 8px 20px;
-      font-size: 13px;
+      justify-content: center;
+      width: 42px;
+      height: 42px;
+      padding: 0;
+      border-radius: 999px;
+      background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
+      border: 1px solid rgba(37, 99, 235, 0.35);
+      box-shadow: 0 10px 24px rgba(29, 78, 216, 0.18);
+      transition:
+        transform 0.18s ease,
+        box-shadow 0.18s ease,
+        background 0.18s ease,
+        border-color 0.18s ease;
 
       .material-icons {
-        font-size: 16px;
+        font-size: 18px;
+        color: #fff;
+        transform: translateY(-1px);
+        transition: transform 0.18s ease;
+      }
+
+      &:hover:not(:disabled) {
+        transform: translateY(-1px);
+        background: linear-gradient(180deg, #3b82f6 0%, #2563eb 100%);
+        border-color: rgba(59, 130, 246, 0.55);
+        box-shadow: 0 14px 30px rgba(37, 99, 235, 0.28);
+
+        .material-icons {
+          transform: translateY(-2px);
+        }
+      }
+
+      &:active:not(:disabled) {
+        transform: translateY(0);
+        box-shadow: 0 8px 18px rgba(37, 99, 235, 0.22);
+      }
+
+      &:disabled {
+        background: var(--bg-hover);
+        border-color: var(--border-color);
+        box-shadow: none;
+
+        .material-icons {
+          color: var(--text-muted);
+          transform: none;
+        }
       }
     }
   `]

@@ -933,7 +933,9 @@ You are being called as a specialist by an orchestrator agent. The user's reques
             type=ChatterEventType.THINKING,
             agent_name=orchestrator_config.get("name", "Orchestrator"),
             content=decision_msg,
-            friendly_message=decision_msg
+            friendly_message=decision_msg,
+            tokens_input=decision.get("tokens_input"),
+            tokens_output=decision.get("tokens_output"),
         )
 
         # =================================================================
@@ -946,7 +948,7 @@ You are being called as a specialist by an orchestrator agent. The user's reques
                 agent_id=orchestrator_config.get("id", "orchestrator"),
                 agent_name=orchestrator_config.get("name", "Orchestrator"),
                 content=direct_response,
-                tokens_used=0,
+                tokens_used=(decision.get("tokens_input", 0) or 0) + (decision.get("tokens_output", 0) or 0),
                 metadata={
                     "pattern": pattern.value,
                     "action": "direct",
@@ -972,7 +974,7 @@ You are being called as a specialist by an orchestrator agent. The user's reques
                 agent_id=orchestrator_config.get("id", "orchestrator"),
                 agent_name=orchestrator_config.get("name", "Orchestrator"),
                 content=direct_response,
-                tokens_used=0,
+                tokens_used=(decision.get("tokens_input", 0) or 0) + (decision.get("tokens_output", 0) or 0),
                 metadata={"pattern": pattern.value, "action": "direct_fallback"},
                 chatter_events=[]
             )
@@ -988,10 +990,32 @@ You are being called as a specialist by an orchestrator agent. The user's reques
         if specialist_message != user_message and should_log_agent():
             logger.info(f"Using contextualized query for specialists: {specialist_message[:200]}")
 
+        specialist_names: list[str] = []
+        for sid in specialist_ids:
+            sc = self._configs_cache.get(sid, {})
+            specialist_names.append(sc.get("name", sid))
+
+        if specialist_names:
+            if len(specialist_names) == 1:
+                coordination_detail = (
+                    f"I'm going to ask {specialist_names[0]} to handle the specialist part of this request, "
+                    f"review the result, and then combine it into the final answer."
+                )
+            else:
+                coordination_detail = (
+                    f"I'm going to coordinate {', '.join(specialist_names)} using the {pattern.value} pattern, "
+                    f"review what each specialist returns, and then synthesize a final answer."
+                )
+        else:
+            coordination_detail = (
+                f"I'm going to coordinate the selected specialists using the {pattern.value} pattern, "
+                f"review their results, and then synthesize a final answer."
+            )
+
         yield ChatterEvent(
             type=ChatterEventType.THINKING,
             agent_name=orchestrator_config.get("name", "Orchestrator"),
-            content=f"Coordinating specialists using {pattern.value} pattern...",
+            content=coordination_detail,
             friendly_message=f"Coordinating {len(specialist_ids)} specialist(s)"
         )
 
@@ -1060,20 +1084,31 @@ You are being called as a specialist by an orchestrator agent. The user's reques
             friendly_message="Combining results into final answer"
         )
 
-        synthesized_response = await run_orchestrator_for_synthesis(
+        synthesis_result = await run_orchestrator_for_synthesis(
             orchestrator_config,
             specialist_results,
             user_message,
             create_chat_client_fn=self._create_chat_client,
         )
 
+        yield ChatterEvent(
+            type=ChatterEventType.THINKING,
+            agent_name=orchestrator_config.get("name", "Orchestrator"),
+            content="Synthesized specialist responses into the final answer.",
+            friendly_message="Combining results into final answer",
+            tokens_input=synthesis_result.get("tokens_input"),
+            tokens_output=synthesis_result.get("tokens_output"),
+        )
+
         # Build final response
         total_tokens = sum(r.get("tokens_input", 0) + r.get("tokens_output", 0) for r in specialist_results)
+        total_tokens += (decision.get("tokens_input", 0) or 0) + (decision.get("tokens_output", 0) or 0)
+        total_tokens += (synthesis_result.get("tokens_input", 0) or 0) + (synthesis_result.get("tokens_output", 0) or 0)
 
         yield AgentResponse(
             agent_id=orchestrator_config.get("id", "orchestrator"),
             agent_name=orchestrator_config.get("name", "Orchestrator"),
-            content=synthesized_response,
+            content=synthesis_result.get("content", ""),
             tokens_used=total_tokens,
             metadata={
                 "pattern": pattern.value,

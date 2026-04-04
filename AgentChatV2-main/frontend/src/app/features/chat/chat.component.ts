@@ -41,6 +41,23 @@ interface UploadedFile {
   error?: string;
 }
 
+interface TokenAgentBreakdown {
+  name: string;
+  input: number;
+  output: number;
+  total: number;
+  percent: number;
+}
+
+interface TokenUsageSummary {
+  label: string;
+  input: number;
+  output: number;
+  total: number;
+  llmCalls: number;
+  agentBreakdown: TokenAgentBreakdown[];
+}
+
 @Component({
   selector: 'app-chat',
   standalone: true,
@@ -177,6 +194,7 @@ interface UploadedFile {
       <app-chat-input
         [disabled]="isSending"
         [sessionId]="sessionId"
+        [tokenUsage]="getTokenUsageSummary()"
         (send)="sendMessage($event)"
         (fileUpload)="handleFileUpload($event)"
       ></app-chat-input>
@@ -546,7 +564,7 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
     this.destroy$.next();
     this.destroy$.complete();
   }
-  
+
   ngAfterViewChecked(): void {
     if (this.shouldScroll) {
       this.scrollToBottom();
@@ -720,7 +738,49 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
         && (a.has_grounding || (a.grounding_sources && a.grounding_sources.length > 0)))
       .map(a => a.id!);
   }
-  
+
+  getTokenUsageSummary(): TokenUsageSummary | null {
+    const source = this.getTokenUsageSourceMessage();
+    const events = source?.chatterEvents || [];
+    const usageEvents = events.filter(event => (event.tokensInput || 0) > 0 || (event.tokensOutput || 0) > 0);
+    if (usageEvents.length === 0) {
+      return null;
+    }
+
+    const input = usageEvents.reduce((sum, event) => sum + (event.tokensInput || 0), 0);
+    const output = usageEvents.reduce((sum, event) => sum + (event.tokensOutput || 0), 0);
+    const total = input + output;
+    const byAgent = new Map<string, { input: number; output: number; total: number }>();
+
+    for (const event of usageEvents) {
+      const agentName = event.agentName || 'Agent';
+      const current = byAgent.get(agentName) || { input: 0, output: 0, total: 0 };
+      current.input += event.tokensInput || 0;
+      current.output += event.tokensOutput || 0;
+      current.total += (event.tokensInput || 0) + (event.tokensOutput || 0);
+      byAgent.set(agentName, current);
+    }
+
+    const agentBreakdown: TokenAgentBreakdown[] = [...byAgent.entries()]
+      .map(([name, value]) => ({
+        name,
+        input: value.input,
+        output: value.output,
+        total: value.total,
+        percent: total > 0 ? (value.total / total) * 100 : 0,
+      }))
+      .sort((left, right) => right.total - left.total);
+
+    return {
+      label: source === this.streamingMessage ? 'Current response' : 'Last response',
+      input,
+      output,
+      total,
+      llmCalls: usageEvents.length,
+      agentBreakdown,
+    };
+  }
+
   toggleAgent(agentId: string): void {
     // Find if this is the orchestrator - orchestrator cannot be unchecked
     const agent = this.agents.find(a => a.id === agentId);
@@ -1131,6 +1191,28 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
       renderHint: e['render_hint'] as ChatterEvent['renderHint'],
     }));
     return msg;
+  }
+
+  private getTokenUsageSourceMessage(): DisplayMessage | undefined {
+    const streamingHasUsage = !!this.streamingMessage?.chatterEvents?.some(
+      event => (event.tokensInput || 0) > 0 || (event.tokensOutput || 0) > 0
+    );
+    if (streamingHasUsage) {
+      return this.streamingMessage;
+    }
+
+    for (let i = this.messages.length - 1; i >= 0; i--) {
+      const message = this.messages[i];
+      if (message.role !== 'assistant') continue;
+      const hasUsage = !!message.chatterEvents?.some(
+        event => (event.tokensInput || 0) > 0 || (event.tokensOutput || 0) > 0
+      );
+      if (hasUsage) {
+        return message;
+      }
+    }
+
+    return undefined;
   }
   
   handleFileUpload(file: File): void {

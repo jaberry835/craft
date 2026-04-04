@@ -18,6 +18,26 @@ from services.chatter import ChatterEvent, ChatterEventType
 logger = get_logger(__name__)
 
 
+def _accumulate_usage_from_update(update, token_accumulator: dict[str, int]) -> None:
+    """Accumulate input/output token counts from streamed framework updates."""
+    contents = getattr(update, "contents", None)
+    if not contents:
+        return
+
+    for content_item in contents:
+        if getattr(content_item, "type", None) != "usage":
+            continue
+        details = getattr(content_item, "usage_details", None)
+        if not details:
+            continue
+
+        input_tokens = details.get("input_token_count") if isinstance(details, dict) else getattr(details, "input_token_count", None)
+        output_tokens = details.get("output_token_count") if isinstance(details, dict) else getattr(details, "output_token_count", None)
+
+        token_accumulator["input"] = token_accumulator.get("input", 0) + (input_tokens or 0)
+        token_accumulator["output"] = token_accumulator.get("output", 0) + (output_tokens or 0)
+
+
 @dataclass
 class AgentResponse:
     """Response from agent execution."""
@@ -200,6 +220,7 @@ async def run_orchestrator_for_analysis(
             - specialists: list of agent IDs to call (if delegate)
             - reasoning: explanation of decision
             - direct_response: response text (if direct action)
+            - tokens_input / tokens_output: orchestrator analysis usage
     """
     from services.context_providers import CosmosHistoryProvider, DocumentRAGProvider
 
@@ -259,9 +280,11 @@ async def run_orchestrator_for_analysis(
     # Run — providers automatically load history + RAG; the framework
     # adds user_message as the current input.
     response_parts = []
+    token_accumulator = {"input": 0, "output": 0}
     async for update in analysis_agent.run(
         user_message, session=session, stream=True
     ):
+        _accumulate_usage_from_update(update, token_accumulator)
         if update.text:
             response_parts.append(update.text)
     
@@ -340,6 +363,8 @@ async def run_orchestrator_for_analysis(
                 decision["action"] = "direct"
                 decision["direct_response"] = full_response
         
+        decision["tokens_input"] = token_accumulator["input"]
+        decision["tokens_output"] = token_accumulator["output"]
         return decision
         
     except json_module.JSONDecodeError as e:
@@ -348,7 +373,9 @@ async def run_orchestrator_for_analysis(
         return {
             "action": "direct",
             "reasoning": "Failed to parse decision",
-            "direct_response": full_response
+            "direct_response": full_response,
+            "tokens_input": token_accumulator["input"],
+            "tokens_output": token_accumulator["output"],
         }
 
 
@@ -411,7 +438,9 @@ async def run_orchestrator_for_evaluation(
     ]
     
     response_parts = []
+    token_accumulator = {"input": 0, "output": 0}
     async for update in eval_agent.run(eval_messages, stream=True):
+        _accumulate_usage_from_update(update, token_accumulator)
         if update.text:
             response_parts.append(update.text)
     
@@ -443,11 +472,18 @@ async def run_orchestrator_for_evaluation(
                     normalized.append(agent_id_map[spec])
             evaluation["target_agents"] = normalized
         
+        evaluation["tokens_input"] = token_accumulator["input"]
+        evaluation["tokens_output"] = token_accumulator["output"]
         return evaluation
         
     except json_module.JSONDecodeError as e:
         logger.warning(f"Failed to parse evaluation JSON: {e}")
-        return {"continue": False, "reasoning": "Failed to parse evaluation"}
+        return {
+            "continue": False,
+            "reasoning": "Failed to parse evaluation",
+            "tokens_input": token_accumulator["input"],
+            "tokens_output": token_accumulator["output"],
+        }
 
 
 async def run_orchestrator_for_synthesis(
@@ -455,12 +491,12 @@ async def run_orchestrator_for_synthesis(
     specialist_results: list[dict],
     user_message: str,
     create_chat_client_fn,
-) -> str:
+) -> dict:
     """
     Phase 3: Run orchestrator to synthesize specialist results.
     
     Returns:
-        Synthesized response text
+        dict with content, tokens_input, and tokens_output
     """
     # Format specialist responses
     responses_text = []
@@ -501,8 +537,14 @@ async def run_orchestrator_for_synthesis(
     # Pass only the user's original question; the specialist responses are
     # embedded in the instructions (system prompt) already.
     response_parts = []
+    token_accumulator = {"input": 0, "output": 0}
     async for update in synthesis_agent.run(user_message, stream=True):
+        _accumulate_usage_from_update(update, token_accumulator)
         if update.text:
             response_parts.append(update.text)
     
-    return "".join(response_parts)
+    return {
+        "content": "".join(response_parts),
+        "tokens_input": token_accumulator["input"],
+        "tokens_output": token_accumulator["output"],
+    }

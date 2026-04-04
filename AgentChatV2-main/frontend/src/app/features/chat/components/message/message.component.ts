@@ -1,4 +1,4 @@
-import { Component, Input, Output, EventEmitter, DoCheck, ViewChild, ElementRef, AfterViewChecked, HostListener, OnInit } from '@angular/core';
+import { Component, Input, Output, EventEmitter, DoCheck, AfterViewChecked, HostListener, OnInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { HttpClient } from '@angular/common/http';
 import { marked } from 'marked';
@@ -30,6 +30,23 @@ interface DisplayMessage extends Message {
   chatterEvents?: ChatterEvent[];
 }
 
+interface TimelineStep {
+  id: string;
+  type: 'planning' | 'tool' | 'delegation' | 'reasoning';
+  label: string;
+  status: 'active' | 'done';
+  agentName: string;
+  durationMs?: number;
+  toolName?: string;
+  toolArgs?: Record<string, unknown>;
+  toolResult?: string;
+  renderHint?: 'json' | 'table' | 'text';
+  delegationContent?: string;
+  liveNarration?: string;
+  narration?: string;
+  expanded: boolean;
+}
+
 @Component({
   selector: 'app-message',
   standalone: true,
@@ -50,80 +67,106 @@ interface DisplayMessage extends Message {
           <span class="message-time">{{ formatTime(message.timestamp) }}</span>
         </div>
         
-        <!-- Agent Activity Section (simplified view by default) -->
-        @if (hasChatterEvents()) {
-          <div class="chatter-section" [class.expanded]="chatterExpanded" [class.streaming]="isStreaming">
-            <!-- Simplified activity feed (always visible when streaming) -->
-            <div class="activity-feed" #chatterContainer>
-              @for (event of getChatterEvents(); track $index) {
-                <div class="activity-item" [class]="'activity-' + event.type">
-                  <span class="material-icons activity-icon">{{ getActivityIcon(event.type) }}</span>
-                  <span class="activity-agent">{{ event.agentName }}</span>
-                  <span class="activity-message">{{ getActivityMessage(event) }}</span>
-                  @if (event.durationMs && event.type === 'tool_result') {
-                    <span class="activity-duration">{{ formatDuration(event.durationMs) }}</span>
-                  }
-                </div>
-              }
-              @if (isStreaming) {
-                <div class="activity-item activity-working">
-                  <span class="material-icons activity-icon spinning">sync</span>
-                  <span class="activity-message">Working...</span>
-                </div>
-              }
-            </div>
-            
-            <!-- Technical details toggle -->
-            <button class="details-toggle" (click)="chatterExpanded = !chatterExpanded">
-              <span class="material-icons">{{ chatterExpanded ? 'expand_less' : 'expand_more' }}</span>
-              <span>{{ chatterExpanded ? 'Hide' : 'Show' }} technical details</span>
-            </button>
-            
-            <!-- Expanded technical view -->
-            @if (chatterExpanded) {
-              <div class="chatter-events">
-                @for (event of getChatterEvents(); track $index) {
-                  <div class="chatter-event" [class]="'chatter-' + event.type">
-                    <div class="chatter-event-header">
-                      <span class="material-icons">{{ getChatterIcon(event.type) }}</span>
-                      <span class="chatter-agent">{{ event.agentName }}</span>
-                      <span class="chatter-type">{{ formatChatterType(event.type) }}</span>
-                      @if (event.toolName) {
-                        <span class="chatter-tool">{{ event.toolName }}</span>
-                      }
-                      @if (event.durationMs) {
-                        <span class="chatter-duration" title="Execution time for this operation">{{ formatDuration(event.durationMs) }}</span>
-                      }
-                      @if (event.tokensInput || event.tokensOutput) {
-                        <span class="chatter-tokens" [title]="getTokensTooltip(event.tokensInput, event.tokensOutput)">
-                          <span class="material-icons">token</span>
-                          {{ formatTokenCount(event.tokensInput) }} → {{ formatTokenCount(event.tokensOutput) }}
-                        </span>
-                      }
-                    </div>
-                    @if (hasToolArgs(event.toolArgs)) {
-                      <div class="chatter-event-content">
-                        <pre class="tool-args">{{ formatToolArgs(event.toolArgs) }}</pre>
-                      </div>
-                    }
-                    @if (event.content && event.type === 'tool_result') {
-                      <div class="chatter-event-content">
-                        @if (event.renderHint === 'json') {
-                          <pre class="tool-result tool-result-json">{{ formatJson(event.content) }}</pre>
-                        } @else if (event.renderHint === 'table') {
-                          <div class="tool-result tool-result-table" [innerHTML]="renderTable(event.content)"></div>
-                        } @else {
-                          <div class="tool-result">{{ truncateContent(event.content, 300) }}</div>
-                        }
-                      </div>
-                    }
-                    @if (event.content && event.type === 'reasoning') {
-                      <div class="chatter-event-content">
-                        <div class="reasoning-content">{{ truncateContent(event.content, 500) }}</div>
-                      </div>
+        <!-- Vertical Agent Timeline -->
+        @if (hasChatterEvents() || isStreaming) {
+          <div class="agent-timeline" [class.streaming]="isStreaming">
+            @for (step of timelineSteps; track step.id; let last = $last) {
+              <div class="tl-step" [class.tl-active]="step.status === 'active'" [class.tl-done]="step.status === 'done'">
+                <!-- Icon column -->
+                <div class="tl-icon-col">
+                  <div class="tl-icon" [class]="'tl-icon-' + step.type">
+                    @if (step.status === 'active' && isStreaming) {
+                      <span class="material-icons spinning">sync</span>
+                    } @else {
+                      <span class="material-icons">{{ getStepIcon(step) }}</span>
                     }
                   </div>
-                }
+                  @if (!last || isStreaming) {
+                    <div class="tl-line"></div>
+                  }
+                </div>
+                <!-- Content column -->
+                <div class="tl-body">
+                  @if (canExpandStep(step)) {
+                    <button class="tl-header" (click)="toggleStep(step)">
+                      <span class="tl-label">{{ step.label }}</span>
+                      <div class="tl-meta">
+                        @if (step.type === 'delegation') {
+                          <span class="tl-badge tl-badge-agent">{{ step.agentName }}</span>
+                        }
+                        @if (step.durationMs) {
+                          <span class="tl-badge tl-badge-duration">{{ formatDuration(step.durationMs) }}</span>
+                        }
+                        @if (step.toolName) {
+                          <span class="tl-badge tl-badge-tool">{{ step.toolName }}</span>
+                        }
+                      </div>
+                      <span class="material-icons tl-chevron">{{ step.expanded ? 'expand_less' : 'expand_more' }}</span>
+                    </button>
+                  } @else {
+                    <div class="tl-header tl-header-static">
+                      <span class="tl-label">{{ step.label }}</span>
+                      <div class="tl-meta">
+                        @if (step.type === 'delegation') {
+                          <span class="tl-badge tl-badge-agent">{{ step.agentName }}</span>
+                        }
+                        @if (step.durationMs) {
+                          <span class="tl-badge tl-badge-duration">{{ formatDuration(step.durationMs) }}</span>
+                        }
+                        @if (step.toolName) {
+                          <span class="tl-badge tl-badge-tool">{{ step.toolName }}</span>
+                        }
+                      </div>
+                    </div>
+                  }
+                  @if (isStepExpanded(step) && canExpandStep(step)) {
+                    <div class="tl-details">
+                      @if (hasStepDetailText(step)) {
+                        <div class="tl-detail-row">
+                          <span class="tl-detail-label">{{ step.status === 'active' ? 'Narration' : 'Summary' }}</span>
+                          <p class="tl-summary">{{ getStepDetailText(step) }}</p>
+                        </div>
+                      }
+                      @if (step.toolArgs && hasToolArgs(step.toolArgs)) {
+                        <div class="tl-detail-row">
+                          <span class="tl-detail-label">Input</span>
+                          <pre class="tl-code">{{ formatToolArgs(step.toolArgs) }}</pre>
+                        </div>
+                      }
+                      @if (step.toolResult) {
+                        <div class="tl-detail-row">
+                          <span class="tl-detail-label">Result</span>
+                          @if (step.renderHint === 'json') {
+                            <pre class="tl-code">{{ formatJson(step.toolResult) }}</pre>
+                          } @else if (step.renderHint === 'table') {
+                            <div class="tl-table" [innerHTML]="renderTable(step.toolResult)"></div>
+                          } @else {
+                            <p class="tl-result-text">{{ truncateContent(step.toolResult, 400) }}</p>
+                          }
+                        </div>
+                      }
+                      @if (step.type === 'delegation' && step.delegationContent) {
+                        <div class="tl-detail-row">
+                          <span class="tl-detail-label">Task</span>
+                          <p class="tl-result-text">{{ truncateContent(step.delegationContent, 300) }}</p>
+                        </div>
+                      }
+                    </div>
+                  }
+                </div>
+              </div>
+            }
+            <!-- Live working indicator when no active step -->
+            @if (isStreaming && (timelineSteps.length === 0 || timelineSteps[timelineSteps.length - 1].status === 'done')) {
+              <div class="tl-step tl-active">
+                <div class="tl-icon-col">
+                  <div class="tl-icon tl-icon-working">
+                    <span class="material-icons spinning">sync</span>
+                  </div>
+                </div>
+                <div class="tl-body">
+                  <span class="tl-label tl-label-muted">Working…</span>
+                </div>
               </div>
             }
           </div>
@@ -219,339 +262,231 @@ interface DisplayMessage extends Message {
       color: var(--text-muted);
     }
     
-    /* Chatter Section Styles */
-    .chatter-section {
+    /* ─── Agent Timeline ─────────────────────────────────── */
+    .agent-timeline {
       margin: var(--spacing-sm) 0;
+      padding: var(--spacing-sm) var(--spacing-md) var(--spacing-xs);
       border: 1px solid var(--border-color);
       border-radius: 8px;
       background-color: var(--bg-primary);
-      overflow: hidden;
-      
+
       &.streaming {
         border-color: var(--primary);
-        box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.2);
+        box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.15);
       }
     }
-    
-    /* Simplified Activity Feed */
-    .activity-feed {
-      padding: var(--spacing-sm) var(--spacing-md);
-      max-height: 150px;
-      overflow-y: auto;
+
+    .tl-step {
+      display: flex;
+      gap: 10px;
+      min-height: 28px;
     }
-    
-    .activity-item {
+
+    .tl-icon-col {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      flex-shrink: 0;
+      width: 22px;
+    }
+
+    .tl-icon {
+      width: 22px;
+      height: 22px;
       display: flex;
       align-items: center;
-      gap: var(--spacing-xs);
-      padding: 4px 0;
-      font-size: 13px;
-      color: var(--text-secondary);
-      
-      &.activity-tool_call {
-        .activity-icon {
-          color: #3b82f6;
-        }
-      }
-      
-      &.activity-tool_result {
-        .activity-icon {
-          color: #10b981;
-        }
-      }
-      
-      &.activity-delegation {
-        .activity-icon {
-          color: #8b5cf6;
-        }
-      }
-      
-      &.activity-thinking {
-        .activity-icon {
-          color: #f59e0b;
-        }
-      }
-      
-      &.activity-reasoning {
-        .activity-icon {
-          color: #06b6d4;
-        }
-      }
-      
-      &.activity-working {
-        color: var(--text-muted);
-        font-style: italic;
-        
-        .activity-icon {
-          color: var(--primary);
-        }
-      }
-    }
-    
-    .activity-icon {
-      font-size: 16px;
+      justify-content: center;
       flex-shrink: 0;
-      
-      &.spinning {
-        animation: spin 1s linear infinite;
+
+      .material-icons {
+        font-size: 17px;
       }
+
+      &.tl-icon-planning .material-icons { color: #f59e0b; }
+      &.tl-icon-tool .material-icons     { color: #3b82f6; }
+      &.tl-icon-delegation .material-icons { color: #8b5cf6; }
+      &.tl-icon-reasoning .material-icons  { color: #06b6d4; }
+      &.tl-icon-working .material-icons    { color: var(--primary); }
     }
-    
-    .activity-agent {
-      font-weight: 600;
-      color: var(--text-primary);
-      flex-shrink: 0;
-    }
-    
-    .activity-message {
+
+    .tl-line {
       flex: 1;
+      width: 1px;
+      background-color: var(--border-color);
+      min-height: 6px;
+      margin: 2px 0 0;
+    }
+
+    .tl-body {
+      flex: 1;
+      min-width: 0;
+      padding-bottom: 6px;
+    }
+
+    .tl-header {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 2px 4px;
+      text-align: left;
+      border-radius: 4px;
+      transition: background-color var(--transition-fast);
+
+      &:hover {
+        background-color: var(--bg-hover);
+      }
+    }
+
+    .tl-header-static {
+      cursor: default;
+
+      &:hover {
+        background-color: transparent;
+      }
+    }
+
+    .tl-label {
+      flex: 1;
+      font-size: 13px;
+      color: var(--text-primary);
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    
-    .activity-duration {
-      flex-shrink: 0;
-      font-size: 11px;
-      color: #10b981;
-      background-color: rgba(16, 185, 129, 0.1);
-      padding: 2px 6px;
-      border-radius: 4px;
-    }
-    
-    .details-toggle {
-      width: 100%;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: var(--spacing-xs);
-      padding: 6px var(--spacing-md);
-      background: var(--bg-secondary);
-      border: none;
-      border-top: 1px solid var(--border-color);
-      cursor: pointer;
+
+    .tl-label-muted {
       color: var(--text-muted);
-      font-size: 12px;
-      transition: background-color var(--transition-fast);
-      
-      &:hover {
-        background-color: var(--bg-hover);
-        color: var(--text-secondary);
-      }
-      
-      .material-icons {
-        font-size: 16px;
-      }
-    }
-    
-    @keyframes spin {
-      from { transform: rotate(0deg); }
-      to { transform: rotate(360deg); }
-    }
-    
-    .chatter-toggle {
-      width: 100%;
-      display: flex;
-      align-items: center;
-      gap: var(--spacing-xs);
-      padding: var(--spacing-sm) var(--spacing-md);
-      background: none;
-      border: none;
-      cursor: pointer;
-      color: var(--text-muted);
-      font-size: 13px;
-      transition: background-color var(--transition-fast);
-      
-      &:hover {
-        background-color: var(--bg-secondary);
-      }
-      
-      .material-icons {
-        font-size: 18px;
-      }
-      
-      .chatter-icon {
-        color: var(--primary);
-      }
-    }
-    
-    .chatter-events {
-      border-top: 1px solid var(--border-color);
-      max-height: 300px;
-      overflow-y: auto;
-    }
-    
-    .chatter-event {
-      padding: var(--spacing-sm) var(--spacing-md);
-      border-bottom: 1px solid var(--border-color);
-      
-      &:last-child {
-        border-bottom: none;
-      }
-      
-      &.chatter-tool_call {
-        background-color: rgba(59, 130, 246, 0.05);
-        
-        .chatter-event-header .material-icons {
-          color: #3b82f6;
-        }
-      }
-      
-      &.chatter-tool_result {
-        background-color: rgba(16, 185, 129, 0.05);
-        
-        .chatter-event-header .material-icons {
-          color: #10b981;
-        }
-      }
-      
-      &.chatter-delegation {
-        background-color: rgba(139, 92, 246, 0.05);
-        
-        .chatter-event-header .material-icons {
-          color: #8b5cf6;
-        }
-      }
-      
-      &.chatter-reasoning {
-        background-color: rgba(6, 182, 212, 0.05);
-        
-        .chatter-event-header .material-icons {
-          color: #06b6d4;
-        }
-      }
-    }
-    
-    .reasoning-content {
-      font-size: 12px;
-      color: var(--text-secondary);
       font-style: italic;
-      line-height: 1.5;
-      white-space: pre-wrap;
-      background-color: rgba(6, 182, 212, 0.05);
-      border-left: 3px solid #06b6d4;
-      padding: var(--spacing-xs) var(--spacing-sm);
-      border-radius: 0 4px 4px 0;
     }
-    
-    .chatter-event-header {
+
+    .tl-meta {
       display: flex;
       align-items: center;
-      gap: var(--spacing-xs);
-      font-size: 12px;
-      
-      .material-icons {
-        font-size: 16px;
-      }
-      
-      .chatter-agent {
-        font-weight: 600;
-        color: var(--text-primary);
-      }
-      
-      .chatter-type {
-        color: var(--text-muted);
-        text-transform: capitalize;
-      }
-      
-      .chatter-tool {
-        background-color: var(--bg-secondary);
-        padding: 2px 8px;
-        border-radius: 4px;
-        font-family: 'Consolas', 'Monaco', monospace;
-        color: var(--primary);
-      }
-      
-      .chatter-duration {
-        margin-left: auto;
-        background-color: rgba(16, 185, 129, 0.1);
-        color: #10b981;
-        padding: 2px 6px;
-        border-radius: 4px;
-        font-size: 11px;
-        font-weight: 500;
-      }
-      
-      .chatter-tokens {
-        display: flex;
-        align-items: center;
-        gap: 2px;
-        background-color: rgba(139, 92, 246, 0.1);
+      gap: 4px;
+      flex-shrink: 0;
+    }
+
+    .tl-badge {
+      font-size: 11px;
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-weight: 500;
+      white-space: nowrap;
+
+      &.tl-badge-agent {
+        background-color: rgba(139, 92, 246, 0.12);
         color: #8b5cf6;
-        padding: 2px 6px;
-        border-radius: 4px;
-        font-size: 11px;
-        font-weight: 500;
-        
-        .material-icons {
-          font-size: 12px;
-        }
+      }
+
+      &.tl-badge-duration {
+        background-color: rgba(16, 185, 129, 0.12);
+        color: #10b981;
+      }
+
+      &.tl-badge-tool {
+        background-color: rgba(59, 130, 246, 0.1);
+        color: #3b82f6;
+        font-family: 'Consolas', 'Monaco', monospace;
       }
     }
-    
-    .chatter-event-content {
-      margin-top: var(--spacing-xs);
-      margin-left: 24px;
+
+    .tl-chevron {
+      font-size: 16px !important;
+      color: var(--text-muted);
+      flex-shrink: 0;
     }
-    
-    .tool-args {
+
+    /* Step detail panel (expanded) */
+    .tl-details {
+      margin: 4px 0 var(--spacing-xs) 4px;
+      padding-left: var(--spacing-sm);
+      border-left: 2px solid var(--border-color);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .tl-detail-row {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .tl-detail-label {
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+    }
+
+    .tl-code {
       font-size: 11px;
       background-color: var(--bg-secondary);
       padding: var(--spacing-xs) var(--spacing-sm);
       border-radius: 4px;
       overflow-x: auto;
-      max-height: 100px;
+      max-height: 120px;
       margin: 0;
+      font-family: 'Consolas', 'Monaco', monospace;
+      white-space: pre;
     }
-    
-    .tool-result {
+
+    .tl-result-text {
       font-size: 12px;
       color: var(--text-secondary);
-      background-color: var(--bg-secondary);
-      padding: var(--spacing-xs) var(--spacing-sm);
-      border-radius: 4px;
-      max-height: 150px;
+      line-height: 1.5;
+      margin: 0;
+      max-height: 120px;
       overflow: auto;
-      text-overflow: ellipsis;
-      
-      &.tool-result-json {
-        font-family: 'Consolas', 'Monaco', monospace;
-        font-size: 11px;
-        white-space: pre;
-        margin: 0;
-      }
-      
-      &.tool-result-table {
-        overflow-x: auto;
-        
-        :deep(.tool-table) {
-          width: 100%;
-          border-collapse: collapse;
-          font-size: 11px;
-        }
-        
-        :deep(th), :deep(td) {
-          padding: 4px 8px;
-          border: 1px solid var(--border-color);
-          text-align: left;
-          white-space: nowrap;
-        }
-        
-        :deep(th) {
-          background-color: var(--bg-tertiary);
-          font-weight: 600;
-        }
-        
-        :deep(tr:hover td) {
-          background-color: var(--bg-hover);
-        }
-      }
     }
-    
-    .delegation-msg {
+
+    .tl-summary {
       font-size: 12px;
       color: var(--text-secondary);
-      font-style: italic;
+      line-height: 1.5;
+      margin: 0;
+      white-space: pre-wrap;
+      max-height: 140px;
+      overflow: auto;
+    }
+
+    .tl-table {
+      overflow-x: auto;
+      font-size: 11px;
+
+      :deep(.tool-table) {
+        width: 100%;
+        border-collapse: collapse;
+      }
+
+      :deep(th), :deep(td) {
+        padding: 3px 8px;
+        border: 1px solid var(--border-color);
+      }
+
+      :deep(th) {
+        background-color: var(--bg-secondary);
+        font-weight: 600;
+      }
+    }
+
+    .tl-step.tl-done .tl-icon-planning .material-icons { color: #10b981; }
+    .tl-step.tl-done .tl-icon-tool .material-icons     { color: #10b981; }
+    .tl-step.tl-done .tl-icon-delegation .material-icons { color: #10b981; }
+    .tl-step.tl-done .tl-icon-reasoning .material-icons  { color: #10b981; }
+
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to   { transform: rotate(360deg); }
+    }
+
+    .spinning {
+      animation: spin 1s linear infinite;
     }
 
     .image-attachment {
@@ -900,12 +835,12 @@ export class MessageComponent implements DoCheck, OnInit {
   formSubmitted = false;
   private cachedParsedFields: ParsedInputField[] | null = null;
   private cachedContent: string | null = null;
+
+  // Timeline state
+  timelineSteps: TimelineStep[] = [];
+  private toolCallStepIndex = new Map<string, number>();
   
-  @ViewChild('chatterContainer') chatterContainer?: ElementRef<HTMLDivElement>;
-  
-  chatterExpanded = false;  // Technical details are collapsed by default
-  private previousChatterCount = 0;
-  private shouldScrollToBottom = false;
+  private previousTimelineSignature = '';
   private md!: ReturnType<typeof marked.use>;
   
   constructor(
@@ -925,6 +860,11 @@ export class MessageComponent implements DoCheck, OnInit {
       breaks: true,
       gfm: true,
     });
+    // Build timeline for already-loaded messages (history)
+    if (this.hasChatterEvents()) {
+      this.rebuildTimeline();
+      this.previousTimelineSignature = this.buildTimelineSignature();
+    }
   }
   
   /**
@@ -1010,27 +950,15 @@ export class MessageComponent implements DoCheck, OnInit {
   }
   
   ngDoCheck(): void {
-    // Auto-scroll activity feed when new events arrive during streaming
-    if (this.isStreaming && this.hasChatterEvents()) {
-      const currentCount = this.getChatterEvents().length;
-      if (currentCount > this.previousChatterCount) {
-        this.previousChatterCount = currentCount;
-        this.shouldScrollToBottom = true;  // Flag to scroll after view updates
-      }
-    }
-    // Reset counter when streaming ends
-    if (!this.isStreaming && this.previousChatterCount > 0) {
-      this.previousChatterCount = 0;
+    const signature = this.buildTimelineSignature();
+    if (signature !== this.previousTimelineSignature) {
+      this.rebuildTimeline();
+      this.previousTimelineSignature = signature;
     }
   }
   
   ngAfterViewChecked(): void {
-    // Auto-scroll to bottom when new chatter events arrive
-    if (this.shouldScrollToBottom && this.chatterContainer) {
-      const container = this.chatterContainer.nativeElement;
-      container.scrollTop = container.scrollHeight;
-      this.shouldScrollToBottom = false;
-    }
+    // No-op: inner container scroll removed; outer message list handles scrolling
   }
   
   formatTime(timestamp: string): string {
@@ -1190,6 +1118,294 @@ export class MessageComponent implements DoCheck, OnInit {
     const metadata = (this.message as any).metadata;
     const img = metadata?.['image_attachment'] as Record<string, unknown> | undefined;
     return (img?.['filename'] as string) || 'Image';
+  }
+
+  /* ─── Timeline methods ─────────────────────────────────── */
+
+  /** Build the full timeline from scratch (used for history messages on init). */
+  private rebuildTimeline(): void {
+    const expandedStepIds = new Set(
+      this.timelineSteps
+        .filter(step => step.status === 'done' && step.expanded)
+        .map(step => step.id)
+    );
+
+    this.timelineSteps = [];
+    this.toolCallStepIndex.clear();
+    const events = this.getChatterEvents();
+    events.forEach(e => this.processTimelineEvent(e));
+    if (!this.isStreaming) {
+      this.finalizeActiveStep();
+    }
+
+    for (const step of this.timelineSteps) {
+      if (step.status === 'done' && expandedStepIds.has(step.id)) {
+        step.expanded = true;
+      }
+    }
+  }
+
+  /** Process a single incoming event and update timelineSteps in place. */
+  private processTimelineEvent(event: ChatterEvent): void {
+    if (event.type === 'thinking') {
+      this.upsertPlanningStep(event);
+      return;
+    }
+
+    if (event.type === 'reasoning') {
+      this.upsertReasoningStep(event);
+      return;
+    }
+
+    // tool_result closes a matching tool_call step
+    if (event.type === 'tool_result') {
+      const stepIdx = event.toolCallId
+        ? this.toolCallStepIndex.get(event.toolCallId)
+        : this.findLastActiveToolStepIndex();
+      if (stepIdx !== undefined) {
+        const step = this.timelineSteps[stepIdx];
+        step.status = 'done';
+        step.durationMs = event.durationMs;
+        step.toolResult = event.content;
+        step.renderHint = event.renderHint;
+        step.liveNarration = undefined;
+        step.narration = this.buildToolResultNarration(step, event);
+        step.expanded = false;
+      }
+      return;
+    }
+
+    // Suppress raw content events — the final answer is rendered in the message body
+    if (event.type === 'content') return;
+
+    if (event.type === 'delegation') {
+      this.finalizeActiveStep();
+      this.timelineSteps.push({
+        id: `step-${event.timestamp}-${this.timelineSteps.length}`,
+        type: 'delegation',
+        label: event.friendlyMessage || `Asking ${event.agentName}…`,
+        status: 'done',
+        agentName: event.agentName,
+        delegationContent: event.content,
+        narration: this.buildDelegationNarration(event),
+        expanded: false,
+      });
+      return;
+    }
+
+    if (event.type === 'tool_call') {
+      this.finalizeActiveStep();
+      const idx = this.timelineSteps.length;
+      const step: TimelineStep = {
+        id: `step-${event.timestamp}-${idx}`,
+        type: 'tool',
+        label: this.buildToolLabel(event),
+        status: 'active',
+        agentName: event.agentName,
+        toolName: event.toolName,
+        toolArgs: event.toolArgs,
+        liveNarration: this.buildToolStartNarration(event),
+        narration: this.buildToolStartNarration(event),
+        expanded: true,
+      };
+      if (event.toolCallId) {
+        this.toolCallStepIndex.set(event.toolCallId, idx);
+      }
+      this.timelineSteps.push(step);
+    }
+  }
+
+  private findLastActiveToolStepIndex(): number | undefined {
+    for (let i = this.timelineSteps.length - 1; i >= 0; i--) {
+      if (this.timelineSteps[i].type === 'tool' && this.timelineSteps[i].status === 'active') {
+        return i;
+      }
+    }
+    return undefined;
+  }
+
+  private buildToolLabel(event: ChatterEvent): string {
+    if (event.friendlyMessage) return event.friendlyMessage;
+    if (!event.toolName) return 'Calling a tool…';
+    const args = event.toolArgs;
+    const friendly = this.humanizeToolName(event.toolName);
+    if (args?.['query'])    return `Searching: "${this.truncateContent(String(args['query']), 50)}"`;
+    if (args?.['question']) return `Looking up: "${this.truncateContent(String(args['question']), 50)}"`;
+    return `Calling ${friendly}`;
+  }
+
+  private upsertPlanningStep(event: ChatterEvent): void {
+    const label = event.friendlyMessage || 'Planning...';
+    const active = this.getActiveStep();
+    if (active?.type === 'planning') {
+      active.label = label;
+      active.liveNarration = this.buildThinkingNarration(event);
+      active.narration = this.buildThinkingSummary(event);
+      active.expanded = true;
+      return;
+    }
+
+    this.finalizeActiveStep();
+    this.timelineSteps.push({
+      id: `step-${event.timestamp}-${this.timelineSteps.length}`,
+      type: 'planning',
+      label,
+      status: 'active',
+      agentName: event.agentName,
+      liveNarration: this.buildThinkingNarration(event),
+      narration: this.buildThinkingSummary(event),
+      expanded: true,
+    });
+  }
+
+  private upsertReasoningStep(event: ChatterEvent): void {
+    const label = event.friendlyMessage || 'Analyzing...';
+    const active = this.getActiveStep();
+    if (active?.type === 'reasoning') {
+      active.label = label;
+      active.liveNarration = this.buildReasoningNarration(active.agentName, true);
+      active.narration = this.buildReasoningNarration(active.agentName, false);
+      active.expanded = true;
+      return;
+    }
+
+    this.finalizeActiveStep();
+    this.timelineSteps.push({
+      id: `step-${event.timestamp}-${this.timelineSteps.length}`,
+      type: 'reasoning',
+      label,
+      status: 'active',
+      agentName: event.agentName,
+      liveNarration: this.buildReasoningNarration(event.agentName, true),
+      narration: this.buildReasoningNarration(event.agentName, false),
+      expanded: true,
+    });
+  }
+
+  private getActiveStep(): TimelineStep | undefined {
+    return [...this.timelineSteps].reverse().find(step => step.status === 'active');
+  }
+
+  private finalizeActiveStep(): void {
+    const active = this.getActiveStep();
+    if (!active) return;
+
+    active.status = 'done';
+    active.expanded = false;
+    active.liveNarration = undefined;
+  }
+
+  private buildTimelineSignature(): string {
+    return JSON.stringify({
+      isStreaming: this.isStreaming,
+      chatterEvents: this.getChatterEvents().map(event => ({
+        type: event.type,
+        agentName: event.agentName,
+        content: event.content,
+        toolName: event.toolName,
+        toolArgs: event.toolArgs,
+        toolCallId: event.toolCallId,
+        durationMs: event.durationMs,
+        tokensInput: event.tokensInput,
+        tokensOutput: event.tokensOutput,
+        friendlyMessage: event.friendlyMessage,
+        renderHint: event.renderHint,
+      })),
+    });
+  }
+
+  canExpandStep(step: TimelineStep): boolean {
+    return this.hasStepDetailText(step)
+      || (step.toolArgs ? this.hasToolArgs(step.toolArgs) : false)
+      || !!step.toolResult
+      || !!step.delegationContent;
+  }
+
+  isStepExpanded(step: TimelineStep): boolean {
+    return step.status === 'active' ? true : step.expanded;
+  }
+
+  hasStepDetailText(step: TimelineStep): boolean {
+    return !!this.getStepDetailText(step);
+  }
+
+  getStepDetailText(step: TimelineStep): string {
+    return step.status === 'active' ? (step.liveNarration || '') : (step.narration || '');
+  }
+
+  private buildThinkingNarration(event: ChatterEvent): string | undefined {
+    if (event.content && !event.content.startsWith('LLM call:')) {
+      return this.truncateContent(event.content, 220);
+    }
+    if (event.friendlyMessage) {
+      return event.friendlyMessage;
+    }
+    if (event.tokensInput || event.tokensOutput) {
+      const input = this.formatTokenCount(event.tokensInput);
+      const output = this.formatTokenCount(event.tokensOutput);
+      return `Reviewing context with ${input} input tokens and ${output} output tokens generated so far.`;
+    }
+    return 'The model is evaluating the request and deciding the next action.';
+  }
+
+  private buildThinkingSummary(event: ChatterEvent): string {
+    if (event.content && !event.content.startsWith('LLM call:')) {
+      return this.truncateContent(event.content, 160);
+    }
+    if (event.friendlyMessage) {
+      return event.friendlyMessage;
+    }
+    return 'Reviewed the current context and decided the next step.';
+  }
+
+  private buildReasoningNarration(agentName: string, active: boolean): string {
+    if (active) {
+      return `${agentName} is weighing the available information before drafting a response.`;
+    }
+    return `${agentName} analyzed the available information before drafting the response.`;
+  }
+
+  private buildDelegationNarration(event: ChatterEvent): string {
+    if (event.content) {
+      return `Delegated a focused task to ${event.agentName}: ${this.truncateContent(event.content, 140)}`;
+    }
+    return `Delegated work to ${event.agentName}.`;
+  }
+
+  private buildToolStartNarration(event: ChatterEvent): string {
+    if (event.friendlyMessage) {
+      return event.friendlyMessage;
+    }
+    if (event.toolName) {
+      return `${event.agentName} is preparing ${this.humanizeToolName(event.toolName)} and waiting for the result.`;
+    }
+    return `${event.agentName} is calling a tool.`;
+  }
+
+  private buildToolResultNarration(step: TimelineStep, event: ChatterEvent): string {
+    if (step.toolName) {
+      const duration = event.durationMs ? ` in ${this.formatDuration(event.durationMs)}` : '';
+      return `${this.humanizeToolName(step.toolName)} completed${duration}.`;
+    }
+    return 'Tool call completed.';
+  }
+
+  /** Toggle expanded state of a timeline step. */
+  toggleStep(step: TimelineStep): void {
+    if (step.status === 'active') return;
+    step.expanded = !step.expanded;
+  }
+
+  /** Return the right Material icon for a given step. */
+  getStepIcon(step: TimelineStep): string {
+    if (step.status === 'done') return 'check_circle';
+    switch (step.type) {
+      case 'planning':    return 'lightbulb';
+      case 'tool':        return 'search';
+      case 'delegation':  return 'forward';
+      case 'reasoning':   return 'neurology';
+      default:            return 'sync';
+    }
   }
 
   hasChatterEvents(): boolean {
