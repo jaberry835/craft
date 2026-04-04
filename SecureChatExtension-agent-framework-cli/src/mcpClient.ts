@@ -8,8 +8,11 @@
  */
 import * as vscode from 'vscode';
 import * as cp from 'child_process';
+import * as fs from 'fs';
 import * as http from 'http';
 import * as https from 'https';
+import * as path from 'path';
+import type { MCPServerConfig as CopilotSdkMcpServerConfig } from '@github/copilot-sdk';
 import { McpAuthSessionConfig, McpServerConfig, McpToolInfo, ToolDefinition, ToolResult } from './types';
 import { getSetting } from './config';
 
@@ -57,6 +60,11 @@ interface HttpConnection extends McpConnectionBase {
 
 type McpConnection = StdioConnection | HttpConnection;
 
+interface StdioSpawnSpec {
+    command: string;
+    args: string[];
+}
+
 export class McpClient {
     private connections: Map<string, McpConnection> = new Map();
     private mcpToolNameMap: Map<string, { serverName: string; toolName: string }> = new Map();
@@ -87,6 +95,48 @@ export class McpClient {
             }
         }
         this.outputChannel.appendLine(`MCP: ${this.getToolCount()} total tools across ${this.connections.size} connected server(s)`);
+    }
+
+    /**
+     * Return the merged VS Code MCP settings in the shape expected by the Copilot SDK.
+     * This lets the Copilot CLI runtime use the same configured servers as the local agent.
+     */
+    async getCopilotSdkServerConfigs(): Promise<Record<string, CopilotSdkMcpServerConfig>> {
+        const servers = this.getConfiguredServers();
+        const result: Record<string, CopilotSdkMcpServerConfig> = {};
+
+        for (const [name, config] of Object.entries(servers)) {
+            if (this.isCopilotCliBuiltInMcpServer(name, config)) {
+                this.outputChannel.appendLine(`MCP: skipping built-in Copilot CLI MCP server "${name}"`);
+                continue;
+            }
+
+            if (config.command) {
+                const spawnSpec = this.normalizeStdioSpawn(config.command, config.args || []);
+                result[name] = {
+                    tools: ['*'],
+                    type: 'stdio',
+                    command: spawnSpec.command,
+                    args: spawnSpec.args,
+                    ...(config.env ? { env: config.env } : {}),
+                    ...(config.cwd ? { cwd: config.cwd } : {}),
+                };
+                continue;
+            }
+
+            if (config.url) {
+                const headers = await this.resolveHttpHeaders(name, config);
+                result[name] = {
+                    tools: ['*'],
+                    type: 'http',
+                    url: config.url,
+                    ...(Object.keys(headers).length > 0 ? { headers } : {}),
+                };
+            }
+        }
+
+        this.outputChannel.appendLine(`MCP: prepared ${Object.keys(result).length} Copilot SDK server config(s): ${Object.keys(result).join(', ') || '(none)'}`);
+        return result;
     }
 
     private getConfiguredServers(): Record<string, McpServerConfig> {
@@ -148,6 +198,145 @@ export class McpClient {
 
         const config = value as McpServerConfig;
         return typeof config.command === 'string' || typeof config.url === 'string';
+    }
+
+    private normalizeStdioSpawn(command: string, args: string[]): StdioSpawnSpec {
+        if (process.platform !== 'win32') {
+            return { command, args };
+        }
+
+        const resolvedCommand = this.resolveWindowsCommandPath(command);
+        const nodePackageCommand = this.resolveWindowsNodePackageCommand(resolvedCommand, args);
+        if (nodePackageCommand) {
+            return nodePackageCommand;
+        }
+
+        const resolvedExt = path.extname(resolvedCommand).toLowerCase();
+
+        if (resolvedExt === '.exe' || resolvedExt === '.com') {
+            return { command: resolvedCommand, args };
+        }
+
+        if (resolvedExt === '.cmd' || resolvedExt === '.bat') {
+            const shellCommand = process.env.ComSpec || 'cmd.exe';
+            return {
+                command: shellCommand,
+                args: ['/d', '/s', '/c', this.buildWindowsCommandLine(resolvedCommand, args)]
+            };
+        }
+
+        if (resolvedExt === '.ps1' || resolvedExt === '.psm1') {
+            const shellCommand = this.resolvePowerShellCommand();
+            return {
+                command: shellCommand,
+                args: ['-NoProfile', '-NoLogo', '-File', resolvedCommand, ...args]
+            };
+        }
+
+        return { command: resolvedCommand, args };
+    }
+
+    private resolveWindowsNodePackageCommand(command: string, args: string[]): StdioSpawnSpec | undefined {
+        if (process.platform !== 'win32') {
+            return undefined;
+        }
+
+        const commandName = path.basename(command, path.extname(command)).toLowerCase();
+        if (commandName !== 'npx' && commandName !== 'npm') {
+            return undefined;
+        }
+
+        const commandDir = path.dirname(command);
+        const nodeExe = this.resolveWindowsPathCandidates(path.join(commandDir, 'node')) || this.resolveWindowsCommandPath('node');
+        const cliScript = path.join(
+            commandDir,
+            'node_modules',
+            'npm',
+            'bin',
+            commandName === 'npx' ? 'npx-cli.js' : 'npm-cli.js'
+        );
+
+        if (!fs.existsSync(nodeExe) || !fs.existsSync(cliScript)) {
+            return undefined;
+        }
+
+        return {
+            command: nodeExe,
+            args: [cliScript, ...args],
+        };
+    }
+
+    private resolveWindowsCommandPath(command: string): string {
+        if (process.platform !== 'win32') {
+            return command;
+        }
+
+        if (this.commandLooksLikePath(command)) {
+            return this.resolveWindowsPathCandidates(command) || command;
+        }
+
+        const pathEntries = (process.env.PATH || '').split(';').filter(Boolean);
+        for (const entry of pathEntries) {
+            const candidate = this.resolveWindowsPathCandidates(path.join(entry, command));
+            if (candidate) {
+                return candidate;
+            }
+        }
+
+        return command;
+    }
+
+    private resolveWindowsPathCandidates(basePath: string): string | undefined {
+        const ext = path.extname(basePath);
+        const candidates = ext
+            ? [basePath]
+            : [
+                `${basePath}.exe`,
+                `${basePath}.com`,
+                `${basePath}.cmd`,
+                `${basePath}.bat`,
+                `${basePath}.ps1`,
+                `${basePath}.psm1`,
+                basePath,
+            ];
+
+        return candidates.find(candidate => {
+            try {
+                return fs.existsSync(candidate);
+            } catch {
+                return false;
+            }
+        });
+    }
+
+    private commandLooksLikePath(command: string): boolean {
+        return command.includes('\\') || command.includes('/') || /^[a-zA-Z]:/.test(command);
+    }
+
+    private buildWindowsCommandLine(command: string, args: string[]): string {
+        return [command, ...args].map(arg => this.quoteWindowsCommandArg(arg)).join(' ');
+    }
+
+    private quoteWindowsCommandArg(arg: string): string {
+        if (arg.length === 0) {
+            return '""';
+        }
+        if (!/[\s"]/u.test(arg)) {
+            return arg;
+        }
+        return `"${arg.replace(/"/g, '\\"')}"`;
+    }
+
+    private resolvePowerShellCommand(): string {
+        return 'powershell.exe';
+    }
+
+    private isCopilotCliBuiltInMcpServer(name: string, config: McpServerConfig): boolean {
+        const normalizedName = name.trim().replace(/\\+/g, '/').replace(/\/+/g, '/').toLowerCase();
+        const normalizedUrl = (config.url || '').trim().replace(/\/+$/g, '').toLowerCase();
+        return normalizedName === 'github-mcp-server'
+            || normalizedName.endsWith('/github-mcp-server')
+            || normalizedUrl === 'https://api.githubcopilot.com/mcp';
     }
 
     private hasAuthorizationHeader(headers: Record<string, string>): boolean {
@@ -285,15 +474,16 @@ export class McpClient {
     // ── stdio transport ──────────────────────────────────────────────
 
     private async connectStdioServer(name: string, config: McpServerConfig): Promise<void> {
-        this.outputChannel.appendLine(`Connecting to MCP server (stdio): ${name} (${config.command})`);
+        const spawnSpec = this.normalizeStdioSpawn(config.command!, config.args || []);
+        this.outputChannel.appendLine(`Connecting to MCP server (stdio): ${name} (${spawnSpec.command} ${spawnSpec.args.join(' ')})`);
 
         const cwd = config.cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
-        const proc = cp.spawn(config.command!, config.args || [], {
+        const proc = cp.spawn(spawnSpec.command, spawnSpec.args, {
             cwd,
             env: { ...process.env, ...(config.env || {}) },
             stdio: ['pipe', 'pipe', 'pipe'],
             windowsHide: true,
-            shell: process.platform === 'win32'
+            shell: false
         });
 
         const conn: StdioConnection = {

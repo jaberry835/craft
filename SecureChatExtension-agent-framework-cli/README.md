@@ -15,6 +15,7 @@ Typical user tasks are:
 - install the VSIX
 - configure a provider and model list
 - store an API key
+- optionally configure GitHub Copilot CLI
 - open the chat and start working
 
 ## Before You Start
@@ -28,6 +29,8 @@ You need:
 - at least one model or deployment that supports chat and tool calling
 
 You do **not** need to build the extension from source.
+
+If you want to use the optional Copilot CLI provider in Junior, you also need GitHub Copilot CLI installed before you open VS Code. Junior hides the Copilot CLI option unless the CLI executable is present and either GitHub auth or BYOK provider configuration is already available.
 
 ## Install The VSIX
 
@@ -120,6 +123,53 @@ This example is not the only valid arrangement. The key point is that you should
 | `direct` | You connect straight to an Azure OpenAI resource | `junior.azureOpenAI.endpoint`, `junior.azureOpenAI.deployments`, `junior.azureOpenAI.activeDeployment` | `api-key` |
 | `apim` | Your organization exposes Azure OpenAI through Azure API Management | `junior.azureOpenAI.apimBaseUrl`, `junior.azureOpenAI.deployments`, `junior.azureOpenAI.activeDeployment` | `api-key` |
 | `openai` | You use OpenAI or another OpenAI-compatible API | `junior.azureOpenAI.openaiBaseUrl`, `junior.azureOpenAI.deployments`, `junior.azureOpenAI.activeDeployment` | `Authorization: Bearer ...` |
+
+## Optional: Copilot CLI Provider
+
+Junior can also route agent turns through GitHub Copilot CLI via the Copilot SDK.
+
+Before you expect the Copilot CLI option to appear in the UI:
+
+1. Install GitHub CLI.
+2. Install GitHub Copilot CLI and make `copilot` available on `PATH`, or set `junior.copilotCli.path` to the executable.
+3. If you are using BYOK, follow GitHub Copilot CLI's official BYOK setup instructions for your provider first.
+4. Start VS Code from an environment where the Copilot CLI variables are already set.
+
+BYOK/custom-provider auth:
+
+- Set `COPILOT_MODEL`. The Copilot SDK requires an explicit model when using a custom provider.
+- Set `COPILOT_PROVIDER_BASE_URL`.
+- Set `COPILOT_PROVIDER_TYPE` when needed. Valid values are `openai`, `azure`, and `anthropic`.
+- For secured providers, set `COPILOT_PROVIDER_API_KEY` or `COPILOT_PROVIDER_BEARER_TOKEN`.
+- For Azure BYOK, set `COPILOT_PROVIDER_AZURE_API_VERSION`.
+- If your provider requires the Responses API, set `COPILOT_PROVIDER_WIRE_API=responses`.
+
+Junior also exposes matching `junior.copilotCli.*` settings if you prefer to keep the values in VS Code settings. If you already set up the Copilot CLI environment variables before launching VS Code, Junior will use those inherited variables when it starts the CLI.
+
+For SDK-level troubleshooting, set `junior.copilotCli.logSdkEvents` to `true` and inspect the `Junior` output channel. Junior will log the raw Copilot SDK session events with compact summaries so you can see exactly which CLI events were emitted for a turn.
+
+Example Junior settings for the Copilot CLI selector itself:
+
+```jsonc
+{
+  "junior.agentProvider": "copilot-cli",
+  "junior.copilotCli.path": "C:\\Users\\SystemAdministrator\\AppData\\Local\\GitHubCopilotCLI\\copilot.exe",
+  "junior.copilotCli.model": "gpt-4.1",
+  "junior.copilotCli.models": [
+    {
+      "name": "GPT-4.1",
+      "id": "gpt-4.1"
+    }
+  ]
+}
+```
+
+You do not need to keep `junior.copilotCli.home` in settings unless you are intentionally overriding `COPILOT_HOME`.
+
+Notes:
+
+- Restart VS Code after changing environment variables so the extension host inherits them.
+- If Copilot CLI is installed but none of the auth or BYOK prerequisites are present, Junior keeps the provider on `Local` and does not show the Copilot CLI option.
 
 ### Option A: Direct Azure OpenAI
 

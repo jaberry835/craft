@@ -25,6 +25,8 @@ export interface ChatMessage {
     tool_calls?: ToolCall[];
     tool_call_id?: string;
     name?: string;
+    /** Chat mode active when this message was submitted. */
+    mode?: ChatMode;
     /** Original display text for user messages (before slash-command expansion) */
     displayText?: string;
     /** Structured working phases rendered in the chat UI for assistant tool turns. */
@@ -147,10 +149,17 @@ export interface ChatSession {
     messages: ChatMessage[];
     createdAt: number;
     updatedAt: number;
+    activeMode?: ChatMode;
     runtimeState?: RuntimeSessionState;
 }
 
 export type AgentProvider = 'local' | 'copilot-cli';
+export type ChatMode = 'ask' | 'plan' | 'agent';
+
+export interface AgentProviderOption {
+    value: AgentProvider;
+    label: string;
+}
 
 export interface RuntimeSessionState {
     provider: AgentProvider;
@@ -191,6 +200,7 @@ export interface WorkingBlockActionEntry {
     createdAt: number;
     actionType: WorkingActionType;
     status: 'running' | 'done' | 'error';
+    repeatCount?: number;
     detail?: string;
     filePath?: string;
     toolName?: string;
@@ -212,12 +222,14 @@ export interface WorkingBlock {
 // ── Webview Message Types ──
 
 export type WebviewMessage =
-    | { type: 'sendMessage'; text: string; images?: string[]; files?: { name: string; content: string }[] }
+    | { type: 'sendMessage'; text: string; mode: ChatMode; images?: string[]; files?: { name: string; content: string }[] }
     | { type: 'cancelAgent' }
     | { type: 'newSession' }
     | { type: 'selectModel' }
     | { type: 'selectModelById'; deploymentId: string }
     | { type: 'selectAgentProvider'; provider: AgentProvider }
+    | { type: 'selectChatMode'; mode: ChatMode }
+    | { type: 'runPlanInAgent' }
     | { type: 'attachFile' }
     | { type: 'confirmAction'; actionId: string; approved: boolean; allowSession?: boolean; category?: string }
     | { type: 'continueIteration'; shouldContinue: boolean }
@@ -241,7 +253,10 @@ export type WebviewMessage =
 export type ExtensionMessage =
     | { type: 'addUserMessage'; text: string; images?: string[]; fileNames?: string[] }
     | { type: 'setModels'; models: Array<{ name: string; deploymentId: string }>; activeDeployment?: string; disabled?: boolean; title?: string }
+    | { type: 'setAgentProviders'; providers: AgentProviderOption[]; activeProvider: AgentProvider }
     | { type: 'setAgentProvider'; provider: AgentProvider }
+    | { type: 'setChatMode'; mode: ChatMode }
+    | { type: 'planReady'; visible: boolean }
     | { type: 'agentStarted' }
     | { type: 'agentPlan'; steps: AgentPlanStep[] }
     | { type: 'startAssistantMessage' }
@@ -266,7 +281,7 @@ export type ExtensionMessage =
     | { type: 'workingBlockStarted'; block: WorkingBlock }
     | { type: 'workingTextAppended'; blockId: string; entry: WorkingBlockProgressEntry }
     | { type: 'workingActionAdded'; blockId: string; entry: WorkingBlockActionEntry }
-    | { type: 'workingActionUpdated'; blockId: string; entryId: string; status: 'running' | 'done' | 'error'; text?: string; detail?: string; filePath?: string; icon?: string }
+    | { type: 'workingActionUpdated'; blockId: string; entryId: string; status: 'running' | 'done' | 'error'; text?: string; detail?: string; filePath?: string; icon?: string; repeatCount?: number }
     | { type: 'workingBlockCompleted'; blockId: string; summary: string; completedAt: number }
     | { type: 'narrationText'; text: string }
     | { type: 'terminalOutput'; line: string }

@@ -249,6 +249,21 @@ export class BuiltinTools {
         return Array.from(this.touchedFiles.values()).map(v => v.relPath);
     }
 
+    /** Snapshot a file before an external writer modifies it so Junior can show diffs later. */
+    async trackExternalWriteStart(filePath: string): Promise<void> {
+        const resolved = this.resolveWorkspaceFilePath(filePath);
+        if (!resolved) { return; }
+        await this.snapshotOriginal(resolved.absPath, resolved.relPath);
+    }
+
+    /** Recompute change stats for a file modified outside BuiltinTools and surface it in the diff dock. */
+    trackExternalWriteComplete(filePath: string): void {
+        const resolved = this.resolveWorkspaceFilePath(filePath);
+        if (!resolved) { return; }
+        if (!this.touchedFiles.has(resolved.absPath)) { return; }
+        this.notifyFileChanged(resolved.absPath, resolved.relPath);
+    }
+
     /** Get unified diff string for a specific file (for inline diff rendering) */
     getDiffForFile(relPath: string): string {
         for (const [absPath, info] of this.touchedFiles) {
@@ -345,6 +360,24 @@ export class BuiltinTools {
 
     private getWorkspaceRoot(): string {
         return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+    }
+
+    private resolveWorkspaceFilePath(filePath: string): { absPath: string; relPath: string } | undefined {
+        if (!filePath) { return undefined; }
+        const root = this.getWorkspaceRoot();
+        if (!root) { return undefined; }
+
+        const absPath = path.isAbsolute(filePath) ? filePath : path.join(root, filePath);
+        const normalizedRoot = path.resolve(root);
+        const normalizedAbs = path.resolve(absPath);
+        if (!normalizedAbs.startsWith(normalizedRoot)) {
+            return undefined;
+        }
+
+        return {
+            absPath: normalizedAbs,
+            relPath: path.relative(normalizedRoot, normalizedAbs).replace(/\\/g, '/'),
+        };
     }
 
     /** Validate that a file path is within the workspace root to prevent path traversal */

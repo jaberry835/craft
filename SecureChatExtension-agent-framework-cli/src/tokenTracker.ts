@@ -23,6 +23,8 @@ export class TokenTracker {
     };
     /** Current context size in tokens (set by the agent loop after each API call). */
     private currentContextTokens = 0;
+    /** Optional dynamic context window reported by the active runtime. */
+    private currentContextWindowOverride?: number;
     private log: (msg: string) => void;
     private webviewSender?: (msg: ExtensionMessage) => void;
 
@@ -58,13 +60,15 @@ export class TokenTracker {
             this.usage[key] = { promptTokens: 0, completionTokens: 0, requests: 0 };
         }
         this.currentContextTokens = 0;
+        this.currentContextWindowOverride = undefined;
         this.updateStatusBar();
         this.pushToWebview();
     }
 
     /** Update the current context size (estimated tokens in the message array). */
-    setContextSize(tokens: number) {
+    setContextSize(tokens: number, contextWindow?: number) {
         this.currentContextTokens = tokens;
+        this.currentContextWindowOverride = contextWindow ?? undefined;
         this.updateStatusBar();
         this.pushToWebview();
     }
@@ -113,7 +117,7 @@ export class TokenTracker {
     private updateStatusBar() {
         const total = this.totalTokens();
         const requests = this.usage.chat.requests + this.usage.inline.requests;
-        const contextWindow = getSetting<number>('agent.contextWindow', 128000) ?? 128000;
+        const contextWindow = this.currentContextWindowOverride ?? (getSetting<number>('agent.contextWindow', 128000) ?? 128000);
         // Ring shows current context burden, not cumulative total
         const contextTokens = this.currentContextTokens || total;
         const windowPct = Math.min(100, Math.round(contextTokens / contextWindow * 100));
@@ -165,6 +169,7 @@ export class TokenTracker {
         const chatTotal = chat.promptTokens + chat.completionTokens;
         const inlineTotal = inline.promptTokens + inline.completionTokens;
         const total = chatTotal + inlineTotal;
+        const contextWindow = this.currentContextWindowOverride ?? (getSetting<number>('agent.contextWindow', 128000) ?? 128000);
         const pct = (n: number) => total > 0 ? `${Math.round(n / total * 100)}%` : '0%';
 
         this.webviewSender({
@@ -185,8 +190,8 @@ export class TokenTracker {
             inlineCompletionPct: pct(inline.completionTokens),
             chatRequests: chat.requests,
             inlineRequests: inline.requests,
-            windowPct: Math.min(100, Math.round((this.currentContextTokens || total) / ((getSetting<number>('agent.contextWindow', 128000) ?? 128000)) * 100)),
-            contextWindow: this.formatTokens(getSetting<number>('agent.contextWindow', 128000) ?? 128000)
+            windowPct: Math.min(100, Math.round((this.currentContextTokens || total) / contextWindow * 100)),
+            contextWindow: this.formatTokens(contextWindow)
         });
     }
 

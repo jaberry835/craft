@@ -53,6 +53,50 @@ Then in VS Code:
 
 For extension development/testing, you can still press **F5** to launch the Extension Development Host.
 
+### Optional: GitHub Copilot CLI Provider
+
+This repo can also expose a `Copilot CLI` provider inside Junior, but developers need to prepare that runtime explicitly.
+
+Install prerequisites:
+
+1. Install GitHub CLI.
+2. Install GitHub Copilot CLI.
+3. Ensure `copilot` is on `PATH`, or set `junior.copilotCli.path` to the binary.
+
+BYOK/custom-provider path:
+
+- Follow GitHub Copilot CLI's official BYOK setup instructions for your provider.
+- Set `COPILOT_MODEL`.
+- Set `COPILOT_PROVIDER_BASE_URL`.
+- Optionally set `COPILOT_PROVIDER_TYPE` to `openai`, `azure`, or `anthropic`.
+- Set `COPILOT_PROVIDER_API_KEY` or `COPILOT_PROVIDER_BEARER_TOKEN` when the provider requires auth.
+- For Azure, set `COPILOT_PROVIDER_AZURE_API_VERSION`.
+- If the provider expects the Responses API, set `COPILOT_PROVIDER_WIRE_API` to `responses`.
+
+Junior exposes matching `junior.copilotCli.*` settings if you want the values in VS Code settings, but the spawned Copilot CLI process also inherits the environment variables that were already set before VS Code launched.
+
+Example Junior settings for the Copilot CLI selector:
+
+```jsonc
+{
+  "junior.agentProvider": "copilot-cli",
+  "junior.copilotCli.path": "C:\\Users\\<you>\\AppData\\Local\\GitHubCopilotCLI\\copilot.exe",
+  "junior.copilotCli.model": "gpt-4.1",
+  "junior.copilotCli.models": [
+    {
+      "name": "GPT-4.1",
+      "id": "gpt-4.1"
+    }
+  ]
+}
+```
+
+Leave `junior.copilotCli.home` out unless you need to override `COPILOT_HOME`.
+
+Restart VS Code after changing environment variables. Junior now hides the Copilot CLI option unless the binary exists and the extension can detect either GitHub auth state or a complete BYOK configuration.
+
+For SDK-level troubleshooting, set `junior.copilotCli.logSdkEvents` to `true` and inspect the `Junior` output channel. Junior will log the raw Copilot SDK session events with compact summaries so you can see exactly which CLI events were emitted for a turn.
+
 ### 2. Configure Your AI Provider
 
 Junior supports three connection modes: **direct** to an Azure OpenAI resource, through an **API Management (APIM)** proxy, or to the **OpenAI API**.

@@ -137,6 +137,14 @@ export function activate(context: vscode.ExtensionContext) {
 
     mcpClient.connectConfiguredServers().catch((e) => logError(`MCP connect failed: ${e}`));
 
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeConfiguration((event) => {
+            if (event.affectsConfiguration('junior.copilotCli') || event.affectsConfiguration('junior.agentProvider')) {
+                chatViewProvider.refreshProviderAvailability();
+            }
+        })
+    );
+
     if (vscode.workspace.workspaceFolders) {
         const watcher = vscode.workspace.createFileSystemWatcher('**/*');
 

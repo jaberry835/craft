@@ -534,13 +534,13 @@
           "junior.copilotCli.path": {
             "type": "string",
             "default": "",
-            "description": "Path to the Copilot CLI binary. Leave empty to use 'copilot' on PATH.",
+            "description": "Path to the GitHub Copilot CLI binary. Leave empty to use 'copilot' on PATH.",
             "order": 1
           },
           "junior.copilotCli.home": {
             "type": "string",
             "default": "",
-            "description": "COPILOT_HOME directory for the CLI. Leave empty for default.",
+            "description": "COPILOT_HOME directory for the Copilot CLI. Useful when auth or CLI state is stored outside the default home directory.",
             "order": 2
           },
           "junior.copilotCli.model": {
@@ -552,10 +552,20 @@
           "junior.copilotCli.models": {
             "type": "array",
             "items": {
-              "type": "string"
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "Display name shown in Junior"
+                },
+                "id": {
+                  "type": "string",
+                  "description": "Exact Copilot CLI model id"
+                }
+              }
             },
             "default": [],
-            "description": "Available model names for the Copilot CLI provider selector.",
+            "description": "Available Copilot CLI models for the provider selector. Each entry should include a display name and an id.",
             "order": 4
           },
           "junior.copilotCli.additionalArgs": {
@@ -594,37 +604,43 @@
           "junior.copilotCli.providerBaseUrl": {
             "type": "string",
             "default": "",
-            "description": "Base URL for BYOK provider (e.g., your Azure OpenAI endpoint).",
+            "description": "Base URL for the Copilot CLI BYOK provider. Equivalent to COPILOT_PROVIDER_BASE_URL.",
             "order": 9
           },
           "junior.copilotCli.providerApiKey": {
             "type": "string",
             "default": "",
-            "description": "API key for BYOK provider. Consider using 'Junior: Set API Key' for secure storage.",
+            "description": "API key for the Copilot CLI BYOK provider. Equivalent to COPILOT_PROVIDER_API_KEY.",
             "order": 10
           },
           "junior.copilotCli.providerBearerToken": {
             "type": "string",
             "default": "",
-            "description": "Bearer token for BYOK provider (alternative to API key).",
+            "description": "Bearer token for the Copilot CLI BYOK provider. Equivalent to COPILOT_PROVIDER_BEARER_TOKEN.",
             "order": 11
           },
           "junior.copilotCli.providerAzureApiVersion": {
             "type": "string",
             "default": "",
-            "description": "Azure API version when providerType is 'azure' (e.g. 2025-03-01-preview).",
+            "description": "Azure API version when providerType is 'azure'. Equivalent to COPILOT_PROVIDER_AZURE_API_VERSION.",
             "order": 12
           },
           "junior.copilotCli.providerWireApi": {
             "type": "string",
             "enum": [
               "",
-              "chat-completions",
+              "completions",
               "responses"
             ],
             "default": "",
-            "description": "Wire API format for the BYOK provider. Leave empty for auto-detection.",
+            "description": "Wire API format for the BYOK provider. Equivalent to COPILOT_PROVIDER_WIRE_API. Use 'responses' for GPT-5-class models when required.",
             "order": 13
+          },
+          "junior.copilotCli.logSdkEvents": {
+            "type": "boolean",
+            "default": false,
+            "description": "Log raw Copilot SDK session events to the Junior output channel for CLI runtime debugging.",
+            "order": 14
           }
         }
       }

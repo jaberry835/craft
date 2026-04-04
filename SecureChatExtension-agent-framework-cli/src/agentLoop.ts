@@ -25,11 +25,11 @@ import { ContextManager } from './contextManager';
 import { getSetting } from './config';
 import {
     ChatMessage, ContentPart, ToolCall, ToolDefinition, ToolResult,
-    ExtensionMessage, AgentPlanStep, WorkingActionType, WorkingBlock,
+    ExtensionMessage, AgentPlanStep, ChatMode, WorkingActionType, WorkingBlock,
     WorkingBlockActionEntry, WorkingBlockProgressEntry,
 } from './types';
 import { TokenTracker } from './tokenTracker';
-import { SYSTEM_PROMPT } from './agentPrompt';
+import { getSystemPrompt } from './agentPrompt';
 import { AgentTaskMemory } from './taskMemory';
 import { RetrievalRanker } from './retrievalRanker';
 import { RepoPatternStore } from './repoPatternStore';
@@ -83,6 +83,8 @@ export class AgentLoop {
     private running = false;
     private cancelled = false;
     private maxIterations: number;
+    private defaultMaxIterations: number;
+    private currentMode: ChatMode = 'agent';
     private planSteps: AgentPlanStep[] = [];
     private contextManager = new ContextManager();
     private pendingContinuation: { resolve: (shouldContinue: boolean) => void } | null = null;
@@ -111,7 +113,8 @@ export class AgentLoop {
         private tokenTracker?: TokenTracker,
         private log?: (msg: string) => void
     ) {
-        this.maxIterations = getSetting<number>('agent.maxIterations') ?? 25;
+        this.defaultMaxIterations = getSetting<number>('agent.maxIterations') ?? 25;
+        this.maxIterations = this.defaultMaxIterations;
 
         // Initialize framework components
         const chatAdapter = new AoaiChatClientAdapter(aoaiClient);
@@ -198,10 +201,10 @@ export class AgentLoop {
         this.memoryMiddleware.reset();
     }
 
-    setPlan(steps: { id: string; title: string }[]) {
+    setPlan(steps: { id: string; title: string }[], autoStart: boolean = this.currentMode === 'agent') {
         this.planSteps = steps.map((s, i) => ({
             id: s.id, title: s.title,
-            status: i === 0 ? 'in_progress' as const : 'pending' as const
+            status: autoStart && i === 0 ? 'in_progress' as const : 'pending' as const
         }));
         this.callbacks.sendToWebview({ type: 'agentPlan', steps: [...this.planSteps] });
     }
@@ -241,12 +244,15 @@ export class AgentLoop {
 
     // ── Main Run Method ──
 
-    async run(userMessage: string, images?: string[], files?: { name: string; content: string }[], displayText?: string): Promise<void> {
+    async run(mode: ChatMode, userMessage: string, images?: string[], files?: { name: string; content: string }[], displayText?: string): Promise<void> {
         if (this.running) { return; }
+        this.currentMode = mode;
+        this.maxIterations = this.getModeMaxIterations(mode);
         this.running = true;
         this.cancelled = false;
         this.abortController = new AbortController();
         this.planSteps = [];
+        this.callbacks.sendToWebview({ type: 'agentPlan', steps: [] });
         this.editedFiles.clear();
         this.lastInjectedTaskMemoryVersion = -1;
         this.lastInjectedRepoMemoryVersion = -1;
@@ -257,15 +263,15 @@ export class AgentLoop {
         if (this.messages.length === 0) {
             this.taskMemory.reset();
             this.memoryMiddleware.reset();
-            this.messages.push({ role: 'system', content: SYSTEM_PROMPT });
         }
+        this.ensureSystemPrompt(mode);
 
         // ── Step 2: Build user message ──
-        this.addUserMessage(userMessage, images, files, displayText);
+        this.addUserMessage(userMessage, images, files, displayText, mode);
         this.taskMemory.noteUserRequest(displayText || userMessage);
 
         // ── Step 3: Gather tools ──
-        const tools = this.getAllToolDefinitions();
+        const tools = this.getAllToolDefinitions(mode);
 
         // ── Step 4: Run context providers (beforeRun) ──
         const agentContext: AgentContext = {
@@ -278,6 +284,7 @@ export class AgentLoop {
             cancelled: false,
             state: new Map(),
         };
+        agentContext.state.set('chatMode', mode);
 
         for (const provider of this.contextProviders) {
             if (provider.beforeRun) {
@@ -316,8 +323,12 @@ export class AgentLoop {
         } finally {
             this.aoaiClient.setDeploymentOverride(undefined);
             for (const step of this.planSteps) {
-                if (step.status === 'in_progress' || step.status === 'pending') {
-                    step.status = 'completed';
+                if (this.currentMode === 'agent') {
+                    if (step.status === 'in_progress' || step.status === 'pending') {
+                        step.status = 'completed';
+                    }
+                } else if (this.currentMode === 'plan' && step.status === 'in_progress') {
+                    step.status = 'pending';
                 }
             }
             if (this.planSteps.length > 0) {
@@ -580,7 +591,7 @@ export class AgentLoop {
                         if (this.cancelled) { return { tc, result: { success: false, result: 'Cancelled by user.' } }; }
                         let args: Record<string, unknown>;
                         try { args = JSON.parse(tc.function.arguments); } catch { args = {}; }
-                        const result = await this.toolExecutor.execute(tc.function.name, args, tc.id);
+                        const result = await this.executeToolForMode(tc.function.name, args, tc.id, agentContext.state);
                         return { tc, result };
                     }));
 
@@ -613,7 +624,7 @@ export class AgentLoop {
                         const desc = this.describeToolForProgress(tc.function.name, args);
                         const actionEntry = addWorkingAction(desc, 'running', tc.function.name);
 
-                        const result = await this.toolExecutor.execute(tc.function.name, args, tc.id);
+                        const result = await this.executeToolForMode(tc.function.name, args, tc.id, agentContext.state);
 
                         if (result.success && WRITE_TOOLS.has(tc.function.name) && typeof args.path === 'string') {
                             this.editedFiles.add(args.path);
@@ -662,7 +673,7 @@ export class AgentLoop {
 
     // ── Private helpers (preserved from original) ──
 
-    private addUserMessage(userMessage: string, images?: string[], files?: { name: string; content: string }[], displayText?: string): void {
+    private addUserMessage(userMessage: string, images?: string[], files?: { name: string; content: string }[], displayText?: string, mode: ChatMode = this.currentMode): void {
         const hasImages = images && images.length > 0;
         const hasFiles = files && files.length > 0;
 
@@ -681,20 +692,72 @@ export class AgentLoop {
                     parts.push({ type: 'image_url', image_url: { url: dataUri } });
                 }
             }
-            const userMsg: ChatMessage = { role: 'user', content: parts };
+            const userMsg: ChatMessage = { role: 'user', content: parts, mode };
             if (displayText) { userMsg.displayText = displayText; }
             this.messages.push(userMsg);
         } else {
-            const userMsg: ChatMessage = { role: 'user', content: userMessage };
+            const userMsg: ChatMessage = { role: 'user', content: userMessage, mode };
             if (displayText) { userMsg.displayText = displayText; }
             this.messages.push(userMsg);
         }
     }
 
-    private getAllToolDefinitions(): ToolDefinition[] {
+    private getAllToolDefinitions(mode: ChatMode = this.currentMode): ToolDefinition[] {
         const builtin = this.builtinTools.getDefinitions();
         const mcp = this.mcpClient.getToolDefinitions();
-        return [...builtin, ...mcp];
+        return [...builtin, ...mcp].filter(def => this.isToolAllowed(def.function.name, mode));
+    }
+
+    private ensureSystemPrompt(mode: ChatMode): void {
+        const prompt = getSystemPrompt(mode);
+        if (this.messages.length === 0) {
+            this.messages.push({ role: 'system', content: prompt });
+            return;
+        }
+        if (this.messages[0].role === 'system') {
+            this.messages[0] = { ...this.messages[0], content: prompt };
+            return;
+        }
+        this.messages.unshift({ role: 'system', content: prompt });
+    }
+
+    private getModeMaxIterations(mode: ChatMode): number {
+        switch (mode) {
+            case 'ask': return Math.min(this.defaultMaxIterations, 8);
+            case 'plan': return Math.min(this.defaultMaxIterations, 10);
+            default: return this.defaultMaxIterations;
+        }
+    }
+
+    private isToolAllowed(name: string, mode: ChatMode = this.currentMode): boolean {
+        if (mode === 'agent') { return true; }
+
+        const readOnlyTools = new Set([
+            'read_file',
+            'list_directory',
+            'search_files',
+            'grep_search',
+            'semantic_search',
+            'get_file_tree',
+            'get_document_symbols',
+            'find_symbol',
+            'go_to_definition',
+            'find_references',
+            'get_diagnostics',
+            'get_open_editors',
+        ]);
+
+        if (readOnlyTools.has(name)) { return true; }
+        if (mode === 'plan' && (name === 'set_plan' || name === 'update_plan_step')) { return true; }
+        return false;
+    }
+
+    private async executeToolForMode(name: string, args: Record<string, unknown>, callId: string, state?: Map<string, unknown>): Promise<ToolResult> {
+        if (!this.isToolAllowed(name)) {
+            const modeLabel = this.currentMode === 'ask' ? 'Ask' : 'Plan';
+            return { success: false, result: `${modeLabel} mode does not allow the tool "${name}".` };
+        }
+        return this.toolExecutor.execute(name, args, callId, state);
     }
 
     private findFallbackDeployment(): { name: string; deploymentId: string } | null {

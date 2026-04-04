@@ -237,11 +237,15 @@ export function registerCommands(deps: CommandRegistrarDeps): void {
 
     context.subscriptions.push(
         vscode.commands.registerCommand('junior.selectAgentProvider', async () => {
+            const providerOptions = chatViewProvider.getAvailableAgentProviderOptions();
             const pick = await vscode.window.showQuickPick(
-                [
-                    { label: '$(server) Local', description: 'Built-in Azure OpenAI agent loop', value: 'local' as const },
-                    { label: '$(terminal) Copilot CLI', description: 'GitHub Copilot CLI via SDK', value: 'copilot-cli' as const }
-                ],
+                providerOptions.map(option => ({
+                    label: option.value === 'local' ? '$(server) Local' : '$(terminal) Copilot CLI',
+                    description: option.value === 'local'
+                        ? 'Built-in Azure OpenAI agent loop'
+                        : 'GitHub Copilot CLI via SDK',
+                    value: option.value,
+                })),
                 { placeHolder: 'Select agent provider' }
             );
             if (pick) {

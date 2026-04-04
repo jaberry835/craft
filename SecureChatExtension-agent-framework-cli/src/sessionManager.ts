@@ -17,7 +17,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { ChatSession, ChatMessage, RuntimeSessionState } from './types';
+import { ChatSession, ChatMessage, ChatMode, RuntimeSessionState } from './types';
 
 const MAX_SESSIONS = 20;
 const MAX_MESSAGE_LENGTH = 8000;
@@ -60,7 +60,8 @@ export class SessionManager {
             title: 'New Chat',
             messages: [],
             createdAt: Date.now(),
-            updatedAt: Date.now()
+            updatedAt: Date.now(),
+            activeMode: 'agent'
         };
         this.sessions.set(session.id, session);
         return session;
@@ -139,13 +140,14 @@ export class SessionManager {
         });
     }
 
-    createNewSession(): ChatSession {
+    createNewSession(activeMode: ChatMode = this.currentSession?.activeMode || 'agent'): ChatSession {
         const session: ChatSession = {
             id: `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
             title: 'New Chat',
             messages: [],
             createdAt: Date.now(),
             updatedAt: Date.now(),
+            activeMode,
             runtimeState: undefined
         };
         this.sessions.set(session.id, session);
@@ -158,10 +160,11 @@ export class SessionManager {
         return this.currentSession;
     }
 
-    updateMessages(messages: ChatMessage[], runtimeState?: RuntimeSessionState) {
+    updateMessages(messages: ChatMessage[], runtimeState?: RuntimeSessionState, activeMode?: ChatMode) {
         this.currentSession.messages = this.trimForStorage(messages);
         this.currentSession.updatedAt = Date.now();
         this.currentSession.runtimeState = runtimeState;
+        this.currentSession.activeMode = activeMode ?? this.currentSession.activeMode ?? 'agent';
 
         // Auto-title from first user message
         if (this.currentSession.title === 'New Chat') {
@@ -174,6 +177,13 @@ export class SessionManager {
             }
         }
 
+        this.sessions.set(this.currentSession.id, this.currentSession);
+        this.saveSessions();
+    }
+
+    setActiveMode(mode: ChatMode) {
+        this.currentSession.activeMode = mode;
+        this.currentSession.updatedAt = Date.now();
         this.sessions.set(this.currentSession.id, this.currentSession);
         this.saveSessions();
     }
@@ -193,7 +203,7 @@ export class SessionManager {
     deleteSession(id: string) {
         this.sessions.delete(id);
         if (this.currentSession.id === id) {
-            this.currentSession = this.createNewSession();
+            this.currentSession = this.createNewSession(this.currentSession.activeMode || 'agent');
         }
         this.saveSessions();
     }

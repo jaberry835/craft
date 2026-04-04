@@ -33,7 +33,6 @@
 
     "junior.agentProvider": "copilot-cli",
     "junior.copilotCli.path": "C:\\Users\\SystemAdministrator\\AppData\\Local\\GitHubCopilotCLI\\copilot.exe",
-    "junior.copilotCli.home": "",
     "junior.copilotCli.model": "gpt-4.1",
     "junior.copilotCli.models": [
         {
@@ -44,6 +43,7 @@
     "junior.copilotCli.additionalArgs": [],
     "junior.copilotCli.autoApproveWrites": false,
     "junior.copilotCli.autoApproveTerminal": false,
+    "junior.copilotCli.logSdkEvents": false,
     "junior.copilotCli.providerBaseUrl": "",
     "junior.copilotCli.providerType": "",
     "junior.copilotCli.providerApiKey": "",

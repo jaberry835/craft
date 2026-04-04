@@ -148,6 +148,8 @@ export class InvestigationContextProvider implements IContextProvider {
     async beforeRun(context: AgentContext): Promise<ChatMessage[] | void> {
         const enabled = getSetting<boolean>('agent.autoInvestigate') ?? true;
         if (!enabled) { return; }
+        const mode = context.state.get('chatMode');
+        if (mode === 'ask') { return; }
 
         // Extract user message text from the last user message
         const lastUserMsg = [...context.messages].reverse().find(m => m.role === 'user');
