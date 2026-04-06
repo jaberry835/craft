@@ -3,13 +3,15 @@
  * Only the symbols that transitive imports resolve through.
  */
 
+import { vi } from 'vitest';
+
 export const workspace = {
-    getConfiguration: () => ({
+    getConfiguration: vi.fn(() => ({
         get: () => undefined,
         has: () => false,
         inspect: () => undefined,
         update: () => Promise.resolve(),
-    }),
+    })),
     workspaceFolders: [],
 };
 
@@ -37,7 +39,8 @@ export const window = {
         tooltip: '',
         command: '',
     }),
-    showInformationMessage: () => Promise.resolve(undefined),
+    showInformationMessage: vi.fn(() => Promise.resolve(undefined)),
+    showWarningMessage: vi.fn(() => Promise.resolve(undefined)),
 };
 
 export enum StatusBarAlignment {

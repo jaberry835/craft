@@ -17,6 +17,7 @@ window.onerror = function(msg, src, line, col, err) {
     const statusEl = document.getElementById('status-bar');
     const planPanelEl = document.getElementById('plan-panel');
     const modelSelectEl = document.getElementById('model-select');
+    const permissionSelectEl = document.getElementById('permission-select');
     const providerSelectEl = document.getElementById('provider-select');
     const modeSwitchEl = document.getElementById('mode-switch');
     const modeTriggerEl = document.getElementById('mode-trigger');
@@ -39,6 +40,7 @@ window.onerror = function(msg, src, line, col, err) {
     let currentContentEl = null;
     let agentRunning = false;
     let currentProvider = 'local';
+    let currentPermissionLevel = 'default';
     let currentMode = 'agent';
     const toolStateById = new Map();
     const workingBlocksById = new Map();
@@ -57,6 +59,17 @@ window.onerror = function(msg, src, line, col, err) {
         plan: {
             label: 'Plan',
             icon: '<svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M4 4h8M6.5 8H12M6.5 12H12" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><circle cx="4.25" cy="4" r=".85" fill="currentColor"/><circle cx="4.25" cy="8" r=".85" fill="currentColor"/><circle cx="4.25" cy="12" r=".85" fill="currentColor"/></svg>'
+        }
+    };
+
+    const PERMISSION_META = {
+        default: {
+            label: 'Default Approvals',
+            description: 'Use your configured approval settings for this session.'
+        },
+        bypass: {
+            label: 'Bypass Approvals',
+            description: 'Auto-approve tool calls for this session.'
         }
     };
 
@@ -338,12 +351,110 @@ window.onerror = function(msg, src, line, col, err) {
         planActionBarEl.classList.toggle('hidden', !visible);
     }
 
-    function appendAssistantProviderBadge(container) {
-        if (currentProvider !== 'copilot-cli') { return; }
+    function appendAssistantProviderBadge(container, provider) {
+        if ((provider || currentProvider) !== 'copilot-cli') { return; }
         const badge = document.createElement('div');
         badge.className = 'assistant-provider-badge';
         badge.innerHTML = '<span class="assistant-provider-icon" aria-hidden="true"><svg viewBox="0 0 16 16" focusable="false"><path d="M6.25 2.5a.75.75 0 0 1 1.5 0v1.15h3A2.25 2.25 0 0 1 13 5.9v4.2a2.25 2.25 0 0 1-2.25 2.25h-3V13.5a.75.75 0 0 1-1.5 0v-1.15h-.8A2.45 2.45 0 0 1 3 9.9V9a.75.75 0 0 1 1.5 0v.9c0 .52.42.95.95.95h5.3a.75.75 0 0 0 .75-.75V5.9a.75.75 0 0 0-.75-.75h-5.3A.95.95 0 0 0 4.5 6.1V7a.75.75 0 0 1-1.5 0v-.9A2.45 2.45 0 0 1 5.45 3.65h.8V2.5Z" fill="currentColor"></path><path d="M1.53 7.47a.75.75 0 0 1 1.06 0L4 8.88l1.41-1.41a.75.75 0 1 1 1.06 1.06l-1.94 1.94a.75.75 0 0 1-1.06 0L1.53 8.53a.75.75 0 0 1 0-1.06Z" fill="currentColor"></path></svg></span><span>Copilot CLI</span>';
         container.appendChild(badge);
+    }
+
+    function renderUserMessageItem(item) {
+        const el = document.createElement('div');
+        el.className = 'msg user';
+        let inner = '<div class="label">You</div>';
+        if (item.images && item.images.length > 0) {
+            inner += '<div class="user-attachments">';
+            for (const src of item.images) {
+                inner += '<img src="' + src + '" class="user-attach-img" />';
+            }
+            inner += '</div>';
+        }
+        if (item.fileNames && item.fileNames.length > 0) {
+            inner += '<div class="user-attachments">';
+            for (const name of item.fileNames) {
+                inner += '<span class="user-attach-file">&#128196; ' + escapeHtml(name) + '</span>';
+            }
+            inner += '</div>';
+        }
+        inner += '<div class="content">' + escapeHtml(item.text) + '</div>';
+        el.innerHTML = inner;
+        messagesEl.appendChild(el);
+    }
+
+    function renderAssistantMessageItem(item) {
+        if (!item.text) { return; }
+        const assistantEl = document.createElement('div');
+        assistantEl.className = 'msg assistant' + (item.provider === 'copilot-cli' ? ' cli-provider' : '');
+        appendAssistantProviderBadge(assistantEl, item.provider);
+        const contentEl = document.createElement('div');
+        contentEl.className = 'content';
+        contentEl.innerHTML = renderMarkdownLite(item.text);
+        assistantEl.appendChild(contentEl);
+        messagesEl.appendChild(assistantEl);
+    }
+
+    function renderNarrationItem(item) {
+        var narRow = document.createElement('div');
+        narRow.className = 'narration-row';
+        narRow.innerHTML = renderMarkdownLite(item.text);
+        messagesEl.appendChild(narRow);
+    }
+
+    function renderErrorItem(item) {
+        showLocalError(item.message);
+    }
+
+    function restoreWorkingBlockItem(block) {
+        createWorkingBlock({
+            id: block.id,
+            title: block.title,
+            status: block.status,
+            summary: block.summary,
+            entries: [],
+            startedAt: block.startedAt,
+            completedAt: block.completedAt,
+        });
+        for (const entry of block.entries || []) {
+            if (entry.kind === 'progress') {
+                appendWorkingTextEntry(block.id, entry);
+            } else if (entry.kind === 'action') {
+                appendWorkingActionEntry(block.id, entry);
+            } else if (entry.kind === 'terminal') {
+                appendWorkingTerminalEntry(block.id, entry);
+            }
+        }
+        if (block.status === 'completed') {
+            completeWorkingBlock(block.id, block.summary || block.title, block.completedAt || block.startedAt || Date.now());
+        }
+    }
+
+    function restoreTranscript(transcript) {
+        if (!transcript || !Array.isArray(transcript.items)) { return; }
+        for (const item of transcript.items) {
+            switch (item.kind) {
+                case 'user':
+                    renderUserMessageItem(item);
+                    break;
+                case 'assistant':
+                    renderAssistantMessageItem(item);
+                    break;
+                case 'narration':
+                    renderNarrationItem(item);
+                    break;
+                case 'working-block':
+                    restoreWorkingBlockItem(item.block);
+                    break;
+                case 'error':
+                    renderErrorItem(item);
+                    break;
+            }
+        }
+        currentAssistantEl = null;
+        currentContentEl = null;
+        activeWorkingBlockId = null;
+        pinWorkingIndicatorToBottom();
+        scrollToBottom();
     }
 
     var contextMeterEl = document.getElementById('context-meter');
@@ -364,6 +475,13 @@ window.onerror = function(msg, src, line, col, err) {
         providerSelectEl.addEventListener('change', () => {
             const provider = providerSelectEl.value;
             vscode.postMessage({ type: 'selectAgentProvider', provider });
+        });
+    }
+
+    if (permissionSelectEl) {
+        permissionSelectEl.addEventListener('change', () => {
+            const level = permissionSelectEl.value || 'default';
+            vscode.postMessage({ type: 'selectPermissionLevel', level });
         });
     }
 
@@ -422,6 +540,17 @@ window.onerror = function(msg, src, line, col, err) {
             : (providerSelectEl.options[0] ? providerSelectEl.options[0].value : 'local');
         providerSelectEl.value = nextValue;
         currentProvider = nextValue || 'local';
+    }
+
+    function setPermissionLevel(level) {
+        currentPermissionLevel = level || 'default';
+        if (!permissionSelectEl) { return; }
+
+        const nextValue = Object.prototype.hasOwnProperty.call(PERMISSION_META, currentPermissionLevel)
+            ? currentPermissionLevel
+            : 'default';
+        permissionSelectEl.value = nextValue;
+        permissionSelectEl.title = PERMISSION_META[nextValue].description;
     }
 
     function setModels(models, activeDeployment) {
@@ -667,6 +796,7 @@ window.onerror = function(msg, src, line, col, err) {
     function showLocalError(text) {
         const el = document.createElement('div');
         el.className = 'error-msg';
+        el.style.whiteSpace = 'pre-wrap';
         el.textContent = text;
         messagesEl.appendChild(el);
         scrollToBottom();
@@ -899,35 +1029,19 @@ window.onerror = function(msg, src, line, col, err) {
         const msg = event.data;
         switch (msg.type) {
             case 'addUserMessage': {
-                const el = document.createElement('div');
-                el.className = 'msg user';
-                let inner = '<div class="label">You</div>';
-                // Show attached images
-                if (msg.images && msg.images.length > 0) {
-                    inner += '<div class="user-attachments">';
-                    for (const src of msg.images) {
-                        inner += '<img src="' + src + '" class="user-attach-img" />';
-                    }
-                    inner += '</div>';
-                }
-                // Show attached file names
-                if (msg.fileNames && msg.fileNames.length > 0) {
-                    inner += '<div class="user-attachments">';
-                    for (const name of msg.fileNames) {
-                        inner += '<span class="user-attach-file">&#128196; ' + escapeHtml(name) + '</span>';
-                    }
-                    inner += '</div>';
-                }
-                inner += '<div class="content">' + escapeHtml(msg.text) + '</div>';
-                el.innerHTML = inner;
-                messagesEl.appendChild(el);
+                renderUserMessageItem(msg);
+                scrollToBottom();
+                break;
+            }
+            case 'restoreTranscript': {
+                restoreTranscript(msg.transcript);
                 scrollToBottom();
                 break;
             }
             case 'startAssistantMessage': {
                 currentAssistantEl = document.createElement('div');
                 currentAssistantEl.className = 'msg assistant' + (currentProvider === 'copilot-cli' ? ' cli-provider' : '');
-                appendAssistantProviderBadge(currentAssistantEl);
+                appendAssistantProviderBadge(currentAssistantEl, currentProvider);
                 currentContentEl = document.createElement('div');
                 currentContentEl.className = 'content';
                 currentAssistantEl.appendChild(currentContentEl);
@@ -1316,6 +1430,10 @@ window.onerror = function(msg, src, line, col, err) {
                 currentProvider = msg.provider || 'local';
                 break;
             }
+            case 'setPermissionLevel': {
+                setPermissionLevel(msg.level || 'default');
+                break;
+            }
             case 'setChatMode': {
                 setChatMode(msg.mode || 'agent');
                 break;
@@ -1351,6 +1469,7 @@ window.onerror = function(msg, src, line, col, err) {
                 }
                 currentAssistantEl = null;
                 currentContentEl = null;
+                toolStateById.clear();
                 workingBlocksById.clear();
                 workingEntriesById.clear();
                 activeWorkingBlockId = null;
@@ -1492,10 +1611,7 @@ window.onerror = function(msg, src, line, col, err) {
                 break;
             }
             case 'narrationText': {
-                var narRow = document.createElement('div');
-                narRow.className = 'narration-row';
-                narRow.innerHTML = renderMarkdownLite(msg.text);
-                messagesEl.appendChild(narRow);
+                renderNarrationItem(msg);
                 pinWorkingIndicatorToBottom();
                 scrollToBottom();
                 break;
@@ -1731,6 +1847,14 @@ window.onerror = function(msg, src, line, col, err) {
             return row;
         }
 
+        if (entry.kind === 'terminal') {
+            row = document.createElement('pre');
+            row.className = 'wb-terminal-output';
+            row.dataset.entryId = entry.id;
+            row.textContent = entry.text;
+            return row;
+        }
+
         row.innerHTML =
             '<span class="wb-action-icon">' + (PC_ICONS[entry.icon || 'loading'] || PC_ICONS.loading) + '</span>' +
             '<div class="wb-action-copy">' +
@@ -1793,6 +1917,16 @@ window.onerror = function(msg, src, line, col, err) {
     }
 
     function appendWorkingActionEntry(blockId, entry) {
+        var record = workingBlocksById.get(blockId);
+        if (!record) { return; }
+        record.data.entries.push(entry);
+        var row = createWorkingEntryElement(entry);
+        record.entriesEl.appendChild(row);
+        workingEntriesById.set(entry.id, { blockId: blockId, entry: entry, el: row });
+        scrollWorkingBodyToBottom(record);
+    }
+
+    function appendWorkingTerminalEntry(blockId, entry) {
         var record = workingBlocksById.get(blockId);
         if (!record) { return; }
         record.data.entries.push(entry);

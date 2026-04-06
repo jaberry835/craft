@@ -30,3 +30,4 @@ Last Updated: 3/20/2025 912AM
 | 2026-04-04 13:14 UTC | AgentChatV2 | main | ~6 |
 | 2026-04-04 13:14 UTC | SecureChatExtension | agent-framework-cli | +3, ~18 |
 | 2026-04-06 22:15 UTC | AgentChatV2 | main | +2, -2 |
+| 2026-04-06 22:15 UTC | SecureChatExtension | agent-framework-cli | +10, ~14 |

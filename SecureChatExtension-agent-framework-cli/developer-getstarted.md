@@ -63,6 +63,8 @@ Install prerequisites:
 2. Install GitHub Copilot CLI.
 3. Ensure `copilot` is on `PATH`, or set `junior.copilotCli.path` to the binary.
 
+On Windows, that setting may point to either `copilot.exe` or `copilot.cmd`.
+
 BYOK/custom-provider path:
 
 - Follow GitHub Copilot CLI's official BYOK setup instructions for your provider.
@@ -80,7 +82,7 @@ Example Junior settings for the Copilot CLI selector:
 ```jsonc
 {
   "junior.agentProvider": "copilot-cli",
-  "junior.copilotCli.path": "C:\\Users\\<you>\\AppData\\Local\\GitHubCopilotCLI\\copilot.exe",
+  "junior.copilotCli.path": "C:\\Users\\<you>\\AppData\\Local\\GitHubCopilotCLI\\copilot.cmd",
   "junior.copilotCli.model": "gpt-4.1",
   "junior.copilotCli.models": [
     {
@@ -94,6 +96,8 @@ Example Junior settings for the Copilot CLI selector:
 Leave `junior.copilotCli.home` out unless you need to override `COPILOT_HOME`.
 
 Restart VS Code after changing environment variables. Junior now hides the Copilot CLI option unless the binary exists and the extension can detect either GitHub auth state or a complete BYOK configuration.
+
+On Windows, Junior automatically wraps `copilot.cmd` and `copilot.bat` with `cmd.exe` when starting the Copilot CLI runtime. Paths that resolve to `copilot.exe` still launch directly.
 
 For SDK-level troubleshooting, set `junior.copilotCli.logSdkEvents` to `true` and inspect the `Junior` output channel. Junior will log the raw Copilot SDK session events with compact summaries so you can see exactly which CLI events were emitted for a turn.
 

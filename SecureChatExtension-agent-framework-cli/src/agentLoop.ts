@@ -33,6 +33,7 @@ import { getSystemPrompt } from './agentPrompt';
 import { AgentTaskMemory } from './taskMemory';
 import { RetrievalRanker } from './retrievalRanker';
 import { RepoPatternStore } from './repoPatternStore';
+import { formatLocalAgentError } from './errorFormatting';
 
 // ── Framework imports ──
 import { AoaiChatClientAdapter } from './framework/aoaiAdapter';
@@ -300,7 +301,9 @@ export class AgentLoop {
             this.aoaiClient.setRetryCallback((remainingSec, attempt, maxRetries) => {
                 this.callbacks.sendToWebview({
                     type: 'setStatus',
-                    status: `⏳ Rate limited — retrying in ${remainingSec}s (attempt ${attempt}/${maxRetries})...`
+                    status: remainingSec > 0
+                        ? `⏳ Rate limited — retrying in ${remainingSec}s (attempt ${attempt}/${maxRetries})...`
+                        : `⏳ Rate limit window elapsed — reconnecting (attempt ${attempt}/${maxRetries})...`
                 });
             });
 
@@ -318,9 +321,10 @@ export class AgentLoop {
                 const errMsg = e instanceof Error ? e.message : String(e);
                 const stack = e instanceof Error ? e.stack : '';
                 this.log?.(`[ERROR] Agent loop error: ${errMsg}${stack ? '\n' + stack : ''}`);
-                this.callbacks.sendToWebview({ type: 'error', message: `Agent error: ${errMsg}` });
+                this.callbacks.sendToWebview({ type: 'error', message: formatLocalAgentError(errMsg) });
             }
         } finally {
+            this.aoaiClient.setRetryCallback(undefined);
             this.aoaiClient.setDeploymentOverride(undefined);
             for (const step of this.planSteps) {
                 if (this.currentMode === 'agent') {
@@ -545,9 +549,11 @@ export class AgentLoop {
                     assistantMsg.tool_calls = toolCalls;
                     lastToolAssistantMsg = assistantMsg;
 
-                    if (assistantText.trim() && !textAlreadyRendered) {
+                    const narrationToRender = narrationText || assistantText.trim() || null;
+
+                    if (narrationToRender && !textAlreadyRendered) {
                         completeActiveWorkingBlock();
-                        this.callbacks.sendToWebview({ type: 'narrationText', text: assistantText.trim() });
+                        this.callbacks.sendToWebview({ type: 'narrationText', text: narrationToRender });
                     }
                 }
                 this.messages.push(assistantMsg);

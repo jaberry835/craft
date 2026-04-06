@@ -135,6 +135,8 @@ Before you expect the Copilot CLI option to appear in the UI:
 3. If you are using BYOK, follow GitHub Copilot CLI's official BYOK setup instructions for your provider first.
 4. Start VS Code from an environment where the Copilot CLI variables are already set.
 
+On Windows, `junior.copilotCli.path` can point to either `copilot.exe` or the `copilot.cmd` shim.
+
 BYOK/custom-provider auth:
 
 - Set `COPILOT_MODEL`. The Copilot SDK requires an explicit model when using a custom provider.
@@ -153,7 +155,7 @@ Example Junior settings for the Copilot CLI selector itself:
 ```jsonc
 {
   "junior.agentProvider": "copilot-cli",
-  "junior.copilotCli.path": "C:\\Users\\SystemAdministrator\\AppData\\Local\\GitHubCopilotCLI\\copilot.exe",
+  "junior.copilotCli.path": "C:\\Users\\SystemAdministrator\\AppData\\Local\\GitHubCopilotCLI\\copilot.cmd",
   "junior.copilotCli.model": "gpt-4.1",
   "junior.copilotCli.models": [
     {
@@ -169,6 +171,7 @@ You do not need to keep `junior.copilotCli.home` in settings unless you are inte
 Notes:
 
 - Restart VS Code after changing environment variables so the extension host inherits them.
+- On Windows, Junior now launches `copilot.cmd` and `copilot.bat` through `cmd.exe` automatically. Keep using `copilot.exe` if you have a native executable path and want direct spawn behavior.
 - If Copilot CLI is installed but none of the auth or BYOK prerequisites are present, Junior keeps the provider on `Local` and does not show the Copilot CLI option.
 
 ### Option A: Direct Azure OpenAI

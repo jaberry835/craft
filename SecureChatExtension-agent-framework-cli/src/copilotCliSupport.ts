@@ -10,6 +10,23 @@ export interface CopilotCliAvailability {
     mode?: 'github' | 'byok';
 }
 
+export interface CopilotCliLaunchSpec {
+    cliPath: string;
+    cliArgs: string[];
+    resolvedCliPath?: string;
+}
+
+export interface CopilotCliConfiguredModel {
+    name?: string;
+    id?: string;
+    deploymentId?: string;
+}
+
+export interface CopilotCliModelOption {
+    name: string;
+    deploymentId: string;
+}
+
 interface CopilotCliByokConfig {
     hasSignal: boolean;
     type: 'openai' | 'azure' | 'anthropic';
@@ -31,6 +48,62 @@ export function buildCopilotCliProcessEnv(): NodeJS.ProcessEnv {
 export function resolveConfiguredCopilotCliPath(env: NodeJS.ProcessEnv = buildCopilotCliProcessEnv()): string | undefined {
     const configuredPath = (getSetting<string>('copilotCli.path') || '').trim() || 'copilot';
     return resolveExecutable(configuredPath, env);
+}
+
+export function resolveConfiguredCopilotCliLaunchSpec(
+    additionalArgs: string[] = [],
+    env: NodeJS.ProcessEnv = buildCopilotCliProcessEnv()
+): CopilotCliLaunchSpec {
+    const configuredPath = (getSetting<string>('copilotCli.path') || '').trim() || 'copilot';
+    const resolvedCliPath = resolveExecutable(configuredPath, env);
+    return buildCopilotCliLaunchSpec(configuredPath, resolvedCliPath, additionalArgs, process.platform, env.ComSpec || process.env.ComSpec || 'cmd.exe');
+}
+
+export function buildCopilotCliLaunchSpec(
+    configuredPath: string,
+    resolvedCliPath: string | undefined,
+    additionalArgs: string[] = [],
+    platform: NodeJS.Platform = process.platform,
+    commandShell: string = process.env.ComSpec || 'cmd.exe'
+): CopilotCliLaunchSpec {
+    const fallbackCliPath = configuredPath.trim() || 'copilot';
+    const directCliPath = resolvedCliPath || fallbackCliPath;
+
+    if (platform === 'win32' && resolvedCliPath && isWindowsCommandShim(resolvedCliPath)) {
+        return {
+            cliPath: commandShell || 'cmd.exe',
+            cliArgs: ['/d', '/s', '/c', buildWindowsShellCommand(resolvedCliPath, additionalArgs)],
+            resolvedCliPath,
+        };
+    }
+
+    return {
+        cliPath: directCliPath,
+        cliArgs: [...additionalArgs],
+        resolvedCliPath,
+    };
+}
+
+export function normalizeCopilotCliConfiguredModels(models: CopilotCliConfiguredModel[]): CopilotCliModelOption[] {
+    return models
+        .map((model) => {
+            const normalizedId = [model.id, model.deploymentId]
+                .find((value): value is string => typeof value === 'string' && value.trim().length > 0)
+                ?.trim();
+            const normalizedName = typeof model.name === 'string' && model.name.trim().length > 0
+                ? model.name.trim()
+                : normalizedId || 'Unnamed';
+
+            if (!normalizedId) {
+                return undefined;
+            }
+
+            return {
+                name: normalizedName,
+                deploymentId: normalizedId,
+            };
+        })
+        .filter((model): model is CopilotCliModelOption => Boolean(model));
 }
 
 export function getCopilotCliAvailability(env: NodeJS.ProcessEnv = buildCopilotCliProcessEnv()): CopilotCliAvailability {
@@ -165,4 +238,22 @@ function buildExecutableCandidates(basePath: string, env: NodeJS.ProcessEnv): st
 
 function looksLikePath(command: string): boolean {
     return command.includes('\\') || command.includes('/') || /^[a-zA-Z]:/.test(command);
+}
+
+function isWindowsCommandShim(commandPath: string): boolean {
+    const ext = path.extname(commandPath).toLowerCase();
+    return ext === '.cmd' || ext === '.bat';
+}
+
+function buildWindowsShellCommand(commandPath: string, args: string[]): string {
+    return [commandPath, ...args].map(quoteWindowsShellArg).join(' ');
+}
+
+function quoteWindowsShellArg(arg: string): string {
+    if (!arg.length) {
+        return '""';
+    }
+
+    const escaped = arg.replace(/(\\*)"/g, '$1$1\\"');
+    return /[\s"&()^<>|]/.test(arg) ? `"${escaped}"` : escaped;
 }

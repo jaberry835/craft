@@ -13,14 +13,17 @@ import { AzureOpenAIClient } from './aoaiClient';
 import { BuiltinTools } from './builtinTools';
 import { McpClient } from './mcpClient';
 import { SessionManager } from './sessionManager';
-import { AgentProvider, AgentProviderOption, ChatMode, ExtensionMessage, WebviewMessage, WorkingBlock, WorkingBlockActionEntry, WorkingActionType } from './types';
+import { AgentPermissionLevel, AgentProvider, AgentProviderOption, ChatMode, ExtensionMessage, WebviewMessage, WorkingBlock, WorkingBlockActionEntry, WorkingActionType } from './types';
 import { getSetting, updateSetting } from './config';
 import { TokenTracker } from './tokenTracker';
+import { formatCopilotCliRunError } from './errorFormatting';
 import { InlineDiffDecorator } from './inlineDiffDecorator';
 import { RetrievalRanker } from './retrievalRanker';
 import { RepoPatternStore } from './repoPatternStore';
 import { AgentTaskMemory } from './taskMemory';
-import { CopilotCliAvailability, getCopilotCliAvailability } from './copilotCliSupport';
+import { CopilotCliAvailability, getCopilotCliAvailability, normalizeCopilotCliConfiguredModels } from './copilotCliSupport';
+import { shouldPersistTranscriptMessage } from './chatTranscript';
+import { DEFAULT_PERMISSION_LEVEL } from './permissions';
 
 /** Minimum interval (ms) between consecutive agent loop submissions */
 const MIN_SUBMISSION_INTERVAL_MS = 2000;
@@ -33,11 +36,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private copilotRuntime?: AgentRuntime;
     /** Active agent provider */
     private activeProvider: AgentProvider = 'local';
+    /** Active permission level for the current chat session */
+    private currentPermissionLevel: AgentPermissionLevel = DEFAULT_PERMISSION_LEVEL;
     /** Active chat mode */
     private activeMode: ChatMode = 'agent';
     private copilotCliAvailability: CopilotCliAvailability = { available: false };
     private log: (msg: string) => void;
     private lastSubmissionTime = 0;
+    private restoringTranscript = false;
 
     constructor(
         private extensionUri: vscode.Uri,
@@ -54,8 +60,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     ) {
         this.log = log || (() => {});
         this.activeProvider = (getSetting<string>('agentProvider') as AgentProvider) || 'local';
-        this.activeMode = this.getSessionMode(this.sessionManager.getCurrentSession());
+        const currentSession = this.sessionManager.getCurrentSession();
+        this.activeMode = this.getSessionMode(currentSession);
+        this.currentPermissionLevel = currentSession.activePermissionLevel ?? DEFAULT_PERMISSION_LEVEL;
         this.refreshProviderAvailability();
+        this.applyPermissionLevel(this.currentPermissionLevel, { persist: false, sync: false });
         // When a file is fully resolved via inline diff CodeLens, update the dock
         if (this.inlineDiffDecorator) {
             this.inlineDiffDecorator.setDiffLookup((fsPath) => this.builtinTools.getTouchedFileInfoByPath(fsPath));
@@ -151,20 +160,53 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     sendToWebview(msg: ExtensionMessage) {
         this.webview?.postMessage(msg);
+        if (!this.restoringTranscript) {
+            this.captureTranscriptMessage(msg);
+        }
     }
 
     /** Persist current agent loop messages to session storage (called on deactivate/reload). */
     saveCurrentSession() {
+        this.sessionManager.flushPendingSave();
         if (this.activeProvider === 'copilot-cli' && this.copilotRuntime) {
             const msgs = this.copilotRuntime.getMessages();
             if (msgs.length > 0) {
-                this.sessionManager.updateMessages(msgs, this.copilotRuntime.getSessionState?.(), this.activeMode);
+                this.sessionManager.updateMessages(msgs, this.copilotRuntime.getSessionState?.(), this.activeMode, this.currentPermissionLevel);
             }
         } else if (this.agentLoop) {
             const msgs = this.agentLoop.getMessages();
             if (msgs.length > 0) {
-                this.sessionManager.updateMessages(msgs, undefined, this.activeMode);
+                this.sessionManager.updateMessages(msgs, undefined, this.activeMode, this.currentPermissionLevel);
             }
+        }
+    }
+
+    private captureTranscriptMessage(msg: ExtensionMessage): void {
+        if (!shouldPersistTranscriptMessage(msg)) {
+            return;
+        }
+
+        this.sessionManager.recordTranscriptMessage(msg, {
+            provider: msg.type === 'startAssistantMessage' ? this.activeProvider : undefined,
+            immediate: this.shouldPersistTranscriptImmediately(msg),
+        });
+    }
+
+    private shouldPersistTranscriptImmediately(msg: ExtensionMessage): boolean {
+        switch (msg.type) {
+            case 'startAssistantMessage':
+            case 'appendAssistantText':
+            case 'endAssistantMessage':
+            case 'narrationText':
+            case 'workingBlockStarted':
+            case 'workingTextAppended':
+            case 'workingActionAdded':
+            case 'workingActionUpdated':
+            case 'workingBlockCompleted':
+            case 'terminalOutput':
+                return false;
+            default:
+                return true;
         }
     }
 
@@ -186,13 +228,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     private getCopilotCliModelConfig(): { models: Array<{ name: string; deploymentId: string }>; activeDeployment?: string; disabled?: boolean; title?: string } {
-        const configuredModels = getSetting<Array<{ name: string; id: string }>>('copilotCli.models') || [];
+        const configuredModels = getSetting<Array<{ name?: string; id?: string; deploymentId?: string }>>('copilotCli.models') || [];
         const activeModel = getSetting<string>('copilotCli.model') || process.env.COPILOT_MODEL || '';
 
-        const models = configuredModels.map(m => ({
-            name: m.name || m.id || 'Unnamed',
-            deploymentId: m.id || '__copilot_cli_default__'
-        }));
+        const models = normalizeCopilotCliConfiguredModels(configuredModels);
 
         if (models.length === 0) {
             models.push({ name: 'Copilot CLI default', deploymentId: '__copilot_cli_default__' });
@@ -238,6 +277,67 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         });
     }
 
+    private syncPermissionLevelToWebview(): void {
+        this.sendToWebview({ type: 'setPermissionLevel', level: this.currentPermissionLevel });
+    }
+
+    private applyPermissionLevel(
+        level: AgentPermissionLevel,
+        options: { persist?: boolean; sync?: boolean } = {}
+    ): void {
+        this.currentPermissionLevel = level;
+        this.builtinTools.setPermissionLevel(level);
+        this.copilotRuntime?.setPermissionLevel?.(level);
+
+        if (options.persist !== false) {
+            this.sessionManager.setActivePermissionLevel(level);
+        }
+        if (options.sync !== false) {
+            this.syncPermissionLevelToWebview();
+        }
+    }
+
+    private async confirmPermissionLevel(level: AgentPermissionLevel): Promise<boolean> {
+        if (level === 'default') {
+            return true;
+        }
+
+        const warningKey = `junior.permissionWarningSeen.${level}`;
+        if (this.globalState?.get<boolean>(warningKey, false)) {
+            return true;
+        }
+
+        const action = await vscode.window.showWarningMessage(
+            'Enable Bypass Approvals for this session?',
+            {
+                modal: true,
+                detail: 'Bypass Approvals auto-approves all tool calls for this chat session, including file edits, terminal commands, and external tool calls.'
+            },
+            'Enable'
+        );
+
+        if (action !== 'Enable') {
+            this.syncPermissionLevelToWebview();
+            return false;
+        }
+
+        await this.globalState?.update(warningKey, true);
+        return true;
+    }
+
+    private async handleSelectPermissionLevel(level: AgentPermissionLevel): Promise<void> {
+        if (level === this.currentPermissionLevel) {
+            this.syncPermissionLevelToWebview();
+            return;
+        }
+
+        if (!(await this.confirmPermissionLevel(level))) {
+            return;
+        }
+
+        this.applyPermissionLevel(level);
+    }
+
     public refreshProviderAvailability(): void {
         this.copilotCliAvailability = getCopilotCliAvailability();
 
@@ -277,7 +377,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             this.builtinTools.resetSessionApprovals();
             this.agentLoop?.clearMessages();
         }
-        this.sessionManager.createNewSession(this.activeMode);
+        this.sessionManager.createNewSession(this.activeMode, DEFAULT_PERMISSION_LEVEL);
+        this.applyPermissionLevel(DEFAULT_PERMISSION_LEVEL, { persist: false });
         this.sendToWebview({ type: 'sessionCleared' });
         this.sendToWebview({ type: 'setChatMode', mode: this.activeMode });
         this.sendToWebview({ type: 'planReady', visible: false });
@@ -368,6 +469,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 case 'selectAgentProvider':
                     this.handleSelectAgentProvider(msg.provider);
                     break;
+                case 'selectPermissionLevel':
+                    void this.handleSelectPermissionLevel(msg.level);
+                    break;
                 case 'selectChatMode':
                     this.setChatMode(msg.mode);
                     break;
@@ -436,6 +540,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     this.refreshProviderAvailability();
                     this.syncProvidersToWebview();
                     this.sendToWebview({ type: 'setAgentProvider', provider: this.activeProvider });
+                    this.syncPermissionLevelToWebview();
                     this.sendToWebview({ type: 'setChatMode', mode: this.activeMode });
                     this.syncModelsToWebview();
                     this.restoreSession();
@@ -544,6 +649,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             }
         }
 
+        this.builtinTools.setPermissionLevel(this.currentPermissionLevel);
+
         // Confirmation callback for built-in tools
         this.builtinTools.setConfirmCallback((actionId, description, category, diff) => {
             this.sendToWebview({ type: 'confirmAction', actionId, description, category, diff });
@@ -581,7 +688,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             }
         } finally {
             // Always persist — even if cancelled or errored
-            this.sessionManager.updateMessages(this.agentLoop.getMessages(), undefined, this.activeMode);
+            this.sessionManager.updateMessages(this.agentLoop.getMessages(), undefined, this.activeMode, this.currentPermissionLevel);
             this.sendSessionList();
         }
     }
@@ -621,51 +728,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         } catch (err: any) {
             const msg = err?.message || String(err);
             this.log(`[copilot-cli] Run error: ${msg}`);
-            this.sendToWebview({ type: 'error', message: this.formatCopilotCliRunError(msg) });
+            this.sendToWebview({ type: 'error', message: formatCopilotCliRunError(msg) });
             this.sendToWebview({ type: 'agentDone' });
         } finally {
             // Always persist — even if cancelled or errored
-            this.sessionManager.updateMessages(runtime.getMessages(), runtime.getSessionState?.(), this.activeMode);
+            this.sessionManager.updateMessages(runtime.getMessages(), runtime.getSessionState?.(), this.activeMode, this.currentPermissionLevel);
             this.sendSessionList();
         }
-    }
-
-    private formatCopilotCliRunError(rawMessage: string): string {
-        const message = (rawMessage || '').trim();
-        if (!message) {
-            return 'Copilot CLI error: Unknown error.';
-        }
-
-        const retryMatch = message.match(/Failed to get response from the AI model; retried (\d+) times \(total retry wait time: ([^)]+) seconds\)(?: \(Request-ID ([^)]+)\))? Last error: (.+)$/i);
-        if (!retryMatch) {
-            return `Copilot CLI error: ${message}`;
-        }
-
-        const retries = retryMatch[1];
-        const waitSeconds = retryMatch[2];
-        const requestId = retryMatch[3];
-        const lastError = retryMatch[4].trim();
-        const unknownLastError = /^unknown error$/i.test(lastError);
-        const providerHint = unknownLastError
-            ? 'This is usually a transient provider issue such as rate limiting or backend overload.'
-            : /^api returned 429\b/i.test(lastError)
-                ? 'The provider appears to have rate limited this request.'
-                : 'This appears to be an upstream model/provider failure.';
-
-        const lines = [
-            `Copilot CLI model request failed after ${retries} retries (${waitSeconds}s total backoff).`,
-            providerHint,
-            'Try again in a moment.'
-        ];
-
-        if (!unknownLastError) {
-            lines.push(`Last error: ${lastError}`);
-        }
-        if (requestId) {
-            lines.push(`Request ID: ${requestId}`);
-        }
-
-        return lines.join('\n');
     }
 
     /** Ensure the Copilot CLI runtime is initialized and session is loaded */
@@ -680,6 +749,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 (mode, promptText) => this.buildCopilotPromptContext(mode, promptText)
             );
         }
+
+        this.copilotRuntime.setPermissionLevel?.(this.currentPermissionLevel);
 
         const session = this.sessionManager.getCurrentSession();
         this.copilotRuntime.setMessages([...session.messages]);
@@ -1313,6 +1384,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 this.copilotRuntime?.clearMessages();
             } else {
                 if (this.agentLoop?.isRunning()) { this.agentLoop.cancel(); }
+                this.builtinTools.resetSessionApprovals();
                 this.agentLoop?.clearMessages();
             }
             this.sendToWebview({ type: 'sessionCleared' });
@@ -1324,9 +1396,28 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private restoreSession() {
         const session = this.sessionManager.getCurrentSession();
         this.activeMode = this.getSessionMode(session);
+        this.applyPermissionLevel(session.activePermissionLevel ?? DEFAULT_PERMISSION_LEVEL, { persist: false });
         this.sendToWebview({ type: 'setChatMode', mode: this.activeMode });
         this.sendToWebview({ type: 'planReady', visible: false });
+
+        if (session.transcript && session.transcript.items.length > 0) {
+            this.restoringTranscript = true;
+            try {
+                this.sendToWebview({ type: 'restoreTranscript', transcript: session.transcript });
+            } finally {
+                this.restoringTranscript = false;
+            }
+
+            if (this.agentLoop) {
+                this.agentLoop.setMessages([...session.messages]);
+            }
+            return;
+        }
+
         if (session.messages.length === 0) { return; }
+
+        this.restoringTranscript = true;
+        try {
 
         // Build a map of tool_call_id → success for completed tool results
         const toolResults = new Map<string, boolean>();
@@ -1418,6 +1509,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                         for (const entry of phase.entries) {
                             if (entry.kind === 'progress') {
                                 this.sendToWebview({ type: 'workingTextAppended', blockId: phase.id, entry });
+                            } else if (entry.kind === 'terminal') {
+                                for (const line of entry.text.split(/\r?\n/)) {
+                                    if (!line) { continue; }
+                                    this.sendToWebview({ type: 'terminalOutput', line });
+                                }
                             } else {
                                 this.sendToWebview({ type: 'workingActionAdded', blockId: phase.id, entry });
                             }
@@ -1482,6 +1578,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         // Restore into agent loop
         if (this.agentLoop) {
             this.agentLoop.setMessages([...session.messages]);
+        }
+        } finally {
+            this.restoringTranscript = false;
         }
     }
 
@@ -2507,7 +2606,7 @@ body { display: flex; flex-direction: column; }
 /* INPUT */
 #input-area {
     border-top: 1px solid var(--border);
-    padding: 6px 8px;
+    padding: 8px 10px 10px;
     flex-shrink: 0;
 }
 #input-area.drag-over {
@@ -2516,7 +2615,7 @@ body { display: flex; flex-direction: column; }
 }
 #composer-shell {
     border: 1px solid var(--input-border);
-    border-radius: 8px;
+    border-radius: 10px;
     background: var(--input-bg);
     overflow: visible;
     position: relative;
@@ -2527,14 +2626,14 @@ body { display: flex; flex-direction: column; }
     color: var(--input-fg);
     border: none;
     border-radius: 0;
-    padding: 8px 10px;
+    padding: 10px 12px 6px;
     font-family: inherit;
     font-size: inherit;
     resize: none;
     outline: none;
-    min-height: 36px;
+    min-height: 40px;
     max-height: 200px;
-    line-height: 1.4;
+    line-height: 1.45;
 }
 #input-area textarea:focus {
     border-color: transparent;
@@ -2542,8 +2641,8 @@ body { display: flex; flex-direction: column; }
 #composer-toolbar {
     display: flex;
     align-items: center;
-    gap: 2px;
-    padding: 4px 6px;
+    gap: 4px;
+    padding: 5px 8px 7px;
     min-height: 32px;
 }
 /* Shared composer toolbar button base */
@@ -2794,17 +2893,26 @@ body { display: flex; flex-direction: column; }
 
 #model-select {
     width: auto;
-    min-width: 140px;
-    max-width: 260px;
-    background: var(--vscode-dropdown-background, var(--input-bg, #1e1e1e));
+    min-width: 120px;
+    max-width: 220px;
+    min-height: 28px;
+    box-sizing: border-box;
+    background: rgba(255,255,255,0.03);
     color: var(--vscode-dropdown-foreground, var(--input-fg));
-    border: 1px solid var(--vscode-dropdown-border, var(--input-border));
-    border-radius: 6px;
-    padding: 4px 8px;
+    border: 1px solid rgba(255,255,255,0.09);
+    border-radius: 8px;
+    padding: 4px 10px 4px 10px;
     font-family: inherit;
     font-size: 12.5px;
+    line-height: 1.2;
+    vertical-align: middle;
     outline: none;
     cursor: pointer;
+    transition: background 0.12s ease, border-color 0.12s ease;
+}
+#model-select:hover {
+    background: rgba(255,255,255,0.05);
+    border-color: rgba(255,255,255,0.14);
 }
 #model-select:focus {
     border-color: var(--vscode-focusBorder, var(--btn-bg));
@@ -2820,14 +2928,71 @@ body { display: flex; flex-direction: column; }
 #provider-bar {
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 2px 4px;
+    gap: 8px;
+    padding: 7px 4px 2px;
+}
+.footer-select-control {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-height: 24px;
+    box-sizing: border-box;
+    color: var(--fg);
+    opacity: 0.65;
+    padding: 2px 6px;
+    border-radius: 4px;
+    transition: opacity 0.12s, background 0.12s;
+}
+.footer-select-control:hover,
+.footer-select-control:focus-within {
+    opacity: 1;
+    background: rgba(255,255,255,0.08);
+}
+.footer-select-icon {
+    width: 11px;
+    height: 11px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--vscode-descriptionForeground, #b2b8bf);
+    flex-shrink: 0;
+}
+.footer-select-icon svg {
+    width: 11px;
+    height: 11px;
+    display: block;
+}
+#provider-select,
+#permission-select {
+    background: none;
+    border: none;
+    color: var(--fg);
+    font-family: inherit;
+    font-size: 11.5px;
+    line-height: 1.2;
+    cursor: pointer;
+    padding: 0;
+    outline: none;
+    vertical-align: middle;
+}
+#provider-select {
+    min-width: 88px;
+}
+#permission-select {
+    min-width: 134px;
+}
+#provider-select option,
+#permission-select option {
+    background: var(--vscode-dropdown-listBackground, var(--vscode-dropdown-background, #252526));
+    color: var(--vscode-dropdown-foreground, var(--input-fg));
+    padding: 4px 8px;
+    font-size: 11.5px;
 }
 #plan-action-bar {
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 0 2px 8px;
+    padding: 0 2px 10px;
     color: var(--vscode-descriptionForeground, #b2b8bf);
     font-size: 11.5px;
 }
@@ -2853,34 +3018,9 @@ body { display: flex; flex-direction: column; }
     background: rgba(255,255,255,0.09);
     border-color: rgba(255,255,255,0.18);
 }
-#provider-select {
-    background: none;
-    border: none;
-    color: var(--fg);
-    opacity: 0.65;
-    font-family: inherit;
-    font-size: 11.5px;
-    cursor: pointer;
-    padding: 2px 4px;
-    border-radius: 4px;
-    outline: none;
-}
-#provider-select:hover {
-    opacity: 1;
-    background: rgba(255,255,255,0.08);
-}
-#provider-select:focus {
-    border-color: var(--vscode-focusBorder, var(--btn-bg));
-}
-#provider-select option {
-    background: var(--vscode-dropdown-listBackground, var(--vscode-dropdown-background, #252526));
-    color: var(--vscode-dropdown-foreground, var(--input-fg));
-    padding: 4px 8px;
-    font-size: 11.5px;
-}
-
 #provider-bar #context-meter {
     margin-left: auto;
+    align-self: center;
 }
 
 /* ATTACHMENT PREVIEW */
@@ -2988,8 +3128,8 @@ body { display: flex; flex-direction: column; }
 #attach-preview {
     display: none;
     flex-wrap: wrap;
-    gap: 4px;
-    padding: 4px 0;
+    gap: 6px;
+    padding: 2px 0 8px;
 }
 .attach-pill {
     display: flex;
@@ -3234,9 +3374,23 @@ body { display: flex; flex-direction: column; }
         </div>
     </div>
     <div id="provider-bar">
-        <select id="provider-select" title="Agent provider">
-            <option value="local">▫ Local</option>
-        </select>
+        <label class="footer-select-control" title="Agent provider">
+            <span class="footer-select-icon" aria-hidden="true">
+                <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M5.1 3.9h5.8A2.3 2.3 0 0 1 13.2 6.2v3.2a2.3 2.3 0 0 1-2.3 2.3H5.1a2.3 2.3 0 0 1-2.3-2.3V6.2a2.3 2.3 0 0 1 2.3-2.3Z" stroke="currentColor" stroke-width="1.15" stroke-linejoin="round"/><path d="M2.8 7.1H1.9M14.1 7.1h-.9" stroke="currentColor" stroke-width="1.15" stroke-linecap="round"/><circle cx="6.3" cy="7.2" r=".75" fill="currentColor"/><circle cx="9.7" cy="7.2" r=".75" fill="currentColor"/><path d="M6 9.4c.6.45 1.2.65 2 .65s1.4-.2 2-.65" stroke="currentColor" stroke-width="1.15" stroke-linecap="round"/></svg>
+            </span>
+            <select id="provider-select" title="Agent provider">
+                <option value="local">Local</option>
+            </select>
+        </label>
+        <label class="footer-select-control" title="Approval mode for this chat session">
+            <span class="footer-select-icon" aria-hidden="true">
+                <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M8 1.75 12.5 3.5v3.84c0 3.06-1.9 5.84-4.5 6.91-2.6-1.07-4.5-3.85-4.5-6.91V3.5L8 1.75Z" stroke="currentColor" stroke-width="1.15" stroke-linejoin="round"/><path d="m6.35 7.95 1.1 1.1 2.35-2.35" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </span>
+            <select id="permission-select" title="Approval mode for this chat session">
+                <option value="default">Default Approvals</option>
+                <option value="bypass">Bypass Approvals</option>
+            </select>
+        </label>
         <div id="context-meter"><div class="meter-ring"><svg viewBox="0 0 20 20"><circle class="meter-bg" cx="10" cy="10" r="8" /><circle class="meter-fill" cx="10" cy="10" r="8" stroke-dasharray="50.27" stroke-dashoffset="50.27" /></svg></div><span class="meter-label">0 / 128.0K (0%)</span></div>
     </div>
 </div>

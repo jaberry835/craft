@@ -147,14 +147,17 @@ export interface ChatSession {
     id: string;
     title: string;
     messages: ChatMessage[];
+    transcript?: PersistedTranscript;
     createdAt: number;
     updatedAt: number;
     activeMode?: ChatMode;
+    activePermissionLevel?: AgentPermissionLevel;
     runtimeState?: RuntimeSessionState;
 }
 
 export type AgentProvider = 'local' | 'copilot-cli';
 export type ChatMode = 'ask' | 'plan' | 'agent';
+export type AgentPermissionLevel = 'default' | 'bypass';
 
 export interface AgentProviderOption {
     value: AgentProvider;
@@ -193,6 +196,13 @@ export interface WorkingBlockProgressEntry {
     createdAt: number;
 }
 
+export interface WorkingBlockTerminalEntry {
+    id: string;
+    kind: 'terminal';
+    text: string;
+    createdAt: number;
+}
+
 export interface WorkingBlockActionEntry {
     id: string;
     kind: 'action';
@@ -207,7 +217,7 @@ export interface WorkingBlockActionEntry {
     icon?: string;
 }
 
-export type WorkingBlockEntry = WorkingBlockProgressEntry | WorkingBlockActionEntry;
+export type WorkingBlockEntry = WorkingBlockProgressEntry | WorkingBlockActionEntry | WorkingBlockTerminalEntry;
 
 export interface WorkingBlock {
     id: string;
@@ -219,6 +229,53 @@ export interface WorkingBlock {
     completedAt?: number;
 }
 
+export interface PersistedUserTranscriptItem {
+    id: string;
+    kind: 'user';
+    text: string;
+    images?: string[];
+    fileNames?: string[];
+}
+
+export interface PersistedAssistantTranscriptItem {
+    id: string;
+    kind: 'assistant';
+    text: string;
+    provider: AgentProvider;
+}
+
+export interface PersistedNarrationTranscriptItem {
+    id: string;
+    kind: 'narration';
+    text: string;
+}
+
+export interface PersistedWorkingBlockTranscriptItem {
+    id: string;
+    kind: 'working-block';
+    block: WorkingBlock;
+}
+
+export interface PersistedErrorTranscriptItem {
+    id: string;
+    kind: 'error';
+    message: string;
+}
+
+export type PersistedTranscriptItem =
+    | PersistedUserTranscriptItem
+    | PersistedAssistantTranscriptItem
+    | PersistedNarrationTranscriptItem
+    | PersistedWorkingBlockTranscriptItem
+    | PersistedErrorTranscriptItem;
+
+export interface PersistedTranscript {
+    version: 1;
+    items: PersistedTranscriptItem[];
+    activeAssistantMessageId?: string;
+    activeWorkingBlockId?: string;
+}
+
 // ── Webview Message Types ──
 
 export type WebviewMessage =
@@ -228,6 +285,7 @@ export type WebviewMessage =
     | { type: 'selectModel' }
     | { type: 'selectModelById'; deploymentId: string }
     | { type: 'selectAgentProvider'; provider: AgentProvider }
+    | { type: 'selectPermissionLevel'; level: AgentPermissionLevel }
     | { type: 'selectChatMode'; mode: ChatMode }
     | { type: 'runPlanInAgent' }
     | { type: 'attachFile' }
@@ -252,9 +310,11 @@ export type WebviewMessage =
 
 export type ExtensionMessage =
     | { type: 'addUserMessage'; text: string; images?: string[]; fileNames?: string[] }
+    | { type: 'restoreTranscript'; transcript: PersistedTranscript }
     | { type: 'setModels'; models: Array<{ name: string; deploymentId: string }>; activeDeployment?: string; disabled?: boolean; title?: string }
     | { type: 'setAgentProviders'; providers: AgentProviderOption[]; activeProvider: AgentProvider }
     | { type: 'setAgentProvider'; provider: AgentProvider }
+    | { type: 'setPermissionLevel'; level: AgentPermissionLevel }
     | { type: 'setChatMode'; mode: ChatMode }
     | { type: 'planReady'; visible: boolean }
     | { type: 'agentStarted' }

@@ -8,8 +8,9 @@ import * as vscode from 'vscode';
 import { CopilotClient, CopilotSession } from '@github/copilot-sdk';
 import type { MCPServerConfig, PermissionRequest, PermissionRequestResult, SessionConfig } from '@github/copilot-sdk';
 import * as path from 'path';
-import { buildCopilotCliProcessEnv, resolveConfiguredCopilotCliPath } from './copilotCliSupport';
+import { buildCopilotCliProcessEnv, resolveConfiguredCopilotCliLaunchSpec } from './copilotCliSupport';
 import { BuiltinTools } from './builtinTools';
+import { shouldAutoApproveCopilotPermission } from './permissions';
 
 /** ProviderConfig is defined in SDK types but not re-exported; extract from SessionConfig. */
 type ProviderConfig = NonNullable<SessionConfig['provider']>;
@@ -17,6 +18,7 @@ import { AgentRuntime, AgentCallbacks } from './agentRuntime';
 import { getSetting } from './config';
 import { TokenTracker } from './tokenTracker';
 import {
+    AgentPermissionLevel,
     AgentPlanStep,
     ChatMessage,
     ChatMode,
@@ -46,6 +48,8 @@ interface ToolCallMetadata {
 export class CopilotSdkRuntime implements AgentRuntime {
     private static readonly IDLE_TIMEOUT_RECOVERY_MS = 180000;
     private static readonly SEND_AND_WAIT_TIMEOUT_MS = 180000;
+    private static readonly LONG_WAIT_STATUS_INTERVAL_MS = 5000;
+    private static readonly LONG_WAIT_INACTIVITY_MS = 15000;
 
     private client?: CopilotClient;
     private session?: CopilotSession;
@@ -71,6 +75,9 @@ export class CopilotSdkRuntime implements AgentRuntime {
     private toolMetadataByCallId = new Map<string, ToolCallMetadata>();
     private lastBackgroundTaskSummary = '';
     private currentPromptContext = '';
+    private longWaitStatusTimer?: NodeJS.Timeout;
+    private lastLongWaitStatus = '';
+    private permissionLevel: AgentPermissionLevel = 'default';
 
     constructor(
         private readonly callbacks: AgentCallbacks,
@@ -147,6 +154,10 @@ export class CopilotSdkRuntime implements AgentRuntime {
         finalize();
     }
 
+    setPermissionLevel(level: AgentPermissionLevel): void {
+        this.permissionLevel = level;
+    }
+
     getSessionState(): RuntimeSessionState | undefined {
         if (!this.sessionId) { return undefined; }
         return {
@@ -193,6 +204,7 @@ export class CopilotSdkRuntime implements AgentRuntime {
         // Match the local runtime: surface an immediate thinking state even before
         // the CLI emits reasoning/tool events.
         this.callbacks.sendToWebview({ type: 'setStatus', status: 'Thinking...' });
+        this.startLongWaitStatusHeartbeat();
 
         try {
             await this.ensureSession();
@@ -254,6 +266,7 @@ export class CopilotSdkRuntime implements AgentRuntime {
             this.log?.(`[copilot-sdk] Prompt completed in ${Date.now() - this.runStartTs}ms`);
         } finally {
             this.running = false;
+            this.stopLongWaitStatusHeartbeat();
             this.callbacks.sendToWebview({ type: 'setStatus', status: '' });
             this.callbacks.sendToWebview({ type: 'agentDone' });
         }
@@ -272,7 +285,6 @@ export class CopilotSdkRuntime implements AgentRuntime {
         if (this.client) { return this.client; }
 
         const cliEnv = buildCopilotCliProcessEnv();
-        const cliPath = resolveConfiguredCopilotCliPath(cliEnv) || (getSetting<string>('copilotCli.path') || 'copilot');
         const additionalArgs = [...(getSetting<string[]>('copilotCli.additionalArgs') || [])];
         const configuredModel = getSetting<string>('copilotCli.model') || cliEnv.COPILOT_MODEL || '';
 
@@ -280,11 +292,14 @@ export class CopilotSdkRuntime implements AgentRuntime {
             additionalArgs.push('--model', configuredModel);
         }
 
-        this.log?.(`[copilot-sdk] Creating client (cliPath=${cliPath}, args=${JSON.stringify(additionalArgs)})`);
+        const launchSpec = resolveConfiguredCopilotCliLaunchSpec(additionalArgs, cliEnv);
+        const cliTarget = launchSpec.resolvedCliPath || launchSpec.cliPath;
+
+        this.log?.(`[copilot-sdk] Creating client (cliPath=${launchSpec.cliPath}, target=${cliTarget}, args=${JSON.stringify(launchSpec.cliArgs)})`);
 
         this.client = new CopilotClient({
-            cliPath,
-            cliArgs: additionalArgs,
+            cliPath: launchSpec.cliPath,
+            cliArgs: launchSpec.cliArgs,
             useStdio: true,
             env: cliEnv,
         });
@@ -296,7 +311,8 @@ export class CopilotSdkRuntime implements AgentRuntime {
         } catch (err: any) {
             this.client = undefined;
             const msg = err?.message || String(err);
-            throw new Error(`Copilot CLI failed to start (cliPath=${cliPath}): ${msg}`);
+            const cliDescriptor = launchSpec.cliPath === cliTarget ? cliTarget : `${cliTarget} via ${launchSpec.cliPath}`;
+            throw new Error(`Copilot CLI failed to start (cliPath=${cliDescriptor}): ${msg}`);
         }
         this.log?.('[copilot-sdk] Client started');
         return this.client;
@@ -679,6 +695,10 @@ export class CopilotSdkRuntime implements AgentRuntime {
                 }
 
                 const entry = this.findWorkingActionEntry(entryId);
+                // Only show partial output for action types where it's meaningful
+                if (entry && (entry.actionType === 'read' || entry.actionType === 'review' || entry.actionType === 'search')) {
+                    return;
+                }
                 const detail = this.describePartialOutputDetail(partialOutput, entry?.repeatCount || 1);
                 if (!detail) {
                     return;
@@ -721,8 +741,6 @@ export class CopilotSdkRuntime implements AgentRuntime {
     }
 
     private handlePermission(request: PermissionRequest): Promise<PermissionRequestResult> {
-        const autoApproveWrites = getSetting<boolean>('copilotCli.autoApproveWrites') || false;
-        const autoApproveTerminal = getSetting<boolean>('copilotCli.autoApproveTerminal') || false;
         const normalizedTool = this.normalizeToolName(String((request as any).toolName || ''));
         const writeFilePath = request.kind === 'write' ? this.getPermissionWriteFilePath(request) : undefined;
         this.lastActivityTs = Date.now();
@@ -748,14 +766,8 @@ export class CopilotSdkRuntime implements AgentRuntime {
             return Promise.resolve({ kind: 'denied-interactively-by-user' });
         }
 
-        // Auto-approve writes if configured
-        if (request.kind === 'write' && autoApproveWrites) {
+        if (shouldAutoApproveCopilotPermission(this.permissionLevel, request.kind)) {
             return this.approvePermissionRequest(writeFilePath);
-        }
-
-        // Auto-approve shell if configured
-        if (request.kind === 'shell' && autoApproveTerminal) {
-            return Promise.resolve({ kind: 'approved' });
         }
 
         // For everything else: show confirmation in webview
@@ -792,9 +804,9 @@ export class CopilotSdkRuntime implements AgentRuntime {
     private describePermission(request: PermissionRequest): string {
         switch (request.kind) {
             case 'write':
-                return `Write file: ${(request as any).fileName || 'unknown'}`;
+                return `Write file: ${this.shortenPathsInText((request as any).fileName || 'unknown')}`;
             case 'shell':
-                return `Run command: ${(request as any).fullCommandText || 'unknown'}`;
+                return `Run command: ${this.shortenPathsInText((request as any).fullCommandText || 'unknown')}`;
             case 'mcp':
                 return `Call MCP tool: ${(request as any).toolName || 'unknown'}`;
             case 'custom-tool':
@@ -1066,7 +1078,7 @@ export class CopilotSdkRuntime implements AgentRuntime {
 
     private describeToolAction(toolName: string, data: any, toolMeta?: ToolCallMetadata): string {
         if (toolMeta?.toolTitle?.trim()) {
-            return this.summarizeUiText(toolMeta.toolTitle.trim(), 88);
+            return this.shortenPathsInText(this.summarizeUiText(toolMeta.toolTitle.trim(), 88));
         }
 
         const args = this.readToolArgs(data, toolMeta);
@@ -1115,13 +1127,13 @@ export class CopilotSdkRuntime implements AgentRuntime {
         const endLine = this.readNumberArg(args, ['endLine', 'end_line', 'toLine', 'to_line']);
 
         if (toolMeta?.intentionSummary?.trim()) {
-            details.push(this.summarizeUiText(toolMeta.intentionSummary.trim(), 132));
+            details.push(this.shortenPathsInText(this.summarizeUiText(toolMeta.intentionSummary.trim(), 132)));
         } else if (actionType === 'run') {
             const goal = this.readStringArg(args, ['goal', 'label', 'title', 'description']);
             const explanation = this.readStringArg(args, ['explanation', 'reason']);
             const runSummary = goal || explanation;
             if (runSummary) {
-                details.push(this.summarizeUiText(runSummary, 132));
+                details.push(this.shortenPathsInText(this.summarizeUiText(runSummary, 132)));
             }
         }
 
@@ -1160,7 +1172,7 @@ export class CopilotSdkRuntime implements AgentRuntime {
     }
 
     private describeProgressDetail(progressMessage: string, repeatCount: number): string {
-        const trimmed = progressMessage.replace(/\s+/g, ' ').trim();
+        const trimmed = this.shortenPathsInText(progressMessage.replace(/\s+/g, ' ').trim());
         if (repeatCount > 1) {
             return `${trimmed} • ${repeatCount} edit passes`;
         }
@@ -1177,7 +1189,7 @@ export class CopilotSdkRuntime implements AgentRuntime {
             return undefined;
         }
 
-        const normalized = firstLine.length > 140 ? firstLine.slice(0, 137) + '...' : firstLine;
+        const normalized = this.shortenPathsInText(firstLine.length > 140 ? firstLine.slice(0, 137) + '...' : firstLine);
         if (repeatCount > 1) {
             return `${normalized} • ${repeatCount} edit passes`;
         }
@@ -1207,17 +1219,33 @@ export class CopilotSdkRuntime implements AgentRuntime {
             return patch;
         }
 
-        const detail = this.extractCompletionDetail(data);
-        if (detail) {
-            patch.detail = entry.repeatCount && entry.repeatCount > 1 && !/\bpasses\b/i.test(detail)
-                ? `${detail} • ${entry.repeatCount} ${entry.actionType === 'edit' ? 'edit passes' : 'passes'}`
-                : detail;
-        } else if (data?.success !== false) {
-            if (entry.actionType === 'edit') {
-                patch.detail = 'File updated';
-            } else if (entry.actionType === 'create') {
-                patch.detail = 'File created';
+        // Only extract detail from tool output for action types where it's meaningful.
+        // For read/review/search the label already describes what happened; showing the
+        // first line of file content ("import os", "{") is noisy, not helpful.
+        const showOutputDetail = entry.actionType === 'edit' || entry.actionType === 'create' || entry.actionType === 'run' || entry.actionType === 'other';
+
+        if (data?.success === false) {
+            // Always show error detail
+            const detail = this.extractCompletionDetail(data);
+            if (detail) {
+                patch.detail = detail;
             }
+        } else if (showOutputDetail) {
+            const detail = this.extractCompletionDetail(data);
+            if (detail) {
+                patch.detail = entry.repeatCount && entry.repeatCount > 1 && !/\bpasses\b/i.test(detail)
+                    ? `${detail} • ${entry.repeatCount} ${entry.actionType === 'edit' ? 'edit passes' : 'passes'}`
+                    : detail;
+            } else {
+                if (entry.actionType === 'edit') {
+                    patch.detail = 'File updated';
+                } else if (entry.actionType === 'create') {
+                    patch.detail = 'File created';
+                }
+            }
+        } else if (data?.success !== false) {
+            // For read/search: clear any noisy detail that was set during progress
+            patch.detail = '';
         }
 
         const resultPath = this.extractCompletionFilePath(data);
@@ -1271,7 +1299,8 @@ export class CopilotSdkRuntime implements AgentRuntime {
             return undefined;
         }
 
-        return line.length > 160 ? `${line.slice(0, 157)}...` : line;
+        const trimmedLine = line.length > 160 ? `${line.slice(0, 157)}...` : line;
+        return this.shortenPathsInText(trimmedLine);
     }
 
     private isMeaningfulUiDetail(line: string): boolean {
@@ -1280,11 +1309,23 @@ export class CopilotSdkRuntime implements AgentRuntime {
             return false;
         }
 
+        // Too short to be meaningful (single chars like '{', '[', etc.)
+        if (normalized.length < 4) {
+            return false;
+        }
+
+        // Diff / patch markers
         if (/^[-+@#*=]{2,}/.test(normalized) || /^diff\b/i.test(normalized)) {
             return false;
         }
 
-        if (/^index [0-9a-f.,]+ [0-7]{6}$/i.test(normalized)) {
+        // Diff content lines: single +/- followed by code
+        if (/^[+-][a-zA-Z#\s{}\[\]()\/"']/.test(normalized)) {
+            return false;
+        }
+
+        // Git index lines
+        if (/^index\s+[0-9a-f]/i.test(normalized)) {
             return false;
         }
 
@@ -1301,6 +1342,31 @@ export class CopilotSdkRuntime implements AgentRuntime {
         }
 
         if (/^@@\s.*\s@@/.test(normalized)) {
+            return false;
+        }
+
+        // Code-like lines that don't explain anything to the user
+        if (/^(import |from |require\(|#include |using |package |namespace )/.test(normalized)) {
+            return false;
+        }
+
+        // Comment-only lines
+        if (/^(#!?\/|#\s|\*\s|\/\*|\/\/)/.test(normalized)) {
+            return false;
+        }
+
+        // Lines that are just a bracket, brace, paren, or trivial punctuation
+        if (/^[{}\[\]();:,]+$/.test(normalized)) {
+            return false;
+        }
+
+        // Hex-only hashes (git SHAs, etc.)
+        if (/^[0-9a-f]{7,}$/i.test(normalized)) {
+            return false;
+        }
+
+        // JSON key-value that's just structural (e.g. '"name": "value"')
+        if (/^"[^"]+"\s*:\s*/.test(normalized) && normalized.length < 60) {
             return false;
         }
 
@@ -1365,6 +1431,50 @@ export class CopilotSdkRuntime implements AgentRuntime {
         }
 
         return 'Copilot CLI is still working';
+    }
+
+    private startLongWaitStatusHeartbeat(): void {
+        this.stopLongWaitStatusHeartbeat();
+        this.lastLongWaitStatus = '';
+        this.longWaitStatusTimer = setInterval(() => {
+            if (!this.running) {
+                return;
+            }
+
+            const idleMs = Date.now() - this.lastActivityTs;
+            if (idleMs < CopilotSdkRuntime.LONG_WAIT_INACTIVITY_MS) {
+                this.lastLongWaitStatus = '';
+                return;
+            }
+
+            const status = this.describeLongWaitStatus(idleMs, Date.now() - this.runStartTs);
+            if (!status || status === this.lastLongWaitStatus) {
+                return;
+            }
+
+            this.lastLongWaitStatus = status;
+            this.callbacks.sendToWebview({ type: 'setStatus', status });
+        }, CopilotSdkRuntime.LONG_WAIT_STATUS_INTERVAL_MS);
+    }
+
+    private stopLongWaitStatusHeartbeat(): void {
+        if (this.longWaitStatusTimer) {
+            clearInterval(this.longWaitStatusTimer);
+            this.longWaitStatusTimer = undefined;
+        }
+        this.lastLongWaitStatus = '';
+    }
+
+    private describeLongWaitStatus(idleMs: number, totalRunMs: number): string {
+        const baseStatus = this.describePendingWaitStatus();
+        const idleSeconds = Math.max(1, Math.round(idleMs / 1000));
+        const totalSeconds = Math.max(1, Math.round(totalRunMs / 1000));
+
+        if (baseStatus === 'Copilot CLI is still working') {
+            return `Waiting on Copilot CLI / model provider (${idleSeconds}s since the last update, ${totalSeconds}s total). This can happen during provider retries or rate limiting.`;
+        }
+
+        return `${baseStatus} (${idleSeconds}s since the last update)`;
     }
 
     private shouldLogSdkEvents(): boolean {
@@ -1468,6 +1578,14 @@ export class CopilotSdkRuntime implements AgentRuntime {
             return parts.slice(-2).join('/');
         }
         return path.basename(filePath) || filePath;
+    }
+
+    /** Replace absolute file paths in free-form text with their last 2 segments. */
+    private shortenPathsInText(text: string): string {
+        // Match Windows paths  (C:\foo\bar\...) and Unix paths (/home/user/...)
+        return text.replace(/(?:[A-Za-z]:\\|\/(?:home|Users|tmp|var|opt|usr|etc|mnt)\/)[^\s"'`;,)}\]]+/g, (match) => {
+            return this.shortPath(match);
+        });
     }
 
     private disconnectSession(): void {
