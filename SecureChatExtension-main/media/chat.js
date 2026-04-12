@@ -17,6 +17,16 @@ window.onerror = function(msg, src, line, col, err) {
     const statusEl = document.getElementById('status-bar');
     const planPanelEl = document.getElementById('plan-panel');
     const modelSelectEl = document.getElementById('model-select');
+    const permissionSelectEl = document.getElementById('permission-select');
+    const providerSelectEl = document.getElementById('provider-select');
+    const modeSwitchEl = document.getElementById('mode-switch');
+    const modeTriggerEl = document.getElementById('mode-trigger');
+    const modeTriggerIconEl = document.getElementById('mode-trigger-icon');
+    const modeTriggerLabelEl = document.getElementById('mode-trigger-label');
+    const modeMenuEl = document.getElementById('mode-menu');
+    const modeOptions = modeMenuEl ? Array.from(modeMenuEl.querySelectorAll('.mode-option')) : [];
+    const planActionBarEl = document.getElementById('plan-action-bar');
+    const btnRunPlan = document.getElementById('btn-run-plan');
     const workingEl = document.getElementById('working-indicator');
     const workingTextEl = document.getElementById('working-text');
 
@@ -29,10 +39,39 @@ window.onerror = function(msg, src, line, col, err) {
     let currentAssistantEl = null;
     let currentContentEl = null;
     let agentRunning = false;
+    let currentProvider = 'local';
+    let currentPermissionLevel = 'default';
+    let currentMode = 'agent';
     const toolStateById = new Map();
     const workingBlocksById = new Map();
     const workingEntriesById = new Map();
     let activeWorkingBlockId = null;
+
+    const MODE_META = {
+        agent: {
+            label: 'Agent',
+            icon: '<svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M8 2v1.4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><path d="M5.1 3.9h5.8A2.3 2.3 0 0 1 13.2 6.2v3.2a2.3 2.3 0 0 1-2.3 2.3H5.1a2.3 2.3 0 0 1-2.3-2.3V6.2a2.3 2.3 0 0 1 2.3-2.3Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M2.8 7.1H1.9M14.1 7.1h-.9" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><circle cx="6.3" cy="7.2" r=".75" fill="currentColor"/><circle cx="9.7" cy="7.2" r=".75" fill="currentColor"/><path d="M6 9.4c.6.45 1.2.65 2 .65s1.4-.2 2-.65" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>'
+        },
+        ask: {
+            label: 'Ask',
+            icon: '<svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M3 4.75A2.25 2.25 0 0 1 5.25 2.5h5.5A2.25 2.25 0 0 1 13 4.75v3.5a2.25 2.25 0 0 1-2.25 2.25H7.1L4.4 12.8a.6.6 0 0 1-.99-.45v-1.87A2.25 2.25 0 0 1 3 8.25v-3.5Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M5.5 5.9h5M5.5 7.9h3.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>'
+        },
+        plan: {
+            label: 'Plan',
+            icon: '<svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M4 4h8M6.5 8H12M6.5 12H12" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><circle cx="4.25" cy="4" r=".85" fill="currentColor"/><circle cx="4.25" cy="8" r=".85" fill="currentColor"/><circle cx="4.25" cy="12" r=".85" fill="currentColor"/></svg>'
+        }
+    };
+
+    const PERMISSION_META = {
+        default: {
+            label: 'Default Approvals',
+            description: 'Use your configured approval settings for this session.'
+        },
+        bypass: {
+            label: 'Bypass Approvals',
+            description: 'Auto-approve tool calls for this session.'
+        }
+    };
 
     // Tools that should never render as standalone tool-blocks (pure bookkeeping).
     const HIDDEN_TOOLS = new Set(['set_plan', 'update_plan_step']);
@@ -191,7 +230,8 @@ window.onerror = function(msg, src, line, col, err) {
     function sendCurrentMessage() {
         const text = inputEl.value.trim();
         if (!text && pendingImages.length === 0 && pendingFiles.length === 0) { return; }
-        const msg = { type: 'sendMessage', text: text || '(see attachments)' };
+        closeModeMenu();
+        const msg = { type: 'sendMessage', text: text || '(see attachments)', mode: currentMode };
         if (pendingImages.length > 0) { msg.images = pendingImages.slice(); }
         if (pendingFiles.length > 0) { msg.files = pendingFiles.slice(); }
         vscode.postMessage(msg);
@@ -199,6 +239,7 @@ window.onerror = function(msg, src, line, col, err) {
         inputEl.style.height = 'auto';
         clearAttachments();
         closeSlashAutocomplete();
+        setPlanReadyVisibility(false);
     }
 
 
@@ -224,7 +265,11 @@ window.onerror = function(msg, src, line, col, err) {
 
     function setAgentRunning(running) {
         agentRunning = running;
+        closeModeMenu();
         if (!btnSend) return;
+        if (modeTriggerEl) {
+            modeTriggerEl.disabled = running;
+        }
         if (running) {
             btnSend.classList.add('stop-mode');
             btnSend.innerHTML = AGENT_STOP_ICON;
@@ -234,6 +279,182 @@ window.onerror = function(msg, src, line, col, err) {
             btnSend.innerHTML = '<i class=\"codicon codicon-arrow-up\"></i>';
             btnSend.title = 'Send message (Enter)';
         }
+    }
+
+    function getWorkingIndicatorText(status) {
+        if (status && /^Thinking\b/i.test(status)) {
+            return currentProvider === 'copilot-cli' ? 'Copilot CLI thinking' : 'Thinking';
+        }
+        return status || 'Working';
+    }
+
+    function pinWorkingIndicatorToBottom() {
+        if (!workingEl || !workingEl.classList.contains('active')) { return; }
+        if (activeWorkingBlockId) { return; }
+        messagesEl.appendChild(workingEl);
+    }
+
+    function showGlobalWorkingIndicator(text) {
+        if (!workingEl) { return; }
+        workingTextEl.textContent = text || (currentProvider === 'copilot-cli' ? 'Copilot CLI thinking' : 'Thinking');
+        workingEl.classList.add('active');
+        pinWorkingIndicatorToBottom();
+    }
+
+    function hideGlobalWorkingIndicator() {
+        if (!workingEl) { return; }
+        workingEl.classList.remove('active');
+    }
+
+    function getModePlaceholder(mode) {
+        if (mode === 'ask') { return 'Ask Junior about the codebase...'; }
+        if (mode === 'plan') { return 'Plan the work before execution...'; }
+        return 'Ask Junior anything...';
+    }
+
+    function setChatMode(mode) {
+        currentMode = mode || 'agent';
+        var meta = MODE_META[currentMode] || MODE_META.agent;
+        if (modeTriggerLabelEl) {
+            modeTriggerLabelEl.textContent = meta.label;
+        }
+        if (modeTriggerIconEl) {
+            modeTriggerIconEl.innerHTML = meta.icon;
+        }
+        modeOptions.forEach(function(btn) {
+            var active = btn.dataset.mode === currentMode;
+            btn.classList.toggle('active', active);
+            btn.setAttribute('aria-checked', active ? 'true' : 'false');
+        });
+        if (!agentRunning && inputEl) {
+            inputEl.placeholder = getModePlaceholder(currentMode);
+        }
+    }
+
+    function closeModeMenu() {
+        if (!modeSwitchEl || !modeMenuEl || !modeTriggerEl) { return; }
+        modeSwitchEl.classList.remove('open');
+        modeMenuEl.classList.add('hidden');
+        modeTriggerEl.setAttribute('aria-expanded', 'false');
+    }
+
+    function toggleModeMenu() {
+        if (!modeSwitchEl || !modeMenuEl || !modeTriggerEl || modeTriggerEl.disabled) { return; }
+        var open = modeMenuEl.classList.contains('hidden');
+        modeSwitchEl.classList.toggle('open', open);
+        modeMenuEl.classList.toggle('hidden', !open);
+        modeTriggerEl.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+
+    function setPlanReadyVisibility(visible) {
+        if (!planActionBarEl) { return; }
+        planActionBarEl.classList.toggle('hidden', !visible);
+    }
+
+    function appendAssistantProviderBadge(container, provider) {
+        if ((provider || currentProvider) !== 'copilot-cli') { return; }
+        const badge = document.createElement('div');
+        badge.className = 'assistant-provider-badge';
+        badge.innerHTML = '<span class="assistant-provider-icon" aria-hidden="true"><svg viewBox="0 0 16 16" focusable="false"><path d="M6.25 2.5a.75.75 0 0 1 1.5 0v1.15h3A2.25 2.25 0 0 1 13 5.9v4.2a2.25 2.25 0 0 1-2.25 2.25h-3V13.5a.75.75 0 0 1-1.5 0v-1.15h-.8A2.45 2.45 0 0 1 3 9.9V9a.75.75 0 0 1 1.5 0v.9c0 .52.42.95.95.95h5.3a.75.75 0 0 0 .75-.75V5.9a.75.75 0 0 0-.75-.75h-5.3A.95.95 0 0 0 4.5 6.1V7a.75.75 0 0 1-1.5 0v-.9A2.45 2.45 0 0 1 5.45 3.65h.8V2.5Z" fill="currentColor"></path><path d="M1.53 7.47a.75.75 0 0 1 1.06 0L4 8.88l1.41-1.41a.75.75 0 1 1 1.06 1.06l-1.94 1.94a.75.75 0 0 1-1.06 0L1.53 8.53a.75.75 0 0 1 0-1.06Z" fill="currentColor"></path></svg></span><span>Copilot CLI</span>';
+        container.appendChild(badge);
+    }
+
+    function renderUserMessageItem(item) {
+        const el = document.createElement('div');
+        el.className = 'msg user';
+        let inner = '<div class="label">You</div>';
+        if (item.images && item.images.length > 0) {
+            inner += '<div class="user-attachments">';
+            for (const src of item.images) {
+                inner += '<img src="' + src + '" class="user-attach-img" />';
+            }
+            inner += '</div>';
+        }
+        if (item.fileNames && item.fileNames.length > 0) {
+            inner += '<div class="user-attachments">';
+            for (const name of item.fileNames) {
+                inner += '<span class="user-attach-file">&#128196; ' + escapeHtml(name) + '</span>';
+            }
+            inner += '</div>';
+        }
+        inner += '<div class="content">' + escapeHtml(item.text) + '</div>';
+        el.innerHTML = inner;
+        messagesEl.appendChild(el);
+    }
+
+    function renderAssistantMessageItem(item) {
+        if (!item.text) { return; }
+        const assistantEl = document.createElement('div');
+        assistantEl.className = 'msg assistant' + (item.provider === 'copilot-cli' ? ' cli-provider' : '');
+        appendAssistantProviderBadge(assistantEl, item.provider);
+        const contentEl = document.createElement('div');
+        contentEl.className = 'content';
+        contentEl.innerHTML = renderMarkdownLite(item.text);
+        assistantEl.appendChild(contentEl);
+        messagesEl.appendChild(assistantEl);
+    }
+
+    function renderNarrationItem(item) {
+        var narRow = document.createElement('div');
+        narRow.className = 'narration-row';
+        narRow.innerHTML = renderMarkdownLite(item.text);
+        messagesEl.appendChild(narRow);
+    }
+
+    function renderErrorItem(item) {
+        showLocalError(item.message);
+    }
+
+    function restoreWorkingBlockItem(block) {
+        createWorkingBlock({
+            id: block.id,
+            title: block.title,
+            status: block.status,
+            summary: block.summary,
+            entries: [],
+            startedAt: block.startedAt,
+            completedAt: block.completedAt,
+        });
+        for (const entry of block.entries || []) {
+            if (entry.kind === 'progress') {
+                appendWorkingTextEntry(block.id, entry);
+            } else if (entry.kind === 'action') {
+                appendWorkingActionEntry(block.id, entry);
+            } else if (entry.kind === 'terminal') {
+                appendWorkingTerminalEntry(block.id, entry);
+            }
+        }
+        if (block.status === 'completed') {
+            completeWorkingBlock(block.id, block.summary || block.title, block.completedAt || block.startedAt || Date.now());
+        }
+    }
+
+    function restoreTranscript(transcript) {
+        if (!transcript || !Array.isArray(transcript.items)) { return; }
+        for (const item of transcript.items) {
+            switch (item.kind) {
+                case 'user':
+                    renderUserMessageItem(item);
+                    break;
+                case 'assistant':
+                    renderAssistantMessageItem(item);
+                    break;
+                case 'narration':
+                    renderNarrationItem(item);
+                    break;
+                case 'working-block':
+                    restoreWorkingBlockItem(item.block);
+                    break;
+                case 'error':
+                    renderErrorItem(item);
+                    break;
+            }
+        }
+        currentAssistantEl = null;
+        currentContentEl = null;
+        activeWorkingBlockId = null;
+        pinWorkingIndicatorToBottom();
+        scrollToBottom();
     }
 
     var contextMeterEl = document.getElementById('context-meter');
@@ -248,6 +469,88 @@ window.onerror = function(msg, src, line, col, err) {
                 vscode.postMessage({ type: 'selectModelById', deploymentId });
             }
         });
+    }
+
+    if (providerSelectEl) {
+        providerSelectEl.addEventListener('change', () => {
+            const provider = providerSelectEl.value;
+            vscode.postMessage({ type: 'selectAgentProvider', provider });
+        });
+    }
+
+    if (permissionSelectEl) {
+        permissionSelectEl.addEventListener('change', () => {
+            const level = permissionSelectEl.value || 'default';
+            vscode.postMessage({ type: 'selectPermissionLevel', level });
+        });
+    }
+
+    if (modeTriggerEl) {
+        modeTriggerEl.addEventListener('click', function(e) {
+            e.stopPropagation();
+            toggleModeMenu();
+        });
+    }
+
+    modeOptions.forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            var mode = btn.dataset.mode || 'agent';
+            setChatMode(mode);
+            closeModeMenu();
+            setPlanReadyVisibility(false);
+            vscode.postMessage({ type: 'selectChatMode', mode });
+            inputEl.focus();
+        });
+    });
+
+    document.addEventListener('click', function(e) {
+        if (!modeSwitchEl || modeSwitchEl.contains(e.target)) { return; }
+        closeModeMenu();
+    });
+
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') {
+            closeModeMenu();
+        }
+    });
+
+    if (btnRunPlan) {
+        btnRunPlan.addEventListener('click', function() {
+            setPlanReadyVisibility(false);
+            vscode.postMessage({ type: 'runPlanInAgent' });
+        });
+    }
+
+    function setAgentProviders(providers, activeProvider) {
+        if (!providerSelectEl) { return; }
+
+        const current = activeProvider || providerSelectEl.value || 'local';
+        providerSelectEl.innerHTML = '';
+
+        for (const provider of providers || []) {
+            const opt = document.createElement('option');
+            opt.value = provider.value;
+            opt.textContent = provider.label;
+            providerSelectEl.appendChild(opt);
+        }
+
+        providerSelectEl.disabled = !providers || providers.length <= 1;
+        const nextValue = Array.from(providerSelectEl.options).some(opt => opt.value === current)
+            ? current
+            : (providerSelectEl.options[0] ? providerSelectEl.options[0].value : 'local');
+        providerSelectEl.value = nextValue;
+        currentProvider = nextValue || 'local';
+    }
+
+    function setPermissionLevel(level) {
+        currentPermissionLevel = level || 'default';
+        if (!permissionSelectEl) { return; }
+
+        const nextValue = Object.prototype.hasOwnProperty.call(PERMISSION_META, currentPermissionLevel)
+            ? currentPermissionLevel
+            : 'default';
+        permissionSelectEl.value = nextValue;
+        permissionSelectEl.title = PERMISSION_META[nextValue].description;
     }
 
     function setModels(models, activeDeployment) {
@@ -267,10 +570,9 @@ window.onerror = function(msg, src, line, col, err) {
             const opt = document.createElement('option');
             opt.value = m.deploymentId;
             const label = m.name || m.deploymentId;
-            opt.textContent = label !== m.deploymentId
-                ? label + '  (' + m.deploymentId + ')'
-                : label;
-            opt.title = label + (label !== m.deploymentId ? ' — ' + m.deploymentId : '');
+            opt.textContent = label;
+            opt.title = m.title || (label + (label !== m.deploymentId ? ' — ' + m.deploymentId : ''));
+            if (m.disabled) { opt.disabled = true; }
             modelSelectEl.appendChild(opt);
         }
         modelSelectEl.disabled = false;
@@ -494,6 +796,7 @@ window.onerror = function(msg, src, line, col, err) {
     function showLocalError(text) {
         const el = document.createElement('div');
         el.className = 'error-msg';
+        el.style.whiteSpace = 'pre-wrap';
         el.textContent = text;
         messagesEl.appendChild(el);
         scrollToBottom();
@@ -726,38 +1029,24 @@ window.onerror = function(msg, src, line, col, err) {
         const msg = event.data;
         switch (msg.type) {
             case 'addUserMessage': {
-                const el = document.createElement('div');
-                el.className = 'msg user';
-                let inner = '<div class="label">You</div>';
-                // Show attached images
-                if (msg.images && msg.images.length > 0) {
-                    inner += '<div class="user-attachments">';
-                    for (const src of msg.images) {
-                        inner += '<img src="' + src + '" class="user-attach-img" />';
-                    }
-                    inner += '</div>';
-                }
-                // Show attached file names
-                if (msg.fileNames && msg.fileNames.length > 0) {
-                    inner += '<div class="user-attachments">';
-                    for (const name of msg.fileNames) {
-                        inner += '<span class="user-attach-file">&#128196; ' + escapeHtml(name) + '</span>';
-                    }
-                    inner += '</div>';
-                }
-                inner += '<div class="content">' + escapeHtml(msg.text) + '</div>';
-                el.innerHTML = inner;
-                messagesEl.appendChild(el);
+                renderUserMessageItem(msg);
+                scrollToBottom();
+                break;
+            }
+            case 'restoreTranscript': {
+                restoreTranscript(msg.transcript);
                 scrollToBottom();
                 break;
             }
             case 'startAssistantMessage': {
                 currentAssistantEl = document.createElement('div');
-                currentAssistantEl.className = 'msg assistant';
+                currentAssistantEl.className = 'msg assistant' + (currentProvider === 'copilot-cli' ? ' cli-provider' : '');
+                appendAssistantProviderBadge(currentAssistantEl, currentProvider);
                 currentContentEl = document.createElement('div');
                 currentContentEl.className = 'content';
                 currentAssistantEl.appendChild(currentContentEl);
                 messagesEl.appendChild(currentAssistantEl);
+                pinWorkingIndicatorToBottom();
                 streamRawText = '';
                 streamBuffer = '';
                 scrollToBottom();
@@ -839,6 +1128,7 @@ window.onerror = function(msg, src, line, col, err) {
                     block.classList.toggle('expanded');
                 });
                 messagesEl.appendChild(block);
+                pinWorkingIndicatorToBottom();
                 scrollToBottom();
                 break;
             }
@@ -904,6 +1194,7 @@ window.onerror = function(msg, src, line, col, err) {
                     dialog.remove();
                 });
                 messagesEl.appendChild(dialog);
+                pinWorkingIndicatorToBottom();
                 scrollToBottom();
                 break;
             }
@@ -926,6 +1217,7 @@ window.onerror = function(msg, src, line, col, err) {
                     dialog.remove();
                 });
                 messagesEl.appendChild(dialog);
+                pinWorkingIndicatorToBottom();
                 scrollToBottom();
                 break;
             }
@@ -1127,6 +1419,36 @@ window.onerror = function(msg, src, line, col, err) {
                 setModels(msg.models, msg.activeDeployment);
                 break;
             }
+            case 'setAgentProviders': {
+                setAgentProviders(msg.providers, msg.activeProvider);
+                break;
+            }
+            case 'setAgentProvider': {
+                if (providerSelectEl && msg.provider) {
+                    providerSelectEl.value = msg.provider;
+                }
+                currentProvider = msg.provider || 'local';
+                break;
+            }
+            case 'setPermissionLevel': {
+                setPermissionLevel(msg.level || 'default');
+                break;
+            }
+            case 'setChatMode': {
+                setChatMode(msg.mode || 'agent');
+                break;
+            }
+            case 'planReady': {
+                setPlanReadyVisibility(!!msg.visible);
+                break;
+            }
+            case 'agentStarted': {
+                inputEl.disabled = true;
+                inputEl.placeholder = currentMode === 'plan' ? 'Planning...' : currentMode === 'ask' ? 'Answering...' : 'Agent is working...';
+                setAgentRunning(true);
+                showGlobalWorkingIndicator(currentProvider === 'copilot-cli' ? 'Copilot CLI thinking' : 'Thinking');
+                break;
+            }
             case 'agentPlan': {
                 renderPlan(msg.steps);
                 break;
@@ -1147,10 +1469,12 @@ window.onerror = function(msg, src, line, col, err) {
                 }
                 currentAssistantEl = null;
                 currentContentEl = null;
+                toolStateById.clear();
                 workingBlocksById.clear();
                 workingEntriesById.clear();
                 activeWorkingBlockId = null;
                 clearAttachments();
+                setPlanReadyVisibility(false);
                 renderPlan([]);
                 // Reset file-change dock
                 const dockReset = document.getElementById('file-change-dock');
@@ -1174,33 +1498,37 @@ window.onerror = function(msg, src, line, col, err) {
             }
             case 'setStatus': {
                 if (msg.status) {
-                    statusEl.textContent = msg.status;
-                    statusEl.classList.add('active');
+                    var liveBlock = getActiveWorkingBlock();
+                    // Only show status bar for important/unusual messages
+                    // Routine statuses (Thinking, Reading, etc.) are handled by working blocks
+                    var isRoutine = /^(Thinking|Reading|Searching|Editing|Running command|Running tool|Checking|Continuing|Working)\b/i.test(msg.status);
+                    if (!liveBlock && !isRoutine) {
+                        statusEl.textContent = msg.status;
+                        statusEl.classList.add('active');
+                    } else {
+                        statusEl.textContent = '';
+                        statusEl.classList.remove('active');
+                    }
                     inputEl.disabled = true;
                     inputEl.placeholder = 'Agent is working...';
                     setAgentRunning(true);
-                    var liveBlock = getActiveWorkingBlock();
                     if (liveBlock) {
                         setWorkingBlockStatusText(liveBlock, msg.status);
                     }
                     if (liveBlock) {
-                        if (workingEl) { workingEl.classList.remove('active'); }
+                        hideGlobalWorkingIndicator();
                     } else {
-                        if (workingEl) {
-                            workingTextEl.textContent = 'Thinking';
-                            workingEl.classList.add('active');
-                            messagesEl.appendChild(workingEl);
-                        }
+                        showGlobalWorkingIndicator(getWorkingIndicatorText(msg.status));
                     }
                     scrollToBottom();
                 } else {
                     statusEl.textContent = '';
                     statusEl.classList.remove('active');
                     inputEl.disabled = false;
-                    inputEl.placeholder = 'Ask Junior anything...';
+                    inputEl.placeholder = getModePlaceholder(currentMode);
                     inputEl.focus();
                     setAgentRunning(false);
-                    if (workingEl) { workingEl.classList.remove('active'); }
+                    hideGlobalWorkingIndicator();
                     var activeBlock = getActiveWorkingBlock();
                     if (activeBlock) {
                         setWorkingBlockStatusText(activeBlock, '');
@@ -1210,10 +1538,10 @@ window.onerror = function(msg, src, line, col, err) {
             }
             case 'agentDone': {
                 inputEl.disabled = false;
-                inputEl.placeholder = 'Ask Junior anything...';
+                inputEl.placeholder = getModePlaceholder(currentMode);
                 inputEl.focus();
                 setAgentRunning(false);
-                if (workingEl) { workingEl.classList.remove('active'); }
+                hideGlobalWorkingIndicator();
                 // Remove any lingering continue-iteration dialog
                 const continueDialog = messagesEl.querySelector('.continue-iteration-dialog');
                 if (continueDialog) { continueDialog.remove(); }
@@ -1252,6 +1580,7 @@ window.onerror = function(msg, src, line, col, err) {
                         previousBlock.el.classList.remove('live');
                     }
                 }
+                hideGlobalWorkingIndicator();
                 createWorkingBlock(msg.block);
                 activeWorkingBlockId = msg.block.id;
                 scrollToBottom();
@@ -1282,10 +1611,8 @@ window.onerror = function(msg, src, line, col, err) {
                 break;
             }
             case 'narrationText': {
-                var narRow = document.createElement('div');
-                narRow.className = 'narration-row';
-                narRow.innerHTML = renderMarkdownLite(msg.text);
-                messagesEl.appendChild(narRow);
+                renderNarrationItem(msg);
+                pinWorkingIndicatorToBottom();
                 scrollToBottom();
                 break;
             }
@@ -1450,6 +1777,7 @@ window.onerror = function(msg, src, line, col, err) {
     }
 
     function createWorkingBlock(block) {
+        var titleText = block.title && block.title !== 'Working' ? block.title : '';
         var wrapper = document.createElement('div');
         wrapper.className = 'working-block-wrapper live';
         wrapper.dataset.blockId = block.id;
@@ -1460,7 +1788,7 @@ window.onerror = function(msg, src, line, col, err) {
             '<div class="working-block-header">' +
                 '<div class="wb-header-copy">' +
                     '<span class="wb-leading">Working</span>' +
-                    '<span class="wb-title">' + escapeHtml(block.title || 'Working') + '</span>' +
+                    '<span class="wb-title"' + (titleText ? '' : ' style="display:none"') + '>' + escapeHtml(titleText) + '</span>' +
                     '<span class="wb-summary"></span>' +
                 '</div>' +
                 '<span class="wb-chevron">\u25B6</span>' +
@@ -1519,6 +1847,14 @@ window.onerror = function(msg, src, line, col, err) {
             return row;
         }
 
+        if (entry.kind === 'terminal') {
+            row = document.createElement('pre');
+            row.className = 'wb-terminal-output';
+            row.dataset.entryId = entry.id;
+            row.textContent = entry.text;
+            return row;
+        }
+
         row.innerHTML =
             '<span class="wb-action-icon">' + (PC_ICONS[entry.icon || 'loading'] || PC_ICONS.loading) + '</span>' +
             '<div class="wb-action-copy">' +
@@ -1539,6 +1875,7 @@ window.onerror = function(msg, src, line, col, err) {
         var textEl = row.querySelector('.wb-action-text');
         if (textEl) {
             textEl.innerHTML = entry.filePath ? labelWithFileLink(entry.text, entry.filePath) : escapeHtml(entry.text) + fileBadgeHtml(entry.text);
+            textEl.title = entry.text || '';
             var fileLink = textEl.querySelector('.pc-file-link');
             if (fileLink && entry.filePath) {
                 fileLink.addEventListener('click', function(e) {
@@ -1550,6 +1887,7 @@ window.onerror = function(msg, src, line, col, err) {
         var detailEl = row.querySelector('.wb-action-detail');
         if (detailEl) {
             detailEl.textContent = entry.detail || '';
+            detailEl.title = entry.detail || '';
             detailEl.style.display = entry.detail ? 'block' : 'none';
         }
         var diffEl = row.querySelector('.wb-action-diff');
@@ -1588,6 +1926,16 @@ window.onerror = function(msg, src, line, col, err) {
         scrollWorkingBodyToBottom(record);
     }
 
+    function appendWorkingTerminalEntry(blockId, entry) {
+        var record = workingBlocksById.get(blockId);
+        if (!record) { return; }
+        record.data.entries.push(entry);
+        var row = createWorkingEntryElement(entry);
+        record.entriesEl.appendChild(row);
+        workingEntriesById.set(entry.id, { blockId: blockId, entry: entry, el: row });
+        scrollWorkingBodyToBottom(record);
+    }
+
     function updateWorkingActionEntry(blockId, entryId, patch) {
         var record = workingBlocksById.get(blockId);
         var entryRecord = workingEntriesById.get(entryId);
@@ -1597,6 +1945,7 @@ window.onerror = function(msg, src, line, col, err) {
         if (typeof patch.detail === 'string') { entryRecord.entry.detail = patch.detail; }
         if (typeof patch.filePath === 'string') { entryRecord.entry.filePath = patch.filePath; }
         if (typeof patch.icon === 'string') { entryRecord.entry.icon = patch.icon; }
+        if (typeof patch.repeatCount === 'number') { entryRecord.entry.repeatCount = patch.repeatCount; }
         renderWorkingActionRow(entryRecord.el, entryRecord.entry);
         scrollWorkingBodyToBottom(record);
     }
@@ -1657,6 +2006,9 @@ window.onerror = function(msg, src, line, col, err) {
         }
         if (activeWorkingBlockId === blockId) {
             activeWorkingBlockId = null;
+        }
+        if (agentRunning && !activeWorkingBlockId) {
+            showGlobalWorkingIndicator(currentProvider === 'copilot-cli' ? 'Copilot CLI thinking' : 'Thinking');
         }
     }
 

@@ -17,7 +17,9 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { ChatSession, ChatMessage } from './types';
+import { AgentPermissionLevel, AgentProvider, ChatSession, ChatMessage, ChatMode, ExtensionMessage, RuntimeSessionState } from './types';
+import { DEFAULT_PERMISSION_LEVEL } from './permissions';
+import { applyTranscriptMessage, createEmptyTranscript } from './chatTranscript';
 
 const MAX_SESSIONS = 20;
 const MAX_MESSAGE_LENGTH = 8000;
@@ -32,6 +34,7 @@ export class SessionManager {
     private currentSession: ChatSession;
     private sessions: Map<string, ChatSession> = new Map();
     private filePath: string;
+    private pendingSaveTimer?: NodeJS.Timeout;
 
     constructor(private storageDir: string, legacyState?: vscode.Memento) {
         // Ensure the storage directory exists
@@ -59,8 +62,11 @@ export class SessionManager {
             id: `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
             title: 'New Chat',
             messages: [],
+            transcript: createEmptyTranscript(),
             createdAt: Date.now(),
-            updatedAt: Date.now()
+            updatedAt: Date.now(),
+            activeMode: 'agent',
+            activePermissionLevel: DEFAULT_PERMISSION_LEVEL,
         };
         this.sessions.set(session.id, session);
         return session;
@@ -90,14 +96,31 @@ export class SessionManager {
             const raw = fs.readFileSync(this.filePath, 'utf-8');
             const data: SessionsOnDisk = JSON.parse(raw);
             for (const [id, session] of Object.entries(data.sessions || {})) {
-                this.sessions.set(id, session);
+                this.sessions.set(id, this.hydrateSession(session));
             }
         } catch {
             // File doesn't exist yet or is corrupt — start fresh
         }
     }
 
+    private hydrateSession(session: ChatSession): ChatSession {
+        const rawPermissionLevel = session.activePermissionLevel as string | undefined;
+        const permissionLevel = rawPermissionLevel === 'yolo'
+            ? 'bypass'
+            : (session.activePermissionLevel ?? DEFAULT_PERMISSION_LEVEL);
+
+        return {
+            ...session,
+            transcript: session.transcript ?? createEmptyTranscript(),
+            activePermissionLevel: permissionLevel,
+        };
+    }
+
     private saveSessions() {
+        if (this.pendingSaveTimer) {
+            clearTimeout(this.pendingSaveTimer);
+            this.pendingSaveTimer = undefined;
+        }
         this.pruneOldSessions();
         const data: SessionsOnDisk = {
             activeId: this.currentSession.id,
@@ -139,13 +162,20 @@ export class SessionManager {
         });
     }
 
-    createNewSession(): ChatSession {
+    createNewSession(
+        activeMode: ChatMode = this.currentSession?.activeMode || 'agent',
+        activePermissionLevel: AgentPermissionLevel = DEFAULT_PERMISSION_LEVEL
+    ): ChatSession {
         const session: ChatSession = {
             id: `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
             title: 'New Chat',
             messages: [],
+            transcript: createEmptyTranscript(),
             createdAt: Date.now(),
-            updatedAt: Date.now()
+            updatedAt: Date.now(),
+            activeMode,
+            activePermissionLevel,
+            runtimeState: undefined
         };
         this.sessions.set(session.id, session);
         this.currentSession = session;
@@ -157,9 +187,17 @@ export class SessionManager {
         return this.currentSession;
     }
 
-    updateMessages(messages: ChatMessage[]) {
+    updateMessages(
+        messages: ChatMessage[],
+        runtimeState?: RuntimeSessionState,
+        activeMode?: ChatMode,
+        activePermissionLevel?: AgentPermissionLevel
+    ) {
         this.currentSession.messages = this.trimForStorage(messages);
         this.currentSession.updatedAt = Date.now();
+        this.currentSession.runtimeState = runtimeState;
+        this.currentSession.activeMode = activeMode ?? this.currentSession.activeMode ?? 'agent';
+        this.currentSession.activePermissionLevel = activePermissionLevel ?? this.currentSession.activePermissionLevel ?? DEFAULT_PERMISSION_LEVEL;
 
         // Auto-title from first user message
         if (this.currentSession.title === 'New Chat') {
@@ -172,6 +210,52 @@ export class SessionManager {
             }
         }
 
+        this.sessions.set(this.currentSession.id, this.currentSession);
+        this.saveSessions();
+    }
+
+    recordTranscriptMessage(
+        message: ExtensionMessage,
+        options?: { provider?: AgentProvider; immediate?: boolean }
+    ) {
+        this.currentSession.transcript = applyTranscriptMessage(this.currentSession.transcript, message, {
+            provider: options?.provider,
+        });
+        this.currentSession.updatedAt = Date.now();
+        this.sessions.set(this.currentSession.id, this.currentSession);
+
+        if (options?.immediate === false) {
+            this.scheduleSave();
+            return;
+        }
+
+        this.saveSessions();
+    }
+
+    flushPendingSave() {
+        this.saveSessions();
+    }
+
+    private scheduleSave(delayMs: number = 200) {
+        if (this.pendingSaveTimer) {
+            clearTimeout(this.pendingSaveTimer);
+        }
+        this.pendingSaveTimer = setTimeout(() => {
+            this.pendingSaveTimer = undefined;
+            this.saveSessions();
+        }, delayMs);
+    }
+
+    setActiveMode(mode: ChatMode) {
+        this.currentSession.activeMode = mode;
+        this.currentSession.updatedAt = Date.now();
+        this.sessions.set(this.currentSession.id, this.currentSession);
+        this.saveSessions();
+    }
+
+    setActivePermissionLevel(level: AgentPermissionLevel) {
+        this.currentSession.activePermissionLevel = level;
+        this.currentSession.updatedAt = Date.now();
         this.sessions.set(this.currentSession.id, this.currentSession);
         this.saveSessions();
     }
@@ -191,7 +275,7 @@ export class SessionManager {
     deleteSession(id: string) {
         this.sessions.delete(id);
         if (this.currentSession.id === id) {
-            this.currentSession = this.createNewSession();
+            this.currentSession = this.createNewSession(this.currentSession.activeMode || 'agent');
         }
         this.saveSessions();
     }

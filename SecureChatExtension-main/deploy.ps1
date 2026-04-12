@@ -29,7 +29,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$ExtensionId = "ms-csu-ett.junior"
+$ExtensionId = "microsoft.junior"
 $VsixPattern = "junior-*.vsix"
 
 function Write-Step($msg) { Write-Host "`n>> $msg" -ForegroundColor Cyan }
@@ -121,9 +121,15 @@ function Invoke-Build {
         npm install | Write-Host
         if ($LASTEXITCODE -ne 0) { throw "npm install failed" }
 
-        Write-Step "Compiling TypeScript"
-        npm run compile | Write-Host
-        if ($LASTEXITCODE -ne 0) { throw "Compilation failed" }
+        Write-Step "Type-checking TypeScript"
+        npx tsc --noEmit | Write-Host
+        if ($LASTEXITCODE -ne 0) { throw "Type-check failed" }
+
+        Write-Step "Bundling with esbuild (production)"
+        # Clean out/ so the VSIX only contains the single bundle
+        if (Test-Path out) { Remove-Item out -Recurse -Force }
+        node esbuild.mjs --production | Write-Host
+        if ($LASTEXITCODE -ne 0) { throw "esbuild bundle failed" }
 
         # Remove old .vsix files
         Get-ChildItem -Path . -Filter $VsixPattern -ErrorAction SilentlyContinue |
@@ -136,7 +142,8 @@ function Invoke-Build {
         $vsix = Get-ChildItem -Path . -Filter $VsixPattern | Select-Object -First 1
         if (-not $vsix) { throw "No .vsix file found after packaging" }
 
-        Write-Ok "Created: $($vsix.Name)"
+        $sizeKB = [math]::Round($vsix.Length / 1024, 1)
+        Write-Ok "Created: $($vsix.Name) ($sizeKB KB)"
         return $vsix.FullName
     } finally {
         if ($packageBackupPath -and (Test-Path $packageBackupPath)) {

@@ -9,10 +9,16 @@ import { AoaiConfig, ChatMessage, ToolDefinition, AoaiStreamChunk, ToolCall, Tok
 import { getSetting } from './config';
 
 export class AzureOpenAIClient {
+    private static readonly REQUEST_TIMEOUT_MS = 120_000;
+    private static readonly STREAM_STALL_TIMEOUT_MS = 90_000;
+    private static readonly MAX_RETRY_DELAY_SECONDS = 120;
+    private static readonly MAX_TOTAL_RETRY_WINDOW_MS = 180_000;
+
     private secrets?: vscode.SecretStorage;
     private cachedSecretKey?: string;
     /** Temporary deployment override — set by the agent loop for fallback recovery. */
     private deploymentOverride?: string;
+    private retryCallback?: (waitSec: number, attempt: number, maxRetries: number) => void;
 
     /** Temporarily override the active deployment (e.g. for model fallback). Pass undefined to clear. */
     setDeploymentOverride(deploymentId: string | undefined) {
@@ -22,6 +28,13 @@ export class AzureOpenAIClient {
     /** Returns the current effective deployment ID (override or configured). */
     getEffectiveDeployment(): string {
         return this.deploymentOverride || getSetting<string>('azureOpenAI.activeDeployment') || '';
+    }
+
+    /** Look up the deployment entry from the deployments array for the active deployment. */
+    private getDeploymentEntry(): { name: string; deploymentId: string; apiVersion?: string } | undefined {
+        const deployments = getSetting<Array<{ name: string; deploymentId: string; apiVersion?: string }>>('azureOpenAI.deployments') || [];
+        const active = this.getEffectiveDeployment();
+        return deployments.find(d => d.deploymentId === active);
     }
 
     setSecretStorage(secrets: vscode.SecretStorage) {
@@ -62,7 +75,8 @@ export class AzureOpenAIClient {
         // apiKey is resolved async via getApiKey() — callers that need it should call getConfigAsync()
         const apiKey = this.cachedSecretKey || getSetting<string>('azureOpenAI.apiKey') || '';
         const deploymentId = this.getEffectiveDeployment();
-        const apiVersion = getSetting<string>('azureOpenAI.apiVersion') || '2024-06-01';
+        const entry = this.getDeploymentEntry();
+        const apiVersion = entry?.apiVersion || getSetting<string>('azureOpenAI.apiVersion') || '2024-06-01';
         const maxTokens = getSetting<number>('maxTokens') || 16384;
         const temperature = getSetting<number>('temperature') || 0.3;
 
@@ -75,7 +89,8 @@ export class AzureOpenAIClient {
         const apimBaseUrl = getSetting<string>('azureOpenAI.apimBaseUrl') || '';
         const apiKey = await this.getApiKey();
         const deploymentId = this.getEffectiveDeployment();
-        const apiVersion = getSetting<string>('azureOpenAI.apiVersion') || '2024-06-01';
+        const entry = this.getDeploymentEntry();
+        const apiVersion = entry?.apiVersion || getSetting<string>('azureOpenAI.apiVersion') || '2024-06-01';
         const maxTokens = getSetting<number>('maxTokens') || 16384;
         const temperature = getSetting<number>('temperature') || 0.3;
 
@@ -134,12 +149,16 @@ export class AzureOpenAIClient {
         // stream_options requires API version >= 2024-08-01-preview
         const supportsStreamOptions = config.apiVersion >= '2024-08-01';
 
+        // stream_options is supported by OpenAI, Azure OpenAI, and APIM-proxied Azure OpenAI;
+        // many OAI-compatible endpoints (vLLM, LiteLLM, etc.) reject it with 400.
+        const isNativeProvider = config.provider === 'openai' || config.provider === 'direct' || config.provider === 'apim';
+
         const body = JSON.stringify({
             messages: effectiveMessages,
             max_completion_tokens: effectiveMaxTokens,
             ...(options?.reasoningMode ? {} : { temperature: effectiveTemperature }),
             stream: true,
-            ...(supportsStreamOptions ? { stream_options: { include_usage: true } } : {}),
+            ...(supportsStreamOptions && isNativeProvider ? { stream_options: { include_usage: true } } : {}),
             ...(options?.stop ? { stop: options.stop } : {}),
             ...(tools.length > 0 ? { tools, tool_choice: 'auto' } : {}),
             // OpenAI requires the model in the body; Azure OpenAI uses the deployment in the URL
@@ -242,29 +261,67 @@ export class AzureOpenAIClient {
         apiKey: string,
         abortSignal?: AbortSignal,
         maxRetries: number = 3,
-        provider: 'direct' | 'apim' | 'openai' = 'direct'
+        provider: 'direct' | 'apim' | 'openai' = 'direct',
+        retryBudgetMs: number = AzureOpenAIClient.MAX_TOTAL_RETRY_WINDOW_MS
     ): Promise<AsyncIterable<string>> {
+        let currentBody = body;
+        let paramStripped = false;
+        const startedAt = Date.now();
+        const retryDeadline = startedAt + retryBudgetMs;
+
         for (let attempt = 0; attempt <= maxRetries; attempt++) {
             try {
-                return await this.httpRequest(url, body, apiKey, abortSignal, provider);
-            } catch (err: any) {
-                const retryable = err.statusCode === 429 || err.statusCode === 503;
-                if (!retryable || attempt === maxRetries) { throw err; }
-                const waitSec = err.retryAfter && err.retryAfter > 0
-                    ? Math.min(err.retryAfter, 120)
-                    : Math.min(10 * Math.pow(2, attempt), 120);
-                // Notify via a custom event so the UI can show the wait
-                // Countdown: notify the UI every second so it can show a live timer
-                for (let remaining = waitSec; remaining > 0; remaining--) {
-                    if (abortSignal?.aborted) { throw new Error('Aborted'); }
-                    if ((this as any)._onRetry) { (this as any)._onRetry(remaining, attempt + 1, maxRetries); }
-                    await new Promise<void>((resolve) => {
-                        const timer = setTimeout(resolve, 1000);
-                        if (abortSignal) {
-                            abortSignal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
-                        }
-                    });
+                const remainingBudgetMs = retryDeadline - Date.now();
+                if (remainingBudgetMs <= 0) {
+                    throw this.buildRetryBudgetExceededError(attempt, maxRetries, startedAt);
                 }
+                return await this.httpRequest(url, currentBody, apiKey, abortSignal, provider, remainingBudgetMs);
+            } catch (err: any) {
+                const retryable = err.statusCode === 429 || err.statusCode === 500
+                    || err.statusCode === 502 || err.statusCode === 503;
+
+                // Strip unsupported parameters (stream_options, max_completion_tokens, tool_choice)
+                // and retry — needed for OAI-compatible endpoints that reject newer API params.
+                if (err.statusCode === 400 && !paramStripped) {
+                    const msg = String(err.message ?? '').toLowerCase();
+                    const isParamError = msg.includes('unknown parameter')
+                        || msg.includes('unsupported parameter')
+                        || msg.includes('unrecognized request argument')
+                        || msg.includes('stream_options')
+                        || msg.includes('max_completion_tokens')
+                        || msg.includes('tool_choice');
+                    if (isParamError) {
+                        paramStripped = true;
+                        try {
+                            const parsed = JSON.parse(currentBody);
+                            delete parsed.stream_options;
+                            delete parsed.tool_choice;
+                            if (parsed.max_completion_tokens !== undefined) {
+                                parsed.max_tokens = parsed.max_completion_tokens;
+                                delete parsed.max_completion_tokens;
+                            }
+                            currentBody = JSON.stringify(parsed);
+                        } catch { /* body wasn't parseable — skip stripping */ }
+                        continue; // retry immediately with stripped params
+                    }
+                }
+                if (!retryable || attempt === maxRetries) { throw err; }
+                const requestedWaitSec = err.retryAfter && err.retryAfter > 0
+                    ? Math.min(err.retryAfter, AzureOpenAIClient.MAX_RETRY_DELAY_SECONDS)
+                    : Math.min(10 * Math.pow(2, attempt), AzureOpenAIClient.MAX_RETRY_DELAY_SECONDS);
+                const requestedWaitMs = requestedWaitSec * 1000;
+                const remainingBudgetMs = retryDeadline - Date.now();
+                if (remainingBudgetMs <= 0 || requestedWaitMs > remainingBudgetMs) {
+                    throw this.buildRetryBudgetExceededError(attempt + 1, maxRetries, startedAt, err, requestedWaitMs, remainingBudgetMs);
+                }
+
+                // Countdown: notify the UI every second so it can show a live timer.
+                for (let remainingMs = requestedWaitMs; remainingMs > 0; remainingMs -= 1000) {
+                    if (abortSignal?.aborted) { throw new Error('Aborted'); }
+                    this.retryCallback?.(Math.ceil(remainingMs / 1000), attempt + 1, maxRetries);
+                    await this.delayWithAbort(Math.min(1000, remainingMs), abortSignal);
+                }
+                this.retryCallback?.(0, attempt + 1, maxRetries);
                 if (abortSignal?.aborted) { throw new Error('Aborted'); }
             }
         }
@@ -272,8 +329,8 @@ export class AzureOpenAIClient {
     }
 
     /** Set a callback to be notified when a rate-limit retry is happening */
-    setRetryCallback(cb: (waitSec: number, attempt: number, maxRetries: number) => void) {
-        (this as any)._onRetry = cb;
+    setRetryCallback(cb?: (waitSec: number, attempt: number, maxRetries: number) => void) {
+        this.retryCallback = cb;
     }
 
     private httpRequest(
@@ -281,13 +338,16 @@ export class AzureOpenAIClient {
         body: string,
         apiKey: string,
         abortSignal?: AbortSignal,
-        provider: 'direct' | 'apim' | 'openai' = 'direct'
+        provider: 'direct' | 'apim' | 'openai' = 'direct',
+        timeoutBudgetMs: number = AzureOpenAIClient.REQUEST_TIMEOUT_MS
     ): Promise<AsyncIterable<string>> {
         return new Promise((resolve, reject) => {
             if (abortSignal?.aborted) {
                 reject(new Error('Aborted'));
                 return;
             }
+
+            const requestTimeoutMs = Math.max(1_000, Math.min(AzureOpenAIClient.REQUEST_TIMEOUT_MS, timeoutBudgetMs));
 
             const isHttps = url.protocol === 'https:';
             const mod = isHttps ? https : http;
@@ -301,7 +361,7 @@ export class AzureOpenAIClient {
                 url,
                 {
                     method: 'POST',
-                    timeout: 120_000, // 2-minute socket timeout to prevent indefinite hangs
+                    timeout: requestTimeoutMs,
                     headers: {
                         'Content-Type': 'application/json',
                         ...authHeaders
@@ -329,7 +389,7 @@ export class AzureOpenAIClient {
                     }
 
                     res.setEncoding('utf8');
-                    const STREAM_STALL_TIMEOUT = 90_000; // 90s — if no SSE chunk arrives in this window, bail
+                    const streamStallTimeoutMs = Math.max(1_000, Math.min(AzureOpenAIClient.STREAM_STALL_TIMEOUT_MS, timeoutBudgetMs));
                     const iterable: AsyncIterable<string> = {
                         [Symbol.asyncIterator]() {
                             return {
@@ -340,8 +400,8 @@ export class AzureOpenAIClient {
                                             res.removeListener('end', onEnd);
                                             res.removeListener('error', onError);
                                             res.destroy();
-                                            innerReject(new Error('Stream stalled — no data received for 90s. The server may be overloaded.'));
-                                        }, STREAM_STALL_TIMEOUT);
+                                            innerReject(new Error(`Stream stalled — no data received for ${Math.ceil(streamStallTimeoutMs / 1000)}s. The server may be overloaded.`));
+                                        }, streamStallTimeoutMs);
                                         const onData = (chunk: string) => {
                                             clearTimeout(stallTimer);
                                             res.removeListener('data', onData);
@@ -382,12 +442,44 @@ export class AzureOpenAIClient {
 
             req.on('timeout', () => {
                 req.destroy();
-                reject(new Error('Request timed out after 120s — the server may be overloaded.'));
+                reject(new Error(`Request timed out after ${Math.ceil(requestTimeoutMs / 1000)}s — the server may be overloaded.`));
             });
             req.on('error', reject);
             req.write(body);
             req.end();
         });
+    }
+
+    private async delayWithAbort(delayMs: number, abortSignal?: AbortSignal): Promise<void> {
+        await new Promise<void>((resolve) => {
+            const timer = setTimeout(() => resolve(), delayMs);
+            if (abortSignal) {
+                abortSignal.addEventListener('abort', () => {
+                    clearTimeout(timer);
+                    resolve();
+                }, { once: true });
+            }
+        });
+    }
+
+    private buildRetryBudgetExceededError(
+        attemptsUsed: number,
+        maxRetries: number,
+        startedAt: number,
+        lastError?: Error,
+        requestedWaitMs?: number,
+        remainingBudgetMs?: number
+    ): Error {
+        const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+        const requestedWaitSeconds = requestedWaitMs !== undefined ? Math.ceil(requestedWaitMs / 1000) : undefined;
+        const remainingBudgetSeconds = remainingBudgetMs !== undefined ? Math.max(0, Math.ceil(remainingBudgetMs / 1000)) : undefined;
+        const detail = lastError?.message ? ` Last error: ${lastError.message}` : '';
+        const budgetDetail = requestedWaitSeconds !== undefined && remainingBudgetSeconds !== undefined
+            ? ` The next retry required waiting ${requestedWaitSeconds}s, but only ${remainingBudgetSeconds}s remained in the retry window.`
+            : '';
+        return new Error(
+            `Request exhausted its retry budget after ${attemptsUsed} of ${maxRetries} retries and ${elapsedSeconds}s without a successful response.${budgetDetail}${detail}`
+        );
     }
 }
 

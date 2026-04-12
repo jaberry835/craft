@@ -117,12 +117,8 @@ export class InlineCompletionProvider implements vscode.InlineCompletionItemProv
     ): vscode.ProviderResult<vscode.InlineCompletionList> {
         // Gate: feature toggle
         if (!getSetting<boolean>('inlineCompletions.enabled')) {
-            // TODO: uncomment for debugging
-            // this.log('Inline: disabled by setting');
             return;
         }
-        // TODO: uncomment for debugging
-        // this.log(`Inline: triggered at ${position.line}:${position.character} in ${document.languageId}`);
 
         const manualTrigger = context.triggerKind === vscode.InlineCompletionTriggerKind.Invoke;
 
@@ -133,23 +129,17 @@ export class InlineCompletionProvider implements vscode.InlineCompletionItemProv
 
         // Gate: skip when IntelliSense completion widget is active (unless manually triggered)
         if (context.selectedCompletionInfo && !manualTrigger) {
-            // TODO: uncomment for debugging
-            // this.log('Inline: skipped — IntelliSense active');
             return;
         }
 
         // Gate: smart suppression — skip when cursor is in a comment (unless manually triggered)
         if (this.isInComment(document, position) && !manualTrigger) {
-            // TODO: uncomment for debugging
-            // this.log('Inline: skipped — in comment');
             return;
         }
 
         // ── Type-ahead cache reuse ──
         const typeAhead = this.tryTypeAheadReuse(document, position);
         if (typeAhead) {
-            // TODO: uncomment for debugging
-            // this.log('Inline: serving type-ahead cache hit');
             return new vscode.InlineCompletionList(typeAhead);
         }
 
@@ -177,8 +167,6 @@ export class InlineCompletionProvider implements vscode.InlineCompletionItemProv
             effectiveDebounce = 0;
         }
 
-        // TODO: uncomment for debugging
-        // this.log(`Inline: debouncing ${effectiveDebounce}ms then fetching`);
         return this.debouncedFetch(document, position, token, requestKey, effectiveDebounce);
     }
 
@@ -207,12 +195,8 @@ export class InlineCompletionProvider implements vscode.InlineCompletionItemProv
                 this.setStatusFetching();
 
                 try {
-                    // TODO: uncomment for debugging
-                    // this.log('Inline: sending API request...');
                     const candidateCount = Math.min(getSetting<number>('inlineCompletions.candidates') || 1, 3);
                     const results = await this.fetchCandidates(document, position, abortController.signal, candidateCount);
-                    // TODO: uncomment for debugging
-                    // this.log(`Inline: API returned ${results.length} candidate(s)`);
 
                     if (results.length > 0 && !token.isCancellationRequested) {
                         const items = results.map(r =>

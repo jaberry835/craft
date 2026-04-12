@@ -1,66 +1,188 @@
-# Junior — AI Assistant for Offline Environments
+# Junior User Guide
 
-A VS Code extension that provides a **Copilot-like autonomous agent** powered by **Azure OpenAI** or **OpenAI**, designed for air-gapped / offline developer environments with no internet access and no GitHub Copilot availability.
+Junior is a VS Code extension that brings Agentic chat and coding assistance to air-gapped, offline, and otherwise restricted development environments using **Azure OpenAI**, **OpenAI**, or compatible endpoints.
 
-## Features
+## What Junior Does
 
-- **Agent Mode** — Autonomous tool-calling loop: the AI reads files, edits code, runs terminal commands, and searches your workspace without manual intervention.
-- **Built-in Tools** — 20 workspace tools: `read_file`, `write_file`, `edit_file`, `delete_file`, `list_directory`, `search_files`, `grep_search`, `semantic_search`, `get_file_tree`, `get_document_symbols`, `find_symbol`, `go_to_definition`, `find_references`, `rename_symbol`, `run_terminal_command`, `get_diagnostics`, `get_open_editors`, `apply_code_action`, `set_plan`, `update_plan_step`.
-- **MCP (Model Context Protocol)** — Connect external MCP tool servers over stdio for extensible tool capabilities.
-- **Azure OpenAI & OpenAI Streaming** — Direct HTTPS connection to Azure OpenAI, OpenAI, or any compatible endpoint with streaming responses (no SDK, zero external runtime dependencies). Supports direct AOAI, API Management (APIM) proxy, and OpenAI API connections.
-- **Multi-Model Selection** — Configure multiple deployments and switch between them from the chat panel.
-- **Inline Code Completions** — Ghost-text suggestions (like GitHub Copilot) powered by your Azure OpenAI or OpenAI model. Supports a separate fast model for completions, debounced triggering, and aggressive cancellation for responsive UX.
-- **Confirmation Dialogs** — Approve or deny file writes, deletions, and terminal commands before execution.
-- **Context Menu Actions** — Right-click selected code to Explain, Review, or Fix it.
-- **Session Persistence** — Chat history is persisted across VS Code restarts.
+Junior adds an AI chat panel and inline code completions to VS Code. It can connect to:
 
-## Requirements
+- **Azure OpenAI** directly
+- **Azure API Management (APIM)** in front of Azure OpenAI
+- **OpenAI-compatible APIs** such as OpenAI, GitHub Models, OpenRouter, Ollama, or LM Studio
+
+Typical user tasks are:
+
+- install the VSIX
+- configure a provider and model list
+- store an API key
+- optionally configure GitHub Copilot CLI
+- open the chat and start working
+
+## Before You Start
+
+You need:
 
 - VS Code 1.85.0 or later
-- Network access to your **Azure OpenAI** resource (internal network; no public internet required), **or** network access to the **OpenAI API** (api.openai.com)
-- A model that supports function/tool calling (e.g., `gpt-4o`, `gpt-4.1`, `gpt-4-turbo`, `o4-mini`, or newer)
+- a `junior-*.vsix` file from your team or administrator
+- network access to your configured AI endpoint
+- an API key or token for that endpoint
+- at least one model or deployment that supports chat and tool calling
 
-## Setup
+You do **not** need to build the extension from source.
 
-### 1. Install the Extension
+If you want to use the optional Copilot CLI provider in Junior, you also need GitHub Copilot CLI installed before you open VS Code. Junior hides the Copilot CLI option unless the CLI executable is present and either GitHub auth or BYOK provider configuration is already available.
 
-Use the helper script from the project root:
+## Install The VSIX
 
-```powershell
-# Build VSIX
-.\deploy.ps1 build
+1. In VS Code, open the Command Palette with `Ctrl+Shift+P`.
+2. Run **Extensions: Install from VSIX...**.
+3. Choose the `.vsix` file you were given.
+4. After install completes, run **Developer: Reload Window** if VS Code does not reload automatically.
+5. Open Junior from the Activity Bar, or run **Junior: Open Chat**.
 
-# Or build and print install path/instructions
-.\deploy.ps1 install
+On first open, Junior shows a splash screen with **Configure Settings** and **Set API Key** buttons. That is the fastest way to reach the two setup steps most users need.
 
-# Build VSIX with custom default junior.* settings baked in
-.\deploy.ps1 build -DefaultSettings .\settings.default.json
+## First-Time Setup
+
+Junior can be configured in the Settings UI by searching for `Junior`, or directly in your `settings.json`.
+
+Most teams should set these items before they start using the extension:
+
+1. Set `junior.azureOpenAI.provider`.
+2. Add one or more entries to `junior.azureOpenAI.deployments`.
+3. Set `junior.azureOpenAI.activeDeployment`.
+4. Set `junior.inlineCompletions.deployment` so inline suggestions use the intended model.
+5. Run **Junior: Set API Key** and store your key securely.
+
+For most teams, `junior.inlineCompletions.deployment` should be treated as part of initial setup, not an optional later tuning step. A common pattern is to keep chat on the main model and point inline completions at a faster model.
+
+If your team shipped the VSIX with preset defaults, some of these values may already be filled in. You can still override them in your own settings.
+
+### Complete Example: APIM Setup With Separate Chat And Inline Models
+
+If your environment uses APIM and you want a fuller starting point, this is a realistic example:
+
+```jsonc
+{
+  "junior.azureOpenAI.provider": "apim",
+  "junior.azureOpenAI.apimBaseUrl": "https://rudeaoaiapi.azure-api.net/foundryapi",
+  "junior.azureOpenAI.apiVersion": "2025-03-01-preview",
+  "junior.azureOpenAI.deployments": [
+    {
+      "name": "GPT-5.3 Chat",
+      "deploymentId": "gpt-5.3-chat",
+      "apiVersion": "2025-03-01-preview"
+    },
+    {
+      "name": "GPT-4o",
+      "deploymentId": "gpt-4o",
+      "apiVersion": "2025-03-01-preview"
+    },
+    {
+      "name": "gpt-5.4-mini",
+      "deploymentId": "gpt-5.4-mini",
+      "apiVersion": "2025-03-01-preview"
+    }
+  ],
+  "junior.azureOpenAI.activeDeployment": "gpt-5.4-mini",
+  "junior.inlineCompletions.deployment": "gpt-4o",
+  "junior.temperature": 1,
+  "junior.mcp.includeExternalServers": true,
+  "junior.mcp.externalServerSettings": [
+    "mcp.servers"
+  ],
+  "junior.mcp.servers": {}
+}
 ```
 
-`-DefaultSettings` accepts a JSON object of `junior.*` keys and values. During packaging, those values temporarily override `package.json` defaults so the generated `.vsix` ships with your preset defaults. The working tree `package.json` is restored after the build.
+The API key is intentionally not shown in this sample. Set it with **Junior: Set API Key** unless your environment requires `junior.azureOpenAI.apiKey` in settings.
 
-These are extension defaults, not direct edits to VS Code's `settings.json`. They apply only when the user has not already set a value for that `junior.*` setting, and they do not affect non-`junior.*` settings from other extensions or VS Code itself.
+What each setting is doing in this example:
 
-Then in VS Code:
-1. Open **Command Palette** (`Ctrl+Shift+P`)
-2. Run **Extensions: Install from VSIX...**
-3. Select the generated `junior-*.vsix`
-4. Run **Developer: Reload Window**
+- `junior.azureOpenAI.provider`: tells Junior to call Azure OpenAI through APIM instead of directly.
+- `junior.azureOpenAI.apimBaseUrl`: points to the APIM gateway base URL and path prefix.
+- `junior.azureOpenAI.apiVersion`: sets the Azure OpenAI API version used for requests.
+- `junior.azureOpenAI.deployments`: defines the models the extension can offer in its model picker.
+- `junior.azureOpenAI.activeDeployment`: selects the default chat model used when you open Junior.
+- `junior.inlineCompletions.deployment`: selects the separate model used for ghost-text inline completions.
+- `junior.temperature`: controls response creativity. `1` is noticeably looser than the default `0.3`.
+- `junior.mcp.includeExternalServers`: lets Junior also read MCP server definitions from other VS Code settings.
+- `junior.mcp.externalServerSettings`: tells Junior which settings path to read external MCP definitions from.
+- `junior.mcp.servers`: holds Junior-specific MCP server definitions. An empty object means none are defined here yet.
 
-For extension development/testing, you can still press **F5** to launch the Extension Development Host.
+This example is not the only valid arrangement. The key point is that you should decide three things explicitly:
 
-### 2. Configure Your AI Provider
+1. Which provider path you are using.
+2. Which deployment is your default chat model.
+3. Which deployment is your inline completions model.
 
-Junior supports three connection modes: **direct** to an Azure OpenAI resource, through an **API Management (APIM)** proxy, or to the **OpenAI API**.
+## Provider Options
 
-#### Option A — Direct Azure OpenAI
+| Provider value | Use this when | Required settings | Auth header |
+|---|---|---|---|
+| `direct` | You connect straight to an Azure OpenAI resource | `junior.azureOpenAI.endpoint`, `junior.azureOpenAI.deployments`, `junior.azureOpenAI.activeDeployment` | `api-key` |
+| `apim` | Your organization exposes Azure OpenAI through Azure API Management | `junior.azureOpenAI.apimBaseUrl`, `junior.azureOpenAI.deployments`, `junior.azureOpenAI.activeDeployment` | `api-key` |
+| `openai` | You use OpenAI or another OpenAI-compatible API | `junior.azureOpenAI.openaiBaseUrl`, `junior.azureOpenAI.deployments`, `junior.azureOpenAI.activeDeployment` | `Authorization: Bearer ...` |
 
-Open VS Code Settings (`Ctrl+,`) and search for `Junior`, or add to your `settings.json`:
+## Optional: Copilot CLI Provider
+
+Junior can also route agent turns through GitHub Copilot CLI via the Copilot SDK.
+
+Before you expect the Copilot CLI option to appear in the UI:
+
+1. Install GitHub CLI.
+2. Install GitHub Copilot CLI and make `copilot` available on `PATH`, or set `junior.copilotCli.path` to the executable.
+3. If you are using BYOK, follow GitHub Copilot CLI's official BYOK setup instructions for your provider first.
+4. Start VS Code from an environment where the Copilot CLI variables are already set.
+
+On Windows, `junior.copilotCli.path` can point to either `copilot.exe` or the `copilot.cmd` shim.
+
+BYOK/custom-provider auth:
+
+- Set `COPILOT_MODEL`. The Copilot SDK requires an explicit model when using a custom provider.
+- Set `COPILOT_PROVIDER_BASE_URL`.
+- Set `COPILOT_PROVIDER_TYPE` when needed. Valid values are `openai`, `azure`, and `anthropic`.
+- For secured providers, set `COPILOT_PROVIDER_API_KEY` or `COPILOT_PROVIDER_BEARER_TOKEN`.
+- For Azure BYOK, set `COPILOT_PROVIDER_AZURE_API_VERSION`.
+- If your provider requires the Responses API, set `COPILOT_PROVIDER_WIRE_API=responses`.
+
+Junior also exposes matching `junior.copilotCli.*` settings if you prefer to keep the values in VS Code settings. If you already set up the Copilot CLI environment variables before launching VS Code, Junior will use those inherited variables when it starts the CLI.
+
+For SDK-level troubleshooting, set `junior.copilotCli.logSdkEvents` to `true` and inspect the `Junior` output channel. Junior will log the raw Copilot SDK session events with compact summaries so you can see exactly which CLI events were emitted for a turn.
+
+Example Junior settings for the Copilot CLI selector itself:
+
+```jsonc
+{
+  "junior.agentProvider": "copilot-cli",
+  "junior.copilotCli.path": "C:\\Users\\SystemAdministrator\\AppData\\Local\\GitHubCopilotCLI\\copilot.cmd",
+  "junior.copilotCli.model": "gpt-4.1",
+  "junior.copilotCli.models": [
+    {
+      "name": "GPT-4.1",
+      "id": "gpt-4.1"
+    }
+  ]
+}
+```
+
+You do not need to keep `junior.copilotCli.home` in settings unless you are intentionally overriding `COPILOT_HOME`.
+
+Notes:
+
+- Restart VS Code after changing environment variables so the extension host inherits them.
+- On Windows, Junior now launches `copilot.cmd` and `copilot.bat` through `cmd.exe` automatically. Keep using `copilot.exe` if you have a native executable path and want direct spawn behavior.
+- If Copilot CLI is installed but none of the auth or BYOK prerequisites are present, Junior keeps the provider on `Local` and does not show the Copilot CLI option.
+
+### Option A: Direct Azure OpenAI
+
+Use this when you have the Azure OpenAI resource URL itself.
 
 ```jsonc
 {
   "junior.azureOpenAI.provider": "direct",
   "junior.azureOpenAI.endpoint": "https://your-resource.openai.azure.com",
+  "junior.azureOpenAI.apiVersion": "2025-03-01-preview",
   "junior.azureOpenAI.deployments": [
     {
       "name": "GPT-4o",
@@ -68,41 +190,57 @@ Open VS Code Settings (`Ctrl+,`) and search for `Junior`, or add to your `settin
       "apiVersion": "2025-03-01-preview"
     },
     {
-      "name": "GPT-4 Turbo",
-      "deploymentId": "gpt-4-turbo",
+      "name": "GPT-4o Mini",
+      "deploymentId": "gpt-4o-mini",
       "apiVersion": "2025-03-01-preview"
     }
   ],
-  "junior.azureOpenAI.activeDeployment": "gpt-4o"
+  "junior.azureOpenAI.activeDeployment": "gpt-4o",
+  "junior.inlineCompletions.deployment": "gpt-4o-mini"
 }
 ```
 
-#### Option B — Via API Management (APIM)
+Notes:
 
-If your Azure OpenAI is behind an APIM gateway, set the provider to `apim` and supply the APIM base URL (including any path prefix):
+- `deploymentId` must match the Azure deployment name exactly.
+- `apiVersion` can be set globally with `junior.azureOpenAI.apiVersion`, per deployment, or both.
+- The extension sends your key as an `api-key` header.
+
+### Option B: Azure OpenAI Through APIM
+
+Use this when your company requires calls to go through an Azure API Management gateway.
 
 ```jsonc
 {
   "junior.azureOpenAI.provider": "apim",
   "junior.azureOpenAI.apimBaseUrl": "https://my-apim.azure-api.net/foundryapi",
+  "junior.azureOpenAI.apiVersion": "2025-03-01-preview",
   "junior.azureOpenAI.deployments": [
     {
       "name": "GPT-5.3 Chat",
       "deploymentId": "gpt-5.3-chat",
       "apiVersion": "2025-03-01-preview"
+    },
+    {
+      "name": "GPT-4o",
+      "deploymentId": "gpt-4o",
+      "apiVersion": "2025-03-01-preview"
     }
   ],
-  "junior.azureOpenAI.activeDeployment": "gpt-5.3-chat"
+  "junior.azureOpenAI.activeDeployment": "gpt-5.3-chat",
+  "junior.inlineCompletions.deployment": "gpt-4o"
 }
 ```
 
-The APIM endpoint must expose the standard Azure OpenAI Chat Completions API path (`/openai/deployments/{deployment-id}/chat/completions`). The API key is sent in the `api-key` header, which works with both direct AOAI and most APIM configurations.
+Notes:
 
-> **Note:** Deployments must be configured manually in `junior.azureOpenAI.deployments` — they are not auto-discovered. The `deploymentId` values must match the deployment names in your Azure OpenAI resource exactly.
+- `junior.azureOpenAI.apimBaseUrl` should include any path prefix required by your APIM route.
+- The APIM route must expose the Azure OpenAI chat completions path format.
+- The extension still sends the key in the `api-key` header.
 
-#### Option C — OpenAI API
+### Option C: OpenAI Or Another Compatible API
 
-To connect directly to the OpenAI API (or any OpenAI-compatible endpoint such as OpenRouter or a local Ollama server):
+Use this for OpenAI and compatible services that follow the OpenAI-style REST API.
 
 ```jsonc
 {
@@ -113,178 +251,253 @@ To connect directly to the OpenAI API (or any OpenAI-compatible endpoint such as
     { "name": "GPT-4o Mini", "deploymentId": "gpt-4o-mini" },
     { "name": "o4-mini", "deploymentId": "o4-mini" }
   ],
-  "junior.azureOpenAI.activeDeployment": "gpt-4o"
+  "junior.azureOpenAI.activeDeployment": "gpt-4o",
+  "junior.inlineCompletions.deployment": "gpt-4o-mini"
 }
 ```
 
-The API key is sent as a `Bearer` token in the `Authorization` header. The `deployments` list and **Junior: Select Model** picker work the same way as with Azure — just use model names (e.g. `gpt-4o`) instead of deployment IDs. The `apiVersion` field is ignored for OpenAI.
+Notes:
 
-**Compatible endpoints:**
+- In `openai` mode, `deploymentId` is the model name.
+- `junior.azureOpenAI.apiVersion` is ignored in this mode.
+- The extension sends your key as a bearer token.
 
-| Service | `openaiBaseUrl` | Notes |
-|---------|-----------------|-------|
-| OpenAI | `https://api.openai.com/v1` (default) | Use your OpenAI API key |
-| GitHub Models | `https://models.inference.ai.azure.com` | Use a GitHub fine-grained PAT with Models read permission |
-| OpenRouter | `https://openrouter.ai/api/v1` | Use your OpenRouter key; some models are free |
-| Ollama (local) | `http://localhost:11434/v1` | Any non-empty string as API key |
-| LM Studio (local) | `http://localhost:1234/v1` | Any non-empty string as API key |
+Common compatible endpoints:
 
-#### Store your API key
+| Service | `junior.azureOpenAI.openaiBaseUrl` |
+|---|---|
+| OpenAI | `https://api.openai.com/v1` |
+| GitHub Models | `https://models.inference.ai.azure.com` |
+| OpenRouter | `https://openrouter.ai/api/v1` |
+| Ollama | `http://localhost:11434/v1` |
+| LM Studio | `http://localhost:1234/v1` |
 
-Then store your API key securely:
+## Store Your API Key
 
-1. Open **Command Palette** (`Ctrl+Shift+P`)
-2. Run **Junior: Set API Key**
-3. Paste your key into the password prompt
+Preferred method:
 
-The key is stored in VS Code's **SecretStorage**, which uses your OS credential manager (Windows Credential Manager, macOS Keychain, or Linux secret service). **No plaintext is written to disk** — not in settings.json, not in any config file.
+1. Open the Command Palette.
+2. Run **Junior: Set API Key**.
+3. Paste the key when prompted.
 
-> **Backward compatibility:** If you previously had `securechat.*` keys in your settings.json, Junior still reads them as a fallback. New settings should use `junior.*`.
+Junior stores the key in VS Code SecretStorage, which uses the operating system credential store.
 
-### 3. (Optional) Configure MCP Servers
+Fallback method:
 
-Add MCP tool servers to extend the agent's capabilities. Junior supports two transports and can also reuse MCP server definitions from other VS Code extensions (for example the official MCP extension via `mcp.servers`) by default.
+- You can set `junior.azureOpenAI.apiKey` in settings.
+- This works, but it is less secure than the command above.
 
-**stdio** — spawn a local process:
+## Settings Reference
+
+All extension settings use the `junior.*` namespace.
+
+### Connection And Models
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `junior.azureOpenAI.provider` | `"direct"` | Selects the connection mode: direct Azure OpenAI, APIM, or OpenAI-compatible API. |
+| `junior.azureOpenAI.endpoint` | `""` | Azure OpenAI resource URL. Used only when provider is `direct`. |
+| `junior.azureOpenAI.apimBaseUrl` | `""` | APIM base URL, including any required path prefix. Used only when provider is `apim`. |
+| `junior.azureOpenAI.openaiBaseUrl` | `"https://api.openai.com/v1"` | Base URL for OpenAI-compatible APIs. Used only when provider is `openai`. |
+| `junior.azureOpenAI.apiVersion` | `"2025-03-01-preview"` | Azure OpenAI API version for `direct` and `apim`. |
+| `junior.azureOpenAI.deployments` | `[]` | List of selectable models. Each entry is an object with `name`, `deploymentId`, and optional `apiVersion`. |
+| `junior.azureOpenAI.activeDeployment` | `""` | The model Junior uses by default for chat. |
+| `junior.azureOpenAI.apiKey` | `""` | API key fallback stored in settings. Prefer **Junior: Set API Key** instead. |
+
+### Model Behavior
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `junior.maxTokens` | `16384` | Maximum output tokens per response. Increase only if your model and endpoint support it. |
+| `junior.temperature` | `0.3` | Response randomness. Lower values are more deterministic; higher values are more creative. |
+
+### Agent Behavior
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `junior.agent.maxIterations` | `25` | Maximum number of tool-call loops Junior can take in one turn. |
+| `junior.agent.contextWindow` | `128000` | The model context size Junior plans around when trimming and summarizing old messages. |
+| `junior.agent.contextThreshold` | `0.7` | Fraction of the context window at which Junior starts summarizing older conversation content. |
+| `junior.agent.confirmWrites` | `true` | Ask before writing or deleting files. |
+| `junior.agent.confirmTerminal` | `true` | Ask before running terminal commands. |
+| `junior.agent.autoInvestigate` | `true` | Before the first model call, gather likely context such as diagnostics and relevant files automatically. |
+| `junior.agent.autoInvestigateMaxFiles` | `4` | Maximum number of likely files included in that automatic preflight investigation. |
+
+### Workspace Indexing
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `junior.workspace.maxFileSize` | `100000` | Largest file size, in bytes, that Junior will index for search. |
+| `junior.workspace.excludePatterns` | built-in list | Glob patterns excluded from indexing. Useful for large generated folders. |
+
+Default exclude patterns:
+
+```json
+[
+  "**/node_modules/**",
+  "**/.git/**",
+  "**/bin/**",
+  "**/obj/**",
+  "**/out/**",
+  "**/dist/**",
+  "**/*.min.js",
+  "**/*.map"
+]
+```
+
+### MCP Servers
+
+These are optional. You only need them if your team uses external MCP tools.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `junior.mcp.servers` | `{}` | Defines MCP servers. Use `{ command, args?, env?, cwd? }` for stdio or `{ url, headers?, authSession? }` for HTTP. |
+| `junior.mcp.includeExternalServers` | `true` | Also load MCP server definitions from other VS Code settings. |
+| `junior.mcp.externalServerSettings` | `["mcp.servers"]` | Settings paths that Junior also checks for MCP definitions. |
+
+Minimal stdio example:
 
 ```jsonc
 {
   "junior.mcp.servers": {
     "filesystem": {
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/dir"]
-    },
-    "database": {
-      "command": "python",
-      "args": ["my_db_mcp_server.py"],
-      "env": { "DB_CONNECTION": "..." },
-      "cwd": "/path/to/server"
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:/work"]
     }
   }
 }
 ```
 
-Quick test example using the reference MCP server:
-
-```jsonc
-{
-  "junior.mcp.servers": {
-    "everything": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-everything"]
-    }
-  }
-}
-```
-
-After saving settings, run **Junior: Manage MCP Servers** and choose **Connect All Configured Servers** to reload MCP connections without restarting VS Code.
-
-**HTTP** — connect to a remote MCP server endpoint:
+Minimal HTTP example:
 
 ```jsonc
 {
   "junior.mcp.servers": {
     "remote-tools": {
-      "url": "https://my-mcp-server.internal:8080/mcp",
+      "url": "https://my-server.example/mcp",
       "headers": {
-        "Authorization": "Bearer my-token"
+        "Authorization": "Bearer token"
       }
     }
   }
 }
 ```
 
-If the MCP server supports bearer tokens and you want Junior to reuse an existing VS Code authentication session, add `authSession`:
+#### MCP Authentication
+
+Junior supports three ways to authenticate with HTTP MCP servers, evaluated in this order:
+
+1. **Explicit headers** — set `Authorization` (or any header) directly in the server config. Junior uses it as-is.
+2. **`authSession` config** — tell Junior to fetch a token from a VS Code authentication provider and inject it into the request.
+3. **Automatic detection** — if no auth is configured, Junior inspects the server URL and auto-authenticates for known providers.
+
+**Automatic authentication (no config required):**
+
+| Server URL | Auth provider | Scopes |
+|---|---|---|
+| `https://api.githubcopilot.com/mcp/*` | `github` | `repo`, `workflow`, `user:email`, `read:user` |
+| `https://login.microsoftonline.com/*` (and `login.microsoft.com`, `login.windows.net`) | `microsoft` | (default) |
+
+For the GitHub MCP server, this means you just need:
 
 ```jsonc
 {
   "junior.mcp.servers": {
     "github": {
-      "url": "https://api.githubcopilot.com/mcp/",
+      "url": "https://api.githubcopilot.com/mcp/"
+    }
+  }
+}
+```
+
+Junior will prompt for GitHub sign-in automatically and attach the token to every request.
+
+**Explicit `authSession` config** — for servers that use a VS Code auth provider other than GitHub or Microsoft, or when you need custom scopes:
+
+```jsonc
+{
+  "junior.mcp.servers": {
+    "my-corporate-tools": {
+      "url": "https://tools.corp.example/mcp",
       "authSession": {
-        "providerId": "github"
+        "providerId": "microsoft",
+        "scopes": ["api://my-app/.default"],
+        "tokenHeader": "Authorization",
+        "tokenScheme": "Bearer",
+        "createIfNone": true
       }
     }
   }
 }
 ```
 
-For GitHub's hosted MCP server at `https://api.githubcopilot.com/mcp/`, Junior will also try to reuse an existing VS Code GitHub login automatically when no `Authorization` header is configured. If no compatible session is available, configure `headers.Authorization` with a PAT instead.
+| `authSession` field | Default | Meaning |
+|---|---|---|
+| `providerId` | *(required)* | VS Code authentication provider ID (e.g. `github`, `microsoft`) |
+| `scopes` | `[]` | OAuth scopes to request |
+| `tokenHeader` | `"Authorization"` | HTTP header name for the token |
+| `tokenScheme` | `"Bearer"` | Prefix before the token value. Set to `""` for a raw token with no prefix. |
+| `createIfNone` | `false` | Prompt the user to sign in if no session exists. Set to `true` for interactive login. |
 
-For HTTP MCP servers that respond with `401 Unauthorized` and a `WWW-Authenticate` challenge, Junior will also retry once using the configured `authSession` provider. This helps with remote MCP servers that follow OAuth challenge flows but still rely on a known VS Code auth provider such as `github` or `microsoft`.
+**401 challenge handling** — if an MCP server returns `401` with a `WWW-Authenticate` header, Junior automatically retries the request after resolving the OAuth challenge through the configured auth provider. This supports servers that use dynamic authentication negotiation.
 
-You can mix both transports — servers with `command` use stdio, servers with `url` use HTTP.
+### Inline Completions
 
-By default, Junior merges `junior.mcp.servers` with external settings listed in `junior.mcp.externalServerSettings` (defaults to `["mcp.servers"]`). If two settings define the same server name, `junior.mcp.servers` wins. Set `junior.mcp.includeExternalServers` to `false` to only use Junior's own setting.
+| Setting | Default | Meaning |
+|---|---|---|
+| `junior.inlineCompletions.enabled` | `true` | Turns ghost-text suggestions on or off. |
+| `junior.inlineCompletions.deployment` | `""` | Model used for inline completions. Leave empty to reuse the active chat model. |
+| `junior.inlineCompletions.timeoutMs` | `5000` | Maximum wait time for a completion request before Junior cancels it. |
+| `junior.inlineCompletions.candidates` | `1` | Number of alternative inline suggestions to fetch, from 1 to 3. |
 
-**Complete example — OpenAI provider (all settings shown):**
+Recommendation:
 
-```jsonc
-{
-  // ── Provider & connection ──
-  "junior.azureOpenAI.provider": "openai",             // "direct" | "apim" | "openai"
-  "junior.azureOpenAI.openaiBaseUrl": "https://api.openai.com/v1", // base URL (include /v1 for OpenAI; omit for GitHub Models)
+- keep chat on your best model
+- set `junior.inlineCompletions.deployment` to a faster, cheaper model if you have one
 
-  // ── Models (shared across all providers) ──
-  "junior.azureOpenAI.deployments": [                  // list of models to pick from
-    { "name": "GPT-4o", "deploymentId": "gpt-4o" },
-    { "name": "GPT-4o Mini", "deploymentId": "gpt-4o-mini" },
-    { "name": "o4-mini", "deploymentId": "o4-mini" }
-  ],
-  "junior.azureOpenAI.activeDeployment": "gpt-4o",     // currently selected model
+### Slash Commands
 
-  // ── Azure OpenAI settings (used when provider is "direct" or "apim") ──
-  "junior.azureOpenAI.endpoint": "",                   // Azure OpenAI resource URL
-  "junior.azureOpenAI.apimBaseUrl": "",                // APIM gateway URL (when provider is "apim")
-  "junior.azureOpenAI.apiVersion": "2025-03-01-preview", // Azure API version
+| Setting | Default | Meaning |
+|---|---|---|
+| `junior.slashCommands.directories` | `[]` | Additional folders to scan for slash-command markdown files. Built-in command folders are always scanned. |
 
-  // ── Model behavior ──
-  "junior.maxTokens": 16384,                           // max completion tokens per response
-  "junior.temperature": 0.3,                           // response temperature (0.0–1.0)
+## Basic Use
 
-  // ── Agent settings ──
-  "junior.agent.maxIterations": 25,                    // max tool-call loops per turn
-  "junior.agent.contextWindow": 128000,                // model context window size (tokens)
-  "junior.agent.contextThreshold": 0.7,                // fraction of context window before summarizing (0.3–0.95)
-  "junior.agent.confirmWrites": true,                  // confirm before file write/delete
-  "junior.agent.confirmTerminal": true,                // confirm before terminal commands
+Once the provider and API key are set, most users only need a few commands.
 
-  // ── Workspace indexing ──
-  "junior.workspace.maxFileSize": 100000,              // max file size (bytes) to index
-  "junior.workspace.excludePatterns": [
-    "**/node_modules/**",
-    "**/.git/**",
-    "**/bin/**",
-    "**/obj/**",
-    "**/out/**",
-    "**/dist/**",
-    "**/*.min.js",
-    "**/*.map"
-  ],
+| Action | How to do it |
+|---|---|
+| Open the chat panel | Click the Junior activity icon or run **Junior: Open Chat** |
+| Open chat with keyboard | Press `Ctrl+Shift+I` |
+| Start a new conversation | Run **Junior: New Chat Session** |
+| Change models | Run **Junior: Select Model** |
+| Rebuild workspace index | Run **Junior: Index Workspace** |
+| Explain, review, or fix selected code | Select text in the editor, then right-click |
+| Trigger inline completion manually | Run **Junior: Trigger Inline Completion** or press `Alt+\` |
+| Connect configured MCP servers | Run **Junior: Manage MCP Servers** |
+| Inspect token usage | Run **Junior: Show Token Usage** |
 
-  // ── Inline completions (ghost text) ──
-  "junior.inlineCompletions.enabled": true,            // toggle inline suggestions on/off
-  "junior.inlineCompletions.deployment": "gpt-4o-mini",// model for completions (leave "" to use the chat model)
-  "junior.inlineCompletions.timeoutMs": 5000,          // abort if no response within this time (1000–30000)
-  "junior.inlineCompletions.candidates": 1,            // number of alternatives (1–3); cycle with Alt+] / Alt+[
+Normal workflow:
 
-  // ── Slash commands ──
-  "junior.slashCommands.directories": [],              // additional dirs to scan for .md slash commands
+1. Open the chat.
+2. Ask for a change, explanation, or review.
+3. Approve file writes or terminal commands if Junior asks.
+4. Switch models if you want a different balance of speed and quality.
 
-  // ── MCP servers ──
-  "junior.mcp.includeExternalServers": true,           // also load servers from mcp.servers
-  "junior.mcp.externalServerSettings": [
-    "mcp.servers"
-  ],
-  "junior.mcp.servers": {
-    // Add local MCP servers here; these override duplicates from external settings
-  }
-}
-```
+## Custom Project Instructions
 
-MCP tools appear alongside built-in tools with names prefixed by their server name (e.g., `mcp_filesystem_read_file`).
+You can add a `.junior/instructions.md` file (or `.github/copilot-instructions.md`) to any project repository to give Junior project-specific guidance. Junior reads this file from the workspace root at the start of every conversation and appends it to its system prompt.
 
-### 4. (Optional) Spec Kit Integration — Spec-Driven Development
+Use it to tell Junior about:
+
+- Build and test commands for your project
+- Naming conventions or coding standards
+- Architecture decisions or patterns to follow
+- Files or directories that need special handling
+- Frameworks, libraries, or APIs in use
+
+The file is plain Markdown, capped at 4,000 characters. If both paths exist, the first one found is used.
+### (Optional) Spec Kit Integration — Spec-Driven Development
 
 Junior supports **slash commands** that integrate with [GitHub Spec Kit](https://github.com/github/spec-kit), enabling structured spec-driven development workflows directly from the chat panel.
 
@@ -345,308 +558,39 @@ Slash commands aren't limited to Spec Kit. Any `.md` file placed in the command 
 3. `.github/copilot/commands/`
 4. `.github/commands/`
 
-To create a custom command, add a markdown file — e.g., `.junior/commands/review-security.md` — and type `/review-security` in the chat. The file's content is prepended to your message as context for the AI.
+## Troubleshooting
 
-#### How It Works
+### The chat opens but requests fail
 
-When you type `/commandName [optional text]` in the chat:
+Check:
 
-1. Junior looks up `commandName.md` in the command directories
-2. The template content is loaded and prepended to your message
-3. The combined prompt is sent to the AI model
-4. The AI follows the template's instructions with your additional context
+- the selected provider is correct
+- the endpoint or base URL is correct
+- the active deployment or model name exists
+- your API key has been set
 
-No runtime dependency on Spec Kit is needed — the prompt templates are plain markdown files.
+### The model picker is empty
 
-## Usage
+`junior.azureOpenAI.deployments` is empty or malformed. Add at least one valid entry.
 
-### Open the Chat Panel
+### Azure returns 404 or deployment errors
 
-- Click the **Junior** icon in the Activity Bar (left sidebar), or
-- Press `Ctrl+Shift+I`, or
-- Run **Junior: Open Chat** from the Command Palette
+The most common causes are:
 
-### Chat with the Agent
+- `deploymentId` does not match the real Azure deployment name
+- `junior.azureOpenAI.endpoint` or `junior.azureOpenAI.apimBaseUrl` is wrong
+- the APIM route does not expose the expected Azure OpenAI path
 
-Type a message and press **Enter**. The agent will:
-1. Analyze your request
-2. Autonomously call tools (read files, search code, edit files, etc.)
-3. Stream its response with tool call visualization
-4. Ask for confirmation before destructive actions (file writes, terminal commands)
+### Inline completions do not appear
 
-Press **Shift+Enter** for a newline without sending.
+Check:
 
-### Commands
+- `junior.inlineCompletions.enabled` is `true`
+- the configured inline model exists
+- the endpoint supports the selected model
+- the request is not timing out; if needed, raise `junior.inlineCompletions.timeoutMs`
 
-| Command | Description |
-|---------|-------------|
-| `Junior: Open Chat` | Focus the chat panel |
-| `Junior: Open Chat in Editor Tab` | Open chat as a top-level editor tab |
-| `Junior: New Chat Session` | Start a fresh conversation |
-| `Junior: Select Model` | Switch between configured deployments |
-| `Junior: Index Workspace` | Re-scan workspace files (manual refresh) |
-| `Junior: Explain Selected Code` | Explain highlighted code |
-| `Junior: Review Selected Code` | Code review of selection |
-| `Junior: Fix Selected Code` | Fix issues in selection |
-| `Junior: Manage MCP Servers` | Connect/disconnect MCP servers |
-| `Junior: Cancel Agent Run` | Stop the current agent loop |
-| `Junior: Toggle Chat History` | Show/hide the session history panel |
-| `Junior: Set API Key` | Store API key securely in OS credential manager |
-| `Junior: Trigger Inline Completion` | Manually trigger a ghost-text suggestion (`Alt+\`) |
-| `Junior: Show Token Usage` | Show detailed session token usage breakdown |
-| `Junior: Reset Token Usage` | Reset all session token counters to zero |
-
-`Index Workspace` also runs automatically on activation. Use it manually after major file/folder changes or when workspace settings (exclude patterns, max file size) change.
-
-> **Index Persistence:** The file index and semantic index are cached under VS Code's global storage directory. On subsequent activations, only files whose size or modification time changed are re-processed, which dramatically reduces startup time for large repositories.
-
-### Context Menu
-
-Select code in the editor, right-click, and choose:
-- **Junior: Explain Selected Code**
-- **Junior: Review Selected Code**
-- **Junior: Fix Selected Code**
-
-## Settings Reference
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `junior.azureOpenAI.provider` | `"direct"` | Connection mode: `Azure OpenAI`, `API Management (APIM)`, or `OpenAI / Compatible` |
-| `junior.azureOpenAI.openaiBaseUrl` | `"https://api.openai.com/v1"` | OpenAI-compatible API base URL. Include `/v1` for OpenAI; omit for GitHub Models (used when provider is `openai`) |
-| `junior.azureOpenAI.deployments` | `[]` | List of `{ name, deploymentId, apiVersion? }` — models available for selection. Works with all providers. |
-| `junior.azureOpenAI.activeDeployment` | `""` | Currently active model — Azure deployment ID or OpenAI model name |
-| `junior.azureOpenAI.endpoint` | `""` | Azure OpenAI endpoint URL (used when provider is `direct`) |
-| `junior.azureOpenAI.apimBaseUrl` | `""` | APIM gateway base URL with path prefix (used when provider is `apim`) |
-| `junior.azureOpenAI.apiKey` | `""` | API key (prefer using **Junior: Set API Key** for secure storage) |
-| `junior.azureOpenAI.apiVersion` | `"2025-03-01-preview"` | Azure API version (>= `2024-08-01` required for token usage tracking) |
-| `junior.maxTokens` | `16384` | Max completion tokens per response |
-| `junior.temperature` | `0.3` | Response temperature (0–1) |
-| `junior.workspace.maxFileSize` | `100000` | Max file size (bytes) to index |
-| `junior.workspace.excludePatterns` | `[...]` | Glob patterns excluded from indexing |
-| `junior.agent.maxIterations` | `25` | Max tool-call loops per turn |
-| `junior.agent.contextWindow` | `128000` | Model context window size (tokens). Older messages are summarized when approaching this limit. |
-| `junior.agent.contextThreshold` | `0.70` | Fraction of context window (0.3–0.95) at which older messages are summarized |
-| `junior.agent.confirmWrites` | `true` | Confirm before file write/delete |
-| `junior.agent.confirmTerminal` | `true` | Confirm before terminal commands |
-| `junior.mcp.servers` | `{}` | MCP server configurations (overrides duplicates from external settings) |
-| `junior.mcp.includeExternalServers` | `true` | Also load MCP servers from external settings keys |
-| `junior.mcp.externalServerSettings` | `["mcp.servers"]` | External settings paths to merge MCP servers from |
-| `junior.slashCommands.directories` | `[]` | Additional directories to scan for slash command `.md` files. Built-in dirs (`.junior/commands`, `.github/copilot/commands`, `.github/commands`) are always scanned |
-| `junior.inlineCompletions.enabled` | `true` | Enable/disable inline ghost-text code completions |
-| `junior.inlineCompletions.deployment` | `""` | Deployment ID or OpenAI model name for inline completions. Leave empty to use the active chat model. A fast model (e.g. `gpt-4o-mini`) is recommended. |
-| `junior.inlineCompletions.timeoutMs` | `5000` | Max time (ms) to wait for a completion response before aborting (1000–30000) |
-| `junior.inlineCompletions.candidates` | `1` | Number of alternative completions to fetch (1–3). Cycle with Alt+] / Alt+[ |
-
-## Architecture
-
-```
-src/
-├── extension.ts          — Activation entry point, command registration
-├── types.ts              — Shared TypeScript type definitions
-├── config.ts             — Settings helper with legacy namespace fallback
-├── aoaiClient.ts         — Azure OpenAI streaming client (raw HTTPS)
-├── agentLoop.ts          — Core agent orchestrator (tool-calling loop)
-├── contextManager.ts     — Context window management (token estimation, message trimming)
-├── toolValidator.ts      — Tool argument validation (schema checking before execution)
-├── builtinTools.ts       — 20 built-in workspace tools
-├── inlineCompletionProvider.ts — Inline ghost-text completions (InlineCompletionItemProvider)
-├── mcpClient.ts          — MCP stdio/HTTP client for external tool servers
-├── workspaceIndexer.ts   — Workspace file scanning and search (cached to disk)
-├── symbolIndexer.ts      — Symbol indexing (functions, classes, etc.)
-├── semanticIndexer.ts    — TF-IDF semantic indexing for natural-language search (cached to disk)
-├── planTreeProvider.ts   — Plan tree view provider for agent step tracking
-├── sessionManager.ts     — Chat session persistence (globalState)
-└── chatViewProvider.ts   — Webview UI (sidebar chat panel)└── tokenTracker.ts       — Session token usage tracking with status bar + webview badge```
-
-## Development
-
-```bash
-npm install          # Install dependencies
-npm run compile      # Build once
-npm run watch        # Build in watch mode
-npm run lint         # Run ESLint
-npm run package      # Create .vsix package
-```
-
-Press **F5** to launch the Extension Development Host with the extension loaded.
-
-## Security Notes
-
-- The API key is stored in VS Code's **SecretStorage** (OS credential manager) when set via **Junior: Set API Key**. No plaintext is written to disk. The legacy `settings.json` key is supported as a fallback but is not recommended.
-- All HTTP calls go directly to your Azure OpenAI endpoint (or APIM gateway) — **no data leaves your network**.
-- The webview uses a strict Content Security Policy with nonce-based script/style execution.
-
----
-
-## How Junior Works — Technical Deep Dive
-
-This section explains the internal mechanics of Junior and the quality-of-life improvements that bring it closer to GitHub Copilot's agent mode experience.
-
-### The Agent Loop
-
-Junior's core is an autonomous **tool-calling loop** in `agentLoop.ts`. When you send a message:
-
-1. A **context pack** is assembled automatically — open editors, active file/cursor position, workspace diagnostics, and workspace name — and injected as a system message so the model starts with situational awareness, similar to how GHCP populates its context window.
-2. Your message is appended to the conversation and sent to Azure OpenAI with the full tool catalog (built-in + MCP tools).
-3. If the model responds with tool calls, each is executed and results are fed back. This loops for up to `maxIterations` (default 25).
-4. If the model responds with text (no tool calls), the loop ends and the response is streamed to the UI.
-
-### Built-in Tools (20)
-
-The agent has direct access to the workspace through built-in tools registered in `builtinTools.ts`:
-
-| Tool | Purpose |
-|------|---------|
-| `read_file` | Read file contents (path-validated to workspace) |
-| `write_file` | Create or overwrite a file |
-| `edit_file` | Surgical find-and-replace within a file |
-| `delete_file` | Remove a file |
-| `list_directory` | List folder contents |
-| `search_files` | Filename search across the workspace index |
-| `grep_search` | Regex/text search in file contents |
-| `semantic_search` | Natural-language code search using TF-IDF semantic indexing |
-| `get_file_tree` | Full workspace file tree |
-| `get_document_symbols` | List symbols (classes, functions, methods, etc.) for a specific file |
-| `find_symbol` | Find symbol definitions by name across the indexed workspace |
-| `go_to_definition` | Find the definition location for a symbol in a file |
-| `find_references` | Find all references to a symbol across the workspace |
-| `rename_symbol` | Project-wide rename (like F2) — updates all references, imports, and usages |
-| `run_terminal_command` | Execute shell commands with configurable timeout |
-| `get_diagnostics` | Read VS Code's language server diagnostics |
-| `get_open_editors` | List currently open editor tabs |
-| `apply_code_action` | List and apply VS Code quick-fixes at a specific line |
-| `set_plan` | Set the agent's plan with 3–6 specific steps for the current task |
-| `update_plan_step` | Update the status of a plan step (in_progress, completed, failed) |
-
-All file-path parameters are validated against the workspace root to prevent path traversal attacks.
-
-### Post-Edit Validation Pipeline
-
-After every `write_file`, `edit_file`, or `apply_code_action`, the agent **automatically collects diagnostics** from VS Code's language server (after a 750ms settling delay). Errors and warnings are appended to the tool result, so the model sees them immediately and can self-correct without a separate diagnostic-checking step. The system prompt instructs the model to fix any errors it introduced.
-
-### Robust Retry Policy
-
-Tool calls are wrapped in `executeToolWithRetry()`. If a tool fails, it is retried once (after a 600ms delay) before reporting failure to the model. Certain tools are excluded from retry where it wouldn't help: terminal commands (user may have declined), code actions, and invalid-path errors.
-
-### Terminal Command Improvements
-
-The `run_terminal_command` tool includes several safeguards:
-
-- **Dangerous command blocking** — patterns like `rm -rf /` and `format C:` are rejected outright.
-- **Configurable timeout** — the model can specify `timeout_ms` (5–120 seconds, default 30s) for longer builds.
-- **Partial-success on timeout** — if a command times out but produced stdout/stderr output, the result is returned as a success with a timeout note rather than a failure. This prevents the agent from marking lengthy builds as failed when they actually produced useful output.
-- **Description warns the model** — the tool description explicitly tells the model not to run watch-mode or long-running commands.
-
-### Confirmation Dialogs & Session-Level Approval
-
-By default, file writes and terminal commands require user confirmation. Each confirmation dialog presents three options:
-
-- **Allow** — approve this one action
-- **Allow for Session** — approve this action and skip confirmation for all future actions of the same category (terminal or write) for the rest of the session
-- **Deny** — reject the action
-
-Categories are tracked independently — you can allow all terminal commands without auto-approving file writes. Session approvals reset when you start a new chat session. This mirrors GitHub Copilot's "allow for this session" workflow.
-
-### Chat History & Session Persistence
-
-Sessions are persisted to VS Code's `globalState` and survive window reloads:
-
-- **Automatic restore** — on reload, Junior restores the last active session including the full conversation, tool calls, and agent loop state.
-- **History panel** — click the clock icon ($(history)) in the view title bar to see all past sessions with titles, message counts, and relative timestamps. Click to switch; click ✕ to delete.
-- **Storage limits** — to stay within `globalState`'s ~1 MB budget:
-  - **20 sessions max** — oldest are pruned automatically when exceeded
-  - **8,000 character cap** per message — large tool outputs are trimmed before persistence
-  - **Base64 images stripped** — inline image data is removed from stored messages to prevent storage bloat
-- Auto-titling — sessions are named from the first user message (truncated to 60 characters).
-
-### MCP (Model Context Protocol) Client
-
-Junior can connect to external tool servers using the Model Context Protocol, supporting two transports:
-
-- **stdio** — spawns a local process, communicates via JSON-RPC over stdin/stdout. Used for local tool servers.
-- **HTTP/SSE (Streamable HTTP)** — sends JSON-RPC POST requests to a URL endpoint. Handles both `application/json` and `text/event-stream` responses (SSE). Tracks `Mcp-Session-Id` per the Streamable HTTP specification.
-
-Transport is auto-detected from the configuration: if `command` is present, stdio is used; if `url` is present, HTTP is used. MCP tools are discovered via the `tools/list` method and appear in the tool catalog with a server-name prefix.
-
-### Context Pack Assembly
-
-Before the first model call in each turn, `buildContextPack()` gathers:
-
-- **Open editors** — file paths of all visible editor tabs
-- **Active file & cursor** — the file and line number the user is looking at
-- **Active diagnostics** — current errors/warnings across all open files
-- **Workspace name** — so the model knows the project context
-
-This is injected as a `[Context Snapshot]` system message, giving the model awareness without the user needing to manually attach files.
-
-### Workspace Indexing
-
-Three indexers run on activation and can be re-triggered via the Index Workspace command:
-
-1. **WorkspaceIndexer** — scans all files respecting exclude patterns and size limits, builds a filename search index.
-2. **SymbolIndexer** — uses VS Code's `DocumentSymbolProvider` to index functions, classes, variables, interfaces, etc. across the workspace. Powers `find_symbols` and `get_symbol_detail`.
-3. **SemanticIndexer** — splits source files into chunks, builds a TF-IDF index for natural-language code search via `semantic_search`.
-
-### Azure OpenAI Client
-
-`aoaiClient.ts` is a zero-dependency HTTPS client that speaks directly to the Azure OpenAI REST API. It:
-
-- Streams responses token-by-token via SSE (`stream: true`)
-- Handles tool-call function arguments that arrive across multiple SSE chunks
-- Supports switching between multiple configured deployments at runtime
-- Supports per-request overrides for `maxTokens` and `temperature` (used by inline completions)
-- Uses only Node.js built-in `https` — no npm packages, no SDK, no external dependencies
-
-### Inline Code Completions
-
-`inlineCompletionProvider.ts` registers as a VS Code `InlineCompletionItemProvider` to deliver ghost-text suggestions as you type:
-
-- **Debounced triggering** — requests fire after 150ms of idle time to avoid spamming the API during active typing.
-- **Aggressive cancellation** — every new keystroke aborts any in-flight request via `AbortSignal`, keeping the UI responsive.
-- **Buffered response** — streamed tokens are collected into a complete suggestion before displaying (no visual flicker).
-- **Request deduplication** — identical requests (same document version + cursor position) return cached results.
-- **FIM-style prompt** — sends prefix (up to 8K chars before cursor) and suffix (up to 2K chars after cursor) with a system prompt that instructs the model to output only code.
-- **Separate deployment** — optionally use a faster/cheaper model for completions (e.g. `gpt-4o`) while keeping a larger model for chat. Configure via `junior.inlineCompletions.deployment`.
-- **IntelliSense awareness** — suppresses ghost text when the native completions widget is active.
-- **Large file guard** — skips files over 500KB to avoid excessive token usage.
-- **Toggle** — disable instantly via `junior.inlineCompletions.enabled` (no reload required).
-- **Single-line vs multi-line detection** — when the cursor is mid-line, completes only the current line (64 tokens). On a blank line, generates multi-line blocks (256 tokens).
-- **Cooldown after dismissal** — if a suggestion is dismissed, the next request is delayed (up to 2.5s) to reduce API waste.
-- **Neighboring-tab context** — includes snippets from up to 3 open editor tabs in the prompt, giving the model awareness of related files.
-- **Smart suppression** — skips triggering in comment lines (detected via language-specific prefixes: `//`, `#`, `--`, `<!--`, etc.).
-- **Hard request timeout** — aborts if the model doesn't respond within the configured timeout (default 5s). Configurable via `junior.inlineCompletions.timeoutMs`.
-- **Type-ahead cache reuse** — when you type characters that match the beginning of the last suggestion, the remaining tail is served instantly with zero latency (no API call).
-- **Status bar indicator** — shows a sparkle icon in the status bar; displays a spinning animation while fetching. Click it to manually trigger a completion.
-- **Manual trigger** — press `Alt+\` to force a suggestion on demand, bypassing cooldown and comment suppression.
-- **Multi-candidate cycling** — set `junior.inlineCompletions.candidates` to 2 or 3 to fetch multiple alternatives in parallel with varied temperature. Cycle through them with `Alt+]` / `Alt+[`.
-
-### Token Usage Tracking
-
-Junior tracks cumulative token usage across your session — both from chat and inline completions — and displays it in two places:
-
-- **Status bar** — a `$(pulse) 18.6K` indicator in the bottom-left status bar. Hover for a rich GHCP-style tooltip showing a full breakdown: prompt vs. completion tokens, chat vs. inline, percentages, request counts, and a clickable "Reset Counters" link.
-- **Panel badge** — a small `📊 18.6K` badge in the chat panel next to "Enter to send".
-
-Token tracking requires `stream_options: { include_usage: true }` in the API request, which is supported on Azure OpenAI API versions `2024-08-01` and later. The default API version is `2025-03-01-preview`.
-
-**Graceful degradation:** If your deployment uses an older API version (e.g., `2024-06-01`), the `stream_options` parameter is automatically omitted. Everything works normally — the tracker simply shows 0 tokens because the API doesn't return usage data. No errors, no 500s.
-
-### UI Architecture
-
-The chat panel is a VS Code `WebviewViewProvider` rendered in the sidebar. The webview HTML, CSS, and JS are all generated in `chatViewProvider.ts` (inline styles with nonce CSP) with `media/chat.js` as an external script.
-
-Key UI features:
-- **Markdown rendering** — assistant responses render headings, lists, inline code, and fenced code blocks with syntax labels and copy buttons
-- **Tool call visualization** — collapsible blocks show tool name, arguments, and result with success/failure indicators
-- **Working spinner** — an animated pulsing-dots indicator shows the current agent status while processing
-- **Plan panel** — a collapsible step tracker showing the agent's plan with pending/in-progress/completed/failed states
-- **Image paste** — paste screenshots from clipboard directly into the chat
-- **File attachment** — attach workspace files to provide context
-- **Model selector** — dropdown in the composer toolbar to switch deployments mid-conversation
-- Terminal commands and file writes require user confirmation by default.
 
 ## License
 
-MIT
-
-
+See the LICENSE file included with this extension for full terms.

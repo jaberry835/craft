@@ -6,18 +6,18 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as cp from 'child_process';
 import * as fs from 'fs';
-import { ToolDefinition, ToolResult, ToolHandler } from './types';
+import { AgentPermissionLevel, ToolDefinition, ToolResult, ToolHandler } from './types';
 import { WorkspaceIndexer } from './workspaceIndexer';
 import { SymbolIndexer } from './symbolIndexer';
 import { SemanticIndexer } from './semanticIndexer';
 import { getSetting } from './config';
 import { countLineChanges } from './diffUtils';
+import { DEFAULT_PERMISSION_LEVEL, shouldConfirmLocalCategory } from './permissions';
 
 export class BuiltinTools {
     private handlers: Map<string, ToolHandler> = new Map();
     private definitions: ToolDefinition[] = [];
-    private confirmWrite: boolean = true;
-    private confirmTerminal: boolean = true;
+    private permissionLevel: AgentPermissionLevel = DEFAULT_PERMISSION_LEVEL;
     private sessionAllowTerminal: boolean = false;
     private sessionAllowWrites: boolean = false;
     private pendingConfirmations: Map<string, { resolve: (approved: boolean) => void }> = new Map();
@@ -39,7 +39,6 @@ export class BuiltinTools {
         private symbolIndexer: SymbolIndexer,
         private semanticIndexer: SemanticIndexer
     ) {
-        this.loadConfig();
         this.registerAll();
         // Provider that serves the pre-edit (snapshot) content for diff views
         this.originalContentProvider = vscode.workspace.registerTextDocumentContentProvider('junior-original', {
@@ -69,6 +68,10 @@ export class BuiltinTools {
 
     setTerminalOutputCallback(cb: (line: string) => void) {
         this.onTerminalOutput = cb;
+    }
+
+    setPermissionLevel(level: AgentPermissionLevel) {
+        this.permissionLevel = level;
     }
 
     allowForSession(category: string) {
@@ -249,6 +252,21 @@ export class BuiltinTools {
         return Array.from(this.touchedFiles.values()).map(v => v.relPath);
     }
 
+    /** Snapshot a file before an external writer modifies it so Junior can show diffs later. */
+    async trackExternalWriteStart(filePath: string): Promise<void> {
+        const resolved = this.resolveWorkspaceFilePath(filePath);
+        if (!resolved) { return; }
+        await this.snapshotOriginal(resolved.absPath, resolved.relPath);
+    }
+
+    /** Recompute change stats for a file modified outside BuiltinTools and surface it in the diff dock. */
+    trackExternalWriteComplete(filePath: string): void {
+        const resolved = this.resolveWorkspaceFilePath(filePath);
+        if (!resolved) { return; }
+        if (!this.touchedFiles.has(resolved.absPath)) { return; }
+        this.notifyFileChanged(resolved.absPath, resolved.relPath);
+    }
+
     /** Get unified diff string for a specific file (for inline diff rendering) */
     getDiffForFile(relPath: string): string {
         for (const [absPath, info] of this.touchedFiles) {
@@ -325,11 +343,6 @@ export class BuiltinTools {
         }
     }
 
-    private loadConfig() {
-        this.confirmWrite = getSetting<boolean>('agent.confirmWrites') ?? true;
-        this.confirmTerminal = getSetting<boolean>('agent.confirmTerminal') ?? true;
-    }
-
     getDefinitions(): ToolDefinition[] {
         return this.definitions;
     }
@@ -345,6 +358,24 @@ export class BuiltinTools {
 
     private getWorkspaceRoot(): string {
         return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+    }
+
+    private resolveWorkspaceFilePath(filePath: string): { absPath: string; relPath: string } | undefined {
+        if (!filePath) { return undefined; }
+        const root = this.getWorkspaceRoot();
+        if (!root) { return undefined; }
+
+        const absPath = path.isAbsolute(filePath) ? filePath : path.join(root, filePath);
+        const normalizedRoot = path.resolve(root);
+        const normalizedAbs = path.resolve(absPath);
+        if (!normalizedAbs.startsWith(normalizedRoot)) {
+            return undefined;
+        }
+
+        return {
+            absPath: normalizedAbs,
+            relPath: path.relative(normalizedRoot, normalizedAbs).replace(/\\/g, '/'),
+        };
     }
 
     /** Validate that a file path is within the workspace root to prevent path traversal */
@@ -389,9 +420,16 @@ export class BuiltinTools {
 
     private async requestConfirmation(description: string, category?: string, diff?: string): Promise<boolean> {
         if (!this.onConfirmRequest) { return true; }
-        // Check session-level approval
-        if (category === 'terminal' && this.sessionAllowTerminal) { return true; }
-        if (category === 'write' && this.sessionAllowWrites) { return true; }
+        if (category === 'terminal') {
+            if (this.sessionAllowTerminal || !shouldConfirmLocalCategory(this.permissionLevel, 'terminal')) {
+                return true;
+            }
+        }
+        if (category === 'write') {
+            if (this.sessionAllowWrites || !shouldConfirmLocalCategory(this.permissionLevel, 'write')) {
+                return true;
+            }
+        }
         const actionId = `action_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
         return new Promise((resolve) => {
             this.pendingConfirmations.set(actionId, { resolve });
@@ -788,7 +826,22 @@ export class BuiltinTools {
                     };
                 }
                 if (count > 1) {
-                    return { success: false, result: `old_string found ${count} times. Must match exactly once. Add more context.` };
+                    // Help the model by showing the first few match locations
+                    const lines = content.split('\n');
+                    const matchLines: number[] = [];
+                    const searchStr = matchStr;
+                    let searchFrom = 0;
+                    while (matchLines.length < 5) {
+                        const idx = content.indexOf(searchStr, searchFrom);
+                        if (idx < 0) { break; }
+                        const lineNum = content.slice(0, idx).split('\n').length;
+                        matchLines.push(lineNum);
+                        searchFrom = idx + 1;
+                    }
+                    const locations = matchLines.length > 0
+                        ? ` Found at lines: ${matchLines.join(', ')}${count > 5 ? ` (and ${count - 5} more)` : ''}.`
+                        : '';
+                    return { success: false, result: `old_string found ${count} times. Must match exactly once. Add more surrounding lines for context to make the match unique.${locations}` };
                 }
                 // Preserve the file's line-ending style in the replacement text
                 let effectiveNewStr = newStr;
@@ -1276,10 +1329,8 @@ export class BuiltinTools {
             const newName = args.newName as string;
             const lineHint = args.lineHint as number | undefined;
 
-            if (this.confirmWrite) {
-                const approved = await this.requestConfirmation(`Rename "${symbol}" → "${newName}" in ${filePath}`, 'write');
-                if (!approved) { return { success: false, result: 'User declined the rename.' }; }
-            }
+            const approved = await this.requestConfirmation(`Rename "${symbol}" → "${newName}" in ${filePath}`, 'write');
+            if (!approved) { return { success: false, result: 'User declined the rename.' }; }
 
             try {
                 const resolved = await this.resolveSymbolPosition(filePath, symbol, lineHint);
@@ -1385,10 +1436,8 @@ export class BuiltinTools {
                 }
             }
 
-            if (this.confirmTerminal) {
-                const approved = await this.requestConfirmation(`Run command: ${command}${background ? ' (background)' : ''}`, 'terminal');
-                if (!approved) { return { success: false, result: 'User declined the terminal command.' }; }
-            }
+            const approved = await this.requestConfirmation(`Run command: ${command}${background ? ' (background)' : ''}`, 'terminal');
+            if (!approved) { return { success: false, result: 'User declined the terminal command.' }; }
 
             const root = this.getWorkspaceRoot();
             const cwd = args.cwd ? this.validatePath(args.cwd as string) || root : root;
@@ -1559,10 +1608,8 @@ export class BuiltinTools {
             try {
                 const uri = vscode.Uri.file(absPath);
                 // Delete is destructive and can't be undone via dirty-buffer — confirm first
-                if (this.confirmWrite) {
-                    const approved = await this.requestConfirmation(`Delete file: ${filePath}`, 'write');
-                    if (!approved) { return { success: false, result: 'User declined the delete.' }; }
-                }
+                const approved = await this.requestConfirmation(`Delete file: ${filePath}`, 'write');
+                if (!approved) { return { success: false, result: 'User declined the delete.' }; }
                 await vscode.workspace.fs.delete(uri);
                 return { success: true, result: `Deleted: ${filePath}` };
             } catch (e: unknown) {
@@ -1695,10 +1742,8 @@ export class BuiltinTools {
                     return { success: false, result: `No action matching "${targetTitle}". Available:\n${listing}` };
                 }
 
-                if (this.confirmWrite) {
-                    const approved = await this.requestConfirmation(`Apply code action: ${match.title}`, 'write');
-                    if (!approved) { return { success: false, result: 'User declined the code action.' }; }
-                }
+                const approved = await this.requestConfirmation(`Apply code action: ${match.title}`, 'write');
+                if (!approved) { return { success: false, result: 'User declined the code action.' }; }
 
                 // Apply workspace edit if present
                 if (match.edit) {

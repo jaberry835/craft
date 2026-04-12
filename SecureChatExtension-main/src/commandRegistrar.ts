@@ -234,6 +234,25 @@ export function registerCommands(deps: CommandRegistrarDeps): void {
             chatViewProvider.showSplash();
         })
     );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('junior.selectAgentProvider', async () => {
+            const providerOptions = chatViewProvider.getAvailableAgentProviderOptions();
+            const pick = await vscode.window.showQuickPick(
+                providerOptions.map(option => ({
+                    label: option.value === 'local' ? '$(server) Local' : '$(terminal) Copilot CLI',
+                    description: option.value === 'local'
+                        ? 'Built-in Azure OpenAI agent loop'
+                        : 'GitHub Copilot CLI via SDK',
+                    value: option.value,
+                })),
+                { placeHolder: 'Select agent provider' }
+            );
+            if (pick) {
+                chatViewProvider.setAgentProvider(pick.value);
+            }
+        })
+    );
 }
 
 function sendSelectionToChat(chatViewProvider: ChatViewProvider, prefix: string): void {

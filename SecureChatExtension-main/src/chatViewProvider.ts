@@ -7,16 +7,23 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import { AgentLoop, AgentCallbacks } from './agentLoop';
+import { AgentRuntime } from './agentRuntime';
+import { CopilotSdkRuntime } from './copilotSdkRuntime';
 import { AzureOpenAIClient } from './aoaiClient';
 import { BuiltinTools } from './builtinTools';
 import { McpClient } from './mcpClient';
 import { SessionManager } from './sessionManager';
-import { ExtensionMessage, WebviewMessage, WorkingBlock, WorkingBlockActionEntry, WorkingActionType } from './types';
+import { AgentPermissionLevel, AgentProvider, AgentProviderOption, ChatMode, ExtensionMessage, WebviewMessage, WorkingBlock, WorkingBlockActionEntry, WorkingActionType } from './types';
 import { getSetting, updateSetting } from './config';
 import { TokenTracker } from './tokenTracker';
+import { formatCopilotCliRunError } from './errorFormatting';
 import { InlineDiffDecorator } from './inlineDiffDecorator';
 import { RetrievalRanker } from './retrievalRanker';
 import { RepoPatternStore } from './repoPatternStore';
+import { AgentTaskMemory } from './taskMemory';
+import { CopilotCliAvailability, getCopilotCliAvailability, normalizeCopilotCliConfiguredModels } from './copilotCliSupport';
+import { shouldPersistTranscriptMessage } from './chatTranscript';
+import { DEFAULT_PERMISSION_LEVEL } from './permissions';
 
 /** Minimum interval (ms) between consecutive agent loop submissions */
 const MIN_SUBMISSION_INTERVAL_MS = 2000;
@@ -25,8 +32,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private webviewView?: vscode.WebviewView;
     private webviewPanel?: vscode.WebviewPanel;
     private agentLoop?: AgentLoop;
+    /** Copilot CLI runtime — used when agentProvider is 'copilot-cli' */
+    private copilotRuntime?: AgentRuntime;
+    /** Active agent provider */
+    private activeProvider: AgentProvider = 'local';
+    /** Active permission level for the current chat session */
+    private currentPermissionLevel: AgentPermissionLevel = DEFAULT_PERMISSION_LEVEL;
+    /** Active chat mode */
+    private activeMode: ChatMode = 'agent';
+    private copilotCliAvailability: CopilotCliAvailability = { available: false };
     private log: (msg: string) => void;
     private lastSubmissionTime = 0;
+    private restoringTranscript = false;
 
     constructor(
         private extensionUri: vscode.Uri,
@@ -42,6 +59,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         private globalState?: vscode.Memento
     ) {
         this.log = log || (() => {});
+        this.activeProvider = (getSetting<string>('agentProvider') as AgentProvider) || 'local';
+        const currentSession = this.sessionManager.getCurrentSession();
+        this.activeMode = this.getSessionMode(currentSession);
+        this.currentPermissionLevel = currentSession.activePermissionLevel ?? DEFAULT_PERMISSION_LEVEL;
+        this.refreshProviderAvailability();
+        this.applyPermissionLevel(this.currentPermissionLevel, { persist: false, sync: false });
         // When a file is fully resolved via inline diff CodeLens, update the dock
         if (this.inlineDiffDecorator) {
             this.inlineDiffDecorator.setDiffLookup((fsPath) => this.builtinTools.getTouchedFileInfoByPath(fsPath));
@@ -77,7 +100,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         _context: vscode.WebviewViewResolveContext,
         _token: vscode.CancellationToken
     ) {
-        this.log('resolveWebviewView called');
         this.webviewView = webviewView;
 
         webviewView.webview.options = {
@@ -86,8 +108,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         };
 
         const html = this.getHtmlContent(webviewView.webview);
-        this.log('Generated HTML length: ' + html.length);
-        this.log('HTML head snippet: ' + html.substring(0, 500));
         webviewView.webview.html = html;
 
         webviewView.webview.onDidReceiveMessage((msg: WebviewMessage) => {
@@ -137,15 +157,53 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     sendToWebview(msg: ExtensionMessage) {
         this.webview?.postMessage(msg);
+        if (!this.restoringTranscript) {
+            this.captureTranscriptMessage(msg);
+        }
     }
 
     /** Persist current agent loop messages to session storage (called on deactivate/reload). */
     saveCurrentSession() {
-        if (this.agentLoop) {
+        this.sessionManager.flushPendingSave();
+        if (this.activeProvider === 'copilot-cli' && this.copilotRuntime) {
+            const msgs = this.copilotRuntime.getMessages();
+            if (msgs.length > 0) {
+                this.sessionManager.updateMessages(msgs, this.copilotRuntime.getSessionState?.(), this.activeMode, this.currentPermissionLevel);
+            }
+        } else if (this.agentLoop) {
             const msgs = this.agentLoop.getMessages();
             if (msgs.length > 0) {
-                this.sessionManager.updateMessages(msgs);
+                this.sessionManager.updateMessages(msgs, undefined, this.activeMode, this.currentPermissionLevel);
             }
+        }
+    }
+
+    private captureTranscriptMessage(msg: ExtensionMessage): void {
+        if (!shouldPersistTranscriptMessage(msg)) {
+            return;
+        }
+
+        this.sessionManager.recordTranscriptMessage(msg, {
+            provider: msg.type === 'startAssistantMessage' ? this.activeProvider : undefined,
+            immediate: this.shouldPersistTranscriptImmediately(msg),
+        });
+    }
+
+    private shouldPersistTranscriptImmediately(msg: ExtensionMessage): boolean {
+        switch (msg.type) {
+            case 'startAssistantMessage':
+            case 'appendAssistantText':
+            case 'endAssistantMessage':
+            case 'narrationText':
+            case 'workingBlockStarted':
+            case 'workingTextAppended':
+            case 'workingActionAdded':
+            case 'workingActionUpdated':
+            case 'workingBlockCompleted':
+            case 'terminalOutput':
+                return false;
+            default:
+                return true;
         }
     }
 
@@ -154,7 +212,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.syncModelsToWebview();
     }
 
-    private getModelConfig(): { models: Array<{ name: string; deploymentId: string }>; activeDeployment?: string } {
+    private getModelConfig(): { models: Array<{ name: string; deploymentId: string }>; activeDeployment?: string; disabled?: boolean; title?: string } {
+        if (this.activeProvider === 'copilot-cli') {
+            return this.getCopilotCliModelConfig();
+        }
         const deployments = getSetting<Array<{ name: string; deploymentId: string }>>('azureOpenAI.deployments') || [];
         const activeDeployment = getSetting<string>('azureOpenAI.activeDeployment') || undefined;
         return {
@@ -163,13 +224,138 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         };
     }
 
+    private getCopilotCliModelConfig(): { models: Array<{ name: string; deploymentId: string }>; activeDeployment?: string; disabled?: boolean; title?: string } {
+        const configuredModels = getSetting<Array<{ name?: string; id?: string; deploymentId?: string }>>('copilotCli.models') || [];
+        const activeModel = getSetting<string>('copilotCli.model') || process.env.COPILOT_MODEL || '';
+
+        const models = normalizeCopilotCliConfiguredModels(configuredModels);
+
+        if (models.length === 0) {
+            models.push({ name: 'Copilot CLI default', deploymentId: '__copilot_cli_default__' });
+        }
+
+        const activeId = activeModel || '__copilot_cli_default__';
+        if (!models.some(m => m.deploymentId === activeId)) {
+            models.push({ name: activeModel, deploymentId: activeModel });
+        }
+
+        return {
+            models,
+            activeDeployment: activeId,
+            disabled: false,
+            title: activeModel
+                ? `Model: ${activeModel}`
+                : 'Using the Copilot CLI default model'
+        };
+    }
+
     private syncModelsToWebview(): void {
-        const { models, activeDeployment } = this.getModelConfig();
-        this.sendToWebview({ type: 'setModels', models, activeDeployment });
+        const { models, activeDeployment, disabled, title } = this.getModelConfig();
+        this.sendToWebview({ type: 'setModels', models, activeDeployment, disabled, title });
+    }
+
+    private getAgentProviderOptions(): AgentProviderOption[] {
+        const providers: AgentProviderOption[] = [
+            { value: 'local', label: '▫ Local' }
+        ];
+
+        if (this.copilotCliAvailability.available) {
+            providers.push({ value: 'copilot-cli', label: '✦ Copilot CLI' });
+        }
+
+        return providers;
+    }
+
+    private syncProvidersToWebview(): void {
+        this.sendToWebview({
+            type: 'setAgentProviders',
+            providers: this.getAgentProviderOptions(),
+            activeProvider: this.activeProvider,
+        });
+    }
+
+    private syncPermissionLevelToWebview(): void {
+        this.sendToWebview({ type: 'setPermissionLevel', level: this.currentPermissionLevel });
+    }
+
+    private applyPermissionLevel(
+        level: AgentPermissionLevel,
+        options: { persist?: boolean; sync?: boolean } = {}
+    ): void {
+        this.currentPermissionLevel = level;
+        this.builtinTools.setPermissionLevel(level);
+        this.copilotRuntime?.setPermissionLevel?.(level);
+
+        if (options.persist !== false) {
+            this.sessionManager.setActivePermissionLevel(level);
+        }
+        if (options.sync !== false) {
+            this.syncPermissionLevelToWebview();
+        }
+    }
+
+    private async confirmPermissionLevel(level: AgentPermissionLevel): Promise<boolean> {
+        if (level === 'default') {
+            return true;
+        }
+
+        const warningKey = `junior.permissionWarningSeen.${level}`;
+        if (this.globalState?.get<boolean>(warningKey, false)) {
+            return true;
+        }
+
+        const action = await vscode.window.showWarningMessage(
+            'Enable Bypass Approvals for this session?',
+            {
+                modal: true,
+                detail: 'Bypass Approvals auto-approves all tool calls for this chat session, including file edits, terminal commands, and external tool calls.'
+            },
+            'Enable'
+        );
+
+        if (action !== 'Enable') {
+            this.syncPermissionLevelToWebview();
+            return false;
+        }
+
+        await this.globalState?.update(warningKey, true);
+        return true;
+    }
+
+    private async handleSelectPermissionLevel(level: AgentPermissionLevel): Promise<void> {
+        if (level === this.currentPermissionLevel) {
+            this.syncPermissionLevelToWebview();
+            return;
+        }
+
+        if (!(await this.confirmPermissionLevel(level))) {
+            return;
+        }
+
+        this.applyPermissionLevel(level);
+    }
+
+    public refreshProviderAvailability(): void {
+        this.copilotCliAvailability = getCopilotCliAvailability();
+
+        if (!this.copilotCliAvailability.available && this.activeProvider === 'copilot-cli') {
+            this.activeProvider = 'local';
+            this.copilotRuntime?.dispose?.();
+            this.copilotRuntime = undefined;
+            void updateSetting('agentProvider', 'local', vscode.ConfigurationTarget.Global);
+        }
+
+        this.syncProvidersToWebview();
+        this.syncModelsToWebview();
+    }
+
+    public getAvailableAgentProviderOptions(): AgentProviderOption[] {
+        this.refreshProviderAvailability();
+        return this.getAgentProviderOptions();
     }
 
     sendMessageFromExtension(text: string) {
-        this.handleUserMessage(text);
+        this.handleUserMessage(text, this.activeMode);
     }
 
     showSplash(): void {
@@ -179,19 +365,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     newSession() {
         // Save current session's messages before creating a new one
-        if (this.agentLoop) {
-            const msgs = this.agentLoop.getMessages();
-            if (msgs.length > 0) {
-                this.sessionManager.updateMessages(msgs);
-            }
+        this.saveCurrentSession();
+        if (this.activeProvider === 'copilot-cli') {
+            if (this.copilotRuntime?.isRunning()) { this.copilotRuntime.cancel(); }
+            this.copilotRuntime?.clearMessages();
+        } else {
+            if (this.agentLoop?.isRunning()) { this.agentLoop.cancel(); }
+            this.builtinTools.resetSessionApprovals();
+            this.agentLoop?.clearMessages();
         }
-        if (this.agentLoop?.isRunning()) {
-            this.agentLoop.cancel();
-        }
-        this.builtinTools.resetSessionApprovals();
-        this.sessionManager.createNewSession();
-        this.agentLoop?.clearMessages();
+        this.sessionManager.createNewSession(this.activeMode, DEFAULT_PERMISSION_LEVEL);
+        this.applyPermissionLevel(DEFAULT_PERMISSION_LEVEL, { persist: false });
         this.sendToWebview({ type: 'sessionCleared' });
+        this.sendToWebview({ type: 'setChatMode', mode: this.activeMode });
+        this.sendToWebview({ type: 'planReady', visible: false });
         this.sendSessionList();
     }
 
@@ -200,15 +387,64 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     cancelAgent() {
-        this.agentLoop?.cancel();
+        if (this.activeProvider === 'copilot-cli') {
+            this.copilotRuntime?.cancel();
+        } else {
+            this.agentLoop?.cancel();
+        }
+    }
+
+    /** Public method for the command registrar to switch providers */
+    setAgentProvider(provider: AgentProvider) {
+        this.handleSelectAgentProvider(provider);
+    }
+
+    private getSessionMode(session = this.sessionManager.getCurrentSession()): ChatMode {
+        if (session.activeMode) { return session.activeMode; }
+        for (let i = session.messages.length - 1; i >= 0; i--) {
+            const message = session.messages[i];
+            if (message.role === 'user' && message.mode) {
+                return message.mode;
+            }
+        }
+        return 'agent';
+    }
+
+    private isPlanExecutionApproval(text: string): boolean {
+        const normalized = text.trim().toLowerCase();
+        if (!normalized) { return false; }
+
+        const approvalSignals = [
+            /\bproceed\b/,
+            /\bgo ahead\b/,
+            /\bapproved?\b/,
+            /\blooks good\b/,
+            /\bexecute\b/,
+            /\bimplement(?:ation)?\b/,
+            /\bbuild\b.*\b(it|that|this)\b/,
+            /\bapply\b.*\bplan\b/,
+            /\bdo it\b/,
+        ];
+
+        return approvalSignals.some(pattern => pattern.test(normalized));
+    }
+
+    private setChatMode(mode: ChatMode, persist: boolean = true) {
+        this.activeMode = mode;
+        if (persist) {
+            this.sessionManager.setActiveMode(mode);
+        }
+        this.sendToWebview({ type: 'setChatMode', mode });
+        if (mode !== 'plan') {
+            this.sendToWebview({ type: 'planReady', visible: false });
+        }
     }
 
     private handleWebviewMessage(msg: WebviewMessage) {
-        this.log(`Webview message received: ${msg.type}`);
         try {
             switch (msg.type) {
                 case 'sendMessage':
-                    this.handleUserMessage(msg.text, msg.images, msg.files);
+                    this.handleUserMessage(msg.text, msg.mode, msg.images, msg.files);
                     break;
                 case 'cancelAgent':
                     this.cancelAgent();
@@ -226,14 +462,37 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 case 'selectModelById':
                     this.handleSelectModelById(msg.deploymentId);
                     break;
+                case 'selectAgentProvider':
+                    this.handleSelectAgentProvider(msg.provider);
+                    break;
+                case 'selectPermissionLevel':
+                    void this.handleSelectPermissionLevel(msg.level);
+                    break;
+                case 'selectChatMode':
+                    this.setChatMode(msg.mode);
+                    break;
+                case 'runPlanInAgent':
+                    this.sendToWebview({ type: 'planReady', visible: false });
+                    this.setChatMode('agent');
+                    this.lastSubmissionTime = 0;
+                    this.handleUserMessage('Execute the approved plan above. Proceed with the implementation.', 'agent');
+                    break;
                 case 'confirmAction':
-                    if (msg.allowSession && msg.category) {
-                        this.builtinTools.allowForSession(msg.category);
+                    if (this.activeProvider === 'copilot-cli') {
+                        this.copilotRuntime?.resolveConfirmation?.(msg.actionId, msg.approved, msg.allowSession);
+                    } else {
+                        if (msg.allowSession && msg.category) {
+                            this.builtinTools.allowForSession(msg.category);
+                        }
+                        this.builtinTools.resolveConfirmation(msg.actionId, msg.approved);
                     }
-                    this.builtinTools.resolveConfirmation(msg.actionId, msg.approved);
                     break;
                 case 'continueIteration':
-                    this.agentLoop?.resolveContinuation(msg.shouldContinue);
+                    if (this.activeProvider === 'copilot-cli') {
+                        // SDK handles continuation internally
+                    } else {
+                        this.agentLoop?.resolveContinuation(msg.shouldContinue);
+                    }
                     break;
                 case 'fileChangeAction':
                     this.handleFileChangeAction(msg.action);
@@ -274,6 +533,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     break;
                 case 'ready':
                     this.log('Webview reported ready');
+                    this.refreshProviderAvailability();
+                    this.syncProvidersToWebview();
+                    this.sendToWebview({ type: 'setAgentProvider', provider: this.activeProvider });
+                    this.syncPermissionLevelToWebview();
+                    this.sendToWebview({ type: 'setChatMode', mode: this.activeMode });
                     this.syncModelsToWebview();
                     this.restoreSession();
                     this.sendSessionList();
@@ -318,8 +582,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
     }
 
-    private async handleUserMessage(text: string, images?: string[], files?: { name: string; content: string }[]) {
+    private async handleUserMessage(text: string, mode: ChatMode, images?: string[], files?: { name: string; content: string }[]) {
         if (!text.trim() && (!images || images.length === 0) && (!files || files.length === 0)) { return; }
+        const autoExecuteApprovedPlan = mode === 'plan' && this.isPlanExecutionApproval(text);
+        const effectiveMode: ChatMode = autoExecuteApprovedPlan ? 'agent' : mode;
+
+        this.setChatMode(effectiveMode);
+        this.sendToWebview({ type: 'planReady', visible: false });
 
         // Rate-limit: prevent rapid-fire submissions from stacking API calls
         const now = Date.now();
@@ -333,10 +602,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         // Keep original text for display, resolve slash commands for the AI
         const displayText = text;
         text = this.resolveSlashCommand(text);
+        if (autoExecuteApprovedPlan) {
+            text = `Execute the approved plan above. ${text}`;
+        }
 
         // Echo the user message to the webview (show original, not the resolved template)
         const fileNames = files?.map(f => f.name);
         this.sendToWebview({ type: 'addUserMessage', text: displayText, images, fileNames });
+
+        // Immediately activate stop button + thinking indicator
+        this.sendToWebview({ type: 'agentStarted' });
+
+        if (this.activeProvider === 'copilot-cli') {
+            await this.handleUserMessageCopilotCli(effectiveMode, text, displayText, images, files);
+        } else {
+            await this.handleUserMessageLocal(effectiveMode, text, displayText, images, files);
+        }
+    }
+
+    /** Handle user message with the local agent loop (Azure OpenAI) */
+    private async handleUserMessageLocal(mode: ChatMode, text: string, displayText: string, images?: string[], files?: { name: string; content: string }[]) {
 
         const callbacks: AgentCallbacks = {
             sendToWebview: (msg) => this.sendToWebview(msg)
@@ -359,6 +644,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 this.agentLoop.setMessages([...session.messages]);
             }
         }
+
+        this.builtinTools.setPermissionLevel(this.currentPermissionLevel);
 
         // Confirmation callback for built-in tools
         this.builtinTools.setConfirmCallback((actionId, description, category, diff) => {
@@ -385,18 +672,400 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
         const slashDisplayText = displayText !== text ? displayText : undefined;
         try {
-            await this.agentLoop.run(text, images, files, slashDisplayText);
+            await this.agentLoop.run(mode, text, images, files, slashDisplayText);
 
             // If files were changed, wait for Keep/Undo (user clicks file names to review diffs)
             const summary = this.builtinTools.getPendingChangeSummary();
             if (summary) {
                 await this.waitForFileChangeAction();
             }
+            if (mode === 'plan') {
+                this.sendToWebview({ type: 'planReady', visible: true });
+            }
         } finally {
             // Always persist — even if cancelled or errored
-            this.sessionManager.updateMessages(this.agentLoop.getMessages());
+            this.sessionManager.updateMessages(this.agentLoop.getMessages(), undefined, this.activeMode, this.currentPermissionLevel);
             this.sendSessionList();
         }
+    }
+
+    /** Handle user message with the Copilot CLI runtime */
+    private async handleUserMessageCopilotCli(mode: ChatMode, text: string, displayText: string, images?: string[], files?: { name: string; content: string }[]) {
+        const callbacks: AgentCallbacks = {
+            sendToWebview: (msg) => this.sendToWebview(msg)
+        };
+
+        try {
+            await this.ensureCopilotRuntime(callbacks);
+        } catch (err: any) {
+            const msg = err?.message || String(err);
+            this.log(`[copilot-cli] Runtime init failed: ${msg}`);
+            this.sendToWebview({ type: 'error', message: `Copilot CLI failed to start: ${msg}` });
+            this.sendToWebview({ type: 'agentDone' });
+            return;
+        }
+        const runtime = this.copilotRuntime;
+        if (!runtime) {
+            this.sendToWebview({ type: 'error', message: 'Copilot CLI runtime failed to initialize.' });
+            this.sendToWebview({ type: 'agentDone' });
+            return;
+        }
+
+        const slashDisplayText = displayText !== text ? displayText : undefined;
+        try {
+            await runtime.run(mode, text, images, files, slashDisplayText);
+            const summary = this.builtinTools.getPendingChangeSummary();
+            if (summary) {
+                await this.waitForFileChangeAction();
+            }
+            if (mode === 'plan') {
+                this.sendToWebview({ type: 'planReady', visible: true });
+            }
+        } catch (err: any) {
+            const msg = err?.message || String(err);
+            this.log(`[copilot-cli] Run error: ${msg}`);
+            this.sendToWebview({ type: 'error', message: formatCopilotCliRunError(msg) });
+            this.sendToWebview({ type: 'agentDone' });
+        } finally {
+            // Always persist — even if cancelled or errored
+            this.sessionManager.updateMessages(runtime.getMessages(), runtime.getSessionState?.(), this.activeMode, this.currentPermissionLevel);
+            this.sendSessionList();
+        }
+    }
+
+    /** Ensure the Copilot CLI runtime is initialized and session is loaded */
+    private async ensureCopilotRuntime(callbacks: AgentCallbacks): Promise<void> {
+        if (!this.copilotRuntime) {
+            this.copilotRuntime = new CopilotSdkRuntime(
+                callbacks,
+                this.log,
+                this.tokenTracker,
+                () => this.mcpClient.getCopilotSdkServerConfigs(),
+                this.builtinTools,
+                (mode, promptText) => this.buildCopilotPromptContext(mode, promptText)
+            );
+        }
+
+        this.copilotRuntime.setPermissionLevel?.(this.currentPermissionLevel);
+
+        const session = this.sessionManager.getCurrentSession();
+        this.copilotRuntime.setMessages([...session.messages]);
+        if (session.runtimeState?.provider === 'copilot-cli') {
+            await this.copilotRuntime.restoreSessionState?.(session.runtimeState);
+        }
+    }
+
+    private async buildCopilotPromptContext(mode: ChatMode, userMessage: string): Promise<string> {
+        const sections: string[] = [];
+        const snapshotSections: string[] = [];
+        const taskMemory = new AgentTaskMemory();
+        const activeEditor = vscode.window.activeTextEditor;
+        const activeFile = activeEditor
+            ? vscode.workspace.asRelativePath(activeEditor.document.uri, false)
+            : '';
+        const mentionedFiles = this.extractMentionedFiles(userMessage);
+        const diagnostics = this.collectVisibleDiagnostics(mode === 'ask' ? 4 : 8);
+        const openEditors = this.collectOpenEditors();
+        const ranked = this.retrievalRanker.rank(userMessage, {
+            activeFile,
+            mentionedFiles,
+            diagnostics: diagnostics
+                .map(line => this.parseDiagnosticLine(line))
+                .filter(Boolean) as Array<{ filePath: string; severity: 'Error' | 'Warning'; message: string }>,
+            maxCandidates: mode === 'ask' ? 4 : 6,
+        });
+        const taskFocus = this.inferTaskFocus({
+            activeFile,
+            openEditors,
+            mentionedFiles,
+            rankedFiles: ranked.map(candidate => candidate.filePath),
+            diagnosticFiles: this.extractDiagnosticPaths(diagnostics),
+        });
+
+        taskMemory.noteUserRequest(userMessage);
+        if (activeFile) {
+            taskMemory.noteRelevantFile(activeFile, 'active editor');
+            const cursorLine = activeEditor ? activeEditor.selection.active.line + 1 : 1;
+            snapshotSections.push(`Active file: ${activeFile} (cursor at line ${cursorLine})`);
+        }
+
+        const workspaceName = vscode.workspace.workspaceFolders?.[0]?.name;
+        if (workspaceName) {
+            snapshotSections.push(`Workspace: ${workspaceName}`);
+        }
+
+        if (openEditors.length > 0) {
+            snapshotSections.push('Open editors:\n' + openEditors.map(file => `  ${file}`).join('\n'));
+            for (const filePath of openEditors.slice(0, 6)) {
+                taskMemory.noteRelevantFile(filePath, 'open editor');
+            }
+        }
+
+        if (diagnostics.length > 0) {
+            snapshotSections.push('Active diagnostics:\n' + diagnostics.map(line => `  ${line}`).join('\n'));
+            taskMemory.noteDiagnostics(diagnostics);
+            taskMemory.noteRelevantFiles(this.extractDiagnosticPaths(diagnostics), 'diagnostic location');
+            taskMemory.noteFinding(`There are ${diagnostics.length} visible diagnostics that may matter for this task.`);
+        }
+
+        if (taskFocus.taskRoot) {
+            snapshotSections.push(`Likely task root: ${taskFocus.taskRoot}`);
+        }
+
+        if (taskFocus.languageLabel) {
+            snapshotSections.push(`Likely implementation language for this request: ${taskFocus.languageLabel}`);
+            snapshotSections.push(`Language guardrail: Stay in ${taskFocus.languageLabel} unless the user or files clearly point to another language.`);
+        }
+
+        const workspaceSignals = this.collectWorkspaceSignals(taskFocus.taskRoot);
+        if (workspaceSignals.length > 0) {
+            const title = taskFocus.taskRoot && taskFocus.taskRoot !== '.'
+                ? 'Task-local project signals:'
+                : 'Workspace signals:';
+            snapshotSections.push(title + '\n' + workspaceSignals.map(line => `  ${line}`).join('\n'));
+        }
+
+        for (const filePath of mentionedFiles) {
+            taskMemory.noteRelevantFile(filePath, 'mentioned by the user');
+        }
+
+        if (ranked.length > 0) {
+            snapshotSections.push(
+                'Likely relevant files for this request:\n' + ranked
+                    .map(candidate => `  ${candidate.filePath} (${candidate.reasons[0] || 'relevant'})`)
+                    .join('\n')
+            );
+            for (const candidate of ranked) {
+                taskMemory.noteRelevantFile(candidate.filePath, candidate.reasons[0] || 'ranked as relevant context');
+            }
+            taskMemory.noteFinding(`Ranked likely files: ${ranked.slice(0, 3).map(candidate => `${candidate.filePath} (${candidate.reasons[0] || 'relevant'})`).join(', ')}.`);
+        }
+
+        if (snapshotSections.length > 0) {
+            sections.push('[Context Snapshot]\n' + snapshotSections.join('\n\n'));
+        }
+
+        const taskPrompt = taskMemory.buildSystemMessage({
+            maxRelevantFiles: mode === 'ask' ? 4 : 6,
+            maxDiagnostics: mode === 'ask' ? 4 : 6,
+            maxFindings: mode === 'ask' ? 3 : 4,
+            maxSearches: 0,
+            maxFailures: 0,
+        });
+        if (taskPrompt) {
+            sections.push(taskPrompt);
+        }
+
+        const repoPrompt = this.repoPatternStore.buildSystemMessage({ maxFiles: 4, maxCommands: 1 });
+        if (repoPrompt) {
+            sections.push(repoPrompt);
+        }
+
+        return sections.join('\n\n');
+    }
+
+    private collectOpenEditors(): string[] {
+        try {
+            const tabs = vscode.window.tabGroups.all.flatMap(group => group.tabs);
+            return Array.from(new Set(
+                tabs
+                    .map(tab => {
+                        const input = tab.input as { uri?: vscode.Uri } | undefined;
+                        return input?.uri ? vscode.workspace.asRelativePath(input.uri, false) : '';
+                    })
+                    .filter(Boolean)
+            )).slice(0, 8);
+        } catch {
+            return [];
+        }
+    }
+
+    private collectVisibleDiagnostics(limit: number): string[] {
+        const lines: string[] = [];
+        try {
+            for (const [uri, diagnostics] of vscode.languages.getDiagnostics() as [vscode.Uri, vscode.Diagnostic[]][]) {
+                const relPath = vscode.workspace.asRelativePath(uri, false);
+                for (const diagnostic of diagnostics) {
+                    if (diagnostic.severity > vscode.DiagnosticSeverity.Warning) {
+                        continue;
+                    }
+                    const severity = diagnostic.severity === vscode.DiagnosticSeverity.Error ? 'Error' : 'Warning';
+                    lines.push(`${relPath}:${diagnostic.range.start.line + 1}: [${severity}] ${diagnostic.message}`);
+                    if (lines.length >= limit) {
+                        return lines;
+                    }
+                }
+            }
+        } catch {
+            return lines;
+        }
+        return lines;
+    }
+
+    private collectWorkspaceSignals(taskRoot?: string): string[] {
+        const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!workspaceRoot) {
+            return [];
+        }
+
+        const root = taskRoot && taskRoot !== '.'
+            ? path.join(workspaceRoot, taskRoot.replace(/\//g, path.sep))
+            : workspaceRoot;
+
+        if (!fs.existsSync(root)) {
+            return [];
+        }
+
+        const signals: string[] = [];
+        const topLevelEntries: string[] = [];
+        try {
+            for (const entry of fs.readdirSync(root, { withFileTypes: true }).slice(0, 8)) {
+                topLevelEntries.push(entry.isDirectory() ? `${entry.name}/` : entry.name);
+            }
+        } catch {
+            // Ignore listing failures.
+        }
+
+        if (fs.existsSync(path.join(root, 'package.json'))) {
+            signals.push('package.json present');
+        }
+        if (fs.existsSync(path.join(root, 'tsconfig.json'))) {
+            signals.push('tsconfig.json present');
+        }
+        if (fs.existsSync(path.join(root, 'pyproject.toml')) || fs.existsSync(path.join(root, 'requirements.txt'))) {
+            signals.push('Python project files present');
+        }
+
+        try {
+            const rootEntries = fs.readdirSync(root);
+            if (rootEntries.some(name => name.endsWith('.csproj') || name.endsWith('.sln'))) {
+                signals.push('C# solution files present');
+            }
+        } catch {
+            // Ignore listing failures.
+        }
+
+        if (topLevelEntries.length > 0) {
+            signals.push(`Top-level entries: ${topLevelEntries.join(', ')}`);
+        }
+
+        return signals;
+    }
+
+    private inferTaskFocus(input: {
+        activeFile?: string;
+        openEditors: string[];
+        mentionedFiles: string[];
+        rankedFiles: string[];
+        diagnosticFiles: string[];
+    }): { taskRoot: string; languageLabel?: string } {
+        const files = [
+            input.activeFile || '',
+            ...input.openEditors,
+            ...input.mentionedFiles,
+            ...input.rankedFiles,
+            ...input.diagnosticFiles,
+        ].filter(Boolean);
+
+        const taskRoot = this.pickLikelyTaskRoot(files);
+        const languageLabel = this.inferLanguageLabel(files);
+        return { taskRoot, languageLabel };
+    }
+
+    private pickLikelyTaskRoot(files: string[]): string {
+        const counts = new Map<string, number>();
+
+        for (const filePath of files) {
+            const normalized = filePath.replace(/\\/g, '/').replace(/^\.\//, '').trim();
+            if (!normalized) { continue; }
+
+            const directory = path.posix.dirname(normalized);
+            if (!directory || directory === '.') { continue; }
+
+            const segments = directory.split('/');
+            for (let i = 1; i <= segments.length; i++) {
+                const candidate = segments.slice(0, i).join('/');
+                counts.set(candidate, (counts.get(candidate) || 0) + 1);
+            }
+        }
+
+        const ranked = Array.from(counts.entries()).sort((a, b) => {
+            if (b[1] !== a[1]) {
+                return b[1] - a[1];
+            }
+            return b[0].length - a[0].length;
+        });
+
+        return ranked[0]?.[0] || '.';
+    }
+
+    private inferLanguageLabel(files: string[]): string | undefined {
+        const scores = new Map<string, number>();
+        const addScore = (label: string, points: number) => {
+            scores.set(label, (scores.get(label) || 0) + points);
+        };
+
+        for (const filePath of files) {
+            const ext = path.extname(filePath).toLowerCase();
+            switch (ext) {
+                case '.py':
+                    addScore('Python', 3);
+                    break;
+                case '.ts':
+                case '.tsx':
+                    addScore('TypeScript', 3);
+                    break;
+                case '.js':
+                case '.jsx':
+                    addScore('JavaScript', 3);
+                    break;
+                case '.cs':
+                case '.csproj':
+                case '.sln':
+                    addScore('C#', 3);
+                    break;
+                case '.java':
+                    addScore('Java', 3);
+                    break;
+                case '.go':
+                    addScore('Go', 3);
+                    break;
+                case '.rs':
+                    addScore('Rust', 3);
+                    break;
+            }
+        }
+
+        const ranked = Array.from(scores.entries()).sort((a, b) => b[1] - a[1]);
+        return ranked[0]?.[0];
+    }
+
+    private extractMentionedFiles(text: string): string[] {
+        return Array.from(new Set(
+            (text.match(/\b[\w./-]+\.(?:ts|tsx|js|jsx|json|md|css|scss|html|yml|yaml|ps1|py|cs|csproj|sln|java|go|rs)\b/g) || [])
+                .map(filePath => filePath.replace(/\\/g, '/').replace(/^\.\//, '').trim())
+                .filter(Boolean)
+        ));
+    }
+
+    private extractDiagnosticPaths(lines: string[]): string[] {
+        return Array.from(new Set(
+            lines
+                .map(line => line.match(/^([\w./-]+\.[\w]+):(\d+)/)?.[1] || '')
+                .filter(Boolean)
+        ));
+    }
+
+    private parseDiagnosticLine(line: string): { filePath: string; severity: 'Error' | 'Warning'; message: string } | null {
+        const match = line.match(/^([\w./-]+\.[\w]+):(\d+): \[(Error|Warning)\] (.+)$/);
+        if (!match) {
+            return null;
+        }
+        return {
+            filePath: match[1],
+            severity: match[3] as 'Error' | 'Warning',
+            message: match[4],
+        };
     }
 
     private pendingFileChangeResolve?: (action: 'keep' | 'undo') => void;
@@ -501,7 +1170,46 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     private async handleSelectModelById(deploymentId: string) {
         if (!deploymentId) { return; }
-        await updateSetting('azureOpenAI.activeDeployment', deploymentId, vscode.ConfigurationTarget.Global);
+        if (this.activeProvider === 'copilot-cli') {
+            const newModel = deploymentId === '__copilot_cli_default__' ? '' : deploymentId;
+            const oldModel = getSetting<string>('copilotCli.model') || '';
+            await updateSetting('copilotCli.model', newModel, vscode.ConfigurationTarget.Global);
+            this.syncModelsToWebview();
+            // Model is passed at session creation — restart the runtime
+            if (newModel !== oldModel && this.copilotRuntime) {
+                this.log(`Model changed from "${oldModel || '(default)'}" to "${newModel || '(default)'}" — restarting CLI runtime`);
+                this.copilotRuntime.dispose?.();
+                this.copilotRuntime = undefined;
+            }
+        } else {
+            await updateSetting('azureOpenAI.activeDeployment', deploymentId, vscode.ConfigurationTarget.Global);
+            this.syncModelsToWebview();
+        }
+    }
+
+    private async handleSelectAgentProvider(provider: AgentProvider) {
+        this.refreshProviderAvailability();
+
+        if (provider === 'copilot-cli' && !this.copilotCliAvailability.available) {
+            this.sendToWebview({
+                type: 'error',
+                message: this.copilotCliAvailability.reason || 'Copilot CLI is not available in this environment.'
+            });
+            this.syncProvidersToWebview();
+            return;
+        }
+
+        if (provider === this.activeProvider) { return; }
+        this.log(`Switching agent provider: ${this.activeProvider} → ${provider}`);
+
+        // Save current session before switching
+        this.saveCurrentSession();
+
+        this.activeProvider = provider;
+        await updateSetting('agentProvider', provider, vscode.ConfigurationTarget.Global);
+
+        // Notify webview of the new provider and refresh model list
+        this.sendToWebview({ type: 'setAgentProvider', provider });
         this.syncModelsToWebview();
     }
 
@@ -555,10 +1263,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     /** Send available slash commands to the webview for autocomplete */
     private sendSlashCommands() {
-        const dirs = this.getSlashCommandDirs();
-        this.log(`Slash command dirs found: ${dirs.length} → ${JSON.stringify(dirs)}`);
         const commands = this.discoverSlashCommands();
-        this.log(`Slash commands discovered: ${commands.length} → ${commands.map(c => c.name).join(', ')}`);
         this.sendToWebview({ type: 'slashCommands', commands } as any);
     }
 
@@ -639,24 +1344,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     private handleSwitchSession(sessionId: string) {
         // Save current session's messages before switching away
-        if (this.agentLoop) {
-            const msgs = this.agentLoop.getMessages();
-            if (msgs.length > 0) {
-                this.sessionManager.updateMessages(msgs);
-            }
-        }
-        if (this.agentLoop?.isRunning()) {
-            this.agentLoop.cancel();
+        this.saveCurrentSession();
+        if (this.activeProvider === 'copilot-cli') {
+            if (this.copilotRuntime?.isRunning()) { this.copilotRuntime.cancel(); }
+        } else {
+            if (this.agentLoop?.isRunning()) { this.agentLoop.cancel(); }
         }
         const session = this.sessionManager.switchSession(sessionId);
         if (!session) { return; }
-        this.builtinTools.resetSessionApprovals();
+        this.activeMode = this.getSessionMode(session);
+        if (this.activeProvider === 'local') {
+            this.builtinTools.resetSessionApprovals();
+        }
         this.sendToWebview({ type: 'sessionCleared' });
         this.sendToWebview({ type: 'sessionSwitched' });
         this.restoreSession();
         this.sendSessionList();
-        // Sync agent loop messages
-        if (this.agentLoop) {
+        // Sync runtime messages
+        if (this.activeProvider === 'copilot-cli' && this.copilotRuntime) {
+            this.copilotRuntime.setMessages([...session.messages]);
+        } else if (this.agentLoop) {
             this.agentLoop.setMessages([...session.messages]);
         }
     }
@@ -665,17 +1372,45 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         const wasCurrent = this.sessionManager.getCurrentSession().id === sessionId;
         this.sessionManager.deleteSession(sessionId);
         if (wasCurrent) {
-            if (this.agentLoop?.isRunning()) { this.agentLoop.cancel(); }
-            this.agentLoop?.clearMessages();
+            if (this.activeProvider === 'copilot-cli') {
+                if (this.copilotRuntime?.isRunning()) { this.copilotRuntime.cancel(); }
+                this.copilotRuntime?.clearMessages();
+            } else {
+                if (this.agentLoop?.isRunning()) { this.agentLoop.cancel(); }
+                this.builtinTools.resetSessionApprovals();
+                this.agentLoop?.clearMessages();
+            }
             this.sendToWebview({ type: 'sessionCleared' });
-            this.restoreSession();   // restore whatever session the manager switched to
+            this.restoreSession();
         }
         this.sendSessionList();
     }
 
     private restoreSession() {
         const session = this.sessionManager.getCurrentSession();
+        this.activeMode = this.getSessionMode(session);
+        this.applyPermissionLevel(session.activePermissionLevel ?? DEFAULT_PERMISSION_LEVEL, { persist: false });
+        this.sendToWebview({ type: 'setChatMode', mode: this.activeMode });
+        this.sendToWebview({ type: 'planReady', visible: false });
+
+        if (session.transcript && session.transcript.items.length > 0) {
+            this.restoringTranscript = true;
+            try {
+                this.sendToWebview({ type: 'restoreTranscript', transcript: session.transcript });
+            } finally {
+                this.restoringTranscript = false;
+            }
+
+            if (this.agentLoop) {
+                this.agentLoop.setMessages([...session.messages]);
+            }
+            return;
+        }
+
         if (session.messages.length === 0) { return; }
+
+        this.restoringTranscript = true;
+        try {
 
         // Build a map of tool_call_id → success for completed tool results
         const toolResults = new Map<string, boolean>();
@@ -767,6 +1502,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                         for (const entry of phase.entries) {
                             if (entry.kind === 'progress') {
                                 this.sendToWebview({ type: 'workingTextAppended', blockId: phase.id, entry });
+                            } else if (entry.kind === 'terminal') {
+                                for (const line of entry.text.split(/\r?\n/)) {
+                                    if (!line) { continue; }
+                                    this.sendToWebview({ type: 'terminalOutput', line });
+                                }
                             } else {
                                 this.sendToWebview({ type: 'workingActionAdded', blockId: phase.id, entry });
                             }
@@ -831,6 +1571,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         // Restore into agent loop
         if (this.agentLoop) {
             this.agentLoop.setMessages([...session.messages]);
+        }
+        } finally {
+            this.restoringTranscript = false;
         }
     }
 
@@ -1140,6 +1883,30 @@ body { display: flex; flex-direction: column; }
     margin-bottom: 4px;
 }
 .msg.assistant { padding: 4px 0; }
+.assistant-provider-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    margin-bottom: 7px;
+    font-size: 11px;
+    line-height: 1.2;
+    color: var(--vscode-descriptionForeground, #9aa0a6);
+    letter-spacing: 0.2px;
+    user-select: none;
+}
+.assistant-provider-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    opacity: 0.9;
+}
+.assistant-provider-icon svg {
+    width: 14px;
+    height: 14px;
+    display: block;
+}
 .msg.assistant .content {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
@@ -1627,15 +2394,22 @@ body { display: flex; flex-direction: column; }
 }
 /* Inline narration rows between working blocks (GHCP-style agent chatter) */
 .narration-row {
-    padding: 6px 16px;
-    color: var(--fg);
+    padding: 4px 0;
     font-size: 12.5px;
     line-height: 1.5;
 }
-.narration-row p { margin: 0 0 4px; }
+.narration-row p { margin: 0 0 5px; }
 .narration-row p:last-child { margin-bottom: 0; }
+.narration-row ul,
+.narration-row ol {
+    margin: 5px 0 5px 18px;
+    padding: 0;
+}
+.narration-row li {
+    margin: 2px 0;
+}
 .narration-row code {
-    background: var(--vscode-textCodeBlock-background, rgba(255,255,255,0.06));
+    background: rgba(255,255,255,0.07);
     padding: 1px 4px;
     border-radius: 3px;
     font-size: 12px;
@@ -1695,8 +2469,13 @@ body { display: flex; flex-direction: column; }
 }
 .wb-action-copy {
     min-width: 0;
+    flex: 1;
 }
 .wb-action-text {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
     font-size: 12px;
     line-height: 1.35;
     color: var(--fg);
@@ -1707,9 +2486,13 @@ body { display: flex; flex-direction: column; }
 }
 .wb-action-detail {
     margin-top: 1px;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    overflow: hidden;
     font-size: 11px;
     color: var(--vscode-descriptionForeground, #9aa0a6);
-    white-space: pre-wrap;
+    white-space: normal;
     overflow-wrap: anywhere;
 }
 .wb-action-diff {
@@ -1810,7 +2593,7 @@ body { display: flex; flex-direction: column; }
 /* INPUT */
 #input-area {
     border-top: 1px solid var(--border);
-    padding: 6px 8px;
+    padding: 8px 10px 10px;
     flex-shrink: 0;
 }
 #input-area.drag-over {
@@ -1819,7 +2602,7 @@ body { display: flex; flex-direction: column; }
 }
 #composer-shell {
     border: 1px solid var(--input-border);
-    border-radius: 8px;
+    border-radius: 10px;
     background: var(--input-bg);
     overflow: visible;
     position: relative;
@@ -1830,14 +2613,14 @@ body { display: flex; flex-direction: column; }
     color: var(--input-fg);
     border: none;
     border-radius: 0;
-    padding: 8px 10px;
+    padding: 10px 12px 6px;
     font-family: inherit;
     font-size: inherit;
     resize: none;
     outline: none;
-    min-height: 36px;
+    min-height: 40px;
     max-height: 200px;
-    line-height: 1.4;
+    line-height: 1.45;
 }
 #input-area textarea:focus {
     border-color: transparent;
@@ -1845,8 +2628,8 @@ body { display: flex; flex-direction: column; }
 #composer-toolbar {
     display: flex;
     align-items: center;
-    gap: 2px;
-    padding: 4px 6px;
+    gap: 4px;
+    padding: 5px 8px 7px;
     min-height: 32px;
 }
 /* Shared composer toolbar button base */
@@ -1871,23 +2654,118 @@ body { display: flex; flex-direction: column; }
 }
 #btn-attach .codicon { font-size: 14px; }
 
-/* Agent mode label */
-.agent-mode {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    font-size: 11px;
-    color: var(--fg);
-    opacity: 0.7;
-    padding: 2px 6px;
-    border-radius: 6px;
-    cursor: default;
-    user-select: none;
+/* Chat mode dropdown */
+.mode-dropdown {
+    position: relative;
     flex-shrink: 0;
 }
-.agent-mode .agent-icon {
-    font-size: 13px;
-    opacity: 0.8;
+.mode-trigger {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 88px;
+    border: 1px solid rgba(255,255,255,0.1);
+    background: var(--vscode-editorWidget-background, rgba(255,255,255,0.05));
+    color: var(--fg);
+    border-radius: 10px;
+    padding: 4px 8px;
+    font-size: 11.5px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: border-color 0.12s ease, background 0.12s ease, opacity 0.12s ease;
+}
+.mode-trigger:hover {
+    background: rgba(255,255,255,0.08);
+    border-color: rgba(255,255,255,0.16);
+}
+.mode-trigger:focus-visible {
+    outline: 1px solid var(--vscode-focusBorder, #3794ff);
+    outline-offset: 1px;
+}
+.mode-trigger:disabled {
+    opacity: 0.55;
+    cursor: default;
+}
+.mode-trigger-label {
+    flex: 0 1 auto;
+    text-align: left;
+}
+.mode-trigger-chevron {
+    width: 10px;
+    height: 10px;
+    opacity: 0.65;
+    flex-shrink: 0;
+    transition: transform 0.12s ease;
+}
+.mode-dropdown.open .mode-trigger-chevron {
+    transform: rotate(180deg);
+}
+.mode-icon {
+    width: 14px;
+    height: 14px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    color: var(--vscode-descriptionForeground, #b2b8bf);
+}
+.mode-icon svg {
+    width: 14px;
+    height: 14px;
+    display: block;
+}
+.mode-menu {
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 0;
+    min-width: 112px;
+    width: max-content;
+    max-width: 132px;
+    padding: 4px;
+    border-radius: 12px;
+    border: 1px solid rgba(255,255,255,0.12);
+    background: var(--vscode-editorWidget-background, #252526);
+    box-shadow: 0 12px 28px rgba(0,0,0,0.28);
+    z-index: 25;
+}
+.mode-menu.hidden {
+    display: none;
+}
+.mode-option {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    border: none;
+    background: transparent;
+    color: var(--fg);
+    border-radius: 8px;
+    padding: 6px 7px;
+    font-size: 11.5px;
+    font-family: inherit;
+    cursor: pointer;
+}
+.mode-option:hover {
+    background: rgba(255,255,255,0.06);
+}
+.mode-option.active {
+    background: rgba(255,255,255,0.08);
+}
+.mode-option-label {
+    flex: 1;
+    text-align: left;
+}
+.mode-option-check {
+    width: 14px;
+    height: 14px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    color: var(--vscode-textLink-foreground, #3794ff);
+}
+.mode-option.active .mode-option-check {
+    opacity: 1;
 }
 
 /* Tools button SVG */
@@ -2002,17 +2880,26 @@ body { display: flex; flex-direction: column; }
 
 #model-select {
     width: auto;
-    min-width: 140px;
-    max-width: 260px;
-    background: var(--vscode-dropdown-background, var(--input-bg, #1e1e1e));
+    min-width: 120px;
+    max-width: 220px;
+    min-height: 28px;
+    box-sizing: border-box;
+    background: rgba(255,255,255,0.03);
     color: var(--vscode-dropdown-foreground, var(--input-fg));
-    border: 1px solid var(--vscode-dropdown-border, var(--input-border));
-    border-radius: 6px;
-    padding: 4px 8px;
+    border: 1px solid rgba(255,255,255,0.09);
+    border-radius: 8px;
+    padding: 4px 10px 4px 10px;
     font-family: inherit;
     font-size: 12.5px;
+    line-height: 1.2;
+    vertical-align: middle;
     outline: none;
     cursor: pointer;
+    transition: background 0.12s ease, border-color 0.12s ease;
+}
+#model-select:hover {
+    background: rgba(255,255,255,0.05);
+    border-color: rgba(255,255,255,0.14);
 }
 #model-select:focus {
     border-color: var(--vscode-focusBorder, var(--btn-bg));
@@ -2022,6 +2909,105 @@ body { display: flex; flex-direction: column; }
     color: var(--vscode-dropdown-foreground, var(--input-fg));
     padding: 4px 8px;
     font-size: 12.5px;
+}
+
+/* Provider bar – sits below the composer shell, matches GHCP bottom bar */
+#provider-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 4px 2px;
+}
+.footer-select-control {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-height: 24px;
+    box-sizing: border-box;
+    color: var(--fg);
+    opacity: 0.65;
+    padding: 2px 6px;
+    border-radius: 4px;
+    transition: opacity 0.12s, background 0.12s;
+}
+.footer-select-control:hover,
+.footer-select-control:focus-within {
+    opacity: 1;
+    background: rgba(255,255,255,0.08);
+}
+.footer-select-icon {
+    width: 11px;
+    height: 11px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--vscode-descriptionForeground, #b2b8bf);
+    flex-shrink: 0;
+}
+.footer-select-icon svg {
+    width: 11px;
+    height: 11px;
+    display: block;
+}
+#provider-select,
+#permission-select {
+    background: none;
+    border: none;
+    color: var(--fg);
+    font-family: inherit;
+    font-size: 11.5px;
+    line-height: 1.2;
+    cursor: pointer;
+    padding: 0;
+    outline: none;
+    vertical-align: middle;
+}
+#provider-select {
+    min-width: 88px;
+}
+#permission-select {
+    min-width: 134px;
+}
+#provider-select option,
+#permission-select option {
+    background: var(--vscode-dropdown-listBackground, var(--vscode-dropdown-background, #252526));
+    color: var(--vscode-dropdown-foreground, var(--input-fg));
+    padding: 4px 8px;
+    font-size: 11.5px;
+}
+#plan-action-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 2px 10px;
+    color: var(--vscode-descriptionForeground, #b2b8bf);
+    font-size: 11.5px;
+}
+#plan-action-bar.hidden {
+    display: none;
+}
+.plan-action-label {
+    font-size: 11.5px;
+    color: var(--vscode-descriptionForeground, #b2b8bf);
+}
+#btn-run-plan {
+    border: 1px solid rgba(255,255,255,0.12);
+    background: rgba(255,255,255,0.05);
+    color: var(--fg);
+    border-radius: 7px;
+    padding: 5px 10px;
+    font-size: 11.5px;
+    font-family: inherit;
+    cursor: pointer;
+    line-height: 1.2;
+}
+#btn-run-plan:hover {
+    background: rgba(255,255,255,0.09);
+    border-color: rgba(255,255,255,0.18);
+}
+#provider-bar #context-meter {
+    margin-left: auto;
+    align-self: center;
 }
 
 /* ATTACHMENT PREVIEW */
@@ -2129,8 +3115,8 @@ body { display: flex; flex-direction: column; }
 #attach-preview {
     display: none;
     flex-wrap: wrap;
-    gap: 4px;
-    padding: 4px 0;
+    gap: 6px;
+    padding: 2px 0 8px;
 }
 .attach-pill {
     display: flex;
@@ -2215,15 +3201,6 @@ body { display: flex; flex-direction: column; }
     border-radius: 0 0 4px 4px;
 }
 
-#input-area .hint {
-    font-size: 10px;
-    opacity: 0.5;
-    margin-top: 3px;
-    text-align: right;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-}
 #context-meter {
     display: flex;
     align-items: center;
@@ -2310,7 +3287,6 @@ body { display: flex; flex-direction: column; }
 <div id="history-panel">
     <div id="history-list"></div>
 </div>
-<div id="status-bar"></div>
 <div id="messages">
     <div id="working-indicator">
         <span id="working-text">Thinking</span>
@@ -2336,14 +3312,46 @@ body { display: flex; flex-direction: column; }
     </div>
     <div class="plan-steps"></div>
 </div>
+<div id="status-bar"></div>
 <div id="input-area">
     <div id="attach-preview"></div>
+    <div id="plan-action-bar" class="hidden">
+        <span class="plan-action-label">Proceed from Plan</span>
+        <button id="btn-run-plan" title="Continue with execution in Agent mode">Start Implementation</button>
+    </div>
     <div id="composer-shell" style="position:relative;">
         <div id="slash-autocomplete"></div>
         <textarea id="input" rows="1" placeholder="Ask Junior anything..." autofocus></textarea>
         <div id="composer-toolbar">
             <button id="btn-attach" class="composer-btn" title="Attach context"><i class="codicon codicon-add"></i></button>
-            <span class="agent-mode"><span class="agent-icon">&#9672;</span> Agent</span>
+            <div id="mode-switch" class="mode-dropdown">
+                <button id="mode-trigger" class="mode-trigger" type="button" title="Chat mode" aria-haspopup="menu" aria-expanded="false">
+                    <span id="mode-trigger-icon" class="mode-icon" aria-hidden="true">
+                        <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M8 2v1.4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><path d="M5.1 3.9h5.8A2.3 2.3 0 0 1 13.2 6.2v3.2a2.3 2.3 0 0 1-2.3 2.3H5.1a2.3 2.3 0 0 1-2.3-2.3V6.2a2.3 2.3 0 0 1 2.3-2.3Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M2.8 7.1H1.9M14.1 7.1h-.9" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><circle cx="6.3" cy="7.2" r=".75" fill="currentColor"/><circle cx="9.7" cy="7.2" r=".75" fill="currentColor"/><path d="M6 9.4c.6.45 1.2.65 2 .65s1.4-.2 2-.65" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+                    </span>
+                    <span id="mode-trigger-label" class="mode-trigger-label">Agent</span>
+                    <span class="mode-trigger-chevron" aria-hidden="true">
+                        <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M4.5 6.5 8 10l3.5-3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    </span>
+                </button>
+                <div id="mode-menu" class="mode-menu hidden" role="menu" aria-label="Chat mode">
+                    <button class="mode-option active" data-mode="agent" role="menuitemradio" aria-checked="true" type="button">
+                        <span class="mode-icon" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M8 2v1.4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><path d="M5.1 3.9h5.8A2.3 2.3 0 0 1 13.2 6.2v3.2a2.3 2.3 0 0 1-2.3 2.3H5.1a2.3 2.3 0 0 1-2.3-2.3V6.2a2.3 2.3 0 0 1 2.3-2.3Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M2.8 7.1H1.9M14.1 7.1h-.9" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><circle cx="6.3" cy="7.2" r=".75" fill="currentColor"/><circle cx="9.7" cy="7.2" r=".75" fill="currentColor"/><path d="M6 9.4c.6.45 1.2.65 2 .65s1.4-.2 2-.65" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg></span>
+                        <span class="mode-option-label">Agent</span>
+                        <span class="mode-option-check" aria-hidden="true"><i class="codicon codicon-check"></i></span>
+                    </button>
+                    <button class="mode-option" data-mode="ask" role="menuitemradio" aria-checked="false" type="button">
+                        <span class="mode-icon" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M3 4.75A2.25 2.25 0 0 1 5.25 2.5h5.5A2.25 2.25 0 0 1 13 4.75v3.5a2.25 2.25 0 0 1-2.25 2.25H7.1L4.4 12.8a.6.6 0 0 1-.99-.45v-1.87A2.25 2.25 0 0 1 3 8.25v-3.5Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M5.5 5.9h5M5.5 7.9h3.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg></span>
+                        <span class="mode-option-label">Ask</span>
+                        <span class="mode-option-check" aria-hidden="true"><i class="codicon codicon-check"></i></span>
+                    </button>
+                    <button class="mode-option" data-mode="plan" role="menuitemradio" aria-checked="false" type="button">
+                        <span class="mode-icon" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M4 4h8M6.5 8H12M6.5 12H12" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><circle cx="4.25" cy="4" r=".85" fill="currentColor"/><circle cx="4.25" cy="8" r=".85" fill="currentColor"/><circle cx="4.25" cy="12" r=".85" fill="currentColor"/></svg></span>
+                        <span class="mode-option-label">Plan</span>
+                        <span class="mode-option-check" aria-hidden="true"><i class="codicon codicon-check"></i></span>
+                    </button>
+                </div>
+            </div>
             <select id="model-select" title="Choose model deployment">
                 <option value="">Loading models...</option>
             </select>
@@ -2352,7 +3360,26 @@ body { display: flex; flex-direction: column; }
             <button id="btn-send" class="composer-btn" title="Send message (Enter)"><i class="codicon codicon-arrow-up"></i></button>
         </div>
     </div>
-    <div class="hint"><span class="hint-text">Enter to send &middot; Shift+Enter for newline &middot; Paste images from clipboard</span><div id="context-meter"><div class="meter-ring"><svg viewBox="0 0 20 20"><circle class="meter-bg" cx="10" cy="10" r="8" /><circle class="meter-fill" cx="10" cy="10" r="8" stroke-dasharray="50.27" stroke-dashoffset="50.27" /></svg></div><span class="meter-label">0 / 128.0K (0%)</span></div></div>
+    <div id="provider-bar">
+        <label class="footer-select-control" title="Agent provider">
+            <span class="footer-select-icon" aria-hidden="true">
+                <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M5.1 3.9h5.8A2.3 2.3 0 0 1 13.2 6.2v3.2a2.3 2.3 0 0 1-2.3 2.3H5.1a2.3 2.3 0 0 1-2.3-2.3V6.2a2.3 2.3 0 0 1 2.3-2.3Z" stroke="currentColor" stroke-width="1.15" stroke-linejoin="round"/><path d="M2.8 7.1H1.9M14.1 7.1h-.9" stroke="currentColor" stroke-width="1.15" stroke-linecap="round"/><circle cx="6.3" cy="7.2" r=".75" fill="currentColor"/><circle cx="9.7" cy="7.2" r=".75" fill="currentColor"/><path d="M6 9.4c.6.45 1.2.65 2 .65s1.4-.2 2-.65" stroke="currentColor" stroke-width="1.15" stroke-linecap="round"/></svg>
+            </span>
+            <select id="provider-select" title="Agent provider">
+                <option value="local">Local</option>
+            </select>
+        </label>
+        <label class="footer-select-control" title="Approval mode for this chat session">
+            <span class="footer-select-icon" aria-hidden="true">
+                <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M8 1.75 12.5 3.5v3.84c0 3.06-1.9 5.84-4.5 6.91-2.6-1.07-4.5-3.85-4.5-6.91V3.5L8 1.75Z" stroke="currentColor" stroke-width="1.15" stroke-linejoin="round"/><path d="m6.35 7.95 1.1 1.1 2.35-2.35" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </span>
+            <select id="permission-select" title="Approval mode for this chat session">
+                <option value="default">Default Approvals</option>
+                <option value="bypass">Bypass Approvals</option>
+            </select>
+        </label>
+        <div id="context-meter"><div class="meter-ring"><svg viewBox="0 0 20 20"><circle class="meter-bg" cx="10" cy="10" r="8" /><circle class="meter-fill" cx="10" cy="10" r="8" stroke-dasharray="50.27" stroke-dashoffset="50.27" /></svg></div><span class="meter-label">0 / 128.0K (0%)</span></div>
+    </div>
 </div>
 
 <script nonce="${nonce}" src="${scriptUri}"></script>

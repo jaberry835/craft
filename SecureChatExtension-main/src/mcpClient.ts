@@ -8,8 +8,11 @@
  */
 import * as vscode from 'vscode';
 import * as cp from 'child_process';
+import * as fs from 'fs';
 import * as http from 'http';
 import * as https from 'https';
+import * as path from 'path';
+import type { MCPServerConfig as CopilotSdkMcpServerConfig } from '@github/copilot-sdk';
 import { McpAuthSessionConfig, McpServerConfig, McpToolInfo, ToolDefinition, ToolResult } from './types';
 import { getSetting } from './config';
 
@@ -57,6 +60,11 @@ interface HttpConnection extends McpConnectionBase {
 
 type McpConnection = StdioConnection | HttpConnection;
 
+interface StdioSpawnSpec {
+    command: string;
+    args: string[];
+}
+
 export class McpClient {
     private connections: Map<string, McpConnection> = new Map();
     private mcpToolNameMap: Map<string, { serverName: string; toolName: string }> = new Map();
@@ -66,6 +74,12 @@ export class McpClient {
     private static readonly HEALTH_CHECK_INTERVAL_MS = 30_000;
     /** Timeout for a single health ping (ms) */
     private static readonly HEALTH_PING_TIMEOUT_MS = 5_000;
+    /** Max consecutive timeouts before killing/restarting a stdio server */
+    private static readonly MAX_CONSECUTIVE_TIMEOUTS = 3;
+    /** Tracks consecutive timeout count per stdio server */
+    private consecutiveTimeouts: Map<string, number> = new Map();
+    /** Stores original spawn configs for stdio servers so we can restart them */
+    private stdioConfigs: Map<string, McpServerConfig> = new Map();
 
     constructor() {
         this.outputChannel = vscode.window.createOutputChannel('Junior MCP');
@@ -87,6 +101,48 @@ export class McpClient {
             }
         }
         this.outputChannel.appendLine(`MCP: ${this.getToolCount()} total tools across ${this.connections.size} connected server(s)`);
+    }
+
+    /**
+     * Return the merged VS Code MCP settings in the shape expected by the Copilot SDK.
+     * This lets the Copilot CLI runtime use the same configured servers as the local agent.
+     */
+    async getCopilotSdkServerConfigs(): Promise<Record<string, CopilotSdkMcpServerConfig>> {
+        const servers = this.getConfiguredServers();
+        const result: Record<string, CopilotSdkMcpServerConfig> = {};
+
+        for (const [name, config] of Object.entries(servers)) {
+            if (this.isCopilotCliBuiltInMcpServer(name, config)) {
+                this.outputChannel.appendLine(`MCP: skipping built-in Copilot CLI MCP server "${name}"`);
+                continue;
+            }
+
+            if (config.command) {
+                const spawnSpec = this.normalizeStdioSpawn(config.command, config.args || []);
+                result[name] = {
+                    tools: ['*'],
+                    type: 'stdio',
+                    command: spawnSpec.command,
+                    args: spawnSpec.args,
+                    ...(config.env ? { env: config.env } : {}),
+                    ...(config.cwd ? { cwd: config.cwd } : {}),
+                };
+                continue;
+            }
+
+            if (config.url) {
+                const headers = await this.resolveHttpHeaders(name, config);
+                result[name] = {
+                    tools: ['*'],
+                    type: 'http',
+                    url: config.url,
+                    ...(Object.keys(headers).length > 0 ? { headers } : {}),
+                };
+            }
+        }
+
+        this.outputChannel.appendLine(`MCP: prepared ${Object.keys(result).length} Copilot SDK server config(s): ${Object.keys(result).join(', ') || '(none)'}`);
+        return result;
     }
 
     private getConfiguredServers(): Record<string, McpServerConfig> {
@@ -148,6 +204,145 @@ export class McpClient {
 
         const config = value as McpServerConfig;
         return typeof config.command === 'string' || typeof config.url === 'string';
+    }
+
+    private normalizeStdioSpawn(command: string, args: string[]): StdioSpawnSpec {
+        if (process.platform !== 'win32') {
+            return { command, args };
+        }
+
+        const resolvedCommand = this.resolveWindowsCommandPath(command);
+        const nodePackageCommand = this.resolveWindowsNodePackageCommand(resolvedCommand, args);
+        if (nodePackageCommand) {
+            return nodePackageCommand;
+        }
+
+        const resolvedExt = path.extname(resolvedCommand).toLowerCase();
+
+        if (resolvedExt === '.exe' || resolvedExt === '.com') {
+            return { command: resolvedCommand, args };
+        }
+
+        if (resolvedExt === '.cmd' || resolvedExt === '.bat') {
+            const shellCommand = process.env.ComSpec || 'cmd.exe';
+            return {
+                command: shellCommand,
+                args: ['/d', '/s', '/c', this.buildWindowsCommandLine(resolvedCommand, args)]
+            };
+        }
+
+        if (resolvedExt === '.ps1' || resolvedExt === '.psm1') {
+            const shellCommand = this.resolvePowerShellCommand();
+            return {
+                command: shellCommand,
+                args: ['-NoProfile', '-NoLogo', '-File', resolvedCommand, ...args]
+            };
+        }
+
+        return { command: resolvedCommand, args };
+    }
+
+    private resolveWindowsNodePackageCommand(command: string, args: string[]): StdioSpawnSpec | undefined {
+        if (process.platform !== 'win32') {
+            return undefined;
+        }
+
+        const commandName = path.basename(command, path.extname(command)).toLowerCase();
+        if (commandName !== 'npx' && commandName !== 'npm') {
+            return undefined;
+        }
+
+        const commandDir = path.dirname(command);
+        const nodeExe = this.resolveWindowsPathCandidates(path.join(commandDir, 'node')) || this.resolveWindowsCommandPath('node');
+        const cliScript = path.join(
+            commandDir,
+            'node_modules',
+            'npm',
+            'bin',
+            commandName === 'npx' ? 'npx-cli.js' : 'npm-cli.js'
+        );
+
+        if (!fs.existsSync(nodeExe) || !fs.existsSync(cliScript)) {
+            return undefined;
+        }
+
+        return {
+            command: nodeExe,
+            args: [cliScript, ...args],
+        };
+    }
+
+    private resolveWindowsCommandPath(command: string): string {
+        if (process.platform !== 'win32') {
+            return command;
+        }
+
+        if (this.commandLooksLikePath(command)) {
+            return this.resolveWindowsPathCandidates(command) || command;
+        }
+
+        const pathEntries = (process.env.PATH || '').split(';').filter(Boolean);
+        for (const entry of pathEntries) {
+            const candidate = this.resolveWindowsPathCandidates(path.join(entry, command));
+            if (candidate) {
+                return candidate;
+            }
+        }
+
+        return command;
+    }
+
+    private resolveWindowsPathCandidates(basePath: string): string | undefined {
+        const ext = path.extname(basePath);
+        const candidates = ext
+            ? [basePath]
+            : [
+                `${basePath}.exe`,
+                `${basePath}.com`,
+                `${basePath}.cmd`,
+                `${basePath}.bat`,
+                `${basePath}.ps1`,
+                `${basePath}.psm1`,
+                basePath,
+            ];
+
+        return candidates.find(candidate => {
+            try {
+                return fs.existsSync(candidate);
+            } catch {
+                return false;
+            }
+        });
+    }
+
+    private commandLooksLikePath(command: string): boolean {
+        return command.includes('\\') || command.includes('/') || /^[a-zA-Z]:/.test(command);
+    }
+
+    private buildWindowsCommandLine(command: string, args: string[]): string {
+        return [command, ...args].map(arg => this.quoteWindowsCommandArg(arg)).join(' ');
+    }
+
+    private quoteWindowsCommandArg(arg: string): string {
+        if (arg.length === 0) {
+            return '""';
+        }
+        if (!/[\s"]/u.test(arg)) {
+            return arg;
+        }
+        return `"${arg.replace(/"/g, '\\"')}"`;
+    }
+
+    private resolvePowerShellCommand(): string {
+        return 'powershell.exe';
+    }
+
+    private isCopilotCliBuiltInMcpServer(name: string, config: McpServerConfig): boolean {
+        const normalizedName = name.trim().replace(/\\+/g, '/').replace(/\/+/g, '/').toLowerCase();
+        const normalizedUrl = (config.url || '').trim().replace(/\/+$/g, '').toLowerCase();
+        return normalizedName === 'github-mcp-server'
+            || normalizedName.endsWith('/github-mcp-server')
+            || normalizedUrl === 'https://api.githubcopilot.com/mcp';
     }
 
     private hasAuthorizationHeader(headers: Record<string, string>): boolean {
@@ -285,15 +480,18 @@ export class McpClient {
     // ── stdio transport ──────────────────────────────────────────────
 
     private async connectStdioServer(name: string, config: McpServerConfig): Promise<void> {
-        this.outputChannel.appendLine(`Connecting to MCP server (stdio): ${name} (${config.command})`);
-
+        const spawnSpec = this.normalizeStdioSpawn(config.command!, config.args || []);
+        this.outputChannel.appendLine(`Connecting to MCP server (stdio): ${name} (${spawnSpec.command} ${spawnSpec.args.join(' ')})`);
+        // Store config for potential restart
+        this.stdioConfigs.set(name, config);
+        this.consecutiveTimeouts.set(name, 0);
         const cwd = config.cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
-        const proc = cp.spawn(config.command!, config.args || [], {
+        const proc = cp.spawn(spawnSpec.command, spawnSpec.args, {
             cwd,
             env: { ...process.env, ...(config.env || {}) },
             stdio: ['pipe', 'pipe', 'pipe'],
             windowsHide: true,
-            shell: process.platform === 'win32'
+            shell: false
         });
 
         const conn: StdioConnection = {
@@ -409,8 +607,13 @@ export class McpClient {
     }
 
     /** Send a JSON-RPC request over HTTP. Handles both JSON and SSE responses. */
-    private httpPost(conn: HttpConnection, body: string, timeoutMs: number, allowAuthRetry = true): Promise<{ body: string; headers: http.IncomingHttpHeaders; contentType: string }> {
+    private httpPost(conn: HttpConnection, body: string, timeoutMs: number, allowAuthRetry = true, abortSignal?: AbortSignal): Promise<{ body: string; headers: http.IncomingHttpHeaders; contentType: string }> {
         return new Promise((resolve, reject) => {
+            if (abortSignal?.aborted) {
+                reject(new Error('Aborted'));
+                return;
+            }
+
             const parsed = new URL(conn.baseUrl);
             const isHttps = parsed.protocol === 'https:';
             const mod = isHttps ? https : http;
@@ -482,6 +685,14 @@ export class McpClient {
                 req.destroy();
                 reject(new Error('HTTP request timed out'));
             });
+
+            if (abortSignal) {
+                abortSignal.addEventListener('abort', () => {
+                    req.destroy();
+                    reject(new Error('Aborted'));
+                }, { once: true });
+            }
+
             req.write(body);
             req.end();
         });
@@ -530,7 +741,7 @@ export class McpClient {
     }
 
     /** Call an MCP tool — name format: mcp_{serverName}_{toolName} */
-    async callTool(fullName: string, args: Record<string, unknown>): Promise<ToolResult> {
+    async callTool(fullName: string, args: Record<string, unknown>, abortSignal?: AbortSignal): Promise<ToolResult> {
         const mapped = this.mcpToolNameMap.get(fullName);
         const serverName = mapped?.serverName;
         const toolName = mapped?.toolName;
@@ -542,13 +753,17 @@ export class McpClient {
                 return { success: false, result: `Invalid MCP tool name format: ${fullName}` };
             }
 
-            return this.callToolByName(match[1], match[2], args);
+            return this.callToolByName(match[1], match[2], args, abortSignal);
         }
 
-        return this.callToolByName(serverName, toolName, args);
+        return this.callToolByName(serverName, toolName, args, abortSignal);
     }
 
-    private async callToolByName(serverName: string, toolName: string, args: Record<string, unknown>): Promise<ToolResult> {
+    private async callToolByName(serverName: string, toolName: string, args: Record<string, unknown>, abortSignal?: AbortSignal): Promise<ToolResult> {
+        if (abortSignal?.aborted) {
+            return { success: false, result: 'Cancelled by user.' };
+        }
+
         const conn = this.connections.get(serverName);
         if (!conn) {
             return { success: false, result: `MCP server "${serverName}" is not connected.` };
@@ -558,7 +773,10 @@ export class McpClient {
             const response = await this.sendRequest(conn, 'tools/call', {
                 name: toolName,
                 arguments: args
-            }, 30000) as { content?: Array<{ type: string; text?: string }> };
+            }, 30000, abortSignal) as { content?: Array<{ type: string; text?: string }> };
+
+            // Reset consecutive timeout counter on success
+            this.consecutiveTimeouts.set(serverName, 0);
 
             const text = response?.content
                 ?.filter(c => c.type === 'text')
@@ -567,7 +785,21 @@ export class McpClient {
 
             return { success: true, result: text };
         } catch (e: unknown) {
-            return { success: false, result: `MCP tool call failed: ${e instanceof Error ? e.message : String(e)}` };
+            const errMsg = e instanceof Error ? e.message : String(e);
+
+            // Track consecutive timeouts for stdio servers
+            if (conn.transport === 'stdio' && /timed out/i.test(errMsg)) {
+                const count = (this.consecutiveTimeouts.get(serverName) || 0) + 1;
+                this.consecutiveTimeouts.set(serverName, count);
+
+                if (count >= McpClient.MAX_CONSECUTIVE_TIMEOUTS) {
+                    this.outputChannel.appendLine(`MCP: "${serverName}" timed out ${count} times consecutively. Killing and restarting...`);
+                    await this.restartStdioServer(serverName);
+                    return { success: false, result: `MCP server "${serverName}" was unresponsive after ${count} timeouts and has been restarted. Please retry.` };
+                }
+            }
+
+            return { success: false, result: `MCP tool call failed: ${errMsg}` };
         }
     }
 
@@ -606,11 +838,14 @@ export class McpClient {
 
     // ── JSON-RPC transport (dispatch by type) ──
 
-    private sendRequest(conn: McpConnection, method: string, params: unknown, timeoutMs: number): Promise<unknown> {
-        if (conn.transport === 'http') {
-            return this.sendHttpRequest(conn, method, params, timeoutMs);
+    private sendRequest(conn: McpConnection, method: string, params: unknown, timeoutMs: number, abortSignal?: AbortSignal): Promise<unknown> {
+        if (abortSignal?.aborted) {
+            return Promise.reject(new Error('Aborted'));
         }
-        return this.sendStdioRequest(conn, method, params, timeoutMs);
+        if (conn.transport === 'http') {
+            return this.sendHttpRequest(conn, method, params, timeoutMs, abortSignal);
+        }
+        return this.sendStdioRequest(conn, method, params, timeoutMs, abortSignal);
     }
 
     private sendNotification(conn: McpConnection, method: string, params: unknown) {
@@ -628,10 +863,11 @@ export class McpClient {
 
     // ── HTTP request ──
 
-    private async sendHttpRequest(conn: HttpConnection, method: string, params: unknown, timeoutMs: number): Promise<unknown> {
+    private async sendHttpRequest(conn: HttpConnection, method: string, params: unknown, timeoutMs: number, abortSignal?: AbortSignal): Promise<unknown> {
+        if (abortSignal?.aborted) { throw new Error('Aborted'); }
         const id = conn.nextId++;
         const msg: JsonRpcRequest = { jsonrpc: '2.0', id, method, params };
-        const { body, contentType } = await this.httpPost(conn, JSON.stringify(msg), timeoutMs);
+        const { body, contentType } = await this.httpPost(conn, JSON.stringify(msg), timeoutMs, true, abortSignal);
 
         // Handle SSE responses (text/event-stream)
         if (contentType.includes('text/event-stream')) {
@@ -707,25 +943,42 @@ export class McpClient {
 
     // ── stdio request ──
 
-    private sendStdioRequest(conn: StdioConnection, method: string, params: unknown, timeoutMs: number): Promise<unknown> {
+    private sendStdioRequest(conn: StdioConnection, method: string, params: unknown, timeoutMs: number, abortSignal?: AbortSignal): Promise<unknown> {
         const id = conn.nextId++;
         const msg: JsonRpcRequest = { jsonrpc: '2.0', id, method, params };
         const payload = `${JSON.stringify(msg)}\n`;
 
         return new Promise((resolve, reject) => {
+            if (abortSignal?.aborted) {
+                reject(new Error('Aborted'));
+                return;
+            }
+
             const timer = setTimeout(() => {
                 conn.pendingRequests.delete(id);
                 reject(new Error(`Request timed out: ${method}`));
             }, timeoutMs);
 
+            const cleanup = () => {
+                clearTimeout(timer);
+                abortSignal?.removeEventListener('abort', onAbort);
+            };
+
+            const onAbort = () => {
+                conn.pendingRequests.delete(id);
+                cleanup();
+                reject(new Error('Aborted'));
+            };
+            abortSignal?.addEventListener('abort', onAbort, { once: true });
+
             conn.pendingRequests.set(id, {
-                resolve: (val) => { clearTimeout(timer); resolve(val); },
-                reject: (err) => { clearTimeout(timer); reject(err); }
+                resolve: (val) => { cleanup(); resolve(val); },
+                reject: (err) => { cleanup(); reject(err); }
             });
 
             conn.process.stdin?.write(payload, (err) => {
                 if (err) {
-                    clearTimeout(timer);
+                    cleanup();
                     conn.pendingRequests.delete(id);
                     reject(err);
                 }
@@ -806,6 +1059,31 @@ export class McpClient {
             this.outputChannel.appendLine(`[${conn.serverName}] notification: ${body.slice(0, 300)}`);
         } catch {
             this.outputChannel.appendLine(`[${conn.serverName}] Parse error: ${body.slice(0, 200)}`);
+        }
+    }
+
+    /**
+     * Kill a hung stdio server and attempt to reconnect using its original config.
+     * Called when consecutive timeout threshold is exceeded.
+     */
+    private async restartStdioServer(name: string): Promise<void> {
+        this.consecutiveTimeouts.set(name, 0);
+        const config = this.stdioConfigs.get(name);
+
+        // Kill the old connection
+        this.disconnectServer(name);
+
+        if (!config) {
+            this.outputChannel.appendLine(`MCP: cannot restart "${name}" — original config not found.`);
+            return;
+        }
+
+        try {
+            this.outputChannel.appendLine(`MCP: restarting "${name}"...`);
+            await this.connectStdioServer(name, config);
+            this.outputChannel.appendLine(`MCP: "${name}" restarted successfully.`);
+        } catch (e: unknown) {
+            this.outputChannel.appendLine(`MCP: failed to restart "${name}": ${e instanceof Error ? e.message : String(e)}`);
         }
     }
 
