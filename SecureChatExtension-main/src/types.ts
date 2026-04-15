@@ -8,11 +8,16 @@ export interface AoaiConfig {
     provider: 'direct' | 'apim' | 'openai';
     endpoint: string;
     apimBaseUrl: string;
-    apiKey: string;
+    authHeader: 'api-key' | 'bearer';
+    authToken: string;
     deploymentId: string;
     apiVersion: string;
     maxTokens: number;
     temperature: number;
+    authSession?: {
+        providerId: string;
+        scopes: string[];
+    };
 }
 
 export type ContentPart =

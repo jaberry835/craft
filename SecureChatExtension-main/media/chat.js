@@ -38,6 +38,8 @@ window.onerror = function(msg, src, line, col, err) {
     const historyList = document.getElementById('history-list');
     let currentAssistantEl = null;
     let currentContentEl = null;
+    let currentNarrationEl = null;
+    let currentNarrationText = '';
     let agentRunning = false;
     let currentProvider = 'local';
     let currentPermissionLevel = 'default';
@@ -360,6 +362,7 @@ window.onerror = function(msg, src, line, col, err) {
     }
 
     function renderUserMessageItem(item) {
+        closeLiveNarration();
         const el = document.createElement('div');
         el.className = 'msg user';
         let inner = '<div class="label">You</div>';
@@ -384,6 +387,7 @@ window.onerror = function(msg, src, line, col, err) {
 
     function renderAssistantMessageItem(item) {
         if (!item.text) { return; }
+        closeLiveNarration();
         const assistantEl = document.createElement('div');
         assistantEl.className = 'msg assistant' + (item.provider === 'copilot-cli' ? ' cli-provider' : '');
         appendAssistantProviderBadge(assistantEl, item.provider);
@@ -395,10 +399,28 @@ window.onerror = function(msg, src, line, col, err) {
     }
 
     function renderNarrationItem(item) {
+        closeLiveNarration();
         var narRow = document.createElement('div');
         narRow.className = 'narration-row';
         narRow.innerHTML = renderMarkdownLite(item.text);
         messagesEl.appendChild(narRow);
+    }
+
+    function appendNarrationText(text) {
+        if (!text) { return; }
+        if (!currentNarrationEl || !currentNarrationEl.parentNode) {
+            currentNarrationEl = document.createElement('div');
+            currentNarrationEl.className = 'narration-row';
+            currentNarrationText = '';
+            messagesEl.appendChild(currentNarrationEl);
+        }
+        currentNarrationText += text;
+        currentNarrationEl.innerHTML = renderMarkdownLite(currentNarrationText);
+    }
+
+    function closeLiveNarration() {
+        currentNarrationEl = null;
+        currentNarrationText = '';
     }
 
     function renderErrorItem(item) {
@@ -936,7 +958,69 @@ window.onerror = function(msg, src, line, col, err) {
     // ── Unique ID for copy buttons ──
     let codeBlockId = 0;
 
+    function normalizePathologicalWrappedText(text) {
+        return text.replace(/```[\s\S]*?```|[^`]+/g, function(segment) {
+            if (segment.startsWith('```')) {
+                return segment;
+            }
+
+            var paragraphs = segment.split(/\n{2,}/);
+            var normalized = [];
+            var run = [];
+
+            function isShortNeutralParagraph(paragraph) {
+                var line = paragraph.trim();
+                if (!line) { return false; }
+                if (/^\s*(?:[-*+]\s|\d+\.\s|#|>|\|)/.test(line)) { return false; }
+                var words = line.split(/\s+/).filter(Boolean);
+                return words.length > 0 && words.length <= 3 && line.length <= 24;
+            }
+
+            function flushRun() {
+                if (run.length >= 4) {
+                    normalized.push(run.map(function(part) { return part.trim(); }).join(' '));
+                } else {
+                    normalized.push.apply(normalized, run);
+                }
+                run = [];
+            }
+
+            paragraphs.forEach(function(paragraph) {
+                var lines = paragraph.split('\n');
+                var nonEmptyLines = lines.filter(function(line) { return line.trim().length > 0; });
+
+                if (nonEmptyLines.length >= 4) {
+                    var markdownLike = nonEmptyLines.some(function(line) {
+                        return /^\s*(?:[-*+]\s|\d+\.\s|#|>|\|)/.test(line);
+                    });
+                    var shortLineCount = nonEmptyLines.filter(function(line) {
+                        var words = line.trim().split(/\s+/).filter(Boolean);
+                        return words.length > 0 && words.length <= 3 && line.trim().length <= 24;
+                    }).length;
+
+                    if (!markdownLike && shortLineCount / nonEmptyLines.length >= 0.8) {
+                        flushRun();
+                        normalized.push(nonEmptyLines.map(function(line) { return line.trim(); }).join(' '));
+                        return;
+                    }
+                }
+
+                if (isShortNeutralParagraph(paragraph)) {
+                    run.push(paragraph);
+                    return;
+                }
+
+                flushRun();
+                normalized.push(paragraph);
+            });
+
+            flushRun();
+            return normalized.join('\n\n');
+        });
+    }
+
     function renderMarkdownLite(text) {
+        text = normalizePathologicalWrappedText(text);
         // Normalize repeated separator lines that can appear from model/tool output.
         // This avoids rendering stacks of visual rules with no explanatory content.
         text = text.replace(/(?:^\s*---+\s*$\n?){2,}/gm, '\n');
@@ -1039,6 +1123,7 @@ window.onerror = function(msg, src, line, col, err) {
                 break;
             }
             case 'startAssistantMessage': {
+                closeLiveNarration();
                 currentAssistantEl = document.createElement('div');
                 currentAssistantEl.className = 'msg assistant' + (currentProvider === 'copilot-cli' ? ' cli-provider' : '');
                 appendAssistantProviderBadge(currentAssistantEl, currentProvider);
@@ -1108,6 +1193,7 @@ window.onerror = function(msg, src, line, col, err) {
                 break;
             }
             case 'toolCall': {
+                closeLiveNarration();
                 toolStateById.set(msg.id, {
                     name: msg.name,
                     args: safeParseJson(msg.args || '{}')
@@ -1454,6 +1540,7 @@ window.onerror = function(msg, src, line, col, err) {
                 break;
             }
             case 'sessionCleared': {
+                closeLiveNarration();
                 messagesEl.innerHTML = '';
                 // Cancel any pending stream drain
                 if (streamDrainTimer) { clearInterval(streamDrainTimer); streamDrainTimer = null; }
@@ -1574,6 +1661,7 @@ window.onerror = function(msg, src, line, col, err) {
                 break;
             }
             case 'workingBlockStarted': {
+                closeLiveNarration();
                 if (activeWorkingBlockId && activeWorkingBlockId !== msg.block.id) {
                     const previousBlock = getActiveWorkingBlock();
                     if (previousBlock) {
@@ -1611,7 +1699,7 @@ window.onerror = function(msg, src, line, col, err) {
                 break;
             }
             case 'narrationText': {
-                renderNarrationItem(msg);
+                appendNarrationText(msg.text || '');
                 pinWorkingIndicatorToBottom();
                 scrollToBottom();
                 break;

@@ -7,6 +7,8 @@ import { ChatViewProvider } from './chatViewProvider';
 import { McpClient } from './mcpClient';
 import { TokenTracker } from './tokenTracker';
 import { getSetting, updateSetting } from './config';
+import { getAzureOpenAIBearerAuthSessionConfig } from './aoaiClient';
+import { getCopilotCliBearerAuthSessionConfig } from './copilotCliSupport';
 
 interface CommandRegistrarDeps {
     context: vscode.ExtensionContext;
@@ -75,6 +77,87 @@ export function registerCommands(deps: CommandRegistrarDeps): void {
             if (key) {
                 await aoaiClient.storeApiKey(key);
                 vscode.window.showInformationMessage('API key stored securely. You can remove it from settings.json if present.');
+            }
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('junior.signInAzureOpenAIBearer', async () => {
+            const authSessionConfig = getAzureOpenAIBearerAuthSessionConfig();
+            if (!authSessionConfig) {
+                const action = await vscode.window.showWarningMessage(
+                    'Local Azure/APIM bearer sign-in is not enabled. Set Junior: Azure Openai Auth Mode to VS Code Auth Session first.',
+                    'Open Settings'
+                );
+                if (action === 'Open Settings') {
+                    await vscode.commands.executeCommand(
+                        'workbench.action.openSettings',
+                        'junior.azureOpenAI.authMode'
+                    );
+                }
+                return;
+            }
+
+            try {
+                const session = await vscode.authentication.getSession(
+                    authSessionConfig.providerId,
+                    authSessionConfig.scopes,
+                    { createIfNone: true }
+                );
+
+                if (!session) {
+                    return;
+                }
+
+                vscode.window.showInformationMessage(
+                    `Junior: Signed in to ${authSessionConfig.providerId} for local Azure/APIM bearer mode as ${session.account.label}.`
+                );
+            } catch (err: unknown) {
+                const message = err instanceof Error ? err.message : String(err);
+                const stack = err instanceof Error ? err.stack : '';
+                logError(`signInAzureOpenAIBearer error: ${message}\n${stack}`);
+                vscode.window.showErrorMessage(`Junior: Azure/APIM bearer sign-in failed — ${message}`);
+            }
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('junior.signInCopilotCliBearer', async () => {
+            const authSessionConfig = getCopilotCliBearerAuthSessionConfig();
+            if (!authSessionConfig) {
+                const action = await vscode.window.showWarningMessage(
+                    'Copilot CLI bearer sign-in is not enabled. Set Junior: Copilot Cli Provider Bearer Token Source to VS Code Auth Session first.',
+                    'Open Settings'
+                );
+                if (action === 'Open Settings') {
+                    await vscode.commands.executeCommand(
+                        'workbench.action.openSettings',
+                        'junior.copilotCli.providerBearerTokenSource'
+                    );
+                }
+                return;
+            }
+
+            try {
+                const session = await vscode.authentication.getSession(
+                    authSessionConfig.providerId,
+                    authSessionConfig.scopes,
+                    { createIfNone: true }
+                );
+
+                if (!session) {
+                    return;
+                }
+
+                chatViewProvider.refreshProviderAvailability();
+                vscode.window.showInformationMessage(
+                    `Junior: Signed in to ${authSessionConfig.providerId} for Copilot CLI bearer mode as ${session.account.label}.`
+                );
+            } catch (err: unknown) {
+                const message = err instanceof Error ? err.message : String(err);
+                const stack = err instanceof Error ? err.stack : '';
+                logError(`signInCopilotCliBearer error: ${message}\n${stack}`);
+                vscode.window.showErrorMessage(`Junior: Copilot CLI bearer sign-in failed — ${message}`);
             }
         })
     );

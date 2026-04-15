@@ -29,6 +29,7 @@ npm-debug.log*
 
 # Temporary inspection output
 tmp-vsix-inspect/
+tmp-copilot-logs/
 
 # Environment / secrets
 .env

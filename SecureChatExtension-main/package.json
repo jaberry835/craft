@@ -2,7 +2,7 @@
   "name": "junior",
   "displayName": "Junior - AI junior programming assistant",
   "description": "An offline-capable AI coding assistant powered by Azure OpenAI, providing agentic chat, code analysis, editing, and project scaffolding.",
-  "version": "1.1.5",
+  "version": "1.1.6",
   "publisher": "Microsoft",
   "license": "SEE LICENSE IN LICENSE",
   "repository": {
@@ -102,6 +102,16 @@
         "command": "junior.setApiKey",
         "title": "Junior: Set API Key",
         "icon": "$(key)"
+      },
+      {
+        "command": "junior.signInAzureOpenAIBearer",
+        "title": "Junior: Sign In for Azure/APIM Bearer Mode",
+        "icon": "$(account)"
+      },
+      {
+        "command": "junior.signInCopilotCliBearer",
+        "title": "Junior: Sign In for Copilot CLI Bearer Mode",
+        "icon": "$(account)"
       },
       {
         "command": "junior.triggerInlineCompletion",
@@ -273,6 +283,48 @@
             "default": "",
             "description": "API key (fallback — prefer using 'Junior: Set API Key' for secure storage). Sent as 'api-key' header for Azure OpenAI, or 'Bearer' token for OpenAI.",
             "order": 8
+          },
+          "junior.azureOpenAI.authMode": {
+            "type": "string",
+            "enum": [
+              "api-key",
+              "bearer-token",
+              "vscode-auth-session"
+            ],
+            "default": "api-key",
+            "description": "Authentication mode for provider 'direct' and 'apim'. 'api-key' sends the api-key header, 'bearer-token' sends Authorization: Bearer using junior.azureOpenAI.bearerToken, and 'vscode-auth-session' obtains a bearer token from a VS Code authentication provider session.",
+            "order": 9
+          },
+          "junior.azureOpenAI.bearerToken": {
+            "type": "string",
+            "default": "",
+            "description": "Bearer token used when junior.azureOpenAI.authMode is 'bearer-token'.",
+            "order": 10
+          },
+          "junior.azureOpenAI.bearerTokenSource": {
+            "type": "string",
+            "enum": [
+              "",
+              "vscode-auth-session"
+            ],
+            "default": "",
+            "description": "Optional bearer token source for local Azure/APIM auth. Use 'vscode-auth-session' with authMode='vscode-auth-session' to acquire the token from a VS Code authentication provider.",
+            "order": 11
+          },
+          "junior.azureOpenAI.authProviderId": {
+            "type": "string",
+            "default": "microsoft",
+            "description": "VS Code authentication provider id used when junior.azureOpenAI.authMode is 'vscode-auth-session'. Use 'microsoft' for Microsoft Entra sign-in.",
+            "order": 12
+          },
+          "junior.azureOpenAI.authScopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": [],
+            "description": "Scopes requested from the VS Code authentication provider when junior.azureOpenAI.authMode is 'vscode-auth-session'. For APIM bearer mode with Entra, include your API scope such as 'api://<app-id>/user_impersonation'.",
+            "order": 13
           }
         }
       },
@@ -623,11 +675,36 @@
             "description": "Bearer token for the Copilot CLI BYOK provider. Equivalent to COPILOT_PROVIDER_BEARER_TOKEN.",
             "order": 11
           },
+          "junior.copilotCli.providerBearerTokenSource": {
+            "type": "string",
+            "enum": [
+              "",
+              "vscode-auth-session"
+            ],
+            "default": "",
+            "description": "Optional bearer token source for the Copilot CLI BYOK provider. Use 'vscode-auth-session' to obtain the bearer token from a VS Code authentication session instead of storing it in settings.",
+            "order": 12
+          },
+          "junior.copilotCli.providerAuthProviderId": {
+            "type": "string",
+            "default": "microsoft",
+            "description": "VS Code authentication provider id used when providerBearerTokenSource is 'vscode-auth-session'. Use 'microsoft' for Microsoft Entra sign-in.",
+            "order": 13
+          },
+          "junior.copilotCli.providerAuthScopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": [],
+            "description": "Scopes requested from the VS Code authentication provider when providerBearerTokenSource is 'vscode-auth-session'. For APIM bearer mode with Entra, include your custom API scope such as 'api://<app-id>/user_impersonation'.",
+            "order": 14
+          },
           "junior.copilotCli.providerAzureApiVersion": {
             "type": "string",
             "default": "",
             "description": "Azure API version when providerType is 'azure'. Equivalent to COPILOT_PROVIDER_AZURE_API_VERSION.",
-            "order": 12
+            "order": 15
           },
           "junior.copilotCli.providerWireApi": {
             "type": "string",
@@ -638,13 +715,13 @@
             ],
             "default": "",
             "description": "Wire API format for the BYOK provider. Equivalent to COPILOT_PROVIDER_WIRE_API. Use 'responses' for GPT-5-class models when required.",
-            "order": 13
+            "order": 16
           },
           "junior.copilotCli.logSdkEvents": {
             "type": "boolean",
             "default": false,
             "description": "Log raw Copilot SDK session events to the Junior output channel for CLI runtime debugging.",
-            "order": 14
+            "order": 17
           }
         }
       }
