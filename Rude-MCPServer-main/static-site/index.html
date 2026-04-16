@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Security Packages</title>
+  <style>
+    :root {
+      --primary: #0078d4;
+      --primary-dark: #005a9e;
+      --bg: #f3f2f1;
+      --card-bg: #ffffff;
+      --text: #323130;
+      --muted: #605e5c;
+      --border: #edebe9;
+      --success: #107c10;
+      --warning: #ffb900;
+      --danger: #d13438;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+
+    /* ── Header ─────────────────────────────────────────── */
+    header {
+      background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+      color: #fff;
+      padding: 2.5rem 1rem 2rem;
+      text-align: center;
+    }
+    header h1 { font-size: 2rem; font-weight: 600; }
+    header p  { margin-top: .5rem; opacity: .85; font-size: 1.05rem; }
+
+    /* ── Stats bar ──────────────────────────────────────── */
+    .stats-bar {
+      display: flex;
+      justify-content: center;
+      gap: 2rem;
+      margin-top: 1.25rem;
+      flex-wrap: wrap;
+    }
+    .stat {
+      text-align: center;
+    }
+    .stat .number {
+      font-size: 1.8rem;
+      font-weight: 700;
+    }
+    .stat .label {
+      font-size: .8rem;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      opacity: .8;
+    }
+
+    /* ── Search / filter ────────────────────────────────── */
+    .toolbar {
+      max-width: 960px;
+      margin: 1.5rem auto 0;
+      padding: 0 1rem;
+      display: flex;
+      gap: .75rem;
+      flex-wrap: wrap;
+    }
+    .toolbar input[type="search"] {
+      flex: 1;
+      min-width: 200px;
+      padding: .55rem .85rem;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font-size: .95rem;
+      outline: none;
+    }
+    .toolbar input[type="search"]:focus {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 2px rgba(0,120,212,.15);
+    }
+    .toolbar select {
+      padding: .55rem .85rem;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font-size: .95rem;
+      background: #fff;
+    }
+
+    /* ── Container ──────────────────────────────────────── */
+    .container {
+      max-width: 960px;
+      margin: 1.5rem auto 3rem;
+      padding: 0 1rem;
+    }
+
+    /* ── Cards ──────────────────────────────────────────── */
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.25rem 1.5rem;
+      margin-bottom: .85rem;
+      transition: box-shadow .2s, border-color .2s;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 1rem;
+    }
+    .card:hover {
+      box-shadow: 0 2px 12px rgba(0,0,0,.08);
+      border-color: var(--primary);
+    }
+    .card-body { flex: 1; }
+    .card h2 { font-size: 1.1rem; font-weight: 600; }
+    .card h2 a { color: var(--primary); text-decoration: none; }
+    .card h2 a:hover { text-decoration: underline; }
+    .card .meta {
+      font-size: .82rem;
+      color: var(--muted);
+      margin-top: .3rem;
+      display: flex;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+    .card .desc { margin-top: .45rem; font-size: .92rem; }
+    .card .badge {
+      display: inline-block;
+      font-size: .75rem;
+      font-weight: 600;
+      padding: .2rem .6rem;
+      border-radius: 12px;
+      white-space: nowrap;
+      margin-top: .5rem;
+    }
+    .badge-new {
+      background: #e6f4ea;
+      color: var(--success);
+    }
+
+    /* ── States ─────────────────────────────────────────── */
+    #loading {
+      text-align: center;
+      padding: 4rem 1rem;
+      color: var(--muted);
+    }
+    .spinner {
+      display: inline-block;
+      width: 28px; height: 28px;
+      border: 3px solid var(--border);
+      border-top-color: var(--primary);
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+      margin-bottom: .75rem;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    #error {
+      text-align: center;
+      padding: 2rem;
+      color: var(--danger);
+      display: none;
+    }
+    .empty {
+      text-align: center;
+      padding: 4rem 1rem;
+      color: var(--muted);
+    }
+
+    /* ── Footer ─────────────────────────────────────────── */
+    footer {
+      text-align: center;
+      padding: 1.5rem;
+      font-size: .8rem;
+      color: var(--muted);
+      border-top: 1px solid var(--border);
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>Security Packages</h1>
+    <p>Browse security package pages for each project</p>
+    <div class="stats-bar">
+      <div class="stat">
+        <div class="number" id="stat-total">—</div>
+        <div class="label">Projects</div>
+      </div>
+      <div class="stat">
+        <div class="number" id="stat-recent">—</div>
+        <div class="label">Last 30 days</div>
+      </div>
+      <div class="stat">
+        <div class="number" id="stat-owners">—</div>
+        <div class="label">Owners</div>
+      </div>
+    </div>
+  </header>
+
+  <div class="toolbar">
+    <input type="search" id="search" placeholder="Search projects…" aria-label="Search projects" />
+    <select id="sort" aria-label="Sort order">
+      <option value="newest">Newest first</option>
+      <option value="oldest">Oldest first</option>
+      <option value="name">Name A–Z</option>
+    </select>
+  </div>
+
+  <div class="container">
+    <div id="loading">
+      <div class="spinner"></div>
+      <div>Loading projects&hellip;</div>
+    </div>
+    <div id="error">Failed to load projects. Check that <code>projects.json</code> exists.</div>
+    <div id="projects"></div>
+  </div>
+
+  <footer>
+    Security Package Portal &mdash; Powered by MCP Tools
+  </footer>
+
+  <script>
+    (async () => {
+      const el        = document.getElementById('projects');
+      const loading   = document.getElementById('loading');
+      const error     = document.getElementById('error');
+      const searchBox = document.getElementById('search');
+      const sortBox   = document.getElementById('sort');
+
+      let allProjects = [];
+
+      /* ── Fetch projects.json ────────────────────────── */
+      try {
+        const resp = await fetch('/projects.json');
+        if (!resp.ok) throw new Error(resp.statusText);
+        allProjects = await resp.json();
+        loading.style.display = 'none';
+      } catch (e) {
+        loading.style.display = 'none';
+        error.style.display   = 'block';
+        console.error('Failed to load projects.json', e);
+        return;
+      }
+
+      /* ── Stats ──────────────────────────────────────── */
+      const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000);
+      const recentCount   = allProjects.filter(p => new Date(p.deployed_at) >= thirtyDaysAgo).length;
+      const ownerSet      = new Set(allProjects.map(p => (p.owner || '').toLowerCase()));
+
+      document.getElementById('stat-total').textContent  = allProjects.length;
+      document.getElementById('stat-recent').textContent = recentCount;
+      document.getElementById('stat-owners').textContent = ownerSet.size;
+
+      /* ── Render ─────────────────────────────────────── */
+      function render() {
+        const query = searchBox.value.trim().toLowerCase();
+        let list = allProjects;
+        if (query) {
+          list = list.filter(p =>
+            (p.display_name || p.project_name || '').toLowerCase().includes(query) ||
+            (p.description || '').toLowerCase().includes(query) ||
+            (p.owner || '').toLowerCase().includes(query)
+          );
+        }
+
+        const sortVal = sortBox.value;
+        list = [...list].sort((a, b) => {
+          if (sortVal === 'newest') return (b.deployed_at || '').localeCompare(a.deployed_at || '');
+          if (sortVal === 'oldest') return (a.deployed_at || '').localeCompare(b.deployed_at || '');
+          return (a.display_name || a.project_name || '').localeCompare(b.display_name || b.project_name || '');
+        });
+
+        if (!list.length) {
+          el.innerHTML = '<div class="empty">No matching projects found.</div>';
+          return;
+        }
+
+        const isRecent = (d) => d && new Date(d) >= thirtyDaysAgo;
+
+        el.innerHTML = list.map(p => `
+          <div class="card">
+            <div class="card-body">
+              <h2><a href="${p.path}">${p.display_name || p.project_name}</a></h2>
+              <div class="meta">
+                <span>Owner: ${p.owner || 'N/A'}</span>
+                <span>Deployed: ${p.deployed_at ? new Date(p.deployed_at).toLocaleDateString() : 'N/A'}</span>
+              </div>
+              ${p.description ? `<div class="desc">${p.description}</div>` : ''}
+              ${isRecent(p.deployed_at) ? '<span class="badge badge-new">New</span>' : ''}
+            </div>
+          </div>`).join('');
+      }
+
+      searchBox.addEventListener('input', render);
+      sortBox.addEventListener('change', render);
+      render();
+    })();
+  </script>
+</body>
+</html>

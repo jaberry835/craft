@@ -66,7 +66,7 @@ from starlette.middleware.cors import CORSMiddleware
 # Import tool registration functions
 try:
     logger.info("📦 Importing tool registration functions...")
-    from tools import register_adx_tools, register_fictional_api_tools, register_document_tools, register_rag_tools, register_company_and_device_tools, register_postgres_tools, register_translation_tools, register_computer_vision_tools, register_knowledge_base_tools, register_policy_document_tools
+    from tools import register_adx_tools, register_fictional_api_tools, register_document_tools, register_rag_tools, register_company_and_device_tools, register_postgres_tools, register_translation_tools, register_computer_vision_tools, register_knowledge_base_tools, register_policy_document_tools, register_security_package_tools
     logger.info("✅ Tool imports successful")
 except ImportError as e:
     logger.error(f"❌ Failed to import tools: {e}")
@@ -292,6 +292,8 @@ register_knowledge_base_tools(mcp)
 logger.info("✅ Knowledge Base tools registered")
 register_policy_document_tools(mcp)
 logger.info("✅ Policy Document tools registered")
+register_security_package_tools(mcp)
+logger.info("✅ Security Package tools registered")
 logger.info("🎉 All tools registered successfully")
 
 

@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ACME Production Environment – Security Package</title>
+  <style>
+    :root {
+      --primary: #0078d4;
+      --primary-dark: #005a9e;
+      --bg: #f3f2f1;
+      --card-bg: #ffffff;
+      --text: #323130;
+      --muted: #605e5c;
+      --border: #edebe9;
+      --success: #107c10;
+      --warning: #ffb900;
+      --danger: #d13438;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+    }
+    header {
+      background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+      color: #fff;
+      padding: 2rem 1rem 1.5rem;
+    }
+    header .container { max-width: 960px; margin: 0 auto; }
+    header h1 { font-size: 1.8rem; font-weight: 600; }
+    header .subtitle { opacity: .85; margin-top: .25rem; }
+    .breadcrumb { margin-top: .75rem; font-size: .85rem; opacity: .8; }
+    .breadcrumb a { color: #fff; text-decoration: underline; }
+    .meta-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: .75rem;
+      margin-bottom: 1.5rem;
+    }
+    .meta-item {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: .85rem 1rem;
+    }
+    .meta-item .label {
+      font-size: .75rem; text-transform: uppercase;
+      letter-spacing: .04em; color: var(--muted); margin-bottom: .2rem;
+    }
+    .meta-item .value { font-size: 1rem; font-weight: 600; }
+    .container { max-width: 960px; margin: 0 auto; padding: 0 1rem; }
+    main { padding: 1.5rem 0 3rem; }
+    section {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.5rem;
+      margin-bottom: 1.25rem;
+    }
+    section h2 {
+      font-size: 1.15rem; font-weight: 600;
+      margin-bottom: 1rem; padding-bottom: .5rem;
+      border-bottom: 2px solid var(--primary);
+    }
+    .compliance-row { display: flex; gap: 2rem; align-items: center; flex-wrap: wrap; }
+    .donut-wrapper { position: relative; width: 160px; height: 160px; flex-shrink: 0; }
+    .donut-wrapper svg { width: 100%; height: 100%; }
+    .donut-center {
+      position: absolute; inset: 0;
+      display: flex; flex-direction: column;
+      justify-content: center; align-items: center;
+      font-weight: 700; font-size: 1.5rem; color: var(--text);
+    }
+    .donut-center small { font-size: .75rem; font-weight: 400; color: var(--muted); }
+    .compliance-stats { flex: 1; min-width: 200px; }
+    .compliance-stats dl { display: grid; grid-template-columns: auto 1fr; gap: .35rem .75rem; }
+    .compliance-stats dt { font-weight: 600; }
+    .compliance-stats dd { color: var(--muted); }
+    table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+    th, td { text-align: left; padding: .6rem .75rem; border-bottom: 1px solid var(--border); }
+    th {
+      background: var(--bg); font-weight: 600; font-size: .8rem;
+      text-transform: uppercase; letter-spacing: .03em; color: var(--muted);
+    }
+    tr:last-child td { border-bottom: none; }
+    .tag {
+      display: inline-block; padding: .15rem .5rem;
+      border-radius: 10px; font-size: .78rem; font-weight: 600;
+    }
+    .tag-compliant     { background: #e6f4ea; color: var(--success); }
+    .tag-non-compliant { background: #fde7e9; color: var(--danger); }
+    .tag-exempt        { background: #fff4ce; color: #8a6d00; }
+    .risk-high   { color: var(--danger);  font-weight: 600; }
+    .risk-medium { color: var(--warning); font-weight: 600; }
+    .risk-low    { color: var(--success); font-weight: 600; }
+    footer {
+      text-align: center; padding: 1.5rem;
+      font-size: .8rem; color: var(--muted);
+      border-top: 1px solid var(--border);
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="container">
+      <div class="breadcrumb"><a href="/">← All Projects</a></div>
+      <h1>ACME Production Environment</h1>
+      <div class="subtitle">Security Package – Production Environment</div>
+    </div>
+  </header>
+
+  <main>
+    <div class="container">
+
+      <div class="meta-grid">
+        <div class="meta-item">
+          <div class="label">Owner</div>
+          <div class="value">bob@acme.com</div>
+        </div>
+        <div class="meta-item">
+          <div class="label">Environment</div>
+          <div class="value">Production</div>
+        </div>
+        <div class="meta-item">
+          <div class="label">Subscription</div>
+          <div class="value" style="font-size:.85rem;">yyyyyyyy-yyyy-yyyy-yyyy</div>
+        </div>
+        <div class="meta-item">
+          <div class="label">Generated</div>
+          <div class="value">Apr 10, 2026</div>
+        </div>
+      </div>
+
+      <!-- ── Policy Compliance Summary ────────────────── -->
+      <section>
+        <h2>Policy Compliance Summary</h2>
+        <div class="compliance-row">
+          <div class="donut-wrapper">
+            <svg viewBox="0 0 36 36">
+              <circle cx="18" cy="18" r="15.9" fill="none" stroke="#edebe9" stroke-width="3" />
+              <circle cx="18" cy="18" r="15.9" fill="none" stroke="#107c10" stroke-width="3"
+                      stroke-dasharray="93 7" stroke-dashoffset="25"
+                      stroke-linecap="round" />
+              <circle cx="18" cy="18" r="15.9" fill="none" stroke="#d13438" stroke-width="3"
+                      stroke-dasharray="5 95" stroke-dashoffset="32"
+                      stroke-linecap="round" />
+              <circle cx="18" cy="18" r="15.9" fill="none" stroke="#ffb900" stroke-width="3"
+                      stroke-dasharray="2 98" stroke-dashoffset="27"
+                      stroke-linecap="round" />
+            </svg>
+            <div class="donut-center">
+              93%
+              <small>Compliant</small>
+            </div>
+          </div>
+          <div class="compliance-stats">
+            <dl>
+              <dt style="color:var(--success)">Compliant</dt>
+              <dd>186 resources</dd>
+              <dt style="color:var(--danger)">Non-Compliant</dt>
+              <dd>10 resources</dd>
+              <dt style="color:#8a6d00">Exempt</dt>
+              <dd>4 resources</dd>
+              <dt>Total Policies</dt>
+              <dd>38 assignments</dd>
+            </dl>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── Policy Assignments Table ─────────────────── -->
+      <section>
+        <h2>Policy Assignments</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Policy Assignment</th>
+              <th>Resources</th>
+              <th>Non-Compliant</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Azure Security Benchmark v3</td>
+              <td>92</td>
+              <td>3</td>
+              <td><span class="tag tag-non-compliant">Non-Compliant</span></td>
+            </tr>
+            <tr>
+              <td>Require TLS 1.2</td>
+              <td>40</td>
+              <td>0</td>
+              <td><span class="tag tag-compliant">Compliant</span></td>
+            </tr>
+            <tr>
+              <td>Allowed Locations – US Gov</td>
+              <td>55</td>
+              <td>0</td>
+              <td><span class="tag tag-compliant">Compliant</span></td>
+            </tr>
+            <tr>
+              <td>Managed Disk Encryption</td>
+              <td>13</td>
+              <td>2</td>
+              <td><span class="tag tag-non-compliant">Non-Compliant</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <!-- ── Risk Register ────────────────────────────── -->
+      <section>
+        <h2>Risk Register</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Risk</th>
+              <th>Severity</th>
+              <th>Mitigation</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>3 resources missing security benchmark controls</td>
+              <td class="risk-medium">Medium</td>
+              <td>Remediation task scheduled for next maintenance window</td>
+              <td>In Progress</td>
+            </tr>
+            <tr>
+              <td>2 managed disks without encryption at rest</td>
+              <td class="risk-high">High</td>
+              <td>Enable SSE with CMK via Key Vault policy</td>
+              <td>In Progress</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <!-- ── Approvals ────────────────────────────────── -->
+      <section>
+        <h2>Approvals</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Role</th>
+              <th>Name</th>
+              <th>Status</th>
+              <th>Date</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Security Lead</td>
+              <td>Bob Martinez</td>
+              <td><span class="tag tag-compliant">Approved</span></td>
+              <td>Apr 9, 2026</td>
+            </tr>
+            <tr>
+              <td>Cloud Architect</td>
+              <td>Emily Chen</td>
+              <td><span class="tag tag-compliant">Approved</span></td>
+              <td>Apr 10, 2026</td>
+            </tr>
+            <tr>
+              <td>ISSO</td>
+              <td>Frank Novak</td>
+              <td><span class="tag tag-compliant">Approved</span></td>
+              <td>Apr 10, 2026</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+    </div>
+  </main>
+
+  <footer>
+    Security Package for ACME Production Environment &mdash; Generated Apr 10, 2026
+  </footer>
+
+</body>
+</html>

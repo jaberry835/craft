@@ -1,0 +1,61 @@
+{
+  "description": "Fields used to build a Security Package web page. Gather all required fields before generating the HTML and calling deploy_security_page.",
+  "fields": {
+    "project_name": {
+      "type": "string",
+      "required": true,
+      "description": "Short, URL-safe project name (used as folder name in the static site, e.g. 'contoso-migration')."
+    },
+    "project_display_name": {
+      "type": "string",
+      "required": true,
+      "description": "Human-readable project title displayed on the page and in the projects index."
+    },
+    "description": {
+      "type": "string",
+      "required": true,
+      "description": "Brief description of the project / security package."
+    },
+    "owner": {
+      "type": "string",
+      "required": true,
+      "description": "Name or email of the project owner / security lead."
+    },
+    "environment": {
+      "type": "string",
+      "required": true,
+      "description": "Target environment (e.g. 'Production', 'Staging', 'Development').",
+      "enum": ["Production", "Staging", "Development", "Test"]
+    },
+    "subscription_id": {
+      "type": "string",
+      "required": true,
+      "description": "Azure subscription ID associated with this security package."
+    },
+    "resource_group": {
+      "type": "string",
+      "required": false,
+      "description": "Azure resource group name (optional – scopes policy data if provided)."
+    },
+    "compliance_summary": {
+      "type": "object",
+      "required": false,
+      "description": "Policy compliance summary object (from get_policy_compliance). Include this to embed compliance details directly in the page."
+    },
+    "additional_sections": {
+      "type": "array",
+      "required": false,
+      "description": "Array of {title, html_content} objects for extra custom sections to include in the generated page."
+    },
+    "html_content": {
+      "type": "string",
+      "required": true,
+      "description": "The full HTML content of the security package page to deploy. This is passed to deploy_security_page. Include a link to data.json in the footer, e.g.: <a href='data.json'>View JSON</a>"
+    },
+    "page_data": {
+      "type": "string",
+      "required": false,
+      "description": "A JSON string containing the structured (machine-readable) version of this security package — metadata, compliance, risk register, approvals, etc. When provided it is uploaded as data.json alongside the HTML page."
+    }
+  }
+}
