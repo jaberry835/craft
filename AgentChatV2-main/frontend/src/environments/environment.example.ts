@@ -40,10 +40,13 @@ export const environment = {
   // API scope from app registration
   // Format: api://<client-id>/<scope-name> — must match "Expose an API" in your app registration
   apiScopes: ['api://<your-client-id>/<your-scope-name>'],
-  // All delegated scopes from the app registration (used by "Reauthorize Permissions")
-  // Include every scope here that users need to consent to.
+  // Explicit delegated scopes requested by "Reauthorize Permissions".
+  // Keep this aligned with every downstream API the backend calls via OBO on
+  // behalf of the signed-in user. Adding a permission in Entra is not enough;
+  // the SPA must also request the scope here for the consent prompt to include it.
   consentScopes: [
     'openid', 'profile', 'email', 'User.Read', 'offline_access',
-    'api://<your-client-id>/<your-scope-name>'
+    'api://<your-client-id>/<your-scope-name>',
+    'https://management.usgovcloudapi.net/user_impersonation'
   ]
 };
