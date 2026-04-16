@@ -45,11 +45,10 @@ coverage.xml
 .ipynb_checkpoints/
 
 # IDE settings
-.vscode/
+
 .idea/
 .spyderproject/
 .vs/
-.vscode/
 
 .pdf
 .mp4
