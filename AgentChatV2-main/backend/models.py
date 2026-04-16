@@ -138,6 +138,12 @@ class A2AAgentCard(BaseModel):
     default_output_modes: list[str] = Field(default_factory=list)
 
 
+class AgentUICapabilities(BaseModel):
+    """Optional UI features an agent is allowed to use in chat."""
+    html_preview: bool = False
+    structured_input_form: bool = False
+
+
 class AgentConfig(BaseModel):
     """Agent configuration model - supports both local and external A2A agents."""
     id: Optional[str] = None
@@ -186,6 +192,7 @@ class AgentConfig(BaseModel):
     # Common fields
     is_orchestrator: bool = False
     a2a_enabled: bool = True  # Enable Agent-to-Agent protocol (expose via A2A)
+    ui_capabilities: AgentUICapabilities = Field(default_factory=AgentUICapabilities)
     
     # Orchestrator-specific prompts (used only when is_orchestrator=True)
     analysis_prompt: Optional[str] = None  # Phase 1: Analyze request and decide delegation
@@ -294,6 +301,15 @@ class MessageListResponse(BaseModel):
 # Chat Models
 # =============================================================================
 
+
+class PreviewContext(BaseModel):
+    """Optional context for follow-ups against an open HTML preview."""
+    source_agent_id: Optional[str] = None
+    source_agent_name: Optional[str] = None
+    action: Optional[str] = None
+    current_html: Optional[str] = None
+
+
 class ChatRequest(BaseModel):
     """Request to send a chat message."""
     message: str = Field(..., min_length=1)
@@ -301,6 +317,7 @@ class ChatRequest(BaseModel):
     orchestration_type: Optional[OrchestrationPattern] = None
     agent_ids: Optional[list[str]] = None
     include_documents: bool = True
+    preview_context: Optional[PreviewContext] = None
 
 
 class TokenUsage(BaseModel):

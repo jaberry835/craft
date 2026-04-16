@@ -11,6 +11,7 @@ This is the core module; heavy logic is delegated to:
 from typing import Optional, AsyncIterator, Union
 from enum import Enum
 import asyncio
+import re
 import time
 from functools import partial
 
@@ -60,6 +61,81 @@ class OrchestrationPattern(str, Enum):
     CONCURRENT = "concurrent"   # Agents run in parallel
     MAGENTIC = "magentic"       # Magentic-One pattern
     GROUP_CHAT = "group_chat"   # Round-robin group chat
+
+
+# Regex for ```html_preview ... ``` blocks emitted by agents.
+_HTML_PREVIEW_RE = re.compile(r"```html_preview\s*\n(.*?)```", re.DOTALL)
+
+
+def _get_ui_capabilities(agent_config: Optional[dict]) -> dict[str, bool]:
+    """Return normalized UI capability flags for an agent config."""
+    config = agent_config or {}
+    caps = config.get("ui_capabilities") or {}
+    return {
+        "html_preview": bool(caps.get("html_preview", False)),
+        "structured_input_form": bool(caps.get("structured_input_form", False)),
+    }
+
+
+def _build_ui_capability_instructions(agent_config: Optional[dict]) -> str:
+    """Build optional prompt guidance for enabled UI capabilities."""
+    caps = _get_ui_capabilities(agent_config)
+    sections: list[str] = []
+
+    if caps["html_preview"]:
+        sections.append("""
+=== UI CAPABILITY: HTML PREVIEW ===
+You may open the HTML preview side panel when the user should review a complete HTML page.
+- To open the preview, return the FULL HTML document in a fenced code block with the language html_preview
+- Example:
+```html_preview
+<!DOCTYPE html>
+<html>
+...complete page...
+</html>
+```
+- Use html_preview only for real HTML page previews, not for snippets or non-HTML content
+- When the user requests revisions, update the existing draft and return a full replacement page in a fresh html_preview block
+===================================""")
+
+    if caps["structured_input_form"]:
+        sections.append("""
+=== UI CAPABILITY: STRUCTURED INPUT FORM ===
+You may ask the chat UI to render a structured input form when you need the user to fill in several fields.
+- To trigger the form, return a fenced code block with the language structured_input_form containing JSON.
+- Example:
+```structured_input_form
+{
+    "fields": [
+        { "label": "Project Display Name", "hint": "example: Genesis" },
+        { "label": "Description", "hint": "brief summary", "type": "textarea" },
+        { "label": "Owner", "hint": "name or email" }
+    ]
+}
+```
+- Use the form only when structured input is actually needed to continue the task
+- Keep labels concise and concrete
+- Supported field types: text, textarea, date, email, url, number
+- When the user submits the form, their answers will come back as markdown lines like:
+  **Field Name**: value
+===========================================""")
+
+    return "\n\n".join(section.strip("\n") for section in sections if section)
+
+
+def _extract_html_previews(text: str) -> tuple[str, list[str]]:
+    """Extract html_preview code blocks from text.
+
+    Returns:
+        (cleaned_text, list_of_html_strings)
+        cleaned_text has the fenced blocks replaced with a placeholder.
+    """
+    previews: list[str] = []
+    def _replace(m: re.Match) -> str:
+        previews.append(m.group(1).strip())
+        return "_\u2705 HTML preview opened in side panel_"
+    cleaned = _HTML_PREVIEW_RE.sub(_replace, text)
+    return cleaned, previews
 
 
 def _convert_to_chat_messages(messages: list[dict]) -> list[Message]:
@@ -273,6 +349,7 @@ class AgentManager:
 
         # Get base instructions and add action-oriented suffix
         base_instructions = agent_config.get("system_prompt", "You are a helpful assistant.")
+        capability_instructions = _build_ui_capability_instructions(agent_config)
 
         # Add directive to be proactive and not ask for clarification
         action_suffix = """
@@ -286,7 +363,10 @@ You are being called as a specialist by an orchestrator agent. The user's reques
 - Provide results, not questions
 ==========================="""
 
-        enhanced_instructions = base_instructions + action_suffix
+        enhanced_instructions = base_instructions
+        if capability_instructions:
+            enhanced_instructions += "\n\n" + capability_instructions
+        enhanced_instructions += action_suffix
 
         # Build the agent
         agent = Agent(
@@ -837,6 +917,7 @@ You are being called as a specialist by an orchestrator agent. The user's reques
         session_id: str,
         user_id: str,
         user_token: Optional[str] = None,
+        preview_context: Optional[dict] = None,
         max_rounds: int = 10,
     ) -> AsyncIterator[AgentResponse]:
         """
@@ -877,6 +958,97 @@ You are being called as a specialist by an orchestrator agent. The user's reques
         # Create chatter queue for real-time events
         chatter_queue: asyncio.Queue[ChatterEvent] = asyncio.Queue()
 
+        # Single selected orchestrator mode: let the orchestrator execute directly
+        # with its own tools, grounding, history, and preview flow.
+        if len(agent_ids) == 1 and not specialist_configs:
+            if should_log_agent():
+                logger.info(
+                    f"Single orchestrator mode: executing {orchestrator_config.get('name', 'Orchestrator')} directly"
+                )
+
+            agent_name = orchestrator_config.get("name", "Orchestrator")
+            agent_id = orchestrator_config.get("id", "orchestrator")
+            agent_type = orchestrator_config.get("agent_type", "local")
+
+            yield ChatterEvent(
+                type=ChatterEventType.THINKING,
+                agent_name=agent_name,
+                agent_id=agent_id,
+                content="Running in single-agent orchestrator mode...",
+                friendly_message=f"{agent_name} is handling this request directly"
+            )
+
+            if agent_type != "a2a":
+                single_task = asyncio.create_task(
+                    self._call_specialist_local(
+                        agent_id,
+                        agent_name,
+                        user_message,
+                        user_token,
+                        chatter_queue,
+                        session_id=session_id,
+                        user_id=user_id,
+                    )
+                )
+            else:
+                single_task = asyncio.create_task(
+                    self._call_specialist_remote(
+                        agent_id,
+                        agent_name,
+                        orchestrator_config,
+                        user_message,
+                        user_token,
+                        chatter_queue,
+                        session_id=session_id,
+                        user_id=user_id,
+                    )
+                )
+
+            while not single_task.done():
+                try:
+                    event = await asyncio.wait_for(chatter_queue.get(), timeout=0.1)
+                    yield event
+                except asyncio.TimeoutError:
+                    continue
+                except asyncio.QueueEmpty:
+                    await asyncio.sleep(0.05)
+
+            single_result = await single_task
+
+            while not chatter_queue.empty():
+                try:
+                    event = chatter_queue.get_nowait()
+                    yield event
+                except asyncio.QueueEmpty:
+                    break
+
+            response_text = single_result.get("response", "")
+            if single_result.get("error") and not response_text:
+                response_text = f"Error: {single_result['error']}"
+
+            cleaned, html_previews = _extract_html_previews(response_text)
+            for html in html_previews:
+                yield ChatterEvent(
+                    type=ChatterEventType.HTML_PREVIEW,
+                    agent_name=agent_name,
+                    agent_id=agent_id,
+                    content=html,
+                    friendly_message="Showing HTML preview",
+                )
+
+            yield AgentResponse(
+                agent_id=agent_id,
+                agent_name=agent_name,
+                content=cleaned if html_previews else response_text,
+                tokens_used=0,
+                metadata={
+                    "pattern": pattern.value,
+                    "action": "single_orchestrator",
+                },
+                chatter_events=[]
+            )
+            return
+
         if should_log_agent():
             logger.info(f"Two-Phase Orchestration: pattern={pattern.value}, specialists={len(specialist_configs)}")
 
@@ -899,6 +1071,7 @@ You are being called as a specialist by an orchestrator agent. The user's reques
             user_message,
             session_id,
             user_id,
+            preview_context,
             create_chat_client_fn=self._create_chat_client,
             cosmos_service=cosmos_service,
             embedding_service=embedding_service,
@@ -944,10 +1117,21 @@ You are being called as a specialist by an orchestrator agent. The user's reques
         if decision.get("action") == "direct":
             direct_response = decision.get("direct_response", "")
 
+            # Extract html_preview blocks from direct responses
+            cleaned, html_previews = _extract_html_previews(direct_response)
+            for html in html_previews:
+                yield ChatterEvent(
+                    type=ChatterEventType.HTML_PREVIEW,
+                    agent_name=orchestrator_config.get("name", "Orchestrator"),
+                    agent_id=orchestrator_config.get("id"),
+                    content=html,
+                    friendly_message="Showing HTML preview",
+                )
+
             yield AgentResponse(
                 agent_id=orchestrator_config.get("id", "orchestrator"),
                 agent_name=orchestrator_config.get("name", "Orchestrator"),
-                content=direct_response,
+                content=cleaned if html_previews else direct_response,
                 tokens_used=(decision.get("tokens_input", 0) or 0) + (decision.get("tokens_output", 0) or 0),
                 metadata={
                     "pattern": pattern.value,
@@ -1072,6 +1256,27 @@ You are being called as a specialist by an orchestrator agent. The user's reques
             logger.info(f"Phase 2 complete: received {len(specialist_results)} specialist responses")
 
         # =================================================================
+        # Extract html_preview blocks from specialist responses BEFORE
+        # synthesis so the LLM doesn't rewrite/strip them.
+        # =================================================================
+        for result in specialist_results:
+            raw_response = result.get("response", "")
+            source_config = self._configs_cache.get(result.get("agent_id"), {})
+            cleaned, html_previews = _extract_html_previews(raw_response)
+            if html_previews:
+                # Replace the specialist response with cleaned text for synthesis
+                result["response"] = cleaned
+                # Emit each preview as a ChatterEvent so chat_routes can forward it
+                for html in html_previews:
+                    yield ChatterEvent(
+                        type=ChatterEventType.HTML_PREVIEW,
+                        agent_name=result.get("agent_name", "Agent"),
+                        agent_id=result.get("agent_id"),
+                        content=html,
+                        friendly_message="Showing HTML preview",
+                    )
+
+        # =================================================================
         # Phase 3: Synthesis
         # =================================================================
         if should_log_agent():
@@ -1100,7 +1305,18 @@ You are being called as a specialist by an orchestrator agent. The user's reques
             tokens_output=synthesis_result.get("tokens_output"),
         )
 
-        # Build final response
+        # Build final response — also extract any html_preview the synthesizer kept
+        synthesis_content = synthesis_result.get("content", "")
+        synth_cleaned, synth_previews = _extract_html_previews(synthesis_content)
+        for html in synth_previews:
+            yield ChatterEvent(
+                type=ChatterEventType.HTML_PREVIEW,
+                agent_name=orchestrator_config.get("name", "Orchestrator"),
+                agent_id=orchestrator_config.get("id"),
+                content=html,
+                friendly_message="Showing HTML preview",
+            )
+
         total_tokens = sum(r.get("tokens_input", 0) + r.get("tokens_output", 0) for r in specialist_results)
         total_tokens += (decision.get("tokens_input", 0) or 0) + (decision.get("tokens_output", 0) or 0)
         total_tokens += (synthesis_result.get("tokens_input", 0) or 0) + (synthesis_result.get("tokens_output", 0) or 0)
@@ -1108,7 +1324,7 @@ You are being called as a specialist by an orchestrator agent. The user's reques
         yield AgentResponse(
             agent_id=orchestrator_config.get("id", "orchestrator"),
             agent_name=orchestrator_config.get("name", "Orchestrator"),
-            content=synthesis_result.get("content", ""),
+            content=synth_cleaned if synth_previews else synthesis_content,
             tokens_used=total_tokens,
             metadata={
                 "pattern": pattern.value,

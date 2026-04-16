@@ -176,6 +176,10 @@ export interface AgentConfig {
   name: string;
   description?: string;
   agent_type?: AgentType;  // 'local' or 'a2a'
+  ui_capabilities?: {
+    html_preview?: boolean;
+    structured_input_form?: boolean;
+  };
   
   // For local agents (model is required for local agents)
   system_prompt?: string;  // Required for local, optional for A2A

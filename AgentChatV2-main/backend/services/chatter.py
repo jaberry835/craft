@@ -17,6 +17,7 @@ class ChatterEventType(str, Enum):
     DELEGATION = "delegation"       # Orchestrator delegating to specialist
     CONTENT = "content"             # Actual content/text output
     REASONING = "reasoning"         # Model reasoning/chain-of-thought tokens (o-series, gpt-5.x)
+    HTML_PREVIEW = "html_preview"   # Agent wants to show an HTML preview panel
 
 
 def _get_friendly_tool_description(tool_name: str, tool_args: Optional[dict] = None) -> str:
@@ -128,6 +129,7 @@ class ChatterEvent:
     """Intermediate event during agent execution for streaming to UI."""
     type: ChatterEventType
     agent_name: str
+    agent_id: Optional[str] = None
     content: str = ""
     tool_name: Optional[str] = None
     tool_args: Optional[dict] = None
@@ -181,6 +183,8 @@ class ChatterEvent:
             "content": self.content,
             "timestamp": self.timestamp
         }
+        if self.agent_id:
+            result["agent_id"] = self.agent_id
         if self.tool_name:
             result["tool_name"] = self.tool_name
         if self.tool_args:

@@ -803,6 +803,36 @@ import { environment } from '../../../environments/environment';
                 Is Orchestrator Agent
               </label>
             </div>
+
+            <div class="form-group section-group">
+              <label>
+                <span class="material-icons section-icon">web</span>
+                UI Capabilities
+              </label>
+              <span class="field-hint">Enable chat UI features this agent is allowed to use. These options also inject usage guidance into the runtime prompt for local agents.</span>
+
+              <div class="form-group checkbox-group capability-option">
+                <label>
+                  <input
+                    type="checkbox"
+                    [(ngModel)]="editingAgent!.ui_capabilities!.html_preview"
+                  />
+                  Allow HTML Preview
+                </label>
+                <span class="field-hint">Lets the agent open the right-side HTML preview panel by returning a complete <code>html_preview</code> fenced block.</span>
+              </div>
+
+              <div class="form-group checkbox-group capability-option">
+                <label>
+                  <input
+                    type="checkbox"
+                    [(ngModel)]="editingAgent!.ui_capabilities!.structured_input_form"
+                  />
+                  Allow Structured Input Form
+                </label>
+                <span class="field-hint">Lets the agent render a structured form by returning a <code>structured_input_form</code> fenced block with JSON field definitions.</span>
+              </div>
+            </div>
             
             <!-- Orchestrator-specific prompts (visible when is_orchestrator is checked) -->
             @if (editingAgent!.is_orchestrator) {
@@ -812,10 +842,10 @@ import { environment } from '../../../environments/environment';
                   <textarea 
                     class="input" 
                     [(ngModel)]="editingAgent!.analysis_prompt"
-                    placeholder="Prompt for analyzing requests and deciding which specialists to call. Use {agent_list} placeholder for the list of available specialists."
+                    placeholder="Optional. Prompt for analyzing requests and deciding which specialists to call. Use {agent_list} for the list of available specialists. Single-agent orchestrators can leave this blank if they handle requests directly with their own tools."
                     rows="8"
                   ></textarea>
-                  <span class="field-hint">Instructs the orchestrator how to analyze requests and decide on delegation. Leave blank for default behavior.</span>
+                  <span class="field-hint">Optional for orchestrators. Most useful when this agent delegates to additional specialists. Single-agent orchestrators can leave it blank.</span>
                 </div>
                 
                 <div class="form-group">
@@ -823,10 +853,10 @@ import { environment } from '../../../environments/environment';
                   <textarea 
                     class="input" 
                     [(ngModel)]="editingAgent!.synthesis_prompt"
-                    placeholder="Prompt for synthesizing specialist responses into a final answer. Use {specialist_responses} placeholder for the responses."
+                    placeholder="Optional. Prompt for synthesizing specialist responses into a final answer. Use {specialist_responses} for the responses. Single-agent orchestrators can leave this blank if no specialist synthesis is needed."
                     rows="8"
                   ></textarea>
-                  <span class="field-hint">Instructs the orchestrator how to combine specialist responses. Leave blank for default behavior.</span>
+                  <span class="field-hint">Optional for orchestrators. Mainly used when this agent combines responses from additional specialists. Single-agent orchestrators can leave it blank.</span>
                 </div>
               </div>
             }
@@ -923,14 +953,14 @@ import { environment } from '../../../environments/environment';
             </div>
             
             <!-- Document Grounding Section -->
-            @if (groundingAvailable && !editingAgent!.is_orchestrator) {
+            @if (groundingAvailable) {
               <div class="form-group section-group">
                 <label>
                   <span class="material-icons section-icon">library_books</span>
                   Document Grounding (RAG)
                   <span class="material-icons info-tooltip" title="Retrieval Augmented Generation (RAG) grounds the agent in your documents. When asked questions, the agent will automatically search indexed documents for relevant context before responding.">info_outline</span>
                 </label>
-                <span class="field-hint">Ground this agent in documents from Azure Blob Storage or an existing Azure AI Search index.</span>
+                <span class="field-hint">Ground this agent in documents from Azure Blob Storage or an existing Azure AI Search index. This can be used by specialists and by single-agent orchestrators.</span>
                 
                 <!-- Grounding Mode Toggle -->
                 <div class="grounding-mode-toggle">
@@ -1079,7 +1109,7 @@ import { environment } from '../../../environments/environment';
               </div>
             }
             
-            @if (!groundingAvailable && !editingAgent!.is_orchestrator) {
+            @if (!groundingAvailable) {
               <div class="form-group grounding-unavailable">
                 <label>
                   <span class="material-icons" style="vertical-align: middle; font-size: 18px; margin-right: 4px;">library_books</span>
@@ -1508,6 +1538,11 @@ import { environment } from '../../../environments/environment';
     .section-icon {
       font-size: 18px !important;
       color: var(--accent-color);
+    }
+
+    .capability-option {
+      margin-top: var(--spacing-sm);
+      margin-bottom: var(--spacing-sm);
     }
     
     .form-row {
@@ -2666,7 +2701,11 @@ export class AdminComponent implements OnInit, OnDestroy {
     this.editingAgent = agent ? { 
       ...agent, 
       mcp_tools: [...(agent.mcp_tools || [])],
-      grounding_sources: [...(agent.grounding_sources || [])]
+      grounding_sources: [...(agent.grounding_sources || [])],
+      ui_capabilities: {
+        html_preview: !!agent.ui_capabilities?.html_preview,
+        structured_input_form: !!agent.ui_capabilities?.structured_input_form,
+      }
     } : {
       name: '',
       description: '',
@@ -2679,7 +2718,11 @@ export class AdminComponent implements OnInit, OnDestroy {
       analysis_prompt: '',
       synthesis_prompt: '',
       mcp_tools: [],
-      grounding_sources: []
+      grounding_sources: [],
+      ui_capabilities: {
+        html_preview: false,
+        structured_input_form: false,
+      }
     };
     // Reset discovery state when opening editor
     this.mcpServerUrl = '';

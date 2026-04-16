@@ -7,9 +7,11 @@ import { ChatService, Message, Session, AGUIEvent } from '../../core/services/ch
 import { AgentService, AgentConfig } from '../../core/services/agent.service';
 import { SessionStateService } from '../../core/services/session-state.service';
 import { DocumentService, DocumentMetadata } from '../../core/services/document.service';
+import { HtmlPreviewService } from '../../core/services/html-preview.service';
 import { MessageComponent } from './components/message/message.component';
 import { ChatInputComponent } from './components/chat-input/chat-input.component';
 import { AgentSelectorComponent } from './components/agent-selector/agent-selector.component';
+import { HtmlPreviewPanelComponent } from './components/html-preview-panel/html-preview-panel.component';
 
 
 // Chatter event for displaying agent thought process
@@ -65,10 +67,12 @@ interface TokenUsageSummary {
     FormsModule,
     MessageComponent,
     ChatInputComponent,
-    AgentSelectorComponent
+    AgentSelectorComponent,
+    HtmlPreviewPanelComponent
   ],
   template: `
-    <div class="chat-container">
+    <div class="chat-with-preview">
+      <div class="chat-container">
       <!-- Active agents bar - shows when in a session with agents -->
       @if (sessionId && selectedAgentIds.length > 0 && agents.length > 0) {
         <div class="active-agents-bar">
@@ -134,6 +138,7 @@ interface TokenUsageSummary {
             [message]="message"
             [isStreaming]="message.isStreaming ?? false"
             [groundedAgentIds]="groundedAgentIds"
+            [structuredFormAgentIds]="selectedAgentIdsWithStructuredInputForm()"
             [isLastAssistantMessage]="isLastAssistant(i)"
             (formSubmit)="sendMessage($event)"
           ></app-message>
@@ -144,6 +149,7 @@ interface TokenUsageSummary {
             [message]="streamingMessage"
             [isStreaming]="true"
             [groundedAgentIds]="groundedAgentIds"
+            [structuredFormAgentIds]="selectedAgentIdsWithStructuredInputForm()"
           ></app-message>
         }
         
@@ -199,6 +205,16 @@ interface TokenUsageSummary {
         (fileUpload)="handleFileUpload($event)"
       ></app-chat-input>
     </div>
+
+    <!-- HTML Preview Side Panel -->
+    <app-html-preview-panel
+      [html]="previewService.html"
+      [isOpen]="previewService.isOpen"
+      (close)="closePreview()"
+      (approve)="approvePreview()"
+      (feedback)="sendPreviewFeedback($event)"
+    ></app-html-preview-panel>
+    </div>
   `,
   styles: [`
     :host {
@@ -209,10 +225,18 @@ interface TokenUsageSummary {
       overflow: hidden;
     }
     
+    .chat-with-preview {
+      display: flex;
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+    }
+    
     .chat-container {
       display: flex;
       flex-direction: column;
       flex: 1;
+      min-width: 0;
       min-height: 0;
       overflow: hidden;
       background-color: var(--bg-primary);
@@ -518,7 +542,8 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
     private chatService: ChatService,
     private agentService: AgentService,
     private sessionState: SessionStateService,
-    private documentService: DocumentService
+    private documentService: DocumentService,
+    public previewService: HtmlPreviewService
   ) {}
   
   ngOnInit(): void {
@@ -527,12 +552,11 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
       .pipe(takeUntil(this.destroy$))
       .subscribe(response => {
         this.agents = response.agents;
-        // Select orchestrator by default if no agents selected yet
-        const orchestrator = this.agents.find(a => a.is_orchestrator);
-        if (orchestrator && orchestrator.id && this.selectedAgentIds.length === 0) {
-          this.selectedAgentIds = [orchestrator.id];
+        // Ensure there is always at least one selected orchestrator.
+        if (this.selectedAgentIds.length === 0) {
+          this.ensureOrchestratorSelected();
         }
-        // If we already have a session loaded, ensure orchestrator is included
+        // If we already have a session loaded, ensure at least one orchestrator is included.
         if (this.sessionId && this.selectedAgentIds.length > 0) {
           this.ensureOrchestratorSelected();
         }
@@ -541,9 +565,13 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
     // Watch for route changes
     this.route.params.pipe(takeUntil(this.destroy$)).subscribe(params => {
       const newSessionId = params['sessionId'];
+      const preservePreview = !!newSessionId && this.previewService.consumeRoutePreservation();
       
       // Clear state when switching sessions or starting new chat
       if (this.sessionId !== newSessionId) {
+        if (!preservePreview) {
+          this.previewService.clear();
+        }
         this.messages = [];
         this.session = undefined;
         this.streamingMessage = undefined;
@@ -604,7 +632,7 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
           next: (session) => {
             this.session = session;
             this.selectedAgentIds = session.selectedAgents || [];
-            // Ensure orchestrator is always included
+            // Ensure at least one orchestrator is included.
             this.ensureOrchestratorSelected();
             this.orchestrationType = session.orchestrationType || 'sequential';
           },
@@ -632,7 +660,7 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
           console.log('Loaded session details:', session);
           this.session = session;
           this.selectedAgentIds = session.selectedAgents || [];
-          // Ensure orchestrator is always included
+          // Ensure at least one orchestrator is included.
           this.ensureOrchestratorSelected();
           this.orchestrationType = session.orchestrationType || 'sequential';
           
@@ -711,12 +739,21 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
       });
   }
   
-  /** Ensures the orchestrator agent is always in selectedAgentIds */
+  /** Ensures at least one orchestrator agent is in selectedAgentIds. */
   private ensureOrchestratorSelected(): void {
-    const orchestrator = this.agents.find(a => a.is_orchestrator);
-    if (orchestrator?.id && !this.selectedAgentIds.includes(orchestrator.id)) {
+    const hasSelectedOrchestrator = this.selectedAgentIds.some(id => this.isOrchestratorId(id));
+    if (hasSelectedOrchestrator) {
+      return;
+    }
+
+    const orchestrator = this.agents.find(a => a.is_orchestrator && a.id);
+    if (orchestrator?.id) {
       this.selectedAgentIds = [orchestrator.id, ...this.selectedAgentIds];
     }
+  }
+
+  private isOrchestratorId(agentId: string): boolean {
+    return this.agents.some(agent => agent.id === agentId && agent.is_orchestrator);
   }
   
   /** Get the full agent configs for selected agent IDs */
@@ -729,6 +766,12 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
         if (!a.is_orchestrator && b.is_orchestrator) return 1;
         return (a.name || '').localeCompare(b.name || '');
       });
+  }
+
+  selectedAgentIdsWithStructuredInputForm(): string[] {
+    return this.getSelectedAgents()
+      .filter(agent => !!agent.id && !!agent.ui_capabilities?.structured_input_form)
+      .map(agent => agent.id!);
   }
   
   /** IDs of selected agents that have document grounding configured */
@@ -782,20 +825,66 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
   }
 
   toggleAgent(agentId: string): void {
-    // Find if this is the orchestrator - orchestrator cannot be unchecked
     const agent = this.agents.find(a => a.id === agentId);
-    if (agent?.is_orchestrator) {
-      return; // Orchestrator is always selected
+    if (!agent?.id) {
+      return;
     }
-    
-    const index = this.selectedAgentIds.indexOf(agentId);
-    if (index === -1) {
+
+    const isSelected = this.selectedAgentIds.includes(agentId);
+
+    if (agent.is_orchestrator) {
+      if (isSelected) {
+        const remainingSelected = this.selectedAgentIds.filter(id => id !== agentId);
+        const hasAnotherOrchestrator = remainingSelected.some(id => this.isOrchestratorId(id));
+        if (!hasAnotherOrchestrator) {
+          return;
+        }
+        this.selectedAgentIds = remainingSelected;
+        return;
+      }
+
+      const nonOrchestrators = this.selectedAgentIds.filter(id => !this.isOrchestratorId(id));
+      this.selectedAgentIds = [agentId, ...nonOrchestrators];
+      return;
+    }
+
+    if (!isSelected) {
       this.selectedAgentIds = [...this.selectedAgentIds, agentId];
     } else {
       this.selectedAgentIds = this.selectedAgentIds.filter(id => id !== agentId);
     }
   }
   
+  // ── HTML Preview Panel ──
+  closePreview(): void {
+    this.previewService.close();
+  }
+
+  approvePreview(): void {
+    this.previewService.close();
+    this.sendMessage(
+      'The current HTML preview is approved. Continue with the next appropriate step for this task. If publishing, saving, or deployment is part of the workflow, you may proceed.',
+      {
+        sourceAgentId: this.previewService.previewContext.sourceAgentId,
+        sourceAgentName: this.previewService.previewContext.sourceAgentName,
+        action: 'approval',
+        currentHtml: this.previewService.previewContext.currentHtml,
+      }
+    );
+  }
+
+  sendPreviewFeedback(feedback: string): void {
+    this.sendMessage(
+      `Revise the current HTML draft directly and return a complete updated page in a new html_preview block. Do not explain the change or provide a partial snippet unless I explicitly ask for one. Keep the existing draft as the source of truth and apply this feedback: ${feedback}`,
+      {
+        sourceAgentId: this.previewService.previewContext.sourceAgentId,
+        sourceAgentName: this.previewService.previewContext.sourceAgentName,
+        action: 'revision',
+        currentHtml: this.previewService.previewContext.currentHtml,
+      }
+    );
+  }
+
   /** Check if message at index i is the last assistant message (no streaming message active) */
   isLastAssistant(index: number): boolean {
     if (this.streamingMessage) return false;
@@ -806,7 +895,7 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
     return true;
   }
 
-  sendMessage(content: string): void {
+  sendMessage(content: string, previewContext?: { sourceAgentId?: string; sourceAgentName?: string; action?: string; currentHtml?: string }): void {
     if (!content.trim() || this.isSending) return;
     
     this.isSending = true;
@@ -861,7 +950,8 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
       sessionId: this.sessionId,
       orchestrationType: this.orchestrationType,
       agentIds: this.selectedAgentIds.length > 0 ? this.selectedAgentIds : undefined,
-      pendingSessionId: this.currentPendingId  // This enables ChatService to notify SessionStateService
+      pendingSessionId: this.currentPendingId,  // This enables ChatService to notify SessionStateService
+      previewContext,
     });
     
     // For new sessions, let the stream complete naturally so sidebar gets refreshed
@@ -910,6 +1000,9 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
         }
 
         if (!this.sessionId || this.sessionId.startsWith('pending-')) {
+          if (this.previewService.isOpen) {
+            this.previewService.preserveForNextRouteChange();
+          }
           this.sessionId = newSessionId;
           this.router.navigate(['/chat', newSessionId], { replaceUrl: true });
         }
@@ -1035,6 +1128,7 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
           ...(this.streamingMessage.agentResponses || []),
           { agentName: 'Assistant', content: '' }
         ];
+        this.streamingMessage.metadata = { ...(this.streamingMessage.metadata || {}) };
         break;
 
       case 'TEXT_MESSAGE_CONTENT':
@@ -1087,10 +1181,22 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
         // Lifecycle events — no additional UI action needed
         break;
 
-      // --- Custom metadata (chatter enrichment) ---
+      // --- Custom metadata (chatter enrichment + html preview) ---
       case 'CUSTOM': {
         if (event.name === 'chatter' && event.value) {
           this.enrichChatterFromCustom(event.value);
+        } else if (event.name === 'assistant_agent' && event.value) {
+          this.streamingMessage.metadata = {
+            ...(this.streamingMessage.metadata || {}),
+            assistant_agent_id: event.value['agent_id'],
+            assistant_agent_name: event.value['agent_name'],
+          };
+        } else if (event.name === 'html_preview' && event.value?.['html']) {
+          this.previewService.show(
+            event.value['html'] as string,
+            event.value['agent_id'] as string | undefined,
+            event.value['agent_name'] as string | undefined,
+          );
         }
         break;
       }

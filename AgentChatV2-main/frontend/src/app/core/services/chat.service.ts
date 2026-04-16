@@ -40,6 +40,12 @@ export interface ChatRequest {
   agentIds?: string[];
   includeDocuments?: boolean;
   pendingSessionId?: string;  // For tracking new sessions
+  previewContext?: {
+    sourceAgentId?: string;
+    sourceAgentName?: string;
+    action?: string;
+    currentHtml?: string;
+  };
 }
 
 export interface SessionListResponse {
@@ -189,7 +195,8 @@ export class ChatService {
           session_id: request.sessionId,
           orchestration_type: request.orchestrationType,
           agent_ids: request.agentIds,
-          include_documents: request.includeDocuments ?? true
+          include_documents: request.includeDocuments ?? true,
+          preview_context: request.previewContext
         })
       });
       

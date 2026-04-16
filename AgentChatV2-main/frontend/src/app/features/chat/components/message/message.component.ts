@@ -6,7 +6,7 @@ import { marked } from 'marked';
 import { Message } from '../../../../core/services/chat.service';
 import { SettingsService } from '../../../../core/services/settings.service';
 import { environment } from '@env/environment';
-import { WizardFormComponent, ParsedInputField, parseInputFields } from '../wizard-form/wizard-form.component';
+import { WizardFormComponent, ParsedInputField, parseInputFields, stripStructuredInputFormBlock } from '../wizard-form/wizard-form.component';
 
 // Import chatter event type from parent
 interface ChatterEvent {
@@ -828,6 +828,8 @@ export class MessageComponent implements DoCheck, OnInit {
   @Input() isStreaming = false;
   /** IDs of selected agents that have document grounding — used for auto-linking filenames */
   @Input() groundedAgentIds: string[] = [];
+  /** Agent IDs explicitly allowed to trigger the structured input form renderer. */
+  @Input() structuredFormAgentIds: string[] = [];
   /** Whether this is the last assistant message (only show wizard on the last one) */
   @Input() isLastAssistantMessage = false;
   @Output() formSubmit = new EventEmitter<string>();
@@ -967,9 +969,13 @@ export class MessageComponent implements DoCheck, OnInit {
   }
   
   formatContent(content: string): string {
+    // Strip explicit structured_input_form blocks from rendered prose; valid
+    // form blocks are shown as UI below the message instead.
+    let cleaned = stripStructuredInputFormBlock(content);
+
     // Strip Kramdown/Jekyll-style attribute syntax that marked doesn't support,
     // e.g. {:target="_blank"} or {:.class-name}
-    let cleaned = content.replace(/\{:\s*[^}]+\}/g, '');
+    cleaned = cleaned.replace(/\{:\s*[^}]+\}/g, '');
 
     // Use marked for full markdown rendering
     let result = (this.md ? this.md.parse(cleaned) : marked.parse(cleaned)) as string;
@@ -1617,7 +1623,15 @@ export class MessageComponent implements DoCheck, OnInit {
    * Results are cached to avoid re-parsing on every change detection cycle.
    */
   getParsedFields(): ParsedInputField[] {
-    if (this.message.role !== 'assistant' || !this.isLastAssistantMessage) return [];
+    const assistantAgentId = this.message.metadata?.['assistant_agent_id'];
+    if (
+      this.message.role !== 'assistant'
+      || !this.isLastAssistantMessage
+      || typeof assistantAgentId !== 'string'
+      || !this.structuredFormAgentIds.includes(assistantAgentId)
+    ) {
+      return [];
+    }
     if (this.cachedContent === this.message.content) {
       return this.cachedParsedFields || [];
     }

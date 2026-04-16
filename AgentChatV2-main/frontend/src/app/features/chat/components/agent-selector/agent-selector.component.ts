@@ -54,12 +54,12 @@ import { AgentConfig } from '../../../../core/services/agent.service';
           @for (agent of filteredSortedAgents; track agent.id) {
             <div 
               class="agent-card"
-              [class.selected]="isSelected(agent.id!) || agent.is_orchestrator"
+              [class.selected]="isSelected(agent.id!)"
               [class.orchestrator]="agent.is_orchestrator"
-              [class.locked]="agent.is_orchestrator"
+              [class.locked]="isLocked(agent)"
               [class.a2a]="agent.agent_type === 'a2a'"
               [title]="agent.description || agent.name"
-              (click)="!agent.is_orchestrator && agentToggle.emit(agent.id!)"
+              (click)="canToggle(agent) && agentToggle.emit(agent.id!)"
             >
               <div class="agent-icon">
                 <span class="material-icons">
@@ -80,12 +80,12 @@ import { AgentConfig } from '../../../../core/services/agent.service';
                   <div class="agent-model a2a-external">External Agent</div>
                 }
                 @if (agent.is_orchestrator) {
-                  <div class="agent-required">Required</div>
+                  <div class="agent-required">Orchestrator</div>
                 }
               </div>
-              @if (isSelected(agent.id!) || agent.is_orchestrator) {
+              @if (isSelected(agent.id!)) {
                 <div class="agent-check">
-                  <span class="material-icons">{{ agent.is_orchestrator ? 'lock' : 'check_circle' }}</span>
+                  <span class="material-icons">{{ isLocked(agent) ? 'lock' : 'check_circle' }}</span>
                 </div>
               }
             </div>
@@ -373,5 +373,21 @@ export class AgentSelectorComponent {
   
   isSelected(agentId: string): boolean {
     return this.selectedAgentIds.includes(agentId);
+  }
+
+  selectedOrchestratorIds(): string[] {
+    return this.agents
+      .filter(agent => agent.is_orchestrator && agent.id && this.selectedAgentIds.includes(agent.id))
+      .map(agent => agent.id!);
+  }
+
+  isLocked(agent: AgentConfig): boolean {
+    return !!agent.id && !!agent.is_orchestrator && this.isSelected(agent.id) && this.selectedOrchestratorIds().length <= 1;
+  }
+
+  canToggle(agent: AgentConfig): boolean {
+    if (!agent.id) return false;
+    if (!agent.is_orchestrator) return true;
+    return !this.isLocked(agent);
   }
 }

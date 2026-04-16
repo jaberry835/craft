@@ -1,6 +1,9 @@
 import { Component, Input, Output, EventEmitter, OnChanges } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 
+const STRUCTURED_INPUT_FORM_RE = /```structured_input_form\s*\n([\s\S]*?)```/i;
+const SUPPORTED_FIELD_TYPES = new Set(['text', 'textarea', 'date', 'email', 'url', 'number']);
+
 /** A field parsed from an agent's response asking for user input. */
 export interface ParsedInputField {
   /** Original bold label from the agent message (e.g. "Company Name") */
@@ -12,76 +15,87 @@ export interface ParsedInputField {
 }
 
 /**
- * Parses an assistant message looking for a bullet list of bold field names,
- * which is the typical pattern when an agent asks the user for structured input.
+ * Parses an explicit structured_input_form fenced block from an assistant message.
  *
- * Detects patterns like:
- *   - **Field Name** (description or example)
- *   - **Field Name**: description
- *   * **Field Name** — description
- *
- * Returns an array of ParsedInputField if the message looks like an input
- * request, or an empty array if it doesn't match.
+ * Expected format:
+ * ```structured_input_form
+ * {
+ *   "fields": [
+ *     { "label": "Project Display Name", "hint": "example: Genesis" },
+ *     { "label": "Description", "hint": "brief summary", "type": "textarea" }
+ *   ]
+ * }
+ * ```
  */
 export function parseInputFields(markdownContent: string): ParsedInputField[] {
   if (!markdownContent) return [];
 
-  const lines = markdownContent.split('\n');
+  const match = markdownContent.match(STRUCTURED_INPUT_FORM_RE);
+  if (!match) return [];
 
-  // Matches bullet or numbered lists with bold field names:
-  //   - **Label** rest  /  * **Label** rest  /  • **Label** rest
-  //   1. **Label** rest  /  1) **Label** rest
-  const fieldPattern = /^\s*(?:[-*\u2022]|\d+[.)]\s*)\s+\*\*(.+?)\*\*\s*(.*)/;
-
-  const candidates: ParsedInputField[] = [];
-  let filledCount = 0;
-
-  for (const line of lines) {
-    const match = line.match(fieldPattern);
-    if (!match) continue;
-
-    const label = match[1].trim().replace(/:$/, ''); // strip trailing colon if inside bold
-    const rest = match[2].trim();
-
-    // Extract hint from parenthetical or after colon/dash
-    let hint = '';
-    const parenMatch = rest.match(/^\((.+?)\)/);
-    if (parenMatch) {
-      hint = parenMatch[1];
-    } else if (rest.startsWith(':') || rest.startsWith('\u2014') || rest.startsWith('-')) {
-      hint = rest.replace(/^[:\u2014-]\s*/, '').trim();
-    } else {
-      hint = rest;
-    }
-
-    // Track whether this field already has a concrete value filled in.
-    // Handles both "**Label**: Value" (colon outside bold) and "**Label:** Value" (colon inside bold)
-    const colonValue = rest.match(/^:\s*(.+)/);
-    const rawLabel = match[1].trim();
-    const colonInsideBold = rawLabel.endsWith(':');
-    if (colonValue) {
-      const val = colonValue[1].trim();
-      const looksLikeHint = /^(e\.g\.|for example|such as|your |enter |specify |provide |the )/i.test(val);
-      if (val && !looksLikeHint) filledCount++;
-    } else if (colonInsideBold && rest) {
-      // Colon was inside bold: **Label:** Value — rest IS the value
-      const looksLikeHint = /^(e\.g\.|for example|such as|your |enter |specify |provide |the )/i.test(rest);
-      if (!looksLikeHint) filledCount++;
-    }
-
-    const type = inferFieldType(label, hint);
-    candidates.push({ label, hint, type });
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(match[1]);
+  } catch {
+    return [];
   }
 
-  // Only return fields if we found at least 2 bullet-bold items —
-  // a single one is likely not an input request
-  if (candidates.length < 2) return [];
+  const rawFields = Array.isArray(parsed)
+    ? parsed
+    : (parsed && typeof parsed === 'object' && Array.isArray((parsed as { fields?: unknown[] }).fields)
+        ? (parsed as { fields: unknown[] }).fields
+        : []);
 
-  // If most items already have concrete values, this is a result summary,
-  // not an input request (e.g. "Company Name: Mires Corp")
-  if (filledCount > candidates.length * 0.5) return [];
+  if (rawFields.length < 2) return [];
 
-  return candidates;
+  const candidates = new Map<string, ParsedInputField>();
+
+  for (const rawField of rawFields) {
+    if (!rawField || typeof rawField !== 'object') continue;
+
+    const labelValue = (rawField as { label?: unknown }).label;
+    const hintValue = (rawField as { hint?: unknown; placeholder?: unknown; description?: unknown }).hint
+      ?? (rawField as { placeholder?: unknown }).placeholder
+      ?? (rawField as { description?: unknown }).description;
+    const typeValue = (rawField as { type?: unknown }).type;
+
+    const label = typeof labelValue === 'string' ? labelValue.trim() : '';
+    if (!label) continue;
+
+    const hint = typeof hintValue === 'string' ? hintValue.trim() : '';
+    const normalizedType = typeof typeValue === 'string' ? typeValue.trim().toLowerCase() : '';
+    const type = SUPPORTED_FIELD_TYPES.has(normalizedType)
+      ? normalizedType as ParsedInputField['type']
+      : inferFieldType(label, hint);
+
+    const normalizedKey = normalizeFieldLabel(label);
+    candidates.set(normalizedKey, { label, hint, type });
+  }
+
+  const parsedFields = [...candidates.values()];
+
+  // Only return fields if we found at least 2 explicit fields.
+  if (parsedFields.length < 2) return [];
+
+  return parsedFields;
+}
+
+export function stripStructuredInputFormBlock(markdownContent: string): string {
+  if (!parseInputFields(markdownContent).length) {
+    return markdownContent;
+  }
+
+  return markdownContent.replace(
+    STRUCTURED_INPUT_FORM_RE,
+    '\n\n_Structured input form shown below._\n\n'
+  ).trim();
+}
+
+function normalizeFieldLabel(label: string): string {
+  return label
+    .toLowerCase()
+    .replace(/[_\s-]+/g, '')
+    .replace(/[^a-z0-9]/g, '');
 }
 
 /** Infer a field input type from the label and hint text */

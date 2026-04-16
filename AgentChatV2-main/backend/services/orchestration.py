@@ -104,6 +104,7 @@ DELEGATION RULES:
 3. When in doubt about whether a specialist can help, delegate to them
 4. Generic questions (greetings, weather, time, general knowledge) = answer directly
 5. Domain-specific questions (databases, APIs, documents) = delegate
+6. Follow-ups to an existing HTML preview, draft revision requests, approval messages, and iterative design/content tweaks are NOT generic small talk. If a specialist previously generated the draft, delegate back to a specialist rather than answering directly.
 """
 
 DEFAULT_SYNTHESIS_PROMPT = """You are an intelligent orchestration agent synthesizing results from specialist agents.
@@ -201,6 +202,7 @@ async def run_orchestrator_for_analysis(
     user_message: str,
     session_id: str,
     user_id: str,
+    preview_context: Optional[dict],
     create_chat_client_fn,
     cosmos_service,
     embedding_service,
@@ -234,6 +236,56 @@ async def run_orchestrator_for_analysis(
         agent_list.append(f"- {name} (id: {agent_id}): {description}")
         agent_id_map[name.lower()] = agent_id
         agent_id_map[agent_id] = agent_id  # Also map ID to itself
+
+    preview_source_agent_id = (preview_context or {}).get("source_agent_id")
+    preview_source_agent_name = (preview_context or {}).get("source_agent_name")
+    preview_action = (preview_context or {}).get("action")
+    preview_current_html = (preview_context or {}).get("current_html")
+
+    # When a follow-up comes from an open preview and the preview was produced by
+    # a known specialist, route it back to that specialist directly instead of
+    # letting the orchestrator reclassify it as a generic direct-answer request.
+    if preview_source_agent_id and any(
+        config.get("id") == preview_source_agent_id for config in specialist_configs
+    ):
+        prefix = "The user is responding to an existing HTML preview generated earlier."
+        if preview_action == "approval":
+            prefix = "The user approved the existing HTML preview and wants the originating agent to continue with the next step."
+        elif preview_action == "revision":
+            prefix = "The user requested a revision to the existing HTML preview and wants the originating agent to update that draft directly."
+
+        contextualized_query = f"{prefix}\nOriginating agent: {preview_source_agent_name or preview_source_agent_id}\nUser follow-up: {user_message}"
+        if preview_current_html:
+            contextualized_query += f"\n\nCURRENT HTML DRAFT (source of truth - modify this exact draft unless the user asks for a broader redesign):\n```html\n{preview_current_html}\n```"
+        return {
+            "action": "delegate",
+            "specialists": [preview_source_agent_id],
+            "contextualized_query": contextualized_query,
+            "reasoning": "Follow-up to an open preview should return to the originating specialist so it can revise or continue its current draft.",
+            "tokens_input": 0,
+            "tokens_output": 0,
+        }
+
+    # Generic fallback: when this is clearly a preview revision/approval flow and
+    # there is only one specialist in the session, prefer that specialist instead
+    # of letting the orchestrator handle the request directly.
+    if preview_action in {"revision", "approval"} and preview_current_html and len(specialist_configs) == 1:
+        only_specialist = specialist_configs[0]
+        contextualized_query = (
+            f"This is a follow-up to an existing HTML preview. "
+            f"Preview action: {preview_action}.\n"
+            f"User follow-up: {user_message}\n\n"
+            f"CURRENT HTML DRAFT (source of truth - modify this exact draft unless the user asks for a broader redesign):\n"
+            f"```html\n{preview_current_html}\n```"
+        )
+        return {
+            "action": "delegate",
+            "specialists": [only_specialist.get("id")],
+            "contextualized_query": contextualized_query,
+            "reasoning": "Preview follow-up with a single available specialist should return to that specialist to preserve the draft editing flow.",
+            "tokens_input": 0,
+            "tokens_output": 0,
+        }
     
     # Use admin-configured analysis prompt, or default if not set
     analysis_prompt = orchestrator_config.get("analysis_prompt") or DEFAULT_ANALYSIS_PROMPT
@@ -246,6 +298,20 @@ async def run_orchestrator_for_analysis(
     # specialists that have no access to conversation history.
     if "contextualized_query" not in analysis_prompt:
         analysis_prompt += CONTEXTUALIZED_QUERY_SUPPLEMENT
+
+    if preview_context:
+        analysis_prompt += f"""
+
+PREVIEW FOLLOW-UP CONTEXT:
+- This message may be a follow-up to an open HTML preview shown in the UI.
+- Preview action: {preview_action or 'unknown'}
+- Preview source agent ID: {preview_source_agent_id or 'unknown'}
+- Preview source agent name: {preview_source_agent_name or 'unknown'}
+- Current preview HTML is attached: {'yes' if preview_current_html else 'no'}
+
+If this is a revision/approval/follow-up to a previously generated preview, prefer routing it back to the same originating specialist unless there is a strong reason not to.
+Do not treat preview revisions as generic requests for coding advice or direct explanation when a specialist is available to continue the draft.
+"""
     
     # Create chat client
     chat_client = create_chat_client_fn(orchestrator_config)

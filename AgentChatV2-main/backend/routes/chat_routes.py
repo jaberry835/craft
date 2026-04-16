@@ -78,6 +78,7 @@ async def list_available_agents(request: Request):
             "is_orchestrator": a.get("is_orchestrator", False),
             "model": a.get("model"),  # Show model for local agents
             "has_grounding": bool(a.get("grounding_sources")),  # For citation auto-linking
+            "ui_capabilities": a.get("ui_capabilities", {}),
         }
         for a in agents
         if a.get("is_active", True)  # Only return active agents
@@ -270,6 +271,8 @@ async def send_message(request: Request, chat_request: ChatRequest):
             
             full_response = []
             chatter_log = []  # Collect chatter events for persistence
+            assistant_agent_id = None
+            assistant_agent_name = None
             
             # Stream from orchestrated agents.
             # Conversation history and RAG document context are loaded
@@ -281,7 +284,8 @@ async def send_message(request: Request, chat_request: ChatRequest):
                 user_message=chat_request.message,
                 session_id=session_id,
                 user_id=user.user_id,
-                user_token=user_token
+                user_token=user_token,
+                preview_context=chat_request.preview_context.model_dump() if chat_request.preview_context else None,
             ):
                 if isinstance(event, ChatterEvent):
                     # Collect for persistence (strip large tool result content to save space)
@@ -392,15 +396,38 @@ async def send_message(request: Request, chat_request: ChatRequest):
                         if event.tokens_output is not None:
                             metadata["tokens_output"] = event.tokens_output
                         yield _agui_sse(CustomEvent(name="chatter", value=metadata))
+
+                    elif event.type == ChatterEventType.HTML_PREVIEW:
+                        # Emit the html_preview CUSTOM event for the frontend panel
+                        yield _agui_sse(CustomEvent(
+                            name="html_preview",
+                            value={
+                                "html": event.content,
+                                "agent_id": event.agent_id,
+                                "agent_name": event.agent_name,
+                            },
+                        ))
                     
                 elif isinstance(event, AgentManagerResponse):
+                    response_text = event.content
+                    assistant_agent_id = event.agent_id
+                    assistant_agent_name = event.agent_name
+
+                    yield _agui_sse(CustomEvent(
+                        name="assistant_agent",
+                        value={
+                            "agent_id": event.agent_id,
+                            "agent_name": event.agent_name,
+                        },
+                    ))
+
                     # --- AG-UI: TEXT_MESSAGE_START / CONTENT / END ---
                     yield _agui_sse(TextMessageStartEvent(message_id=message_id, role="assistant"))
-                    yield _agui_sse(TextMessageContentEvent(message_id=message_id, delta=event.content))
+                    yield _agui_sse(TextMessageContentEvent(message_id=message_id, delta=response_text))
                     yield _agui_sse(TextMessageEndEvent(message_id=message_id))
 
                     # Persist clean assistant text; agent provenance is captured in chatter metadata.
-                    full_response.append(event.content)
+                    full_response.append(response_text)
             
             # Save assistant response with chatter history
             combined_response = "\n\n".join(full_response)
@@ -412,7 +439,9 @@ async def send_message(request: Request, chat_request: ChatRequest):
                 metadata={
                     "pattern": pattern.value,
                     "agents": agent_ids,
-                    "chatter_events": chatter_log
+                    "chatter_events": chatter_log,
+                    "assistant_agent_id": assistant_agent_id,
+                    "assistant_agent_name": assistant_agent_name,
                 }
             )
             
