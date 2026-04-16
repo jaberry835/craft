@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.1.6 — 2026-04-14
+
+### Codebase Refactoring
+
+- **Split builtinTools.ts into focused tool modules** — the 1,857-line monolith is now a 548-line shell delegating to five category files under `src/tools/`: fileTools, searchTools, terminalTools, codeActionTools, and planTools. Adding a new tool means editing the relevant category file, not a single mega-file.
+- **Extracted ProviderRouter from chatViewProvider** — model configuration, provider switching, and CLI availability checking are now in a dedicated `providerRouter.ts` module (144 lines), keeping provider logic out of the 3,000+ line webview provider.
+- **Extracted session restore logic from chatViewProvider** — the 300+ line transcript replay and tool-description helpers are now in `sessionRestore.ts`, reducing chatViewProvider and making restore behavior independently testable.
+
+### Workspace Indexing Performance
+
+- **Phased startup indexing** — file indexing (fast, stat-only with disk cache) now completes first and makes the agent usable immediately. Symbol and semantic indexing run in the background afterward, so users can start chatting without waiting.
+- **Added disk caching to SymbolIndexer** — symbol data is now persisted to `symbolIndex.json` and only files that changed since the last activation are re-indexed via `executeDocumentSymbolProvider`. Previously every file was re-indexed on every reload.
+- **Batched stat() calls in WorkspaceIndexer** — file metadata is now fetched 20 at a time via `Promise.allSettled` instead of one-by-one awaits, cutting file indexing time significantly on large workspaces.
+- **Batched file reads in SemanticIndexer** — changed files are read 10 at a time concurrently instead of serially.
+- **Raised findFiles limit from 10,000 to 50,000** — large monorepos no longer silently lose files from the index.
+
+### Copilot CLI Integration
+
+- **CLI thinking text now renders inside working blocks** — reasoning/thinking output from the Copilot CLI is now shown as progress entries inside the collapsible working block (GHCP-style), instead of as large standalone narration bubbles that dominated the chat view.
+- **Switched to `customize` mode for CLI system prompt** — uses the SDK's fine-grained `systemMessage.sections` API to surgically set identity, tone, and guidelines while preserving the CLI's built-in tool instructions, safety rules, and other prompt sections.
+
+### Authentication
+
+- **Added VS Code auth-session support for Copilot CLI BYOK bearer mode** — Junior can now acquire Copilot CLI bearer credentials from a VS Code authentication provider session instead of requiring a pasted bearer token in settings.
+- **Added local Azure OpenAI and APIM bearer auth modes** — direct Azure and APIM-backed local agent mode can now use either `api-key`, a manually supplied bearer token, or a VS Code authentication session.
+- **Added sign-in commands for bearer flows** — new commands trigger interactive sign-in for both local Azure/APIM bearer mode and Copilot CLI bearer mode.
+- **Improved auth diagnostics** — the `Junior` output channel now logs the resolved local auth mode and safe bearer-token claims such as `aud` and `scp` without printing secrets.
+
+### Documentation
+
+- **Updated setup guides for bearer auth** — the README and developer guide now document the new local Azure/APIM bearer settings, Copilot CLI bearer settings, sign-in commands, and token-refresh behavior.
+
 ## 1.1.3— 2026-03-31
 
 ### UI

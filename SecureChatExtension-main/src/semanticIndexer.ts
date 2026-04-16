@@ -24,6 +24,8 @@ interface CachedChunk {
 
 const CACHE_VERSION = 1;
 const CACHE_FILENAME = 'semanticIndex.json';
+/** Number of concurrent file reads during semantic indexing. */
+const READ_CONCURRENCY = 10;
 
 const STOP_WORDS = new Set([
     'the', 'and', 'for', 'with', 'this', 'that', 'from', 'into', 'when', 'where', 'what',
@@ -69,33 +71,37 @@ export class SemanticIndexer {
         }
 
         // Process only files that changed (or all files if no cache)
+        const filesToProcess = files.filter(f => needsRechunk.has(f.relativePath));
         let done = 0;
-        let rechunked = 0;
-        for (const file of files) {
-            if (token?.isCancellationRequested) { break; }
 
-            if (needsRechunk.has(file.relativePath)) {
-                try {
+        // Batch file reads with concurrency for speed
+        for (let batchStart = 0; batchStart < filesToProcess.length; batchStart += READ_CONCURRENCY) {
+            if (token?.isCancellationRequested) { break; }
+            const batchEnd = Math.min(batchStart + READ_CONCURRENCY, filesToProcess.length);
+            const batch = filesToProcess.slice(batchStart, batchEnd);
+
+            const results = await Promise.allSettled(
+                batch.map(async (file) => {
                     const bytes = await vscode.workspace.fs.readFile(file.uri);
                     const content = Buffer.from(bytes).toString('utf8');
-                    if (!content || content.indexOf('\u0000') >= 0) {
-                        done++;
-                        continue;
-                    }
+                    return { file, content };
+                })
+            );
 
-                    const fileChunks = this.chunkFile(file.relativePath, content);
-                    newChunks.push(...fileChunks);
-                    rechunked++;
-                } catch {
-                    // ignore unreadable files
-                }
+            for (const result of results) {
+                if (result.status !== 'fulfilled') { continue; }
+                const { file, content } = result.value;
+                if (!content || content.indexOf('\u0000') >= 0) { continue; }
+
+                const fileChunks = this.chunkFile(file.relativePath, content);
+                newChunks.push(...fileChunks);
             }
 
-            done++;
-            if (progress && done % 50 === 0) {
+            done += batch.length;
+            if (progress) {
                 progress.report({
-                    message: `${done}/${total} semantic files`,
-                    increment: total > 0 ? (50 / total) * 100 : 0
+                    message: `${done}/${filesToProcess.length} semantic files`,
+                    increment: filesToProcess.length > 0 ? (batch.length / filesToProcess.length) * 100 : 0
                 });
             }
         }

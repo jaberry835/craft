@@ -27,6 +27,11 @@ export interface CopilotCliModelOption {
     deploymentId: string;
 }
 
+export interface CopilotCliBearerAuthSessionConfig {
+    providerId: string;
+    scopes: string[];
+}
+
 interface CopilotCliByokConfig {
     hasSignal: boolean;
     type: 'openai' | 'azure' | 'anthropic';
@@ -34,6 +39,7 @@ interface CopilotCliByokConfig {
     model: string;
     apiKey: string;
     bearerToken: string;
+    bearerAuthSession?: CopilotCliBearerAuthSessionConfig;
 }
 
 export function buildCopilotCliProcessEnv(): NodeJS.ProcessEnv {
@@ -124,7 +130,7 @@ export function getCopilotCliAvailability(env: NodeJS.ProcessEnv = buildCopilotC
         if (!byokConfig.model) {
             missing.push('model');
         }
-        if ((byokConfig.type === 'azure' || byokConfig.type === 'anthropic') && !byokConfig.apiKey && !byokConfig.bearerToken) {
+        if ((byokConfig.type === 'azure' || byokConfig.type === 'anthropic') && !byokConfig.apiKey && !byokConfig.bearerToken && !byokConfig.bearerAuthSession) {
             missing.push('provider credentials');
         }
 
@@ -158,6 +164,21 @@ export function getCopilotCliAvailability(env: NodeJS.ProcessEnv = buildCopilotC
     };
 }
 
+export function getCopilotCliBearerAuthSessionConfig(): CopilotCliBearerAuthSessionConfig | undefined {
+    const source = (getSetting<string>('copilotCli.providerBearerTokenSource') || '').trim().toLowerCase();
+    if (source !== 'vscode-auth-session') {
+        return undefined;
+    }
+
+    const providerId = (getSetting<string>('copilotCli.providerAuthProviderId') || 'microsoft').trim() || 'microsoft';
+    const scopes = normalizeStringArray(getSetting<string[]>('copilotCli.providerAuthScopes'));
+
+    return {
+        providerId,
+        scopes,
+    };
+}
+
 function getByokConfig(env: NodeJS.ProcessEnv): CopilotCliByokConfig {
     const type = ((getSetting<string>('copilotCli.providerType') || env.COPILOT_PROVIDER_TYPE || '').trim().toLowerCase() || 'openai') as 'openai' | 'azure' | 'anthropic';
     const baseUrl = (getSetting<string>('copilotCli.providerBaseUrl') || env.COPILOT_PROVIDER_BASE_URL || '').trim();
@@ -166,7 +187,8 @@ function getByokConfig(env: NodeJS.ProcessEnv): CopilotCliByokConfig {
     const bearerToken = (getSetting<string>('copilotCli.providerBearerToken') || env.COPILOT_PROVIDER_BEARER_TOKEN || '').trim();
     const wireApi = (getSetting<string>('copilotCli.providerWireApi') || env.COPILOT_PROVIDER_WIRE_API || '').trim();
     const azureApiVersion = (getSetting<string>('copilotCli.providerAzureApiVersion') || env.COPILOT_PROVIDER_AZURE_API_VERSION || '').trim();
-    const hasSignal = [baseUrl, model, apiKey, bearerToken, wireApi, azureApiVersion].some(Boolean);
+    const bearerAuthSession = getCopilotCliBearerAuthSessionConfig();
+    const hasSignal = [baseUrl, model, apiKey, bearerToken, wireApi, azureApiVersion, bearerAuthSession?.providerId].some(Boolean);
 
     return {
         hasSignal,
@@ -175,7 +197,18 @@ function getByokConfig(env: NodeJS.ProcessEnv): CopilotCliByokConfig {
         model,
         apiKey,
         bearerToken,
+        bearerAuthSession,
     };
+}
+
+function normalizeStringArray(values: string[] | undefined): string[] {
+    if (!Array.isArray(values)) {
+        return [];
+    }
+
+    return values
+        .map(value => typeof value === 'string' ? value.trim() : '')
+        .filter((value): value is string => value.length > 0);
 }
 
 function hasGitHubTokenEnv(env: NodeJS.ProcessEnv): boolean {

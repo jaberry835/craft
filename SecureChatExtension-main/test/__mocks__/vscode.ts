@@ -41,6 +41,11 @@ export const window = {
     }),
     showInformationMessage: vi.fn(() => Promise.resolve(undefined)),
     showWarningMessage: vi.fn(() => Promise.resolve(undefined)),
+    showErrorMessage: vi.fn(() => Promise.resolve(undefined)),
+};
+
+export const authentication = {
+    getSession: vi.fn(() => Promise.resolve(undefined)),
 };
 
 export enum StatusBarAlignment {

@@ -8,7 +8,7 @@ import * as vscode from 'vscode';
 import { CopilotClient, CopilotSession } from '@github/copilot-sdk';
 import type { MCPServerConfig, PermissionRequest, PermissionRequestResult, SessionConfig } from '@github/copilot-sdk';
 import * as path from 'path';
-import { buildCopilotCliProcessEnv, resolveConfiguredCopilotCliLaunchSpec } from './copilotCliSupport';
+import { buildCopilotCliProcessEnv, getCopilotCliBearerAuthSessionConfig, resolveConfiguredCopilotCliLaunchSpec } from './copilotCliSupport';
 import { BuiltinTools } from './builtinTools';
 import { shouldAutoApproveCopilotPermission } from './permissions';
 
@@ -45,6 +45,16 @@ interface ToolCallMetadata {
     arguments?: Record<string, unknown>;
 }
 
+interface SafeJwtClaims {
+    aud?: string | string[];
+    iss?: string;
+    tid?: string;
+    scp?: string;
+    roles?: string[];
+    exp?: number;
+    nbf?: number;
+}
+
 export class CopilotSdkRuntime implements AgentRuntime {
     private static readonly IDLE_TIMEOUT_RECOVERY_MS = 180000;
     private static readonly SEND_AND_WAIT_TIMEOUT_MS = 180000;
@@ -74,6 +84,7 @@ export class CopilotSdkRuntime implements AgentRuntime {
     private lastActivityTs = 0;
     private toolMetadataByCallId = new Map<string, ToolCallMetadata>();
     private lastBackgroundTaskSummary = '';
+    private reasoningNarrationText = '';
     private currentPromptContext = '';
     private longWaitStatusTimer?: NodeJS.Timeout;
     private lastLongWaitStatus = '';
@@ -105,6 +116,7 @@ export class CopilotSdkRuntime implements AgentRuntime {
         this.mergedActionEntries.clear();
         this.toolMetadataByCallId.clear();
         this.lastBackgroundTaskSummary = '';
+        this.reasoningNarrationText = '';
         this.currentPromptContext = '';
     }
 
@@ -118,6 +130,7 @@ export class CopilotSdkRuntime implements AgentRuntime {
         this.sessionApprovedCategories.clear();
         this.toolMetadataByCallId.clear();
         this.lastBackgroundTaskSummary = '';
+        this.reasoningNarrationText = '';
         this.currentPromptContext = '';
     }
 
@@ -199,6 +212,7 @@ export class CopilotSdkRuntime implements AgentRuntime {
         this.mergedActionEntries.clear();
         this.toolMetadataByCallId.clear();
         this.lastBackgroundTaskSummary = '';
+        this.reasoningNarrationText = '';
         this.callbacks.sendToWebview({ type: 'agentPlan', steps: [] });
 
         this.messages.push({
@@ -343,7 +357,7 @@ export class CopilotSdkRuntime implements AgentRuntime {
         const mcpServers = await this.getMcpServerConfigs?.();
 
         // Build BYOK provider config if configured
-        const provider = this.buildProviderConfig();
+        const provider = await this.buildProviderConfig();
 
         const sessionConfig: SessionConfig = {
             ...(model ? { model } : {}),
@@ -394,7 +408,8 @@ export class CopilotSdkRuntime implements AgentRuntime {
 
         this.unsubscribers.push(
             this.session.on('session.idle', (event: any) => {
-                this.lastActivityTs = Date.now();
+                this.markActivity();
+                this.flushReasoningNarration();
                 this.lastBackgroundTaskSummary = this.describeBackgroundTasks(event.data?.backgroundTasks);
                 if (this.lastBackgroundTaskSummary) {
                     this.callbacks.sendToWebview({ type: 'setStatus', status: this.lastBackgroundTaskSummary });
@@ -404,7 +419,7 @@ export class CopilotSdkRuntime implements AgentRuntime {
 
         this.unsubscribers.push(
             this.session.on('assistant.message', (event: any) => {
-                this.lastActivityTs = Date.now();
+                this.markActivity();
 
                 for (const request of event.data?.toolRequests || []) {
                     if (!request?.toolCallId) { continue; }
@@ -418,6 +433,7 @@ export class CopilotSdkRuntime implements AgentRuntime {
 
                 const content = typeof event.data?.content === 'string' ? event.data.content : '';
                 if (!this.assistantText && content.trim()) {
+                    this.flushReasoningNarration();
                     if (!this.assistantStarted) {
                         if (this.workingBlock) {
                             this.finalizeWorkingBlock();
@@ -434,10 +450,11 @@ export class CopilotSdkRuntime implements AgentRuntime {
         // Streaming text deltas
         this.unsubscribers.push(
             this.session.on('assistant.message_delta', (event: any) => {
-                this.lastActivityTs = Date.now();
+                this.markActivity();
                 const delta = event.data?.deltaContent || '';
                 if (!delta) { return; }
 
+                this.flushReasoningNarration();
                 if (!this.assistantStarted) {
                     // Close any open working block before starting text
                     if (this.workingBlock) {
@@ -454,10 +471,10 @@ export class CopilotSdkRuntime implements AgentRuntime {
         // Reasoning deltas (thinking)
         this.unsubscribers.push(
             this.session.on('assistant.reasoning_delta', (event: any) => {
-                this.lastActivityTs = Date.now();
+                this.markActivity();
                 const delta = event.data?.deltaContent || '';
                 if (delta) {
-                    this.callbacks.sendToWebview({ type: 'narrationText', text: delta });
+                    this.reasoningNarrationText += delta;
                 }
             })
         );
@@ -465,7 +482,7 @@ export class CopilotSdkRuntime implements AgentRuntime {
         // Native token accounting from the Copilot CLI/SDK.
         this.unsubscribers.push(
             this.session.on('assistant.usage', (event: any) => {
-                this.lastActivityTs = Date.now();
+                this.markActivity();
                 const inputTokens = Number(event.data?.inputTokens || 0);
                 const outputTokens = Number(event.data?.outputTokens || 0);
                 if (!this.tokenTracker || (inputTokens <= 0 && outputTokens <= 0)) {
@@ -484,7 +501,7 @@ export class CopilotSdkRuntime implements AgentRuntime {
         // Current context window burden from the active CLI session.
         this.unsubscribers.push(
             this.session.on('session.usage_info', (event: any) => {
-                this.lastActivityTs = Date.now();
+                this.markActivity();
                 const currentTokens = Number(event.data?.currentTokens || 0);
                 const tokenLimit = Number(event.data?.tokenLimit || 0);
                 if (!this.tokenTracker || currentTokens <= 0) {
@@ -498,7 +515,8 @@ export class CopilotSdkRuntime implements AgentRuntime {
         // Tool execution started
         this.unsubscribers.push(
             this.session.on('tool.execution_start', (event: any) => {
-                this.lastActivityTs = Date.now();
+                this.markActivity();
+                this.flushReasoningNarration();
                 const toolName = event.data?.toolName || 'tool';
                 const toolCallId = event.data?.toolCallId as string | undefined;
                 const toolMeta = toolCallId ? this.toolMetadataByCallId.get(toolCallId) : undefined;
@@ -559,7 +577,7 @@ export class CopilotSdkRuntime implements AgentRuntime {
         // Tool execution completed
         this.unsubscribers.push(
             this.session.on('tool.execution_complete', (event: any) => {
-                this.lastActivityTs = Date.now();
+                this.markActivity();
                 const toolName = event.data?.toolName || 'tool';
                 const toolCallId = event.data?.toolCallId as string | undefined;
                 const entryId = toolCallId ? this.toolEntryIds.get(toolCallId) : undefined;
@@ -607,7 +625,7 @@ export class CopilotSdkRuntime implements AgentRuntime {
 
         this.unsubscribers.push(
             this.session.on('session.workspace_file_changed', (event: any) => {
-                this.lastActivityTs = Date.now();
+                this.markActivity();
                 const relPath = typeof event.data?.path === 'string' ? event.data.path.trim() : '';
                 if (!relPath || !this.workingBlock) {
                     return;
@@ -645,7 +663,7 @@ export class CopilotSdkRuntime implements AgentRuntime {
 
         this.unsubscribers.push(
             this.session.on('session.info', (event: any) => {
-                this.lastActivityTs = Date.now();
+                this.markActivity();
                 const message = typeof event.data?.message === 'string' ? event.data.message.trim() : '';
                 if (!message || !this.workingBlock) {
                     return;
@@ -661,7 +679,7 @@ export class CopilotSdkRuntime implements AgentRuntime {
 
         this.unsubscribers.push(
             this.session.on('session.warning', (event: any) => {
-                this.lastActivityTs = Date.now();
+                this.markActivity();
                 const message = typeof event.data?.message === 'string' ? event.data.message.trim() : '';
                 if (!message) {
                     return;
@@ -672,7 +690,7 @@ export class CopilotSdkRuntime implements AgentRuntime {
 
         this.unsubscribers.push(
             this.session.on('tool.execution_progress', (event: any) => {
-                this.lastActivityTs = Date.now();
+                this.markActivity();
                 const toolCallId = event.data?.toolCallId as string | undefined;
                 const entryId = toolCallId ? this.toolEntryIds.get(toolCallId) : undefined;
                 const progressMessage = typeof event.data?.progressMessage === 'string'
@@ -698,7 +716,7 @@ export class CopilotSdkRuntime implements AgentRuntime {
 
         this.unsubscribers.push(
             this.session.on('tool.execution_partial_result', (event: any) => {
-                this.lastActivityTs = Date.now();
+                this.markActivity();
                 const toolCallId = event.data?.toolCallId as string | undefined;
                 const entryId = toolCallId ? this.toolEntryIds.get(toolCallId) : undefined;
                 const partialOutput = typeof event.data?.partialOutput === 'string'
@@ -731,14 +749,14 @@ export class CopilotSdkRuntime implements AgentRuntime {
         );
     }
 
-    private buildProviderConfig(): ProviderConfig | undefined {
+    private async buildProviderConfig(): Promise<ProviderConfig | undefined> {
         const cliEnv = buildCopilotCliProcessEnv();
         const baseUrl = getSetting<string>('copilotCli.providerBaseUrl') || cliEnv.COPILOT_PROVIDER_BASE_URL;
         if (!baseUrl) { return undefined; }
 
         const type = (getSetting<string>('copilotCli.providerType') || cliEnv.COPILOT_PROVIDER_TYPE || 'openai') as 'openai' | 'azure' | 'anthropic';
         const apiKey = getSetting<string>('copilotCli.providerApiKey') || cliEnv.COPILOT_PROVIDER_API_KEY || undefined;
-        const bearerToken = getSetting<string>('copilotCli.providerBearerToken') || cliEnv.COPILOT_PROVIDER_BEARER_TOKEN || undefined;
+        const bearerToken = await this.resolveProviderBearerToken(cliEnv);
         const wireApi = (getSetting<string>('copilotCli.providerWireApi') || cliEnv.COPILOT_PROVIDER_WIRE_API || undefined) as 'completions' | 'responses' | undefined;
         const azureApiVersion = getSetting<string>('copilotCli.providerAzureApiVersion') || cliEnv.COPILOT_PROVIDER_AZURE_API_VERSION || undefined;
 
@@ -751,8 +769,114 @@ export class CopilotSdkRuntime implements AgentRuntime {
             ...(type === 'azure' && azureApiVersion ? { azure: { apiVersion: azureApiVersion } } : {}),
         };
 
-        this.log?.(`[copilot-sdk] BYOK provider: type=${type}, baseUrl=${baseUrl}`);
+        this.log?.(`[copilot-sdk] BYOK provider: type=${type}, baseUrl=${baseUrl}, wireApi=${wireApi || 'default'}, azureApiVersion=${azureApiVersion || 'default'}, hasApiKey=${apiKey ? 'yes' : 'no'}, hasBearerToken=${bearerToken ? 'yes' : 'no'}`);
         return config;
+    }
+
+    private async resolveProviderBearerToken(cliEnv: NodeJS.ProcessEnv): Promise<string | undefined> {
+        const authSessionConfig = getCopilotCliBearerAuthSessionConfig();
+        if (authSessionConfig) {
+            const session = await vscode.authentication.getSession(
+                authSessionConfig.providerId,
+                authSessionConfig.scopes,
+                { createIfNone: true }
+            );
+
+            if (!session?.accessToken) {
+                throw new Error(`No ${authSessionConfig.providerId} authentication session is available for Copilot CLI bearer mode.`);
+            }
+
+            const tokenClaims = this.decodeSafeJwtClaims(session.accessToken);
+            const expiry = typeof tokenClaims?.exp === 'number'
+                ? new Date(tokenClaims.exp * 1000).toISOString()
+                : 'unknown';
+
+            this.log?.(
+                `[copilot-sdk] Using VS Code auth session for Copilot CLI bearer mode ` +
+                `(provider=${authSessionConfig.providerId}, account=${session.account.label}, scopes=${JSON.stringify(authSessionConfig.scopes)})`
+            );
+            this.log?.(
+                `[copilot-sdk] Bearer token claims: aud=${JSON.stringify(tokenClaims?.aud ?? null)}, ` +
+                `scp=${JSON.stringify(tokenClaims?.scp ?? null)}, roles=${JSON.stringify(tokenClaims?.roles ?? null)}, ` +
+                `tid=${JSON.stringify(tokenClaims?.tid ?? null)}, iss=${JSON.stringify(tokenClaims?.iss ?? null)}, exp=${expiry}`
+            );
+            return session.accessToken;
+        }
+
+        return getSetting<string>('copilotCli.providerBearerToken') || cliEnv.COPILOT_PROVIDER_BEARER_TOKEN || undefined;
+    }
+
+    private decodeSafeJwtClaims(token: string): SafeJwtClaims | undefined {
+        const parts = token.split('.');
+        if (parts.length < 2) {
+            return undefined;
+        }
+
+        try {
+            const payload = parts[1]
+                .replace(/-/g, '+')
+                .replace(/_/g, '/');
+            const paddedPayload = payload.padEnd(Math.ceil(payload.length / 4) * 4, '=');
+            const raw = Buffer.from(paddedPayload, 'base64').toString('utf8');
+            const parsed = JSON.parse(raw) as Record<string, unknown>;
+
+            return {
+                aud: typeof parsed.aud === 'string' || Array.isArray(parsed.aud) ? parsed.aud as string | string[] : undefined,
+                iss: typeof parsed.iss === 'string' ? parsed.iss : undefined,
+                tid: typeof parsed.tid === 'string' ? parsed.tid : undefined,
+                scp: typeof parsed.scp === 'string' ? parsed.scp : undefined,
+                roles: Array.isArray(parsed.roles)
+                    ? parsed.roles.filter((value): value is string => typeof value === 'string')
+                    : undefined,
+                exp: typeof parsed.exp === 'number' ? parsed.exp : undefined,
+                nbf: typeof parsed.nbf === 'number' ? parsed.nbf : undefined,
+            };
+        } catch (err) {
+            this.log?.(`[copilot-sdk] Failed to decode bearer token claims: ${err}`);
+            return undefined;
+        }
+    }
+
+    private flushReasoningNarration(): void {
+        if (!this.reasoningNarrationText) {
+            return;
+        }
+
+        const text = this.reasoningNarrationText.trim();
+        this.reasoningNarrationText = '';
+        if (!text) {
+            return;
+        }
+
+        // Route thinking text into the working block as progress entries
+        // (GHCP-style scrollable thinking inside the working block body)
+        // rather than rendering it as standalone narration bubbles.
+        if (!this.workingBlock) {
+            this.startWorkingBlock('Working');
+        }
+
+        const entry = {
+            id: `thought_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+            kind: 'progress' as const,
+            text,
+            createdAt: Date.now(),
+        };
+        this.workingBlock!.entries.push(entry);
+        this.callbacks.sendToWebview({
+            type: 'workingTextAppended',
+            blockId: this.workingBlock!.id,
+            entry,
+        });
+    }
+
+    private markActivity(): void {
+        this.lastActivityTs = Date.now();
+        if (!this.lastLongWaitStatus) {
+            return;
+        }
+
+        this.lastLongWaitStatus = '';
+        this.callbacks.sendToWebview({ type: 'setStatus', status: '' });
     }
 
     private handlePermission(request: PermissionRequest): Promise<PermissionRequestResult> {
@@ -884,7 +1008,7 @@ export class CopilotSdkRuntime implements AgentRuntime {
             };
 
             disposeIdle = this.session!.on('session.idle', () => {
-                this.lastActivityTs = Date.now();
+                this.markActivity();
                 finish(resolve);
             });
 
@@ -983,15 +1107,30 @@ export class CopilotSdkRuntime implements AgentRuntime {
 
     private buildSystemMessageConfig(): SessionConfig['systemMessage'] {
         return {
-            mode: 'append',
-            content: [
-                'You are running inside Junior, a VS Code coding assistant.',
-                'The host may inject per-turn mode instructions and workspace context through SDK hooks. Treat that injected context as authoritative for the current turn.',
-                'When workspace context already identifies the language, likely files, active editor, or diagnostics, do not ask the user to repeat those facts.',
-                'Do not use the sql tool as a scratchpad, todo list, or task tracker for workspace coding tasks.',
-                'Prefer concise answers in chat, but perform concrete workspace actions when the current turn allows edits or commands.'
-            ].join('\n')
-        };
+            mode: 'customize',
+            sections: {
+                identity: {
+                    action: 'replace',
+                    content: [
+                        'You are Junior, an AI coding assistant running inside a VS Code extension.',
+                        'You are powered by the Copilot CLI agent runtime, working through the Junior extension UI.',
+                        'Refer to yourself as "Junior" when speaking to the user, not "GitHub Copilot".',
+                    ].join(' '),
+                },
+                tone: {
+                    action: 'append',
+                    content: 'Be concise. Prefer concrete workspace actions over lengthy explanations.',
+                },
+                guidelines: {
+                    action: 'append',
+                    content: [
+                        'The host may inject per-turn mode instructions and workspace context through SDK hooks. Treat that injected context as authoritative for the current turn.',
+                        'When workspace context already identifies the language, likely files, active editor, or diagnostics, do not ask the user to repeat those facts.',
+                        'Do not use the sql tool as a scratchpad, todo list, or task tracker for workspace coding tasks.',
+                    ].join('\n'),
+                },
+            },
+        } as SessionConfig['systemMessage'];
     }
 
     private buildExcludedTools(): string[] {
@@ -1513,12 +1652,12 @@ export class CopilotSdkRuntime implements AgentRuntime {
             case 'assistant.message_delta':
             case 'assistant.reasoning_delta': {
                 const delta = typeof data?.deltaContent === 'string' ? data.deltaContent : '';
-                return `${type} len=${delta.length} preview=${this.previewText(delta)}`;
+                return `${type} len=${delta.length} lines=${this.countLines(delta)} preview=${this.previewText(delta)} raw=${this.previewRawText(delta)}`;
             }
             case 'assistant.message': {
                 const content = typeof data?.content === 'string' ? data.content : '';
                 const toolCount = Array.isArray(data?.toolRequests) ? data.toolRequests.length : 0;
-                return `${type} len=${content.length} toolRequests=${toolCount} preview=${this.previewText(content)}`;
+                return `${type} len=${content.length} lines=${this.countLines(content)} toolRequests=${toolCount} preview=${this.previewText(content)} raw=${this.previewRawText(content)}`;
             }
             case 'tool.execution_start':
                 return `${type} tool=${data?.toolName || 'unknown'} args=${this.previewJson(data?.arguments)}`;
@@ -1542,6 +1681,27 @@ export class CopilotSdkRuntime implements AgentRuntime {
         }
         const preview = normalized.length > maxLength ? `${normalized.slice(0, maxLength - 3)}...` : normalized;
         return JSON.stringify(preview);
+    }
+
+    private previewRawText(value: string, maxLength = 220): string {
+        if (!value) {
+            return '""';
+        }
+
+        const escaped = value
+            .replace(/\\/g, '\\\\')
+            .replace(/\r/g, '\\r')
+            .replace(/\n/g, '\\n')
+            .replace(/\t/g, '\\t');
+        const preview = escaped.length > maxLength ? `${escaped.slice(0, maxLength - 3)}...` : escaped;
+        return JSON.stringify(preview);
+    }
+
+    private countLines(value: string): number {
+        if (!value) {
+            return 0;
+        }
+        return value.split(/\r?\n/).length;
     }
 
     private previewJson(value: unknown, maxLength = 240): string {

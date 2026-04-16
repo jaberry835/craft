@@ -1,14 +1,9 @@
 {
     "junior.azureOpenAI.deployments": [
         {
-        "name": "GPT-5.3 Chat",
-        "deploymentId": "gpt-5.3-chat",
+        "name": "GPT-5.2",
+        "deploymentId": "gpt-5.2",
         "apiVersion": "2025-03-01-preview"
-        },
-        {
-            "name": "GPT-4o",
-            "deploymentId": "gpt-4o",
-            "apiVersion": "2025-03-01-preview"
         },
         {
             "name": "gpt-5.4-mini",
@@ -16,8 +11,8 @@
             "apiVersion": "2025-03-01-preview"
         }
     ],
-    "junior.azureOpenAI.activeDeployment": "gpt-5.3-chat",
-    "junior.inlineCompletions.deployment": "gpt-4o",
+    "junior.azureOpenAI.activeDeployment": "gpt-5.2",
+    "junior.inlineCompletions.deployment": "gpt-5.2",
     "junior.mcp.includeExternalServers": true,
     "junior.mcp.externalServerSettings": [
     "mcp.servers"
@@ -25,27 +20,46 @@
     "junior.mcp.servers": {
 
     },
-    "junior.azureOpenAI.apimBaseUrl": "https://rudeaoaiapi.azure-api.net/foundryapi",
+
+     //if using bearer auth, enable these 4 keys
+    // "junior.azureOpenAI.authMode": "vscode-auth-session",
+    // "junior.azureOpenAI.authProviderId":"microsoft",
+    // "junior.azureOpenAI.authScopes":[
+    //     "api://<clientid>/user_impersonation"
+    // ],
+    // "junior.azureOpenAI.apimBaseUrl": "https://.azure-api.net/foundryapi-bearer",
+    "junior.azureOpenAI.apimBaseUrl": "https://.azure-api.net/foundryapi",
     "junior.azureOpenAI.provider": "apim",
     "junior.azureOpenAI.apiVersion": "2025-03-01-preview",
     "junior.temperature": 1,
 
 
     "junior.agentProvider": "copilot-cli",
-    "junior.copilotCli.path": "C:\\Users\\SystemAdministrator\\AppData\\Local\\GitHubCopilotCLI\\copilot.exe",
-    "junior.copilotCli.model": "gpt-4.1",
+    "junior.copilotCli.path": "C:\\Users\\SystemAdministrator\\AppData\\Local\\GitHubCopilotCLI\\copilot.cmd",  //in path
+    "junior.copilotCli.model": "gpt-5.2",
     "junior.copilotCli.models": [
         {
-            "name": "GPT-4.1",
-            "id": "gpt-4.1"
+            "name": "GPT-5.2",
+            "id": "gpt-5.2"
         }
     ],
     "junior.copilotCli.additionalArgs": [],
     "junior.copilotCli.autoApproveWrites": false,
     "junior.copilotCli.autoApproveTerminal": false,
     "junior.copilotCli.logSdkEvents": false,
-    "junior.copilotCli.providerBaseUrl": "",
-    "junior.copilotCli.providerType": "",
-    "junior.copilotCli.providerApiKey": "",
+    "junior.copilotCli.providerType": "azure",
+
+    // "junior.copilotCli.providerBaseUrl": "https://agent-poc-resource.cognitiveservices.azure.com/",  //direct to aoai commericl with beaer
+    // "junior.copilotCli.providerApiKey": "",
+    // "junior.copilotCli.providerBearerToken": "",
+    // "junior.copilotCli.providerAzureApiVersion": "2025-03-01-preview",  //empty for apim mode
+
+    "junior.copilotCli.providerBaseUrl":"https://.azure-api.net",  //apim mode
+    "junior.copilotCli.providerBearerTokenSource": "vscode-auth-session",
+    "junior.copilotCli.providerAuthProviderId":"microsoft",
+    "junior.copilotCli.providerAuthScopes":[
+        "api://<clientid>/user_impersonation"
+    ],
+    "junior.copilotCli.providerWireApi": "responses",  //set for apim mode
     "azureFunctions.showProjectWarning": false
 }

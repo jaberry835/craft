@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
+import * as fs from 'fs';
 import { WorkspaceIndexer } from './workspaceIndexer';
 
 export interface SymbolEntry {
@@ -10,29 +12,56 @@ export interface SymbolEntry {
     containerName?: string;
 }
 
+const CACHE_VERSION = 1;
+const CACHE_FILENAME = 'symbolIndex.json';
+
 export class SymbolIndexer {
     private symbolsByFile: Map<string, SymbolEntry[]> = new Map();
+    private storagePath: string | undefined;
+
+    /** Set the directory used for persisting the symbol index cache. */
+    setStoragePath(dir: string) {
+        this.storagePath = dir;
+    }
 
     async indexWorkspace(
         workspaceIndexer: WorkspaceIndexer,
         progress?: vscode.Progress<{ message?: string; increment?: number }>,
-        token?: vscode.CancellationToken
+        token?: vscode.CancellationToken,
+        changedFiles?: Set<string>
     ): Promise<void> {
-        this.symbolsByFile.clear();
-
         const files = workspaceIndexer.getFiles();
         const total = files.length;
+
+        // Load cached symbols from disk
+        const cached = this.loadCache();
+        const currentFilePaths = new Set(files.map(f => f.relativePath));
+        const needsReindex = changedFiles ?? currentFilePaths;
+
+        // Start with cached symbols for files that haven't changed
+        const newSymbols = new Map<string, SymbolEntry[]>();
+        for (const [filePath, symbols] of cached) {
+            if (currentFilePaths.has(filePath) && !needsReindex.has(filePath)) {
+                newSymbols.set(filePath, symbols);
+            }
+        }
+
         let done = 0;
+        let reindexed = 0;
 
         for (const file of files) {
             if (token?.isCancellationRequested) { break; }
-            try {
-                const symbols = await this.getDocumentSymbols(file.uri);
-                if (symbols.length > 0) {
-                    this.symbolsByFile.set(file.relativePath, symbols);
+
+            if (needsReindex.has(file.relativePath)) {
+                try {
+                    const symbols = await this.getDocumentSymbols(file.uri);
+                    if (symbols.length > 0) {
+                        newSymbols.set(file.relativePath, symbols);
+                    }
+                    reindexed++;
+                } catch {
+                    // Skip files whose symbol provider fails
                 }
-            } catch {
-                // Skip files whose symbol provider fails
             }
 
             done++;
@@ -43,6 +72,9 @@ export class SymbolIndexer {
                 });
             }
         }
+
+        this.symbolsByFile = newSymbols;
+        this.saveCache();
     }
 
     getFileSymbols(relativePath: string): SymbolEntry[] {
@@ -103,6 +135,48 @@ export class SymbolIndexer {
     /** Remove a file from the symbol index */
     removeFile(relativePath: string): void {
         this.symbolsByFile.delete(relativePath);
+    }
+
+    // ── Cache persistence ──
+
+    private getCachePath(): string | undefined {
+        if (!this.storagePath) { return undefined; }
+        return path.join(this.storagePath, CACHE_FILENAME);
+    }
+
+    private loadCache(): Map<string, SymbolEntry[]> {
+        const map = new Map<string, SymbolEntry[]>();
+        const cachePath = this.getCachePath();
+        if (!cachePath) { return map; }
+        try {
+            if (!fs.existsSync(cachePath)) { return map; }
+            const raw = fs.readFileSync(cachePath, 'utf8');
+            const data = JSON.parse(raw);
+            if (data?.version !== CACHE_VERSION) { return map; }
+            for (const [filePath, symbols] of Object.entries(data.files as Record<string, SymbolEntry[]>)) {
+                map.set(filePath, symbols);
+            }
+        } catch {
+            // Corrupt cache — ignore and rebuild
+        }
+        return map;
+    }
+
+    private saveCache(): void {
+        const cachePath = this.getCachePath();
+        if (!cachePath) { return; }
+        try {
+            const dir = path.dirname(cachePath);
+            if (!fs.existsSync(dir)) { fs.mkdirSync(dir, { recursive: true }); }
+            const files: Record<string, SymbolEntry[]> = {};
+            for (const [filePath, symbols] of this.symbolsByFile) {
+                files[filePath] = symbols;
+            }
+            const data = { version: CACHE_VERSION, files };
+            fs.writeFileSync(cachePath, JSON.stringify(data), 'utf8');
+        } catch {
+            // Non-fatal — indexing still works without cache
+        }
     }
 
     private async getDocumentSymbols(uri: vscode.Uri): Promise<SymbolEntry[]> {

@@ -13,6 +13,7 @@ import { InlineDiffDecorator } from './inlineDiffDecorator';
 import { registerCommands } from './commandRegistrar';
 import { RetrievalRanker } from './retrievalRanker';
 import { RepoPatternStore } from './repoPatternStore';
+import { getCopilotCliBearerAuthSessionConfig } from './copilotCliSupport';
 
 let chatViewProvider: ChatViewProvider;
 let mcpClient: McpClient;
@@ -39,6 +40,7 @@ export function activate(context: vscode.ExtensionContext) {
     // Set up persistent index storage under globalStorage
     const indexStorageDir = vscode.Uri.joinPath(context.globalStorageUri, 'index').fsPath;
     workspaceIndexer.setStoragePath(indexStorageDir);
+    symbolIndexer.setStoragePath(indexStorageDir);
     semanticIndexer.setStoragePath(indexStorageDir);
 
     const builtinTools = new BuiltinTools(workspaceIndexer, symbolIndexer, semanticIndexer);
@@ -121,18 +123,32 @@ export function activate(context: vscode.ExtensionContext) {
     });
     context.subscriptions.push({ dispose: () => tokenTracker.dispose() });
 
-    // ── Auto-start ──
+    // ── Auto-start: phased indexing ──
+    // Phase 1 runs immediately: fast file index (stat-only, cached).
+    // Phase 2 runs after a short yield: symbol + semantic indexing in background.
+    // The agent is usable after Phase 1 — users can start chatting immediately.
 
     if (vscode.workspace.workspaceFolders) {
+        const startMs = Date.now();
         (async () => {
+            // ── Phase 1: file index (fast — stat-only with disk cache) ──
             log(`Starting workspace index (storage: ${indexStorageDir})...`);
             await workspaceIndexer.indexWorkspace();
             const changed = workspaceIndexer.getChangedFiles();
-            log(`File index done: ${workspaceIndexer.getFileCount()} files, ${changed.size} changed. Starting symbol + semantic index...`);
-            await symbolIndexer.indexWorkspace(workspaceIndexer);
+            const phase1Ms = Date.now() - startMs;
+            log(`Phase 1 done in ${phase1Ms}ms: ${workspaceIndexer.getFileCount()} files, ${changed.size} changed. Agent ready.`);
+
+            // ── Phase 2: symbol + semantic index (background, doesn't block chat) ──
+            // Yield to the event loop so the webview can render and the user can interact.
+            await new Promise(r => setTimeout(r, 100));
+
+            const phase2Start = Date.now();
+            log(`Phase 2: starting symbol + semantic index (${changed.size} files to re-index)...`);
+            await symbolIndexer.indexWorkspace(workspaceIndexer, undefined, undefined, changed);
             await semanticIndexer.indexWorkspace(workspaceIndexer, undefined, undefined, changed);
-            log(`Index loaded: ${workspaceIndexer.getFileCount()} files (${changed.size} changed), ${semanticIndexer.getChunkCount()} semantic chunks.`);
-        })().catch((e) => logError(`Workspace/symbol/semantic indexing failed: ${e}`));
+            const phase2Ms = Date.now() - phase2Start;
+            log(`Phase 2 done in ${phase2Ms}ms: ${symbolIndexer.getSymbolFileCount()} symbol files, ${semanticIndexer.getChunkCount()} semantic chunks. Total startup: ${Date.now() - startMs}ms.`);
+        })().catch((e) => logError(`Workspace indexing failed: ${e}`));
     }
 
     mcpClient.connectConfiguredServers().catch((e) => logError(`MCP connect failed: ${e}`));
@@ -142,6 +158,17 @@ export function activate(context: vscode.ExtensionContext) {
             if (event.affectsConfiguration('junior.copilotCli') || event.affectsConfiguration('junior.agentProvider')) {
                 chatViewProvider.refreshProviderAvailability();
             }
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.authentication.onDidChangeSessions((event) => {
+            const authSessionConfig = getCopilotCliBearerAuthSessionConfig();
+            if (!authSessionConfig || event.provider.id !== authSessionConfig.providerId) {
+                return;
+            }
+
+            chatViewProvider.refreshProviderAvailability();
         })
     );
 

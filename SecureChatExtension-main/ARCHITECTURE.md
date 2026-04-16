@@ -26,6 +26,10 @@ src/
 ├── aoaiClient.ts             Azure OpenAI HTTP client (streaming SSE)
 ├── builtinTools.ts           Tool definitions + handlers (20+ tools)
 ├── chatViewProvider.ts       Webview panel — UI ↔ agent loop bridge
+├── agentRuntime.ts           AgentRuntime interface (shared by both runtimes)
+├── copilotCliSupport.ts      Copilot CLI detection, BYOK config, launch helpers
+├── copilotSdkRuntime.ts      AgentRuntime impl using @github/copilot-sdk
+├── permissions.ts            Permission level logic (local + Copilot CLI)
 ├── mcpClient.ts              MCP server integration (stdio + HTTP)
 ├── sessionManager.ts         Chat history persistence (JSON on disk)
 ├── config.ts                 Settings access (dual-namespace fallback)
@@ -201,6 +205,81 @@ Write tools (`write_file`, `edit_file`, `replace_lines`) snapshot the original f
 
 External tools are discovered via MCP (Model Context Protocol). `McpClient` supports both stdio-based (local process) and HTTP-based (remote endpoint) MCP servers. Server configurations are defined in VS Code settings. Discovered tools are adapted into `IFunctionTool` via `toolAdapter.ts` and appear alongside builtins — the agent doesn't distinguish between them.
 
+## Copilot CLI Runtime
+
+Junior supports two agent runtimes, selectable by the user. Both implement the `AgentRuntime` interface (`agentRuntime.ts`):
+
+```typescript
+interface AgentRuntime {
+    isRunning(): boolean;
+    getMessages(): ChatMessage[];
+    setMessages(messages: ChatMessage[]): void;
+    clearMessages(): void;
+    cancel(): void;
+    run(mode, text, images?, files?, displayText?): Promise<void>;
+    resolveConfirmation?(actionId, approved, allowSession?): void;
+    setPermissionLevel?(level: AgentPermissionLevel): void;
+    getSessionState?(): RuntimeSessionState | undefined;
+    restoreSessionState?(state): Promise<void>;
+    dispose?(): void;
+}
+```
+
+| Runtime | Implementation | Backend |
+|---------|---------------|---------|
+| **Local** | `agentLoop.ts` + framework middleware | Direct HTTPS to Azure OpenAI / OpenAI-compatible APIs |
+| **Copilot CLI** | `CopilotSdkRuntime` (`copilotSdkRuntime.ts`) | Spawns GitHub Copilot CLI in server mode via `@github/copilot-sdk` |
+
+### How it works
+
+`CopilotSdkRuntime` spawns the Copilot CLI as a child process using the `@github/copilot-sdk` package (`CopilotClient`). Communication is over stdio. The lifecycle:
+
+1. **Client start** — `CopilotClient` launches the CLI binary resolved by `copilotCliSupport.ts`
+2. **Session create** — A `CopilotSession` is created with the workspace directory, system prompt, MCP server configs, and optional BYOK provider settings
+3. **Prompt loop** — `session.sendAndWait()` sends the user message and blocks until the session goes idle. The CLI internally runs its own agent loop (tool calls, context management, etc.)
+4. **Event streaming** — The runtime subscribes to SDK events (`assistant.message_delta`, `tool.execution_start`, `tool.execution_complete`, `assistant.reasoning_delta`, `assistant.usage`, `session.usage_info`) and translates them into the same `ExtensionMessage` protocol the webview expects
+
+The UI is runtime-agnostic — working blocks, tool progress indicators, streaming text, and permission prompts all work identically regardless of which runtime is active.
+
+### Availability detection
+
+`copilotCliSupport.ts` determines whether the Copilot CLI runtime is available:
+
+1. Resolve the CLI executable — checks `junior.copilotCli.path` (or `copilot` on PATH), handling Windows `.cmd`/`.bat` shims via `cmd.exe /d /s /c` wrapping
+2. Detect auth mode:
+   - **GitHub mode** — GitHub token env vars (`GH_TOKEN`, `GITHUB_TOKEN`, `COPILOT_GITHUB_TOKEN`) or a non-empty `~/.copilot` home directory
+   - **BYOK mode** — user-configured provider (OpenAI, Azure, or Anthropic) with base URL, model, and credentials (API key, bearer token, or VS Code authentication session)
+
+If neither auth mode is satisfied, the runtime is marked unavailable with a diagnostic reason.
+
+### BYOK (Bring Your Own Key)
+
+BYOK mode routes the Copilot CLI through a user-specified LLM provider instead of GitHub's backend. Configuration is read from `junior.copilotCli.*` settings or environment variables:
+
+| Setting | Env var | Purpose |
+|---------|---------|---------|
+| `copilotCli.providerType` | `COPILOT_PROVIDER_TYPE` | `openai`, `azure`, or `anthropic` |
+| `copilotCli.providerBaseUrl` | `COPILOT_PROVIDER_BASE_URL` | API endpoint URL |
+| `copilotCli.model` | `COPILOT_MODEL` | Model / deployment ID |
+| `copilotCli.providerApiKey` | `COPILOT_PROVIDER_API_KEY` | API key |
+| `copilotCli.providerBearerToken` | `COPILOT_PROVIDER_BEARER_TOKEN` | Bearer token (alternative to API key) |
+| `copilotCli.providerWireApi` | `COPILOT_PROVIDER_WIRE_API` | Wire protocol: `completions` or `responses` |
+
+For Azure and Anthropic providers, bearer credentials can also come from a VS Code authentication session (`copilotCli.providerBearerTokenSource = vscode-auth-session`), enabling Entra ID / managed identity flows without storing secrets in settings.
+
+### Permission model
+
+The Copilot CLI issues permission requests for write and shell operations. `CopilotSdkRuntime` routes these through the same confirmation UI used by the local runtime. `permissions.ts` controls auto-approval:
+
+- **Read** operations are always auto-approved
+- **Write** and **shell** operations respect `copilotCli.autoApproveWrites` / `copilotCli.autoApproveTerminal` settings
+- The `bypass` permission level auto-approves everything
+- Session-level approval (user clicks "Allow for this session") is tracked per category
+
+### Session management
+
+Sessions persist across messages within a conversation. `CopilotSdkRuntime` stores the backend `sessionId` and attempts `client.resumeSession()` on the next message. If resume fails (CLI restarted, session expired), it transparently creates a new session. Session state is included in `SessionManager` persistence for restore-on-reload.
+
 ## Context Management
 
 ### Context Window Trimming
@@ -299,6 +378,7 @@ Provider options:
 | `direct` | Azure OpenAI endpoint + API key |
 | `apim` | Azure API Management gateway URL + subscription key |
 | `openai` | OpenAI-compatible API (OpenAI, Ollama, LM Studio, etc.) |
+| `copilot-cli` | GitHub Copilot CLI spawned via `@github/copilot-sdk` (GitHub auth or BYOK) |
 
 ## Session Persistence
 

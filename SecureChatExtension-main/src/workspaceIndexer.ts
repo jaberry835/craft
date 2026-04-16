@@ -31,6 +31,9 @@ interface CachedFileEntry {
 
 const CACHE_VERSION = 1;
 const CACHE_FILENAME = 'fileIndex.json';
+/** Number of concurrent stat() calls during indexing. */
+const STAT_CONCURRENCY = 20;
+const MAX_FIND_FILES = 50000;
 
 export class WorkspaceIndexer {
     private files: Map<string, FileEntry> = new Map();
@@ -61,7 +64,7 @@ export class WorkspaceIndexer {
         // Load cached entries (if any)
         const cached = this.loadCache();
 
-        const uris = await vscode.workspace.findFiles('**/*', exclude, 10000, token);
+        const uris = await vscode.workspace.findFiles('**/*', exclude, MAX_FIND_FILES, token);
         const total = uris.length;
         let done = 0;
         let cacheHits = 0;
@@ -69,10 +72,22 @@ export class WorkspaceIndexer {
         const newFiles = new Map<string, FileEntry>();
         const changedFiles = new Set<string>();
 
-        for (const uri of uris) {
+        // Process stat() calls in concurrent batches for speed
+        for (let batchStart = 0; batchStart < total; batchStart += STAT_CONCURRENCY) {
             if (token?.isCancellationRequested) { break; }
-            try {
-                const stat = await vscode.workspace.fs.stat(uri);
+            const batchEnd = Math.min(batchStart + STAT_CONCURRENCY, total);
+            const batch = uris.slice(batchStart, batchEnd);
+
+            const results = await Promise.allSettled(
+                batch.map(async (uri) => {
+                    const stat = await vscode.workspace.fs.stat(uri);
+                    return { uri, stat };
+                })
+            );
+
+            for (const result of results) {
+                if (result.status !== 'fulfilled') { continue; }
+                const { uri, stat } = result.value;
                 if (stat.size > maxFileSize) { continue; }
 
                 const relativePath = vscode.workspace.asRelativePath(uri, false);
@@ -95,12 +110,11 @@ export class WorkspaceIndexer {
                     newFiles.set(relativePath, { relativePath, uri, size: stat.size, language, mtime });
                     changedFiles.add(relativePath);
                 }
-            } catch {
-                // skip unreadable files
             }
-            done++;
-            if (progress && done % 50 === 0) {
-                progress.report({ message: `${done}/${total} files`, increment: (50 / total) * 100 });
+
+            done += batch.length;
+            if (progress) {
+                progress.report({ message: `${done}/${total} files`, increment: (batch.length / total) * 100 });
             }
         }
 

@@ -8,6 +8,13 @@ import * as vscode from 'vscode';
 import { AoaiConfig, ChatMessage, ToolDefinition, AoaiStreamChunk, ToolCall, TokenUsage } from './types';
 import { getSetting } from './config';
 
+export interface AzureOpenAIBearerAuthSessionConfig {
+    providerId: string;
+    scopes: string[];
+}
+
+type AzureOpenAIAuthMode = 'api-key' | 'bearer-token' | 'vscode-auth-session';
+
 export class AzureOpenAIClient {
     private static readonly REQUEST_TIMEOUT_MS = 120_000;
     private static readonly STREAM_STALL_TIMEOUT_MS = 90_000;
@@ -68,47 +75,99 @@ export class AzureOpenAIClient {
         return getSetting<string>('azureOpenAI.apiKey') || '';
     }
 
+    getBearerToken(): string {
+        return (getSetting<string>('azureOpenAI.bearerToken') || '').trim();
+    }
+
+    getAuthMode(provider: 'direct' | 'apim' | 'openai'): AzureOpenAIAuthMode {
+        if (provider === 'openai') {
+            return 'api-key';
+        }
+
+        const configured = (getSetting<string>('azureOpenAI.authMode') || 'api-key').trim().toLowerCase();
+        if (configured === 'bearer-token' || configured === 'vscode-auth-session') {
+            return configured;
+        }
+
+        return 'api-key';
+    }
+
     getConfig(): AoaiConfig {
         const provider = (getSetting<string>('azureOpenAI.provider') || 'direct') as 'direct' | 'apim' | 'openai';
         const endpoint = getSetting<string>('azureOpenAI.endpoint') || '';
         const apimBaseUrl = getSetting<string>('azureOpenAI.apimBaseUrl') || '';
-        // apiKey is resolved async via getApiKey() — callers that need it should call getConfigAsync()
-        const apiKey = this.cachedSecretKey || getSetting<string>('azureOpenAI.apiKey') || '';
+        const authMode = this.getAuthMode(provider);
+        const authHeader = provider === 'openai' || authMode !== 'api-key' ? 'bearer' : 'api-key';
+        const authToken = provider === 'openai'
+            ? (this.cachedSecretKey || getSetting<string>('azureOpenAI.apiKey') || '')
+            : authMode === 'api-key'
+                ? (this.cachedSecretKey || getSetting<string>('azureOpenAI.apiKey') || '')
+                : this.getBearerToken();
         const deploymentId = this.getEffectiveDeployment();
         const entry = this.getDeploymentEntry();
         const apiVersion = entry?.apiVersion || getSetting<string>('azureOpenAI.apiVersion') || '2024-06-01';
         const maxTokens = getSetting<number>('maxTokens') || 16384;
         const temperature = getSetting<number>('temperature') || 0.3;
 
-        return { provider, endpoint, apimBaseUrl, apiKey, deploymentId, apiVersion, maxTokens, temperature };
+        return {
+            provider,
+            endpoint,
+            apimBaseUrl,
+            authHeader,
+            authToken,
+            deploymentId,
+            apiVersion,
+            maxTokens,
+            temperature,
+            ...(authMode === 'vscode-auth-session' ? { authSession: getAzureOpenAIBearerAuthSessionConfig() } : {}),
+        };
     }
 
     async getConfigAsync(): Promise<AoaiConfig> {
         const provider = (getSetting<string>('azureOpenAI.provider') || 'direct') as 'direct' | 'apim' | 'openai';
         const endpoint = getSetting<string>('azureOpenAI.endpoint') || '';
         const apimBaseUrl = getSetting<string>('azureOpenAI.apimBaseUrl') || '';
-        const apiKey = await this.getApiKey();
+        const authMode = this.getAuthMode(provider);
+        const authSession = authMode === 'vscode-auth-session'
+            ? getAzureOpenAIBearerAuthSessionConfig()
+            : undefined;
+        const authToken = provider === 'openai'
+            ? await this.getApiKey()
+            : authMode === 'api-key'
+                ? await this.getApiKey()
+                : authMode === 'bearer-token'
+                    ? this.getBearerToken()
+                    : await this.getBearerTokenFromSession(authSession);
+        const authHeader = provider === 'openai' || authMode !== 'api-key' ? 'bearer' : 'api-key';
         const deploymentId = this.getEffectiveDeployment();
         const entry = this.getDeploymentEntry();
         const apiVersion = entry?.apiVersion || getSetting<string>('azureOpenAI.apiVersion') || '2024-06-01';
         const maxTokens = getSetting<number>('maxTokens') || 16384;
         const temperature = getSetting<number>('temperature') || 0.3;
 
-        return { provider, endpoint, apimBaseUrl, apiKey, deploymentId, apiVersion, maxTokens, temperature };
+        return { provider, endpoint, apimBaseUrl, authHeader, authToken, deploymentId, apiVersion, maxTokens, temperature, ...(authSession ? { authSession } : {}) };
     }
 
     async validate(): Promise<string | null> {
         const c = await this.getConfigAsync();
         if (c.provider === 'openai') {
-            if (!c.apiKey) { return 'OpenAI API key is not configured. Run "Junior: Set API Key" to store it securely.'; }
+            if (!c.authToken) { return 'OpenAI API key is not configured. Run "Junior: Set API Key" to store it securely.'; }
             if (!c.deploymentId) { return 'No model selected. Run "Junior: Select Model" or add models to the deployments list.'; }
         } else if (c.provider === 'apim') {
             if (!c.apimBaseUrl) { return 'APIM base URL is not configured. Set junior.azureOpenAI.apimBaseUrl in settings.'; }
-            if (!c.apiKey) { return 'Azure OpenAI API key is not configured. Run "Junior: Set API Key" to store it securely.'; }
+            if (!c.authToken) {
+                return c.authHeader === 'api-key'
+                    ? 'Azure OpenAI API key is not configured. Run "Junior: Set API Key" to store it securely.'
+                    : 'Azure/APIM bearer token is not configured. Set junior.azureOpenAI.bearerToken or use junior.azureOpenAI.authMode = vscode-auth-session.';
+            }
             if (!c.deploymentId) { return 'No model deployment selected. Run "Junior: Select Model".'; }
         } else {
             if (!c.endpoint) { return 'Azure OpenAI endpoint is not configured.'; }
-            if (!c.apiKey) { return 'Azure OpenAI API key is not configured. Run "Junior: Set API Key" to store it securely.'; }
+            if (!c.authToken) {
+                return c.authHeader === 'api-key'
+                    ? 'Azure OpenAI API key is not configured. Run "Junior: Set API Key" to store it securely.'
+                    : 'Azure bearer token is not configured. Set junior.azureOpenAI.bearerToken or use junior.azureOpenAI.authMode = vscode-auth-session.';
+            }
             if (!c.deploymentId) { return 'No model deployment selected. Run "Junior: Select Model".'; }
         }
         return null;
@@ -165,7 +224,7 @@ export class AzureOpenAIClient {
             ...(config.provider === 'openai' ? { model: config.deploymentId } : {})
         });
 
-        const response = await this.httpRequestWithRetry(url, body, config.apiKey, abortSignal, 3, config.provider);
+        const response = await this.httpRequestWithRetry(url, body, config.authHeader, config.authToken, abortSignal, 3, config.provider);
 
         const toolCallAccumulator: Map<number, { id: string; name: string; arguments: string }> = new Map();
         let hasToolCalls = false;
@@ -258,7 +317,8 @@ export class AzureOpenAIClient {
     private async httpRequestWithRetry(
         url: URL,
         body: string,
-        apiKey: string,
+        authHeader: 'api-key' | 'bearer',
+        authToken: string,
         abortSignal?: AbortSignal,
         maxRetries: number = 3,
         provider: 'direct' | 'apim' | 'openai' = 'direct',
@@ -275,7 +335,7 @@ export class AzureOpenAIClient {
                 if (remainingBudgetMs <= 0) {
                     throw this.buildRetryBudgetExceededError(attempt, maxRetries, startedAt);
                 }
-                return await this.httpRequest(url, currentBody, apiKey, abortSignal, provider, remainingBudgetMs);
+                return await this.httpRequest(url, currentBody, authHeader, authToken, abortSignal, provider, remainingBudgetMs);
             } catch (err: any) {
                 const retryable = err.statusCode === 429 || err.statusCode === 500
                     || err.statusCode === 502 || err.statusCode === 503;
@@ -336,7 +396,8 @@ export class AzureOpenAIClient {
     private httpRequest(
         url: URL,
         body: string,
-        apiKey: string,
+        authHeader: 'api-key' | 'bearer',
+        authToken: string,
         abortSignal?: AbortSignal,
         provider: 'direct' | 'apim' | 'openai' = 'direct',
         timeoutBudgetMs: number = AzureOpenAIClient.REQUEST_TIMEOUT_MS
@@ -352,10 +413,7 @@ export class AzureOpenAIClient {
             const isHttps = url.protocol === 'https:';
             const mod = isHttps ? https : http;
 
-            // OpenAI uses Bearer token auth; Azure uses api-key header
-            const authHeaders = provider === 'openai'
-                ? { 'Authorization': `Bearer ${apiKey}` }
-                : { 'api-key': apiKey };
+            const authHeaders = this.buildAuthHeaders(authHeader, authToken);
 
             const req = mod.request(
                 url,
@@ -450,6 +508,26 @@ export class AzureOpenAIClient {
         });
     }
 
+    private buildAuthHeaders(authHeader: 'api-key' | 'bearer', authToken: string): Record<string, string> {
+        return authHeader === 'bearer'
+            ? { 'Authorization': `Bearer ${authToken}` }
+            : { 'api-key': authToken };
+    }
+
+    private async getBearerTokenFromSession(authSession: AzureOpenAIBearerAuthSessionConfig | undefined): Promise<string> {
+        if (!authSession) {
+            return '';
+        }
+
+        const session = await vscode.authentication.getSession(
+            authSession.providerId,
+            authSession.scopes,
+            { createIfNone: true }
+        );
+
+        return session?.accessToken || '';
+    }
+
     private async delayWithAbort(delayMs: number, abortSignal?: AbortSignal): Promise<void> {
         await new Promise<void>((resolve) => {
             const timer = setTimeout(() => resolve(), delayMs);
@@ -481,6 +559,36 @@ export class AzureOpenAIClient {
             `Request exhausted its retry budget after ${attemptsUsed} of ${maxRetries} retries and ${elapsedSeconds}s without a successful response.${budgetDetail}${detail}`
         );
     }
+}
+
+export function getAzureOpenAIBearerAuthSessionConfig(): AzureOpenAIBearerAuthSessionConfig | undefined {
+    const authMode = (getSetting<string>('azureOpenAI.authMode') || 'api-key').trim().toLowerCase();
+    if (authMode !== 'vscode-auth-session') {
+        return undefined;
+    }
+
+    const source = (getSetting<string>('azureOpenAI.bearerTokenSource') || 'vscode-auth-session').trim().toLowerCase();
+    if (source !== 'vscode-auth-session') {
+        return undefined;
+    }
+
+    const providerId = (getSetting<string>('azureOpenAI.authProviderId') || 'microsoft').trim() || 'microsoft';
+    const scopes = normalizeStringArray(getSetting<string[]>('azureOpenAI.authScopes'));
+
+    return {
+        providerId,
+        scopes,
+    };
+}
+
+function normalizeStringArray(values: string[] | undefined): string[] {
+    if (!Array.isArray(values)) {
+        return [];
+    }
+
+    return values
+        .map(value => typeof value === 'string' ? value.trim() : '')
+        .filter((value): value is string => value.length > 0);
 }
 
 

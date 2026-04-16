@@ -54,6 +54,8 @@ Most teams should set these items before they start using the extension:
 4. Set `junior.inlineCompletions.deployment` so inline suggestions use the intended model.
 5. Run **Junior: Set API Key** and store your key securely.
 
+If your Azure OpenAI or APIM route expects `Authorization: Bearer ...` instead of `api-key`, Junior can also use bearer auth for local agent mode. In that case, set `junior.azureOpenAI.authMode` to `bearer-token` or `vscode-auth-session` instead of using the default API-key mode.
+
 For most teams, `junior.inlineCompletions.deployment` should be treated as part of initial setup, not an optional later tuning step. A common pattern is to keep chat on the main model and point inline completions at a faster model.
 
 If your team shipped the VSIX with preset defaults, some of these values may already be filled in. You can still override them in your own settings.
@@ -124,6 +126,30 @@ This example is not the only valid arrangement. The key point is that you should
 | `apim` | Your organization exposes Azure OpenAI through Azure API Management | `junior.azureOpenAI.apimBaseUrl`, `junior.azureOpenAI.deployments`, `junior.azureOpenAI.activeDeployment` | `api-key` |
 | `openai` | You use OpenAI or another OpenAI-compatible API | `junior.azureOpenAI.openaiBaseUrl`, `junior.azureOpenAI.deployments`, `junior.azureOpenAI.activeDeployment` | `Authorization: Bearer ...` |
 
+For `direct` and `apim`, the default auth mode is still `api-key`, but you can switch those providers to bearer auth with these settings:
+
+```jsonc
+{
+  "junior.azureOpenAI.authMode": "vscode-auth-session",
+  "junior.azureOpenAI.bearerTokenSource": "vscode-auth-session",
+  "junior.azureOpenAI.authProviderId": "microsoft",
+  "junior.azureOpenAI.authScopes": [
+    "api://aa6b2ff6-4168-4ffa-b0de-a91ef1726ac6/user_impersonation"
+  ]
+}
+```
+
+If you already have a raw bearer token from another system, you can instead set `junior.azureOpenAI.authMode` to `bearer-token` and place the token in `junior.azureOpenAI.bearerToken`.
+
+When using `vscode-auth-session`, run **Junior: Sign In for Azure/APIM Bearer Mode** to establish the login before sending requests.
+
+Token refresh behavior for `vscode-auth-session`:
+
+- Junior asks the VS Code authentication provider for a token each time it builds a request.
+- If the provider can silently refresh the token, the request continues without prompting you.
+- If the session is missing or can no longer be refreshed, VS Code can prompt you to sign in again on the next request.
+- The `Junior` output channel now logs the resolved local auth mode and, for bearer flows, safe token claims such as `aud` and `scp` without printing the token itself.
+
 ## Optional: Copilot CLI Provider
 
 Junior can also route agent turns through GitHub Copilot CLI via the Copilot SDK.
@@ -147,6 +173,28 @@ BYOK/custom-provider auth:
 - If your provider requires the Responses API, set `COPILOT_PROVIDER_WIRE_API=responses`.
 
 Junior also exposes matching `junior.copilotCli.*` settings if you prefer to keep the values in VS Code settings. If you already set up the Copilot CLI environment variables before launching VS Code, Junior will use those inherited variables when it starts the CLI.
+
+If you want Junior itself to acquire a bearer token through VS Code sign-in instead of storing `COPILOT_PROVIDER_BEARER_TOKEN`, set these additional settings:
+
+```jsonc
+{
+  "junior.copilotCli.providerType": "azure",
+  "junior.copilotCli.providerBaseUrl": "https://rudeaoaiapi.azure-api.net",
+  "junior.copilotCli.model": "gpt-5.4",
+  "junior.copilotCli.providerWireApi": "responses",
+  "junior.copilotCli.providerBearerTokenSource": "vscode-auth-session",
+  "junior.copilotCli.providerAuthProviderId": "microsoft",
+  "junior.copilotCli.providerAuthScopes": [
+    "api://aa6b2ff6-4168-4ffa-b0de-a91ef1726ac6/user_impersonation"
+  ]
+}
+```
+
+Then run **Junior: Sign In for Copilot CLI Bearer Mode**. Junior will request the VS Code auth session, use that access token for the Copilot CLI BYOK provider at runtime, and avoid storing the raw bearer token in settings.
+
+Leave `junior.copilotCli.providerBearerTokenSource`, `junior.copilotCli.providerAuthProviderId`, and `junior.copilotCli.providerAuthScopes` empty unless you want Junior to manage bearer-token sign-in for the Copilot CLI provider.
+
+Token refresh behavior for Copilot CLI bearer mode is the same: Junior asks VS Code for a session when creating the provider config, silent refresh is used when available, and you are only prompted to sign in again when the existing session can no longer satisfy the request.
 
 For SDK-level troubleshooting, set `junior.copilotCli.logSdkEvents` to `true` and inspect the `Junior` output channel. Junior will log the raw Copilot SDK session events with compact summaries so you can see exactly which CLI events were emitted for a turn.
 
