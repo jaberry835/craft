@@ -768,6 +768,9 @@ export class AgentLoop {
 
         if (readOnlyTools.has(name)) { return true; }
         if (mode === 'plan' && (name === 'set_plan' || name === 'update_plan_step')) { return true; }
+        // MCP tools are read-only lookups (doc search, code samples, etc.)
+        // and should be available in ask/plan mode.
+        if (this.mcpClient.isMcpTool(name)) { return true; }
         return false;
     }
 

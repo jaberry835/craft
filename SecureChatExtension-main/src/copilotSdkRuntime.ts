@@ -368,6 +368,8 @@ export class CopilotSdkRuntime implements AgentRuntime {
             ...(cwd ? { workingDirectory: cwd } : {}),
             ...(mcpServers && Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
             ...(provider ? { provider } : {}),
+            enableConfigDiscovery: true,
+            modelCapabilities: this.buildModelCapabilities(provider),
             onPermissionRequest: (request, _invocation) => this.handlePermission(request),
         };
 
@@ -773,6 +775,15 @@ export class CopilotSdkRuntime implements AgentRuntime {
         return config;
     }
 
+    private buildModelCapabilities(provider?: ProviderConfig): SessionConfig['modelCapabilities'] {
+        // When using a BYOK provider, the CLI can't auto-detect capabilities.
+        // Default vision off for BYOK since most enterprise endpoints don't
+        // advertise it, but let the user opt in via settings.
+        if (!provider) { return undefined; }
+        const visionEnabled = getSetting<boolean>('copilotCli.providerSupportsVision') ?? false;
+        return { supports: { vision: visionEnabled } };
+    }
+
     private async resolveProviderBearerToken(cliEnv: NodeJS.ProcessEnv): Promise<string | undefined> {
         const authSessionConfig = getCopilotCliBearerAuthSessionConfig();
         if (authSessionConfig) {
@@ -894,6 +905,11 @@ export class CopilotSdkRuntime implements AgentRuntime {
 
         if (this.currentMode !== 'agent') {
             if (request.kind === 'custom-tool' && (normalizedTool === 'set_plan' || normalizedTool === 'setplan' || normalizedTool === 'update_plan_step' || normalizedTool === 'updateplanstep' || normalizedTool === 'report_intent' || normalizedTool === 'reportintent')) {
+                return Promise.resolve({ kind: 'approved' });
+            }
+            // MCP tools are read-only lookups (doc search, code samples, etc.)
+            // and should be allowed in ask/plan mode.
+            if (request.kind === 'mcp') {
                 return Promise.resolve({ kind: 'approved' });
             }
             this.log?.(`[copilot-sdk] Denied ${request.kind} permission in ${this.currentMode} mode`);
@@ -1127,6 +1143,8 @@ export class CopilotSdkRuntime implements AgentRuntime {
                         'The host may inject per-turn mode instructions and workspace context through SDK hooks. Treat that injected context as authoritative for the current turn.',
                         'When workspace context already identifies the language, likely files, active editor, or diagnostics, do not ask the user to repeat those facts.',
                         'Do not use the sql tool as a scratchpad, todo list, or task tracker for workspace coding tasks.',
+                        'When the user asks about external repos, APIs, libraries, SDKs, or documentation, proactively use MCP tools to look up the information rather than saying you cannot access it.',
+                        'When the user provides a URL or references an external resource, check whether an MCP tool can fetch or search for that content before declining.',
                     ].join('\n'),
                 },
             },
@@ -1160,17 +1178,17 @@ export class CopilotSdkRuntime implements AgentRuntime {
             ? [
                 'Turn mode: Ask',
                 '- Answer directly and concisely.',
-                '- Use read-only tools only when needed.',
-                '- Do not edit files, run commands, call MCP tools, or fetch URLs.',
+                '- Use read-only tools and MCP tools (e.g. doc search) when needed.',
+                '- Do not edit files, run commands, or fetch URLs.',
                 '- If the user wants implementation, edits, generated code to be applied, or commands to be run, say Ask mode is read-only and explicitly direct them to Agent mode.',
                 '- Mention Plan mode when a read-only preflight plan would help.'
             ]
             : mode === 'plan'
                 ? [
                     'Turn mode: Plan',
-                    '- Investigate with read-only tools.',
+                    '- Investigate with read-only tools and MCP tools (e.g. doc search).',
                     '- Call set_plan with 3-6 concrete steps once you understand the task.',
-                    '- Do not edit files, run commands, call MCP tools, or fetch URLs.',
+                    '- Do not edit files, run commands, or fetch URLs.',
                     '- Stop after presenting the plan for approval.'
                 ]
                 : [

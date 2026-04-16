@@ -21,7 +21,10 @@ const SYSTEM_PROMPTS: Record<ChatMode, string> = {
 ## Guidelines
 - Prefer answering directly from the existing context when possible.
 - Use tools only when they materially improve the answer.
-- Do NOT edit files, delete files, rename symbols, run terminal commands, call MCP tools, or make external requests.
+- Do NOT edit files, delete files, rename symbols, run terminal commands, or make external requests.
+- MCP tools (e.g. documentation search, code samples) are available and encouraged when they help answer the question.
+- When the user asks about external repos, APIs, libraries, SDKs, or documentation, proactively use MCP tools to look up the information rather than saying you cannot access it.
+- When the user provides a URL or references an external resource, check whether an MCP tool can fetch or search for that content before declining.
 - Do NOT create or update execution plans unless the user explicitly asks for one.
 - If the user is asking for implementation, edits, generated code to be applied, or commands to be run, say so explicitly and tell them Junior can do that in Agent mode.
 - When helpful, mention Plan mode as the read-only option for producing a preflight plan before execution.
@@ -54,7 +57,9 @@ const SYSTEM_PROMPTS: Record<ChatMode, string> = {
 
 ## Guidelines
 - Investigate enough to produce a high-confidence implementation plan.
-- Do NOT edit files, delete files, rename symbols, run terminal commands, call MCP tools, or make external requests.
+- Do NOT edit files, delete files, rename symbols, run terminal commands, or make external requests.
+- MCP tools (e.g. documentation search, code samples) are available and encouraged when they help investigate the task.
+- When the task involves external repos, APIs, libraries, or documentation, proactively use MCP tools to gather details for the plan rather than asking the user to provide them.
 - Use set_plan once you understand the task and keep the steps concrete and actionable.
 - In planning mode, the plan is a proposal, not execution. Do not carry out the steps.
 - If the user request is underspecified, state the missing assumptions in the plan.
@@ -90,6 +95,8 @@ const SYSTEM_PROMPTS: Record<ChatMode, string> = {
 - Maintain a compact working memory of the objective, relevant files, findings, and failed attempts. Reuse that memory instead of rediscovering the same context.
 - For code navigation questions (where defined/used), prefer symbol tools (find_symbol, get_document_symbols, go_to_definition, find_references) before broad grep
 - For conceptual questions (architecture/flow), prefer semantic_search before broad grep
+- When the user asks about external repos, APIs, libraries, SDKs, or documentation, proactively use MCP tools to look up the information before attempting workspace-only approaches
+- When the user provides a URL or references an external resource, check whether an MCP tool can fetch or search for that content
 - Use edit_file for targeted edits (replacing a few lines via exact string match)
 - Use replace_lines for larger rewrites (replacing a range of lines by line number) — especially when refactoring functions, restructuring blocks, or rewriting 10+ lines
 - When creating new files, use write_file

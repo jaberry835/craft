@@ -740,6 +740,11 @@ export class McpClient {
         return defs;
     }
 
+    /** Check whether a tool name belongs to an MCP server. */
+    isMcpTool(name: string): boolean {
+        return this.mcpToolNameMap.has(name) || /^mcp_[^_]+_.+$/.test(name);
+    }
+
     /** Call an MCP tool — name format: mcp_{serverName}_{toolName} */
     async callTool(fullName: string, args: Record<string, unknown>, abortSignal?: AbortSignal): Promise<ToolResult> {
         const mapped = this.mcpToolNameMap.get(fullName);

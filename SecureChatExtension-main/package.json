@@ -764,6 +764,6 @@
     "vitest": "^4.1.2"
   },
   "dependencies": {
-    "@github/copilot-sdk": "^0.2.0"
+    "@github/copilot-sdk": "^0.2.2"
   }
 }
