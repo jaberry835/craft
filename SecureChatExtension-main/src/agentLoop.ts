@@ -187,7 +187,7 @@ export class AgentLoop {
     getMessages(): ChatMessage[] { return [...this.messages]; }
 
     setMessages(messages: ChatMessage[]) {
-        this.messages = messages;
+        this.messages = this.contextManager.normalizeMessageSequence(messages);
         this.taskMemory.reset();
         this.lastInjectedTaskMemoryVersion = -1;
         this.lastInjectedRepoMemoryVersion = -1;
@@ -480,6 +480,12 @@ export class AgentLoop {
                 agentContext.iteration = iteration;
                 this.log?.(`Iteration ${iteration} — model: ${this.chatClient.modelId}, messages: ${this.messages.length}`);
                 this.callbacks.sendToWebview({ type: 'setStatus', status: 'Thinking...' });
+
+                const normalizedMessages = this.contextManager.normalizeMessageSequence(this.messages);
+                if (normalizedMessages !== this.messages) {
+                    this.messages = normalizedMessages;
+                    this.log?.('Repaired invalid assistant/tool message ordering before sending the request.');
+                }
 
                 // Trim context via ContextManager
                 const preTriMessages = this.messages;
@@ -838,7 +844,7 @@ export class AgentLoop {
             requestMessages.splice(insertAt, 0, ...extraSystemMsgs);
         }
 
-        return requestMessages;
+        return this.contextManager.normalizeMessageSequence(requestMessages);
     }
 
     private recordMemoryFromToolResult(name: string, args: Record<string, unknown>, result: string, success: boolean) {

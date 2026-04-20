@@ -14,7 +14,7 @@
  *  prior actions without blowing up the context window.
  */
 
-import { ChatMessage, ContentPart } from './types';
+import { ChatMessage, ContentPart, ToolCall } from './types';
 import { getSetting } from './config';
 
 /** Average characters per token — a conservative heuristic for English + code. */
@@ -103,6 +103,88 @@ export class ContextManager {
     }
 
     /**
+     * Repair invalid assistant/tool history before sending it to chat completions.
+     *
+     * The chat API requires every `tool` role message to directly answer the
+     * immediately preceding assistant message that declared matching
+     * `tool_calls`. If compaction or persisted history breaks that adjacency,
+     * drop the incomplete transaction instead of sending an invalid payload.
+     */
+    normalizeMessageSequence(messages: ChatMessage[]): ChatMessage[] {
+        let changed = false;
+        const normalized: ChatMessage[] = [];
+        let pendingToolCallIds: Set<string> | null = null;
+        let pendingAssistantIndex = -1;
+
+        const discardPendingToolTransaction = () => {
+            if (pendingToolCallIds && pendingAssistantIndex >= 0) {
+                normalized.splice(pendingAssistantIndex);
+                changed = true;
+            }
+            pendingToolCallIds = null;
+            pendingAssistantIndex = -1;
+        };
+
+        const finalizePendingIfComplete = () => {
+            if (pendingToolCallIds && pendingToolCallIds.size === 0) {
+                pendingToolCallIds = null;
+                pendingAssistantIndex = -1;
+            }
+        };
+
+        for (const msg of messages) {
+            if (msg.role === 'tool') {
+                if (!pendingToolCallIds || !msg.tool_call_id || !pendingToolCallIds.has(msg.tool_call_id)) {
+                    changed = true;
+                    continue;
+                }
+                normalized.push(msg);
+                pendingToolCallIds.delete(msg.tool_call_id);
+                finalizePendingIfComplete();
+                continue;
+            }
+
+            if (pendingToolCallIds) {
+                discardPendingToolTransaction();
+            }
+
+            if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+                const validToolCalls = msg.tool_calls.filter(
+                    (toolCall): toolCall is ToolCall => typeof toolCall.id === 'string' && toolCall.id.trim().length > 0
+                );
+
+                if (validToolCalls.length === 0) {
+                    normalized.push({ ...msg, tool_calls: undefined });
+                    changed = true;
+                    continue;
+                }
+
+                const normalizedAssistant = validToolCalls.length === msg.tool_calls.length
+                    ? msg
+                    : { ...msg, tool_calls: validToolCalls };
+
+                if (normalizedAssistant !== msg) {
+                    changed = true;
+                }
+
+                pendingAssistantIndex = normalized.length;
+                pendingToolCallIds = new Set(validToolCalls.map(toolCall => toolCall.id));
+                normalized.push(normalizedAssistant);
+                finalizePendingIfComplete();
+                continue;
+            }
+
+            normalized.push(msg);
+        }
+
+        if (pendingToolCallIds) {
+            discardPendingToolTransaction();
+        }
+
+        return changed ? normalized : messages;
+    }
+
+    /**
      * Core trimming logic.
      *
      * Protected region (never trimmed):
@@ -148,18 +230,18 @@ export class ContextManager {
 
         // If the summary + tail still fits, we're done
         if (this.estimateTotalTokens(candidate) <= budget) {
-            return candidate;
+            return this.normalizeMessageSequence(candidate);
         }
 
         // Still over budget — progressively truncate the summary
         const truncated = this.truncateSummary(summary, budget, systemMsg, tail);
         const truncMsg: ChatMessage = { role: 'system', content: truncated };
 
-        return [
+        return this.normalizeMessageSequence([
             ...(systemMsg ? [systemMsg] : []),
             truncMsg,
             ...tail,
-        ];
+        ]);
     }
 
     /**
@@ -179,7 +261,18 @@ export class ContextManager {
         }
 
         // No user message in the tail region — just protect the last minTail messages
-        return earliest;
+        return this.alignTailStart(messages, earliest);
+    }
+
+    /**
+     * Avoid starting a preserved tail in the middle of a tool-result block.
+     */
+    private alignTailStart(messages: ChatMessage[], start: number): number {
+        let aligned = start;
+        while (aligned > 0 && messages[aligned].role === 'tool') {
+            aligned--;
+        }
+        return aligned;
     }
 
     /**

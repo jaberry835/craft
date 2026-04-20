@@ -21,16 +21,47 @@
 
     },
 
-     //if using bearer auth, enable these 4 keys
-    // "junior.azureOpenAI.authMode": "vscode-auth-session",
-    // "junior.azureOpenAI.authProviderId":"microsoft",
-    // "junior.azureOpenAI.authScopes":[
-    //     "api://<clientid>/user_impersonation"
-    // ],
-    // "junior.azureOpenAI.apimBaseUrl": "https://.azure-api.net/foundryapi-bearer",
+    // -------------------------------------------------------------------------
+    // Local Junior agent mode: pick ONE of the blocks below.
+    //
+    // Like the Copilot CLI path, the bearer token audience is NOT derived from
+    // the endpoint URL. It comes from junior.azureOpenAI.authScopes. Switching
+    // between APIM and a direct Azure/Foundry endpoint REQUIRES updating the
+    // scopes too, or the backend will return HTTP 401.
+    // -------------------------------------------------------------------------
+
+    // --- Option A: APIM in front of Foundry (key mode, default) --------------
     "junior.azureOpenAI.apimBaseUrl": "https://.azure-api.net/foundryapi",
     "junior.azureOpenAI.provider": "apim",
     "junior.azureOpenAI.apiVersion": "2025-03-01-preview",
+
+    // --- Option B: APIM in front of Foundry (bearer mode) --------------------
+    // Token audience must match the APIM-validated app registration.
+    // "junior.azureOpenAI.provider": "apim",
+    // "junior.azureOpenAI.apimBaseUrl": "https://.azure-api.net/foundryapi-bearer",
+    // "junior.azureOpenAI.apiVersion": "2025-03-01-preview",
+    // "junior.azureOpenAI.authMode": "vscode-auth-session",
+    // "junior.azureOpenAI.authProviderId": "microsoft",
+    // "junior.azureOpenAI.authScopes": [
+    //     "api://<apim-app-clientid>/user_impersonation"
+    // ],
+
+    // --- Option C: Direct Azure OpenAI / Foundry (bearer mode) ---------------
+    // The signed-in principal needs an inference role on the resource:
+    //   - *.cognitiveservices.azure.com  -> Cognitive Services OpenAI User
+    //                                       scope: https://cognitiveservices.azure.com/.default
+    //   - *.services.ai.azure.com        -> Cognitive Services User
+    //                                       scope: https://ai.azure.com/.default
+    //
+    // "junior.azureOpenAI.provider": "direct",
+    // "junior.azureOpenAI.endpoint": "https://agent-poc-resource.cognitiveservices.azure.com/",
+    // "junior.azureOpenAI.apiVersion": "2025-03-01-preview",
+    // "junior.azureOpenAI.authMode": "vscode-auth-session",
+    // "junior.azureOpenAI.authProviderId": "microsoft",
+    // "junior.azureOpenAI.authScopes": [
+    //     "https://cognitiveservices.azure.com/.default"
+    // ],
+
     "junior.temperature": 1,
 
 
@@ -49,17 +80,48 @@
     "junior.copilotCli.logSdkEvents": false,
     "junior.copilotCli.providerType": "azure",
 
-    // "junior.copilotCli.providerBaseUrl": "https://agent-poc-resource.cognitiveservices.azure.com/",  //direct to aoai commericl with beaer
+    // -------------------------------------------------------------------------
+    // Copilot CLI BYOK bearer mode: pick ONE of the blocks below.
+    //
+    // The bearer token audience is NOT derived from providerBaseUrl. It comes
+    // from providerAuthScopes. If you switch the base URL between APIM and a
+    // direct Azure/Foundry endpoint, you MUST also switch the scopes, or the
+    // backend will return HTTP 401.
+    // -------------------------------------------------------------------------
+
+    // --- Option A: APIM in front of Foundry (bearer mode) --------------------
+    // Token audience must match the APIM-validated app registration.
+    // APIM strips the inbound Authorization header and calls Foundry using
+    // its own managed identity.
+    "junior.copilotCli.providerBaseUrl": "https://.azure-api.net",
+    "junior.copilotCli.providerBearerTokenSource": "vscode-auth-session",
+    "junior.copilotCli.providerAuthProviderId": "microsoft",
+    "junior.copilotCli.providerAuthScopes": [
+        "api://<apim-app-clientid>/user_impersonation"
+    ],
+    "junior.copilotCli.providerWireApi": "responses",
+    // Leave providerAzureApiVersion unset for APIM mode.
+
+    // --- Option B: Direct Azure OpenAI / Foundry (bearer mode) ---------------
+    // Comment out Option A above and uncomment this block.
+    // The signed-in principal needs an inference role on the resource:
+    //   - *.cognitiveservices.azure.com  -> Cognitive Services OpenAI User
+    //                                       scope: https://cognitiveservices.azure.com/.default
+    //   - *.services.ai.azure.com        -> Cognitive Services User
+    //                                       scope: https://ai.azure.com/.default
+    //
+    // "junior.copilotCli.providerBaseUrl": "https://agent-poc-resource.cognitiveservices.azure.com/",
+    // "junior.copilotCli.providerBearerTokenSource": "vscode-auth-session",
+    // "junior.copilotCli.providerAuthProviderId": "microsoft",
+    // "junior.copilotCli.providerAuthScopes": [
+    //     "https://cognitiveservices.azure.com/.default"
+    // ],
+    // "junior.copilotCli.providerWireApi": "responses",
+    // "junior.copilotCli.providerAzureApiVersion": "2025-03-01-preview",
+
+    // --- Option C: Direct with a raw API key or pasted bearer token ----------
     // "junior.copilotCli.providerApiKey": "",
     // "junior.copilotCli.providerBearerToken": "",
-    // "junior.copilotCli.providerAzureApiVersion": "2025-03-01-preview",  //empty for apim mode
 
-    "junior.copilotCli.providerBaseUrl":"https://.azure-api.net",  //apim mode
-    "junior.copilotCli.providerBearerTokenSource": "vscode-auth-session",
-    "junior.copilotCli.providerAuthProviderId":"microsoft",
-    "junior.copilotCli.providerAuthScopes":[
-        "api://<clientid>/user_impersonation"
-    ],
-    "junior.copilotCli.providerWireApi": "responses",  //set for apim mode
     "azureFunctions.showProjectWarning": false
 }

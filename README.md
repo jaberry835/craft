@@ -41,3 +41,4 @@ Last Updated: 3/20/2025 912AM
 | 2026-04-16 19:33 UTC | AgentChatV2 | main | ~1 |
 | 2026-04-20 12:22 UTC | AgentChatV2 | main | ~9 |
 | 2026-04-20 12:22 UTC | Rude-MCPServer | main | ~1 |
+| 2026-04-20 12:22 UTC | SecureChatExtension | main | +1, ~3 |
