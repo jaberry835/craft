@@ -395,6 +395,8 @@ async def send_message(request: Request, chat_request: ChatRequest):
                             metadata["tokens_input"] = event.tokens_input
                         if event.tokens_output is not None:
                             metadata["tokens_output"] = event.tokens_output
+                        if event.friendly_message:
+                            metadata["friendly_message"] = event.friendly_message
                         yield _agui_sse(CustomEvent(name="chatter", value=metadata))
 
                     elif event.type == ChatterEventType.HTML_PREVIEW:

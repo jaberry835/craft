@@ -5,17 +5,22 @@
 # - ClientCallInterceptor: Authentication for secured A2A endpoints
 # - Streaming: Real-time updates via SSE
 # Uses agent-framework-ag-ui for AG-UI protocol support (standardized SSE events)
-agent-framework-azure-ai==1.0.0b260114
-agent-framework-a2a>=1.0.0b260219
-agent-framework-ag-ui>=1.0.0b260219
-agent-framework-core>=1.0.0rc1
+# Uses agent-framework-openai for OpenAIChatCompletionClient (replaces deprecated
+# agent_framework.azure.AzureOpenAIChatClient per ADR 0021).
+# Versions pinned (mixed beta/RC/stable) to avoid surprise drift on prerelease packages.
+agent-framework-core==1.0.1
+agent-framework-openai==1.0.1
+agent-framework-azure-ai==1.0.0rc6
+agent-framework-a2a==1.0.0b260409
+agent-framework-ag-ui==1.0.0b260409
 
 # A2A Protocol SDK (a2a-sdk is the correct package - NOT 'a2a' which is a web scraping tool)
 # Provides: a2a.client.A2ACardResolver, a2a.client.middleware.ClientCallInterceptor, a2a.types.AgentCard
 a2a-sdk>=0.3.5
 
 # Web framework
-fastapi>=0.109.0
+# fastapi pinned <0.133.1 to satisfy agent-framework-ag-ui constraint
+fastapi>=0.115.0,<0.133.1
 uvicorn[standard]>=0.27.0
 python-multipart>=0.0.6
 sse-starlette>=1.8.0

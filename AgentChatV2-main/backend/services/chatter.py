@@ -6,6 +6,7 @@ Extracted from agent_manager.py for maintainability.
 from typing import Optional, Any
 from dataclasses import dataclass, field
 from enum import Enum
+import re
 import time
 
 
@@ -18,6 +19,78 @@ class ChatterEventType(str, Enum):
     CONTENT = "content"             # Actual content/text output
     REASONING = "reasoning"         # Model reasoning/chain-of-thought tokens (o-series, gpt-5.x)
     HTML_PREVIEW = "html_preview"   # Agent wants to show an HTML preview panel
+
+
+_PROGRESS_BLOCK_RE = re.compile(r"```progress(?:_update)?\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
+_PROGRESS_START_MARKERS = ("```progress_update", "```progress")
+
+
+def extract_progress_updates(text: str) -> tuple[str, list[str]]:
+    """Strip progress directive blocks from text and return their messages."""
+    updates: list[str] = []
+
+    def _replace(match: re.Match) -> str:
+        message = match.group(1).strip()
+        if message:
+            updates.append(message)
+        return ""
+
+    cleaned = _PROGRESS_BLOCK_RE.sub(_replace, text)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned, updates
+
+
+class ProgressDirectiveBuffer:
+    """Incrementally extracts agent-authored progress directives from streamed text."""
+
+    def __init__(self) -> None:
+        self._buffer = ""
+
+    def push(self, chunk: str) -> tuple[str, list[str]]:
+        if not chunk:
+            return "", []
+
+        self._buffer += chunk
+        safe_text, updates, remainder = self._consume(self._buffer)
+        self._buffer = remainder
+        return safe_text, updates
+
+    def finalize(self) -> str:
+        safe_text, _updates, _remainder = self._consume(self._buffer, final=True)
+        self._buffer = ""
+        return safe_text
+
+    def _consume(self, text: str, final: bool = False) -> tuple[str, list[str], str]:
+        output_parts: list[str] = []
+        updates: list[str] = []
+        cursor = 0
+
+        for match in _PROGRESS_BLOCK_RE.finditer(text):
+            output_parts.append(text[cursor:match.start()])
+            message = match.group(1).strip()
+            if message:
+                updates.append(message)
+            cursor = match.end()
+
+        remainder = text[cursor:]
+
+        if final:
+            cleaned_remainder, trailing_updates = extract_progress_updates(remainder)
+            updates.extend(trailing_updates)
+            output_parts.append(cleaned_remainder)
+            return "".join(output_parts), updates, ""
+
+        partial_start = self._find_partial_progress_start(remainder)
+        if partial_start != -1:
+            output_parts.append(remainder[:partial_start])
+            return "".join(output_parts), updates, remainder[partial_start:]
+
+        output_parts.append(remainder)
+        return "".join(output_parts), updates, ""
+
+    def _find_partial_progress_start(self, text: str) -> int:
+        candidates = [text.rfind(marker) for marker in _PROGRESS_START_MARKERS]
+        return max(candidates)
 
 
 def _get_friendly_tool_description(tool_name: str, tool_args: Optional[dict] = None) -> str:
@@ -304,11 +377,19 @@ def extract_chatter_from_update(
 
         elif content_item.type == 'text_reasoning':
             reasoning_text = getattr(content_item, 'text', None)
-            if reasoning_text:
+            protected_data = getattr(content_item, 'protected_data', None)
+            summary_text = None
+
+            if isinstance(reasoning_text, str) and reasoning_text.strip():
+                summary_text = reasoning_text.strip()
+            elif isinstance(protected_data, str) and protected_data.strip():
+                summary_text = "Working through the next step..."
+
+            if summary_text:
                 events.append(ChatterEvent(
                     type=ChatterEventType.REASONING,
                     agent_name=agent_name,
-                    content=reasoning_text,
+                    content=summary_text,
                     friendly_message="Reasoning...",
                 ))
 

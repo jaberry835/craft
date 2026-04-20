@@ -1,4 +1,4 @@
-import { Component, Input, Output, EventEmitter, DoCheck, AfterViewChecked, HostListener, OnInit } from '@angular/core';
+import { Component, Input, Output, EventEmitter, DoCheck, AfterViewChecked, HostListener, OnInit, OnDestroy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { HttpClient } from '@angular/common/http';
 import { marked } from 'marked';
@@ -47,6 +47,14 @@ interface TimelineStep {
   expanded: boolean;
 }
 
+interface AgentTimelineGroup {
+  id: string;
+  agentName: string;
+  role: 'specialist' | 'orchestrator' | 'assistant';
+  steps: TimelineStep[];
+  hasActiveStep: boolean;
+}
+
 @Component({
   selector: 'app-message',
   standalone: true,
@@ -70,102 +78,108 @@ interface TimelineStep {
         <!-- Vertical Agent Timeline -->
         @if (hasChatterEvents() || isStreaming) {
           <div class="agent-timeline" [class.streaming]="isStreaming">
-            @for (step of timelineSteps; track step.id; let last = $last) {
-              <div class="tl-step" [class.tl-active]="step.status === 'active'" [class.tl-done]="step.status === 'done'">
-                <!-- Icon column -->
-                <div class="tl-icon-col">
-                  <div class="tl-icon" [class]="'tl-icon-' + step.type">
-                    @if (step.status === 'active' && isStreaming) {
-                      <span class="material-icons spinning">sync</span>
-                    } @else {
-                      <span class="material-icons">{{ getStepIcon(step) }}</span>
-                    }
-                  </div>
-                  @if (!last || isStreaming) {
-                    <div class="tl-line"></div>
-                  }
-                </div>
-                <!-- Content column -->
-                <div class="tl-body">
-                  @if (canExpandStep(step)) {
-                    <button class="tl-header" (click)="toggleStep(step)">
-                      <span class="tl-label">{{ step.label }}</span>
-                      <div class="tl-meta">
-                        @if (step.type === 'delegation') {
-                          <span class="tl-badge tl-badge-agent">{{ step.agentName }}</span>
-                        }
-                        @if (step.durationMs) {
-                          <span class="tl-badge tl-badge-duration">{{ formatDuration(step.durationMs) }}</span>
-                        }
-                        @if (step.toolName) {
-                          <span class="tl-badge tl-badge-tool">{{ step.toolName }}</span>
-                        }
-                      </div>
-                      <span class="material-icons tl-chevron">{{ step.expanded ? 'expand_less' : 'expand_more' }}</span>
-                    </button>
-                  } @else {
-                    <div class="tl-header tl-header-static">
-                      <span class="tl-label">{{ step.label }}</span>
-                      <div class="tl-meta">
-                        @if (step.type === 'delegation') {
-                          <span class="tl-badge tl-badge-agent">{{ step.agentName }}</span>
-                        }
-                        @if (step.durationMs) {
-                          <span class="tl-badge tl-badge-duration">{{ formatDuration(step.durationMs) }}</span>
-                        }
-                        @if (step.toolName) {
-                          <span class="tl-badge tl-badge-tool">{{ step.toolName }}</span>
-                        }
-                      </div>
+            @for (group of agentTimelineGroups; track group.id) {
+              <section class="agent-group" [class.agent-group-active]="group.hasActiveStep">
+                <div class="agent-group-header">
+                  <div class="agent-group-title-wrap">
+                    <span class="material-icons agent-group-icon">{{ getAgentGroupIcon(group) }}</span>
+                    <div class="agent-group-copy">
+                      <div class="agent-group-name">{{ group.agentName }}</div>
+                      <div class="agent-group-subtitle">{{ getAgentGroupSubtitle(group) }}</div>
                     </div>
-                  }
-                  @if (isStepExpanded(step) && canExpandStep(step)) {
-                    <div class="tl-details">
-                      @if (hasStepDetailText(step)) {
-                        <div class="tl-detail-row">
-                          <span class="tl-detail-label">{{ step.status === 'active' ? 'Narration' : 'Summary' }}</span>
-                          <p class="tl-summary">{{ getStepDetailText(step) }}</p>
+                  </div>
+                  <div class="agent-group-meta">
+                    <span class="agent-group-role" [class]="'agent-role-' + group.role">{{ group.role }}</span>
+                    <span class="agent-group-count">{{ group.steps.length }} step{{ group.steps.length === 1 ? '' : 's' }}</span>
+                  </div>
+                </div>
+
+                @for (step of group.steps; track step.id; let last = $last) {
+                  <div class="tl-step" [class.tl-active]="step.status === 'active'" [class.tl-done]="step.status === 'done'">
+                    <!-- Icon column -->
+                    <div class="tl-icon-col">
+                      <div class="tl-icon" [class]="'tl-icon-' + step.type">
+                        @if (step.status === 'active' && isStreaming) {
+                          <span class="material-icons spinning">sync</span>
+                        } @else {
+                          <span class="material-icons">{{ getStepIcon(step) }}</span>
+                        }
+                      </div>
+                      @if (!last || group.hasActiveStep || isStreaming) {
+                        <div class="tl-line"></div>
+                      }
+                    </div>
+                    <!-- Content column -->
+                    <div class="tl-body">
+                      @if (canExpandStep(step)) {
+                        <button class="tl-header" (click)="toggleStep(step)">
+                          <span class="tl-label">{{ step.label }}</span>
+                          <div class="tl-meta">
+                            @if (step.durationMs) {
+                              <span class="tl-badge tl-badge-duration">{{ formatDuration(step.durationMs) }}</span>
+                            }
+                            @if (step.toolName) {
+                              <span class="tl-badge tl-badge-tool">{{ step.toolName }}</span>
+                            }
+                          </div>
+                          <span class="material-icons tl-chevron">{{ step.expanded ? 'expand_less' : 'expand_more' }}</span>
+                        </button>
+                      } @else {
+                        <div class="tl-header tl-header-static">
+                          <span class="tl-label">{{ step.label }}</span>
+                          <div class="tl-meta">
+                            @if (step.durationMs) {
+                              <span class="tl-badge tl-badge-duration">{{ formatDuration(step.durationMs) }}</span>
+                            }
+                            @if (step.toolName) {
+                              <span class="tl-badge tl-badge-tool">{{ step.toolName }}</span>
+                            }
+                          </div>
                         </div>
                       }
-                      @if (step.toolArgs && hasToolArgs(step.toolArgs)) {
-                        <div class="tl-detail-row">
-                          <span class="tl-detail-label">Input</span>
-                          <pre class="tl-code">{{ formatToolArgs(step.toolArgs) }}</pre>
-                        </div>
-                      }
-                      @if (step.toolResult) {
-                        <div class="tl-detail-row">
-                          <span class="tl-detail-label">Result</span>
-                          @if (step.renderHint === 'json') {
-                            <pre class="tl-code">{{ formatJson(step.toolResult) }}</pre>
-                          } @else if (step.renderHint === 'table') {
-                            <div class="tl-table" [innerHTML]="renderTable(step.toolResult)"></div>
-                          } @else {
-                            <p class="tl-result-text">{{ truncateContent(step.toolResult, 400) }}</p>
+                      @if (isStepExpanded(step) && canExpandStep(step)) {
+                        <div class="tl-details">
+                          @if (hasStepDetailText(step)) {
+                            <div class="tl-detail-row">
+                              <span class="tl-detail-label">{{ step.status === 'active' ? 'Narration' : 'Summary' }}</span>
+                              <p class="tl-summary">{{ getStepDetailText(step) }}</p>
+                            </div>
+                          }
+                          @if (step.toolArgs && hasToolArgs(step.toolArgs)) {
+                            <div class="tl-detail-row">
+                              <span class="tl-detail-label">Input</span>
+                              <pre class="tl-code">{{ formatToolArgs(step.toolArgs) }}</pre>
+                            </div>
+                          }
+                          @if (step.toolResult) {
+                            <div class="tl-detail-row">
+                              <span class="tl-detail-label">Result</span>
+                              @if (step.renderHint === 'json') {
+                                <pre class="tl-code">{{ formatJson(step.toolResult) }}</pre>
+                              } @else if (step.renderHint === 'table') {
+                                <div class="tl-table" [innerHTML]="renderTable(step.toolResult)"></div>
+                              } @else {
+                                <p class="tl-result-text">{{ truncateContent(step.toolResult, 400) }}</p>
+                              }
+                            </div>
                           }
                         </div>
                       }
-                      @if (step.type === 'delegation' && step.delegationContent) {
-                        <div class="tl-detail-row">
-                          <span class="tl-detail-label">Task</span>
-                          <p class="tl-result-text">{{ truncateContent(step.delegationContent, 300) }}</p>
-                        </div>
-                      }
                     </div>
-                  }
-                </div>
-              </div>
+                  </div>
+                }
+              </section>
             }
             <!-- Live working indicator when no active step -->
             @if (isStreaming && (timelineSteps.length === 0 || timelineSteps[timelineSteps.length - 1].status === 'done')) {
-              <div class="tl-step tl-active">
+              <div class="tl-step tl-active tl-step-working-alone">
                 <div class="tl-icon-col">
                   <div class="tl-icon tl-icon-working">
                     <span class="material-icons spinning">sync</span>
                   </div>
                 </div>
                 <div class="tl-body">
-                  <span class="tl-label tl-label-muted">Working…</span>
+                  <span class="tl-label tl-label-muted">{{ getIdleWorkingLabel() }}</span>
                 </div>
               </div>
             }
@@ -269,6 +283,9 @@ interface TimelineStep {
       border: 1px solid var(--border-color);
       border-radius: 8px;
       background-color: var(--bg-primary);
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
 
       &.streaming {
         border-color: var(--primary);
@@ -276,10 +293,105 @@ interface TimelineStep {
       }
     }
 
+    .agent-group {
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      background-color: var(--bg-secondary);
+      padding: 10px 10px 4px;
+
+      &.agent-group-active {
+        border-color: rgba(59, 130, 246, 0.45);
+        box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.12);
+      }
+    }
+
+    .agent-group-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 8px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .agent-group-title-wrap {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .agent-group-icon {
+      font-size: 18px;
+      color: var(--primary);
+    }
+
+    .agent-group-copy {
+      min-width: 0;
+    }
+
+    .agent-group-name {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-primary);
+      line-height: 1.2;
+    }
+
+    .agent-group-subtitle {
+      font-size: 11px;
+      color: var(--text-muted);
+      line-height: 1.2;
+      margin-top: 2px;
+    }
+
+    .agent-group-meta {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .agent-group-role,
+    .agent-group-count {
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      padding: 2px 6px;
+      border-radius: 999px;
+    }
+
+    .agent-group-count {
+      background-color: var(--bg-tertiary);
+      color: var(--text-muted);
+    }
+
+    .agent-role-specialist {
+      background-color: rgba(59, 130, 246, 0.12);
+      color: #3b82f6;
+    }
+
+    .agent-role-orchestrator {
+      background-color: rgba(139, 92, 246, 0.12);
+      color: #8b5cf6;
+    }
+
+    .agent-role-assistant {
+      background-color: rgba(16, 185, 129, 0.12);
+      color: #10b981;
+    }
+
     .tl-step {
       display: flex;
       gap: 10px;
       min-height: 28px;
+    }
+
+    .tl-step-working-alone {
+      padding: 2px 0 0;
     }
 
     .tl-icon-col {
@@ -823,7 +935,7 @@ interface TimelineStep {
     }
   `]
 })
-export class MessageComponent implements DoCheck, OnInit {
+export class MessageComponent implements DoCheck, OnInit, OnDestroy {
   @Input() message!: DisplayMessage;
   @Input() isStreaming = false;
   /** IDs of selected agents that have document grounding — used for auto-linking filenames */
@@ -840,7 +952,11 @@ export class MessageComponent implements DoCheck, OnInit {
 
   // Timeline state
   timelineSteps: TimelineStep[] = [];
+  agentTimelineGroups: AgentTimelineGroup[] = [];
   private toolCallStepIndex = new Map<string, number>();
+  private readonly recentCompletionOpenMs = 4000;
+  private transientExpandedSteps = new Map<string, number>();
+  private transientCollapseTimers = new Map<string, ReturnType<typeof setTimeout>>();
   
   private previousTimelineSignature = '';
   private md!: ReturnType<typeof marked.use>;
@@ -867,6 +983,14 @@ export class MessageComponent implements DoCheck, OnInit {
       this.rebuildTimeline();
       this.previousTimelineSignature = this.buildTimelineSignature();
     }
+  }
+
+  ngOnDestroy(): void {
+    for (const timer of this.transientCollapseTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.transientCollapseTimers.clear();
+    this.transientExpandedSteps.clear();
   }
   
   /**
@@ -1137,6 +1261,7 @@ export class MessageComponent implements DoCheck, OnInit {
     );
 
     this.timelineSteps = [];
+    this.agentTimelineGroups = [];
     this.toolCallStepIndex.clear();
     const events = this.getChatterEvents();
     events.forEach(e => this.processTimelineEvent(e));
@@ -1149,6 +1274,8 @@ export class MessageComponent implements DoCheck, OnInit {
         step.expanded = true;
       }
     }
+
+    this.agentTimelineGroups = this.buildAgentTimelineGroups();
   }
 
   /** Process a single incoming event and update timelineSteps in place. */
@@ -1170,23 +1297,28 @@ export class MessageComponent implements DoCheck, OnInit {
         : this.findLastActiveToolStepIndex();
       if (stepIdx !== undefined) {
         const step = this.timelineSteps[stepIdx];
-        step.status = 'done';
+        this.markStepCompleted(step, event.timestamp);
         step.durationMs = event.durationMs;
         step.toolResult = event.content;
         step.renderHint = event.renderHint;
-        step.liveNarration = undefined;
         step.narration = this.buildToolResultNarration(step, event);
-        step.expanded = false;
       }
       return;
     }
 
-    // Suppress raw content events — the final answer is rendered in the message body
-    if (event.type === 'content') return;
+    if (event.type === 'content') {
+      const active = this.getActiveStepForAgent(event.agentName);
+      if (!active) return;
+
+      this.markStepCompleted(active, event.timestamp);
+      active.durationMs = event.durationMs ?? active.durationMs;
+      active.narration = this.buildCompletionNarration(active, event);
+      return;
+    }
 
     if (event.type === 'delegation') {
-      this.finalizeActiveStep();
-      this.timelineSteps.push({
+      this.finalizeActiveStep(event.timestamp);
+      const step: TimelineStep = {
         id: `step-${event.timestamp}-${this.timelineSteps.length}`,
         type: 'delegation',
         label: event.friendlyMessage || `Asking ${event.agentName}…`,
@@ -1195,12 +1327,16 @@ export class MessageComponent implements DoCheck, OnInit {
         delegationContent: event.content,
         narration: this.buildDelegationNarration(event),
         expanded: false,
-      });
+      };
+      this.timelineSteps.push(step);
+      if (this.isStreaming) {
+        this.keepStepTemporarilyExpanded(step.id, event.timestamp);
+      }
       return;
     }
 
     if (event.type === 'tool_call') {
-      this.finalizeActiveStep();
+      this.finalizeActiveStep(event.timestamp);
       const idx = this.timelineSteps.length;
       const step: TimelineStep = {
         id: `step-${event.timestamp}-${idx}`,
@@ -1243,7 +1379,7 @@ export class MessageComponent implements DoCheck, OnInit {
   private upsertPlanningStep(event: ChatterEvent): void {
     const label = event.friendlyMessage || 'Planning...';
     const active = this.getActiveStep();
-    if (active?.type === 'planning') {
+    if (active?.type === 'planning' && active.agentName === event.agentName) {
       active.label = label;
       active.liveNarration = this.buildThinkingNarration(event);
       active.narration = this.buildThinkingSummary(event);
@@ -1267,7 +1403,7 @@ export class MessageComponent implements DoCheck, OnInit {
   private upsertReasoningStep(event: ChatterEvent): void {
     const label = event.friendlyMessage || 'Analyzing...';
     const active = this.getActiveStep();
-    if (active?.type === 'reasoning') {
+    if (active?.type === 'reasoning' && active.agentName === event.agentName) {
       active.label = label;
       active.liveNarration = this.buildReasoningNarration(active.agentName, true);
       active.narration = this.buildReasoningNarration(active.agentName, false);
@@ -1292,13 +1428,76 @@ export class MessageComponent implements DoCheck, OnInit {
     return [...this.timelineSteps].reverse().find(step => step.status === 'active');
   }
 
-  private finalizeActiveStep(): void {
+  private getActiveStepForAgent(agentName: string): TimelineStep | undefined {
+    return [...this.timelineSteps]
+      .reverse()
+      .find(step => step.status === 'active' && step.agentName === agentName);
+  }
+
+  private finalizeActiveStep(completedAt?: number): void {
     const active = this.getActiveStep();
     if (!active) return;
 
-    active.status = 'done';
-    active.expanded = false;
-    active.liveNarration = undefined;
+    this.markStepCompleted(active, completedAt);
+  }
+
+  private markStepCompleted(step: TimelineStep, completedAt?: number): void {
+    step.status = 'done';
+    step.liveNarration = undefined;
+    step.expanded = false;
+    if (this.isStreaming) {
+      this.keepStepTemporarilyExpanded(step.id, completedAt);
+    }
+  }
+
+  private keepStepTemporarilyExpanded(stepId: string, startedAt?: number): void {
+    const now = Date.now();
+    const baseTime = startedAt ?? now;
+    const expiresAt = baseTime + this.recentCompletionOpenMs;
+    if (expiresAt <= now) {
+      this.clearTransientExpansion(stepId);
+      return;
+    }
+
+    this.transientExpandedSteps.set(stepId, expiresAt);
+
+    const existingTimer = this.transientCollapseTimers.get(stepId);
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+    }
+
+    const timer = setTimeout(() => {
+      this.transientCollapseTimers.delete(stepId);
+      const deadline = this.transientExpandedSteps.get(stepId);
+      if (deadline && deadline <= Date.now()) {
+        this.transientExpandedSteps.delete(stepId);
+        this.timelineSteps = [...this.timelineSteps];
+        this.agentTimelineGroups = this.buildAgentTimelineGroups();
+      }
+    }, Math.max(0, expiresAt - now) + 50);
+
+    this.transientCollapseTimers.set(stepId, timer);
+  }
+
+  private clearTransientExpansion(stepId: string): void {
+    this.transientExpandedSteps.delete(stepId);
+    const timer = this.transientCollapseTimers.get(stepId);
+    if (timer) {
+      clearTimeout(timer);
+      this.transientCollapseTimers.delete(stepId);
+    }
+  }
+
+  private isStepTemporarilyExpanded(stepId: string): boolean {
+    const deadline = this.transientExpandedSteps.get(stepId);
+    if (!deadline) {
+      return false;
+    }
+    if (deadline <= Date.now()) {
+      this.clearTransientExpansion(stepId);
+      return false;
+    }
+    return true;
   }
 
   private buildTimelineSignature(): string {
@@ -1320,6 +1519,89 @@ export class MessageComponent implements DoCheck, OnInit {
     });
   }
 
+  private buildAgentTimelineGroups(): AgentTimelineGroup[] {
+    const groups: AgentTimelineGroup[] = [];
+    let currentGroup: AgentTimelineGroup | undefined;
+
+    for (const step of this.timelineSteps) {
+      const agentName = step.agentName || 'Agent';
+      const role = this.getAgentRole(agentName);
+
+      if (currentGroup && currentGroup.agentName === agentName && currentGroup.role === role) {
+        currentGroup.steps.push(step);
+        currentGroup.hasActiveStep = currentGroup.hasActiveStep || step.status === 'active';
+        continue;
+      }
+
+      currentGroup = {
+        id: `group-${groups.length}-${agentName}`,
+        agentName,
+        role,
+        steps: [step],
+        hasActiveStep: step.status === 'active',
+      };
+      groups.push(currentGroup);
+    }
+
+    return groups;
+  }
+
+  getAgentGroupIcon(group: AgentTimelineGroup): string {
+    switch (group.role) {
+      case 'orchestrator':
+        return 'hub';
+      case 'assistant':
+        return 'smart_toy';
+      default:
+        return 'engineering';
+    }
+  }
+
+  getAgentGroupSubtitle(group: AgentTimelineGroup): string {
+    if (group.hasActiveStep) {
+      return `Currently working on ${group.steps[group.steps.length - 1]?.label?.toLowerCase() || 'the next step'}`;
+    }
+    const lastStep = group.steps[group.steps.length - 1];
+    if (!lastStep) {
+      return 'No specialist activity yet';
+    }
+    switch (lastStep.type) {
+      case 'delegation':
+        return 'Coordinated the next specialist handoff';
+      case 'tool':
+        return 'Used tools to gather or process information';
+      case 'reasoning':
+        return 'Analyzed the request before responding';
+      case 'planning':
+        return 'Reviewed the task and planned the next action';
+      default:
+        return 'Worked on part of the response';
+    }
+  }
+
+  getIdleWorkingLabel(): string {
+    const activeGroup = this.agentTimelineGroups.find(group => group.hasActiveStep);
+    if (activeGroup) {
+      return `${activeGroup.agentName} is still working…`;
+    }
+    const recentGroup = this.agentTimelineGroups[this.agentTimelineGroups.length - 1];
+    if (recentGroup) {
+      return `Waiting for ${recentGroup.agentName} to continue…`;
+    }
+    return 'Preparing specialist work…';
+  }
+
+  private getAgentRole(agentName: string): AgentTimelineGroup['role'] {
+    const normalized = agentName.trim().toLowerCase();
+    if (normalized === 'assistant') {
+      return 'assistant';
+    }
+    if (normalized.includes('orchestrator')) {
+      return 'orchestrator';
+    }
+    return 'specialist';
+  }
+
   canExpandStep(step: TimelineStep): boolean {
     return this.hasStepDetailText(step)
       || (step.toolArgs ? this.hasToolArgs(step.toolArgs) : false)
@@ -1328,7 +1610,7 @@ export class MessageComponent implements DoCheck, OnInit {
   }
 
   isStepExpanded(step: TimelineStep): boolean {
-    return step.status === 'active' ? true : step.expanded;
+    return step.status === 'active' ? true : step.expanded || this.isStepTemporarilyExpanded(step.id);
   }
 
   hasStepDetailText(step: TimelineStep): boolean {
@@ -1373,9 +1655,12 @@ export class MessageComponent implements DoCheck, OnInit {
 
   private buildDelegationNarration(event: ChatterEvent): string {
     if (event.content) {
-      return `Delegated a focused task to ${event.agentName}: ${this.truncateContent(event.content, 140)}`;
+      return this.truncateContent(event.content, 180);
     }
-    return `Delegated work to ${event.agentName}.`;
+    if (event.friendlyMessage) {
+      return `${event.friendlyMessage}.`;
+    }
+    return 'Delegated work to a specialist.';
   }
 
   private buildToolStartNarration(event: ChatterEvent): string {
@@ -1396,10 +1681,38 @@ export class MessageComponent implements DoCheck, OnInit {
     return 'Tool call completed.';
   }
 
+  private buildCompletionNarration(step: TimelineStep, event: ChatterEvent): string {
+    if (event.content && !event.content.startsWith('Completed')) {
+      return this.truncateContent(event.content, 180);
+    }
+
+    if (step.type === 'tool' && step.toolName) {
+      return this.buildToolResultNarration(step, event);
+    }
+
+    if (event.friendlyMessage) {
+      return event.friendlyMessage;
+    }
+
+    if (event.durationMs) {
+      return `${event.agentName} finished in ${this.formatDuration(event.durationMs)}.`;
+    }
+
+    return `${event.agentName} finished the current step.`;
+  }
+
   /** Toggle expanded state of a timeline step. */
   toggleStep(step: TimelineStep): void {
     if (step.status === 'active') return;
-    step.expanded = !step.expanded;
+    const expanded = this.isStepExpanded(step);
+    if (expanded) {
+      step.expanded = false;
+      this.clearTransientExpansion(step.id);
+      return;
+    }
+
+    step.expanded = true;
+    this.clearTransientExpansion(step.id);
   }
 
   /** Return the right Material icon for a given step. */

@@ -17,7 +17,7 @@ from functools import partial
 
 from agent_framework import Agent, AgentSession, Message, Content
 
-from agent_framework.azure import AzureOpenAIChatClient
+from agent_framework.openai import OpenAIChatCompletionClient
 
 from config import get_settings, get_azure_credential
 from observability import (
@@ -38,6 +38,8 @@ from services.search_service import search_service
 from services.chatter import (                       # noqa: F401
     ChatterEvent,
     ChatterEventType,
+    ProgressDirectiveBuffer,
+    extract_progress_updates,
     extract_chatter_from_update,
 )
 from services.orchestration import (                 # noqa: F401
@@ -149,7 +151,8 @@ def _convert_to_chat_messages(messages: list[dict]) -> list[Message]:
         else:
             role = "user"
 
-        chat_messages.append(Message(role=role, text=msg.get("content", "")))
+        content = msg.get("content", "")
+        chat_messages.append(Message(role, [content] if content else []))
     return chat_messages
 
 
@@ -218,7 +221,7 @@ class AgentManager:
 
         return get_token
 
-    def _create_chat_client(self, agent_config: dict) -> AzureOpenAIChatClient:
+    def _create_chat_client(self, agent_config: dict) -> OpenAIChatCompletionClient:
         """Create Azure OpenAI chat client for an agent.
 
         Uses the agent's configured AOAI endpoint if specified, otherwise falls back
@@ -279,18 +282,20 @@ class AgentManager:
         # Use API key if available, otherwise use token provider
         if api_key:
             logger.info(f"[AOAI-CONFIG] Agent '{agent_name}': authenticating with API key")
-            return AzureOpenAIChatClient(
-                endpoint=endpoint_url,
-                deployment_name=deployment_name,
-                api_key=api_key
+            return OpenAIChatCompletionClient(
+                azure_endpoint=endpoint_url,
+                model=deployment_name,
+                api_key=api_key,
+                api_version=api_version,
             )
         else:
             logger.info(f"[AOAI-CONFIG] Agent '{agent_name}': authenticating with credential "
                         f"(scope={settings.azure_cognitive_services_scope})")
-            return AzureOpenAIChatClient(
-                endpoint=endpoint_url,
-                deployment_name=deployment_name,
-                credential=self._get_token_provider()
+            return OpenAIChatCompletionClient(
+                azure_endpoint=endpoint_url,
+                model=deployment_name,
+                credential=self._get_token_provider(),
+                api_version=api_version,
             )
 
     # =====================================================================
@@ -361,6 +366,20 @@ You are being called as a specialist by an orchestrator agent. The user's reques
 - If information is missing, use your tools to discover it (list databases, list tables, etc.)
 - If you're unsure which resource to use, try the most likely ones
 - Provide results, not questions
+
+=== PROGRESS NARRATION STYLE ===
+While you work, keep your visible narration concise, useful, and action-oriented like an expert coding assistant.
+- If you want to send a progress update to the UI while you work, emit it in a fenced block using the language progress
+- Example:
+```progress
+Checking the available options before I make a recommendation.
+```
+- Prefer emitting one brief progress update near the start of the task that states what you are about to do
+- If something meaningful changes, you may emit one additional short update describing what you learned or what you are doing next
+- Keep each progress update short, concrete, and specific to what you are doing right now
+- Use progress updates only when they add real signal
+- Do NOT reveal private chain-of-thought or long hidden reasoning
+- Do NOT flood the user with repetitive commentary
 ==========================="""
 
         enhanced_instructions = base_instructions
@@ -474,17 +493,21 @@ You are being called as a specialist by an orchestrator agent. The user's reques
             token_accumulator: dict[str, int] = {"input": 0, "output": 0}
 
             # Emit a "working" thinking event at the start
-            if include_chatter:
-                yield ChatterEvent(
-                    type=ChatterEventType.THINKING,
-                    agent_name=agent.name,
-                    content="Starting execution",
-                    friendly_message=f"{agent.name} is working...",
-                )
+            progress_buffer = ProgressDirectiveBuffer()
 
             async for update in agent.run(chat_messages, stream=True):
                 if update.text:
-                    yield update.text
+                    visible_text, progress_updates = progress_buffer.push(update.text)
+                    for progress_update in progress_updates:
+                        if include_chatter:
+                            yield ChatterEvent(
+                                type=ChatterEventType.THINKING,
+                                agent_name=agent.name,
+                                content=progress_update,
+                                friendly_message=progress_update,
+                            )
+                    if visible_text:
+                        yield visible_text
 
                 # Capture tool call/result events if requested
                 if include_chatter:
@@ -494,6 +517,10 @@ You are being called as a specialist by an orchestrator agent. The user's reques
                         pending_tool_calls, token_accumulator,
                     ):
                         yield ce
+
+            trailing_text = progress_buffer.finalize()
+            if trailing_text:
+                yield trailing_text
 
             # Yield a final summary event with total token usage if we have any
             if include_chatter and (token_accumulator["input"] > 0 or token_accumulator["output"] > 0):
@@ -542,22 +569,6 @@ You are being called as a specialist by an orchestrator agent. The user's reques
 
         agent_name = config.get("name", "Agent")
         agent_type = config.get("agent_type", "local")
-
-        # Emit delegation event
-        if chatter_queue:
-            has_context = bool(session_id and user_id)
-            content_preview = message[:200] + ("..." if len(message) > 200 else "")
-            friendly = (
-                f"Asking {agent_name} (with conversation history)"
-                if has_context
-                else f"Asking {agent_name}"
-            )
-            await chatter_queue.put(ChatterEvent(
-                type=ChatterEventType.DELEGATION,
-                agent_name=agent_name,
-                content=content_preview,
-                friendly_message=friendly,
-            ))
 
         # --- Local agents: execute directly for rich chatter ---
         if agent_type != "a2a":
@@ -660,6 +671,7 @@ You are being called as a specialist by an orchestrator agent. The user's reques
 
             # ── Stream the response ──
             response_parts = []
+            progress_buffer = ProgressDirectiveBuffer()
 
             # Track tool calls for timing (shared helper state)
             seen_tool_calls: set[str] = set()
@@ -667,18 +679,19 @@ You are being called as a specialist by an orchestrator agent. The user's reques
             pending_tool_calls: dict[str, tuple[float, str, Optional[dict]]] = {}
             token_accumulator: dict[str, int] = {"input": 0, "output": 0}
 
-            # Emit a "working" event at the start so the UI shows immediate activity
-            if chatter_queue:
-                await chatter_queue.put(ChatterEvent(
-                    type=ChatterEventType.THINKING,
-                    agent_name=agent_name,
-                    content="Starting agent execution",
-                    friendly_message=f"{agent_name} is working...",
-                ))
-
             async for update in agent.run(run_input, session=session, stream=True):
                 if update.text:
-                    response_parts.append(update.text)
+                    visible_text, progress_updates = progress_buffer.push(update.text)
+                    if visible_text:
+                        response_parts.append(visible_text)
+                    if chatter_queue:
+                        for progress_update in progress_updates:
+                            await chatter_queue.put(ChatterEvent(
+                                type=ChatterEventType.THINKING,
+                                agent_name=agent_name,
+                                content=progress_update,
+                                friendly_message=progress_update,
+                            ))
 
                 # Capture chatter events (tool calls, results, token usage)
                 if chatter_queue:
@@ -689,6 +702,10 @@ You are being called as a specialist by an orchestrator agent. The user's reques
                     )
                     for ce in chatter_events:
                         await chatter_queue.put(ce)
+
+            trailing_text = progress_buffer.finalize()
+            if trailing_text:
+                response_parts.append(trailing_text)
 
             response_text = "".join(response_parts)
             duration_ms = (time.time() - start_time) * 1000
@@ -701,7 +718,7 @@ You are being called as a specialist by an orchestrator agent. The user's reques
                 await chatter_queue.put(ChatterEvent(
                     type=ChatterEventType.CONTENT,
                     agent_name=agent_name,
-                    content=f"Completed ({len(response_text)} chars)",
+                    content="Finished preparing the specialist response.",
                     duration_ms=duration_ms,
                     friendly_message=f"{agent_name} finished in {duration_ms/1000:.1f}s"
                 ))
@@ -832,36 +849,31 @@ You are being called as a specialist by an orchestrator agent. The user's reques
             agent = a2a_client.create_a2a_agent(config, user_token)
 
             response_parts: list[str] = []
-            first_chunk_received = False
             chunk_count = 0
 
-            # Emit a "working" event so the UI shows immediate activity
-            if chatter_queue:
-                await chatter_queue.put(ChatterEvent(
-                    type=ChatterEventType.THINKING,
-                    agent_name=agent_name,
-                    content="Connecting to remote agent (with conversation context)...",
-                    friendly_message=f"{agent_name} is working...",
-                ))
+            progress_buffer = ProgressDirectiveBuffer()
 
             async with agent:
                 stream = agent.run(enriched_message, stream=True)
                 async for update in stream:
                     for content_item in update.contents:
                         if hasattr(content_item, 'text') and content_item.text:
-                            response_parts.append(content_item.text)
+                            visible_text, progress_updates = progress_buffer.push(content_item.text)
+                            if visible_text:
+                                response_parts.append(visible_text)
                             chunk_count += 1
+                            if chatter_queue:
+                                for progress_update in progress_updates:
+                                    await chatter_queue.put(ChatterEvent(
+                                        type=ChatterEventType.THINKING,
+                                        agent_name=agent_name,
+                                        content=progress_update,
+                                        friendly_message=progress_update,
+                                    ))
 
-                            # Emit a progress event on the first real chunk
-                            if not first_chunk_received and chatter_queue:
-                                first_chunk_received = True
-                                elapsed = (time.time() - start_time) * 1000
-                                await chatter_queue.put(ChatterEvent(
-                                    type=ChatterEventType.THINKING,
-                                    agent_name=agent_name,
-                                    content=f"Started receiving response after {elapsed:.0f}ms",
-                                    friendly_message=f"{agent_name} is responding...",
-                                ))
+            trailing_text = progress_buffer.finalize()
+            if trailing_text:
+                response_parts.append(trailing_text)
 
             response_text = "".join(response_parts)
             duration_ms = (time.time() - start_time) * 1000
@@ -878,7 +890,7 @@ You are being called as a specialist by an orchestrator agent. The user's reques
                 await chatter_queue.put(ChatterEvent(
                     type=ChatterEventType.CONTENT,
                     agent_name=agent_name,
-                    content=f"Completed ({len(response_text)} chars)",
+                    content="Finished preparing the specialist response.",
                     duration_ms=duration_ms,
                     friendly_message=f"{agent_name} responded in {duration_ms/1000:.1f}s"
                 ))
@@ -1115,7 +1127,7 @@ You are being called as a specialist by an orchestrator agent. The user's reques
         # Handle Direct Response (no specialists needed)
         # =================================================================
         if decision.get("action") == "direct":
-            direct_response = decision.get("direct_response", "")
+            direct_response, _ = extract_progress_updates(decision.get("direct_response", ""))
 
             # Extract html_preview blocks from direct responses
             cleaned, html_previews = _extract_html_previews(direct_response)
@@ -1203,6 +1215,19 @@ You are being called as a specialist by an orchestrator agent. The user's reques
             friendly_message=f"Coordinating {len(specialist_ids)} specialist(s)"
         )
 
+        orchestrator_name = orchestrator_config.get("name", "Orchestrator")
+        for specialist_name in specialist_names:
+            delegation_detail = (
+                f"Delegated a focused task to {specialist_name}: "
+                f"{specialist_message[:220]}{'...' if len(specialist_message) > 220 else ''}"
+            )
+            yield ChatterEvent(
+                type=ChatterEventType.DELEGATION,
+                agent_name=orchestrator_name,
+                content=delegation_detail,
+                friendly_message=f"Asking {specialist_name}",
+            )
+
         # Wrap evaluation function so workflow_runner can call it with 4 args
         run_eval = partial(
             run_orchestrator_for_evaluation,
@@ -1285,7 +1310,11 @@ You are being called as a specialist by an orchestrator agent. The user's reques
         yield ChatterEvent(
             type=ChatterEventType.THINKING,
             agent_name=orchestrator_config.get("name", "Orchestrator"),
-            content="Synthesizing specialist responses...",
+            content=(
+                f"Reviewing {' and '.join(specialist_names)} and drafting the final answer..."
+                if specialist_names and len(specialist_names) <= 2
+                else "Reviewing specialist results and drafting the final answer..."
+            ),
             friendly_message="Combining results into final answer"
         )
 
@@ -1297,16 +1326,20 @@ You are being called as a specialist by an orchestrator agent. The user's reques
         )
 
         yield ChatterEvent(
-            type=ChatterEventType.THINKING,
+            type=ChatterEventType.CONTENT,
             agent_name=orchestrator_config.get("name", "Orchestrator"),
-            content="Synthesized specialist responses into the final answer.",
-            friendly_message="Combining results into final answer",
+            content=(
+                f"Reviewed {', '.join(specialist_names)} and prepared the final answer."
+                if specialist_names
+                else "Prepared the final answer."
+            ),
+            friendly_message="Prepared final answer",
             tokens_input=synthesis_result.get("tokens_input"),
             tokens_output=synthesis_result.get("tokens_output"),
         )
 
         # Build final response — also extract any html_preview the synthesizer kept
-        synthesis_content = synthesis_result.get("content", "")
+        synthesis_content, _ = extract_progress_updates(synthesis_result.get("content", ""))
         synth_cleaned, synth_previews = _extract_html_previews(synthesis_content)
         for html in synth_previews:
             yield ChatterEvent(

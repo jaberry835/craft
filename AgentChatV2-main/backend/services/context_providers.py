@@ -16,8 +16,8 @@ See:
 from typing import Any, Sequence
 
 from agent_framework import (
-    BaseHistoryProvider,
-    BaseContextProvider,
+    HistoryProvider,
+    ContextProvider,
     Message,
     Content,
     AgentSession,
@@ -33,7 +33,7 @@ logger = get_logger(__name__)
 # History Provider — Cosmos DB
 # =============================================================================
 
-class CosmosHistoryProvider(BaseHistoryProvider):
+class CosmosHistoryProvider(HistoryProvider):
     """
     History provider backed by Cosmos DB.
 
@@ -153,9 +153,10 @@ class CosmosHistoryProvider(BaseHistoryProvider):
                 contents.append(
                     Content.from_uri(data_uri, media_type=img["content_type"])
                 )
-                messages.append(Message(role=role, contents=contents))
+                messages.append(Message(role, contents))
             else:
-                messages.append(Message(role=role, text=text))
+                contents = [text] if text else []
+                messages.append(Message(role, contents))
 
         # The user message was already saved to Cosmos *before* agent.run()
         # (for durability).  The framework will also add it as the current
@@ -222,7 +223,7 @@ class CosmosHistoryProvider(BaseHistoryProvider):
 # Context Provider — Document RAG
 # =============================================================================
 
-class DocumentRAGProvider(BaseContextProvider):
+class DocumentRAGProvider(ContextProvider):
     """
     Context provider that injects relevant document context for RAG.
 

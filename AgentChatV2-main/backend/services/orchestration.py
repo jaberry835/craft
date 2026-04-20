@@ -499,8 +499,8 @@ async def run_orchestrator_for_evaluation(
     
     # Get evaluation
     eval_messages = [
-        Message(role="system", text=eval_prompt),
-        Message(role="user", text="Should we continue investigating or do we have enough information?")
+        Message("system", [eval_prompt]),
+        Message("user", ["Should we continue investigating or do we have enough information?"])
     ]
     
     response_parts = []

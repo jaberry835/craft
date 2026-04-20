@@ -1041,28 +1041,24 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
         } else if (stepName.startsWith('thinking:')) {
           agentName = stepName.slice('thinking:'.length);
         }
-        this.streamingMessage.chatterEvents = [
-          ...this.streamingMessage.chatterEvents,
-          { type: chatterType, agentName, content: '', timestamp: Date.now() }
-        ];
+
+        const existingIndex = [...this.streamingMessage.chatterEvents]
+          .reverse()
+          .findIndex(e => e.type === chatterType && e.agentName === agentName && !e.content && !e.friendlyMessage);
+
+        if (existingIndex === -1) {
+          this.streamingMessage.chatterEvents = [
+            ...this.streamingMessage.chatterEvents,
+            { type: chatterType, agentName, content: '', timestamp: Date.now() }
+          ];
+        }
         break;
       }
 
-      case 'STEP_FINISHED': {
-        if (!this.streamingMessage.chatterEvents) {
-          this.streamingMessage.chatterEvents = [];
-        }
-        const stepName = event.step_name || '';
-        let agentName = 'Orchestrator';
-        if (stepName.startsWith('delegate:')) {
-          agentName = stepName.slice('delegate:'.length);
-        }
-        this.streamingMessage.chatterEvents = [
-          ...this.streamingMessage.chatterEvents,
-          { type: 'content', agentName, content: 'Completed', timestamp: Date.now() }
-        ];
+      case 'STEP_FINISHED':
+        // Lifecycle marker only; the richer CUSTOM chatter/content events carry the
+        // actual user-visible summary, so avoid adding a generic "Completed" row.
         break;
-      }
 
       // --- Tool calls ---
       case 'TOOL_CALL_START': {
@@ -1073,7 +1069,7 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
           ...this.streamingMessage.chatterEvents,
           {
             type: 'tool_call',
-            agentName: 'Agent',
+            agentName: event.tool_call_name || 'Agent',
             content: '',
             toolName: event.tool_call_name,
             toolCallId: event.tool_call_id,
@@ -1109,12 +1105,16 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
         if (!this.streamingMessage.chatterEvents) {
           this.streamingMessage.chatterEvents = [];
         }
+        const matchingToolCall = [...this.streamingMessage.chatterEvents]
+          .reverse()
+          .find(e => e.type === 'tool_call' && e.toolCallId === event.tool_call_id);
         this.streamingMessage.chatterEvents = [
           ...this.streamingMessage.chatterEvents,
           {
             type: 'tool_result',
-            agentName: 'Agent',
+            agentName: matchingToolCall?.agentName || 'Agent',
             content: event.content || '',
+            toolName: matchingToolCall?.toolName,
             toolCallId: event.tool_call_id,
             timestamp: Date.now(),
           }
@@ -1123,13 +1123,17 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
       }
 
       // --- Text message (final response) ---
-      case 'TEXT_MESSAGE_START':
+      case 'TEXT_MESSAGE_START': {
+        const assistantName = typeof this.streamingMessage.metadata?.['assistant_agent_name'] === 'string'
+          ? this.streamingMessage.metadata['assistant_agent_name'] as string
+          : 'Assistant';
         this.streamingMessage.agentResponses = [
           ...(this.streamingMessage.agentResponses || []),
-          { agentName: 'Assistant', content: '' }
+          { agentName: assistantName, content: '' }
         ];
         this.streamingMessage.metadata = { ...(this.streamingMessage.metadata || {}) };
         break;
+      }
 
       case 'TEXT_MESSAGE_CONTENT':
         if (this.streamingMessage.agentResponses && this.streamingMessage.agentResponses.length > 0) {
@@ -1145,7 +1149,8 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
 
       // --- Reasoning tokens (chain-of-thought from reasoning models) ---
       case 'REASONING_START': {
-        // Start of a reasoning block — create a reasoning chatter event
+        // Start of a reasoning block — create a lightweight placeholder that can be
+        // enriched by the corresponding CUSTOM chatter event.
         if (!this.streamingMessage.chatterEvents) {
           this.streamingMessage.chatterEvents = [];
         }
@@ -1191,6 +1196,13 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
             assistant_agent_id: event.value['agent_id'],
             assistant_agent_name: event.value['agent_name'],
           };
+
+          if (this.streamingMessage.agentResponses?.length) {
+            const lastResponse = this.streamingMessage.agentResponses[this.streamingMessage.agentResponses.length - 1];
+            if (lastResponse && (!lastResponse.agentName || lastResponse.agentName === 'Assistant')) {
+              lastResponse.agentName = (event.value['agent_name'] as string) || 'Assistant';
+            }
+          }
         } else if (event.name === 'html_preview' && event.value?.['html']) {
           this.previewService.show(
             event.value['html'] as string,
@@ -1213,14 +1225,18 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
    * These carry agent_name, friendly_message, duration_ms, tokens, etc.
    */
   private enrichChatterFromCustom(value: Record<string, unknown>): void {
-    if (!this.streamingMessage?.chatterEvents) return;
+    if (!this.streamingMessage) return;
+
+    if (!this.streamingMessage.chatterEvents) {
+      this.streamingMessage.chatterEvents = [];
+    }
 
     const events = this.streamingMessage.chatterEvents;
     const chatterType = value['chatter_type'] as string | undefined;
     const agentName = value['agent_name'] as string | undefined;
     const toolCallId = value['tool_call_id'] as string | undefined;
 
-    // For tool_call/tool_result, match by tool_call_id
+    // For tool_call/tool_result, match by tool_call_id first.
     if (toolCallId) {
       for (let i = events.length - 1; i >= 0; i--) {
         if (events[i].toolCallId === toolCallId) {
@@ -1231,34 +1247,42 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
       }
     }
 
-    // For thinking/delegation/content, match by type + agent_name (most recent)
-    if (chatterType && agentName) {
-      const typeMap: Record<string, ChatterEvent['type']> = {
-        thinking: 'thinking', delegation: 'delegation', content: 'content',
-        tool_call: 'tool_call', tool_result: 'tool_result', reasoning: 'reasoning',
-      };
-      const mappedType = typeMap[chatterType];
-      if (mappedType) {
-        for (let i = events.length - 1; i >= 0; i--) {
-          if (events[i].type === mappedType && events[i].agentName === agentName) {
-            this.applyChatterMetadata(events[i], value);
-            this.streamingMessage.chatterEvents = [...events];
-            return;
-          }
-        }
-        // If no matching event found for thinking/delegation, create one
-        if (mappedType === 'thinking' || mappedType === 'delegation' || mappedType === 'reasoning') {
-          const newEvent: ChatterEvent = {
-            type: mappedType,
-            agentName,
-            content: (value['content'] as string) || '',
-            timestamp: Date.now(),
-          };
-          this.applyChatterMetadata(newEvent, value);
-          this.streamingMessage.chatterEvents = [...events, newEvent];
-        }
+    if (!chatterType) {
+      return;
+    }
+
+    const typeMap: Record<string, ChatterEvent['type']> = {
+      thinking: 'thinking', delegation: 'delegation', content: 'content',
+      tool_call: 'tool_call', tool_result: 'tool_result', reasoning: 'reasoning',
+    };
+    const mappedType = typeMap[chatterType];
+    if (!mappedType) {
+      return;
+    }
+
+    // Match the most recent compatible event. Allow placeholder "Agent" rows to be
+    // claimed by the real agent name once metadata arrives.
+    for (let i = events.length - 1; i >= 0; i--) {
+      const sameType = events[i].type === mappedType;
+      const sameAgent = !agentName || events[i].agentName === agentName || events[i].agentName === 'Agent';
+      if (sameType && sameAgent) {
+        this.applyChatterMetadata(events[i], value);
+        this.streamingMessage.chatterEvents = [...events];
+        return;
       }
     }
+
+    // If no matching event exists, create one directly from backend metadata.
+    const newEvent: ChatterEvent = {
+      type: mappedType,
+      agentName: agentName || 'Agent',
+      content: (value['content'] as string) || '',
+      toolName: value['tool_name'] as string | undefined,
+      toolCallId: toolCallId,
+      timestamp: Date.now(),
+    };
+    this.applyChatterMetadata(newEvent, value);
+    this.streamingMessage.chatterEvents = [...events, newEvent];
   }
 
   private applyChatterMetadata(target: ChatterEvent, value: Record<string, unknown>): void {
@@ -1266,8 +1290,9 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
     if (value['duration_ms'] != null) target.durationMs = value['duration_ms'] as number;
     if (value['tokens_input'] != null) target.tokensInput = value['tokens_input'] as number;
     if (value['tokens_output'] != null) target.tokensOutput = value['tokens_output'] as number;
-    if (value['content'] && !target.content) target.content = value['content'] as string;
+    if (value['content']) target.content = value['content'] as string;
     if (value['agent_name']) target.agentName = value['agent_name'] as string;
+    if (value['tool_name']) target.toolName = value['tool_name'] as string;
     if (value['render_hint']) target.renderHint = value['render_hint'] as ChatterEvent['renderHint'];
   }
 

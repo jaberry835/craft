@@ -13,7 +13,12 @@ from agent_framework import (
 )
 
 from observability import get_logger, should_log_agent
-from services.chatter import ChatterEvent, ChatterEventType, extract_chatter_from_update
+from services.chatter import (
+    ChatterEvent,
+    ChatterEventType,
+    ProgressDirectiveBuffer,
+    extract_chatter_from_update,
+)
 
 logger = get_logger(__name__)
 
@@ -148,6 +153,7 @@ async def run_workflow_and_collect(
     pending_tool_calls: dict[str, dict[str, tuple[float, str, Optional[dict]]]] = {}
     token_accumulators: dict[str, dict[str, int]] = {}
     executor_start_times: dict[str, float] = {}
+    progress_buffers: dict[str, ProgressDirectiveBuffer] = {}
 
     stream = workflow.run(user_message, stream=True)
     async for event in stream:
@@ -160,15 +166,9 @@ async def run_workflow_and_collect(
             seen_tool_results.setdefault(executor_id, set())
             pending_tool_calls.setdefault(executor_id, {})
             token_accumulators.setdefault(executor_id, {"input": 0, "output": 0})
+            progress_buffers.setdefault(executor_id, ProgressDirectiveBuffer())
 
             agent_id, agent_name = agent_id_map.get(executor_id, (executor_id, executor_id))
-            if chatter_queue:
-                await chatter_queue.put(ChatterEvent(
-                    type=ChatterEventType.DELEGATION,
-                    agent_name=agent_name,
-                    content=f"Running {agent_name}",
-                    friendly_message=f"Asking {agent_name}",
-                ))
             if should_log_agent():
                 logger.info(f"Workflow: executor_invoked -> {executor_id} ({agent_name})")
 
@@ -192,12 +192,25 @@ async def run_workflow_and_collect(
 
                 # Accumulate text for final result
                 if data.text:
-                    results_by_executor.setdefault(executor_id, {
-                        "agent_id": agent_id,
-                        "agent_name": agent_name,
-                        "parts": [],
-                    })
-                    results_by_executor[executor_id]["parts"].append(data.text)
+                    visible_text, progress_updates = progress_buffers.setdefault(
+                        executor_id, ProgressDirectiveBuffer()
+                    ).push(data.text)
+                    if chatter_queue:
+                        for progress_update in progress_updates:
+                            await chatter_queue.put(ChatterEvent(
+                                type=ChatterEventType.THINKING,
+                                agent_name=agent_name,
+                                content=progress_update,
+                                friendly_message=progress_update,
+                            ))
+                    if visible_text:
+                        results_by_executor.setdefault(executor_id, {
+                            "agent_id": agent_id,
+                            "agent_name": agent_name,
+                            "parts": [],
+                        })
+                        results_by_executor[executor_id]["parts"].append(visible_text)
+
 
         elif etype == "executor_completed":
             executor_id = event.executor_id or ""
@@ -210,7 +223,7 @@ async def run_workflow_and_collect(
                 await chatter_queue.put(ChatterEvent(
                     type=ChatterEventType.CONTENT,
                     agent_name=agent_name,
-                    content=f"Completed",
+                    content="Finished preparing the specialist response.",
                     duration_ms=duration_ms,
                     friendly_message=f"{agent_name} finished" + (f" in {duration_ms/1000:.1f}s" if duration_ms else ""),
                 ))
@@ -236,6 +249,17 @@ async def run_workflow_and_collect(
                 ))
 
     # Build final results list
+    for executor_id, progress_buffer in progress_buffers.items():
+        trailing_text = progress_buffer.finalize()
+        if trailing_text:
+            agent_id, agent_name = agent_id_map.get(executor_id, (executor_id, executor_id))
+            results_by_executor.setdefault(executor_id, {
+                "agent_id": agent_id,
+                "agent_name": agent_name,
+                "parts": [],
+            })
+            results_by_executor[executor_id]["parts"].append(trailing_text)
+
     results: list[dict] = []
     for executor_id, data in results_by_executor.items():
         response_text = "".join(data.get("parts", []))
