@@ -27,16 +27,6 @@
       "description": "Target environment (e.g. 'Production', 'Staging', 'Development').",
       "enum": ["Production", "Staging", "Development", "Test"]
     },
-    "subscription_id": {
-      "type": "string",
-      "required": true,
-      "description": "Azure subscription ID associated with this security package."
-    },
-    "resource_group": {
-      "type": "string",
-      "required": false,
-      "description": "Azure resource group name (optional – scopes policy data if provided)."
-    },
     "compliance_summary": {
       "type": "object",
       "required": false,

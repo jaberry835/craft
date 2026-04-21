@@ -550,7 +550,6 @@ def register_security_package_tools(mcp: FastMCP):
 
     @mcp.tool
     def get_policy_compliance(
-        subscription_id: str = "",
         resource_group: str = "",
     ) -> Dict[str, Any]:
         """Retrieve Azure Policy compliance details for a subscription.
@@ -559,9 +558,10 @@ def register_security_package_tools(mcp: FastMCP):
         summary including counts of compliant, non-compliant, and exempt
         resources grouped by policy assignment.
 
+        The subscription is read from the ``AZURE_SUBSCRIPTION_ID``
+        environment variable.
+
         Args:
-            subscription_id: Azure subscription ID. Defaults to the
-                             AZURE_SUBSCRIPTION_ID environment variable.
             resource_group:  Optional resource-group name to scope the query.
 
         Returns:
@@ -571,11 +571,11 @@ def register_security_package_tools(mcp: FastMCP):
         if not HTTPX_AVAILABLE:
             return {"success": False, "error": "httpx is not installed."}
 
-        sub_id = subscription_id or _env("AZURE_SUBSCRIPTION_ID")
+        sub_id = _env("AZURE_SUBSCRIPTION_ID")
         if not sub_id:
             return {
                 "success": False,
-                "error": "No subscription_id provided and AZURE_SUBSCRIPTION_ID is not set.",
+                "error": "AZURE_SUBSCRIPTION_ID is not set in the environment.",
             }
 
         management_endpoint = _env("AZURE_MANAGEMENT_ENDPOINT", "https://management.azure.com")
