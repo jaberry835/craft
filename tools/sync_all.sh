@@ -21,7 +21,7 @@ if [[ -z "${ADD_REPO_GITHUB_TOKEN:-}" ]]; then
 fi
 
 repos=(
-  "https://github.com/adamruderman/UserAccessCheckerApi main"
+ # "https://github.com/adamruderman/UserAccessCheckerApi main"
   "https://github.com/adamruderman/AgentChatV2 main"
   "https://github.com/adamruderman/Rude-MCPServer main"
   #"https://github.com/adamruderman/UserAccessChecker-Python main"
@@ -30,7 +30,8 @@ repos=(
   #"https://github.com/adamruderman/WebScrapeAndIndex main"
   #"https://github.com/adamruderman/SecureAPI main"
   "https://github.com/adamruderman/SecureChatExtension main",
-  "https://github.com/adamruderman/SecureChatExtension agent-framework-cli"
+  "https://github.com/adamruderman/SecureChatExtension msal-config",
+  #"https://github.com/adamruderman/SecureChatExtension agent-framework-cli"
 )
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

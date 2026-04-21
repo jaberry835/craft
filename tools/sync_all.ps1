@@ -2,7 +2,7 @@
 # sync_all.ps1 — Run add_repo.py against all tracked projects
 
 $repos = @(
-    @{ Url = "https://github.com/adamruderman/UserAccessCheckerApi"; Branch = "main" }
+   # @{ Url = "https://github.com/adamruderman/UserAccessCheckerApi"; Branch = "main" }
     @{ Url = "https://github.com/adamruderman/AgentChatV2"; Branch = "main" }
     @{ Url = "https://github.com/adamruderman/Rude-MCPServer"; Branch = "main" }
     #@{ Url = "https://github.com/adamruderman/UserAccessChecker-Python"; Branch = "main" }
@@ -10,9 +10,10 @@ $repos = @(
     #@{ Url = "https://github.com/microsoft/simplechat"; Branch = "main" }
     #@{ Url = "https://github.com/jaberry835/snapseek"; Branch = "deepface-embeddings" }
     #@{ Url = "https://github.com/adamruderman/WebScrapeAndIndex"; Branch = "main" }
-    @{ Url = "https://github.com/adamruderman/SecureAPI"; Branch = "main" } 
-    @{ Url = "https://github.com/adamruderman/McpServer"; Branch = "main" }
-    @{ Url = "https://github.com/adamruderman/SecureChatExtension"; Branch = "main" }
+   # @{ Url = "https://github.com/adamruderman/SecureAPI"; Branch = "main" } 
+    #@{ Url = "https://github.com/adamruderman/McpServer"; Branch = "main" }
+    @{ Url = "https://github.com/adamruderman/SecureChatExtension"; Branch = "main" },
+    @{Url= "https://github.com/adamruderman/SecureChatExtension"; Branch ="msal-config"
    
      
 )
