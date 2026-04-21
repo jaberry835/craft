@@ -1,0 +1,30 @@
+// =============================================================================
+// Junior — Scenario: COPILOT CLI (BYOK) through APIM, API KEY mode
+//
+// Use when:
+//   - "junior.agentProvider": "copilot-cli"
+//   - APIM authenticates inbound calls with a subscription key
+//     (Ocp-Apim-Subscription-Key) instead of a bearer token
+//
+// Store the key with: "Junior: Set Copilot CLI Provider API Key"
+// (writes into VS Code SecretStorage; the Copilot CLI runtime sends it as the
+// provider API key, which Junior translates to the right header for APIM.)
+// =============================================================================
+{
+    "junior.agentProvider": "copilot-cli",
+    "junior.copilotCli.path": "C:\\Users\\you\\AppData\\Roaming\\npm\\copilot.cmd",
+    "junior.copilotCli.model": "gpt-5.2",
+    "junior.copilotCli.models": [
+        { "name": "GPT-5.2", "id": "gpt-5.2" }
+    ],
+    "junior.copilotCli.providerType": "azure",
+    "junior.copilotCli.providerBaseUrl": "https://<your-apim>.azure-api.net",
+    "junior.copilotCli.providerWireApi": "responses",
+    // Leave providerAzureApiVersion UNSET for APIM mode.
+
+    // API key in SecretStorage — DO NOT paste it into settings.json.
+
+    "junior.copilotCli.autoApproveWrites": false,
+    "junior.copilotCli.autoApproveTerminal": false,
+    "junior.copilotCli.logSdkEvents": false
+}

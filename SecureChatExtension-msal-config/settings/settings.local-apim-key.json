@@ -1,0 +1,32 @@
+// =============================================================================
+// Junior — Scenario: LOCAL AGENT through APIM, API KEY mode (simplest)
+//
+// Use when:
+//   - You have an APIM endpoint in front of Azure OpenAI / Foundry
+//   - APIM authenticates inbound calls with a subscription key (Ocp-Apim-...)
+//   - You don't want bearer-token / Entra sign-in
+//
+// Copy these keys into your VS Code settings.json (User or Workspace).
+// =============================================================================
+{
+    // -- Models -------------------------------------------------------------
+    "junior.azureOpenAI.deployments": [
+        { "name": "GPT-5.2",      "deploymentId": "gpt-5.2",      "apiVersion": "2025-03-01-preview" },
+        { "name": "gpt-5.4-mini", "deploymentId": "gpt-5.4-mini", "apiVersion": "2025-03-01-preview" }
+    ],
+    "junior.azureOpenAI.activeDeployment": "gpt-5.2",
+    "junior.inlineCompletions.deployment": "gpt-5.2",
+
+    // -- Provider: APIM (key mode) -----------------------------------------
+    "junior.agentProvider": "azure-openai",
+    "junior.azureOpenAI.provider": "apim",
+    "junior.azureOpenAI.apimBaseUrl": "https://<your-apim>.azure-api.net/foundryapi",
+    "junior.azureOpenAI.apiVersion": "2025-03-01-preview",
+    // Store the APIM subscription key with: "Junior: Set Azure OpenAI / APIM API Key"
+    "junior.azureOpenAI.authMode": "api-key",
+
+    // -- Misc ---------------------------------------------------------------
+    "junior.temperature": 1,
+    "junior.mcp.includeExternalServers": true,
+    "junior.mcp.externalServerSettings": ["mcp.servers"]
+}

@@ -1,0 +1,33 @@
+// =============================================================================
+// Junior — Scenario: LOCAL AGENT against OpenAI or any OpenAI-COMPATIBLE API
+//
+// Use when:
+//   - Public OpenAI API (https://api.openai.com/v1)
+//   - GitHub Models, Ollama, vLLM, LM Studio, llama.cpp server, or any other
+//     server that speaks the OpenAI Chat Completions / Responses wire format
+//
+// Auth: API key only. (The OpenAI provider has no Entra/MSAL path — that
+// only applies to Azure-fronted endpoints.) Store with:
+//     "Junior: Set Azure OpenAI / APIM API Key"
+// (the same secret slot is reused for the OpenAI provider.)
+// =============================================================================
+{
+    // -- Models -------------------------------------------------------------
+    // For the OpenAI provider, "deploymentId" is the OpenAI MODEL NAME.
+    "junior.azureOpenAI.deployments": [
+        { "name": "GPT-4o",      "deploymentId": "gpt-4o" },
+        { "name": "GPT-4o mini", "deploymentId": "gpt-4o-mini" }
+    ],
+    "junior.azureOpenAI.activeDeployment": "gpt-4o",
+    "junior.inlineCompletions.deployment": "gpt-4o-mini",
+
+    // -- Provider: OpenAI / compatible -------------------------------------
+    "junior.agentProvider": "azure-openai",
+    "junior.azureOpenAI.provider": "openai",
+    "junior.azureOpenAI.openaiBaseUrl": "https://api.openai.com/v1",
+    // For Ollama:    "http://localhost:11434/v1"
+    // For LM Studio: "http://localhost:1234/v1"
+
+    // -- Misc ---------------------------------------------------------------
+    "junior.temperature": 1
+}

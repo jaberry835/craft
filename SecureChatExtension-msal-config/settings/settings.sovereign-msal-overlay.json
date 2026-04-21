@@ -1,0 +1,66 @@
+// =============================================================================
+// Junior — Scenario: SOVEREIGN / GOV cloud overlay (MSAL)
+//
+// This is NOT a standalone configuration — it's a set of replacement keys you
+// merge ON TOP OF one of the MSAL scenarios:
+//   - settings.local-apim-msal.json
+//   - settings.local-direct-msal.json
+//   - settings.copilot-cli-apim-msal.json
+//   - settings.copilot-cli-direct-msal.json
+//
+// What changes for sovereign/gov clouds:
+//   1. The MSAL authority (so MSAL talks to the sovereign login host).
+//   2. The audience scope (so the sovereign backend accepts the token).
+//   3. For CUSTOM sovereign hosts: knownAuthorities (so MSAL trusts the host).
+//
+// Pick ONE of the cloud sections below and merge it into your active scenario.
+// =============================================================================
+{
+    // ─────────────────────────────────────────────────────────────────────
+    // Cloud A — Azure US Government (commercial, published)
+    // ─────────────────────────────────────────────────────────────────────
+    "junior.msal.cloudInstance": "https://login.microsoftonline.us",
+    // tenantId stays as your Gov tenant GUID
+    // No knownAuthorities needed (host is recognized by MSAL out of the box).
+
+    // Direct AOAI in Gov:
+    //   "junior.azureOpenAI.authScopes": ["https://cognitiveservices.azure.us/.default"]
+    //   or for Copilot CLI:
+    //   "junior.copilotCli.providerAuthScopes": ["https://cognitiveservices.azure.us/.default"]
+
+    // APIM in Gov:
+    //   "junior.azureOpenAI.authScopes": ["api://<gov-apim-app-clientid>/user_impersonation"]
+
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Cloud B — Azure China
+    // ─────────────────────────────────────────────────────────────────────
+    // "junior.msal.cloudInstance": "https://login.partner.microsoftonline.cn",
+    // "junior.azureOpenAI.authScopes": ["https://cognitiveservices.azure.cn/.default"]
+
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Cloud C — CUSTOM sovereign / air-gapped
+    //
+    // MSAL's built-in AzureCloudInstance enum only knows
+    //   Public / US Gov / China / Germany.
+    // For isolated authority you MUST
+    // set BOTH `authority` (full URL incl. tenant) AND `knownAuthorities`
+    // (host only). `cloudInstance` alone is NOT enough — MSAL refuses to
+    // talk to unrecognized hosts as a security measure.
+    //
+    // Remove `junior.msal.cloudInstance` from your active scenario when you
+    // use these settings — `authority` takes precedence either way, but
+    // dropping cloudInstance avoids confusion.
+    // ─────────────────────────────────────────────────────────────────────
+    // "junior.msal.authority":         "https://login.<your-sovereign-host>/<tenant-guid>",
+    // "junior.msal.knownAuthorities":  ["login.<your-sovereign-host>"],
+    //
+    // Common per-cloud audiences (pick whichever applies to your backend):
+    //   Direct AOAI:
+    //     "junior.azureOpenAI.authScopes":         ["https://cognitiveservices.<sovereign-suffix>/.default"]
+    //     "junior.copilotCli.providerAuthScopes":  ["https://cognitiveservices.<sovereign-suffix>/.default"]
+    //   APIM-fronted:
+    //     "junior.azureOpenAI.authScopes":         ["api://<apim-app-clientid>/user_impersonation"]
+    //     "junior.copilotCli.providerAuthScopes":  ["api://<apim-app-clientid>/user_impersonation"]
+}
