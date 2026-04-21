@@ -26,6 +26,7 @@ const CACHE_VERSION = 1;
 const CACHE_FILENAME = 'semanticIndex.json';
 /** Number of concurrent file reads during semantic indexing. */
 const READ_CONCURRENCY = 10;
+const CACHE_SAVE_DEBOUNCE_MS = 1000;
 
 const STOP_WORDS = new Set([
     'the', 'and', 'for', 'with', 'this', 'that', 'from', 'into', 'when', 'where', 'what',
@@ -39,7 +40,14 @@ const STOP_WORDS = new Set([
 export class SemanticIndexer {
     private chunks: SemanticChunk[] = [];
     private docFreq: Map<string, number> = new Map();
+    /**
+     * Inverted index: term → sorted array of chunk indices that contain the term.
+     * Lets `search()` skip the linear scan over all chunks; we only score the union
+     * of postings for the query terms. Rebuilt from `chunks` whenever the corpus changes.
+     */
+    private termIndex: Map<string, number[]> = new Map();
     private storagePath: string | undefined;
+    private saveTimer: ReturnType<typeof setTimeout> | undefined;
 
     /** Set the directory used for persisting the semantic index cache. */
     setStoragePath(dir: string) {
@@ -58,9 +66,18 @@ export class SemanticIndexer {
         // Load cached chunks grouped by file
         const cachedByFile = this.loadCache();
 
-        // Determine which files actually need re-chunking
+        // Determine which files actually need re-chunking.
+        // A file needs re-chunking if it's in changedFiles OR it isn't in the cache yet.
+        // The second case matters on first run after the semantic cache was added/cleared,
+        // when the file index reports 0 changed files but the semantic cache is empty.
         const currentFilePaths = new Set(files.map(f => f.relativePath));
-        const needsRechunk = changedFiles ?? currentFilePaths; // if no diff info, rechunk everything
+        const changed = changedFiles ?? currentFilePaths;
+        const needsRechunk = new Set<string>();
+        for (const f of files) {
+            if (changed.has(f.relativePath) || !cachedByFile.has(f.relativePath)) {
+                needsRechunk.add(f.relativePath);
+            }
+        }
 
         // Start with cached chunks for files that haven't changed
         const newChunks: SemanticChunk[] = [];
@@ -108,17 +125,11 @@ export class SemanticIndexer {
 
         this.chunks = newChunks;
 
-        // Rebuild document-frequency table
-        this.docFreq.clear();
-        for (const chunk of this.chunks) {
-            const seen = new Set<string>(chunk.termFreq.keys());
-            for (const term of seen) {
-                this.docFreq.set(term, (this.docFreq.get(term) || 0) + 1);
-            }
-        }
+        // Rebuild document-frequency table and inverted term index in a single pass.
+        this.rebuildIndexes();
 
-        // Persist for next activation
-        this.saveCache();
+        // Persist for next activation (full rebuild — immediate write)
+        this.saveCacheNow();
     }
 
     getChunkCount(): number {
@@ -138,9 +149,9 @@ export class SemanticIndexer {
             const newChunks = this.chunkFile(relativePath, content);
             this.chunks.push(...newChunks);
 
-            // Rebuild document frequency
-            this.rebuildDocFreq();
-            this.saveCache();
+            // Rebuild derived indexes (cheap relative to disk read)
+            this.rebuildIndexes();
+            this.scheduleSave();
         } catch {
             // File may be unreadable (binary, etc.)
         }
@@ -151,18 +162,38 @@ export class SemanticIndexer {
         const before = this.chunks.length;
         this.chunks = this.chunks.filter(c => c.filePath !== relativePath);
         if (this.chunks.length !== before) {
-            this.rebuildDocFreq();
-            this.saveCache();
+            this.rebuildIndexes();
+            this.scheduleSave();
         }
     }
 
-    /** Rebuild the document frequency map from current chunks */
-    private rebuildDocFreq(): void {
+    /** Flush any pending debounced cache write. Call on extension shutdown. */
+    flush(): void {
+        if (this.saveTimer) {
+            clearTimeout(this.saveTimer);
+            this.saveTimer = undefined;
+            this.saveCacheNow();
+        }
+    }
+
+    dispose(): void {
+        this.flush();
+    }
+
+    /** Rebuild docFreq and the inverted term index from the current chunks array. */
+    private rebuildIndexes(): void {
         this.docFreq.clear();
-        for (const chunk of this.chunks) {
-            const seen = new Set<string>(chunk.termFreq.keys());
-            for (const term of seen) {
+        this.termIndex.clear();
+        for (let i = 0; i < this.chunks.length; i++) {
+            const chunk = this.chunks[i];
+            for (const term of chunk.termFreq.keys()) {
                 this.docFreq.set(term, (this.docFreq.get(term) || 0) + 1);
+                let postings = this.termIndex.get(term);
+                if (!postings) {
+                    postings = [];
+                    this.termIndex.set(term, postings);
+                }
+                postings.push(i);
             }
         }
     }
@@ -174,29 +205,31 @@ export class SemanticIndexer {
         }
 
         const chunkCount = this.chunks.length;
-        const scored: Array<{ chunk: SemanticChunk; score: number }> = [];
+        // Use the inverted index: only score chunks that contain at least one query term.
+        // Falls back gracefully (empty postings) for terms not in the corpus.
+        const candidateScores = new Map<number, number>();
 
-        for (const chunk of this.chunks) {
-            let score = 0;
-
-            for (const term of terms) {
+        for (const term of terms) {
+            const postings = this.termIndex.get(term);
+            if (!postings) { continue; }
+            const df = this.docFreq.get(term) || 1;
+            const idf = Math.log(1 + chunkCount / df);
+            for (const idx of postings) {
+                const chunk = this.chunks[idx];
                 const tf = chunk.termFreq.get(term) || 0;
                 if (tf === 0) { continue; }
-
-                const df = this.docFreq.get(term) || 1;
-                const idf = Math.log(1 + chunkCount / df);
                 const tfNorm = tf / Math.max(chunk.termCount, 1);
-                score += tfNorm * idf;
+                candidateScores.set(idx, (candidateScores.get(idx) || 0) + tfNorm * idf);
             }
+        }
 
-            const q = query.toLowerCase();
-            if (chunk.filePath.toLowerCase().includes(q)) {
-                score += 0.25;
-            }
-
-            if (score > 0) {
-                scored.push({ chunk, score });
-            }
+        // Light filename-match boost (cheap — only over candidates we already scored).
+        const q = query.toLowerCase();
+        const scored: Array<{ chunk: SemanticChunk; score: number }> = [];
+        for (const [idx, score] of candidateScores) {
+            const chunk = this.chunks[idx];
+            const finalScore = chunk.filePath.toLowerCase().includes(q) ? score + 0.25 : score;
+            scored.push({ chunk, score: finalScore });
         }
 
         scored.sort((a, b) => b.score - a.score);
@@ -286,7 +319,7 @@ export class SemanticIndexer {
         return map;
     }
 
-    private saveCache(): void {
+    private saveCacheNow(): void {
         const cachePath = this.getCachePath();
         if (!cachePath) { return; }
         try {
@@ -301,9 +334,19 @@ export class SemanticIndexer {
                 termCount: c.termCount,
             }));
             const data = { version: CACHE_VERSION, chunks: cached };
-            fs.writeFileSync(cachePath, JSON.stringify(data), 'utf8');
+            const tmp = cachePath + '.tmp';
+            fs.writeFileSync(tmp, JSON.stringify(data), 'utf8');
+            fs.renameSync(tmp, cachePath);
         } catch {
             // Non-fatal
         }
+    }
+
+    private scheduleSave(): void {
+        if (this.saveTimer) { return; }
+        this.saveTimer = setTimeout(() => {
+            this.saveTimer = undefined;
+            this.saveCacheNow();
+        }, CACHE_SAVE_DEBOUNCE_MS);
     }
 }

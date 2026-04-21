@@ -367,6 +367,16 @@
               "**/*.map"
             ],
             "description": "Glob patterns to exclude from workspace indexing"
+          },
+          "junior.workspace.maxIndexedFiles": {
+            "type": "number",
+            "default": 50000,
+            "description": "Maximum number of files to discover during workspace indexing. If a workspace exceeds this cap, indexing is incomplete and a warning is shown. Raise for very large monorepos; lower to bound memory."
+          },
+          "junior.workspace.respectGitignore": {
+            "type": "boolean",
+            "default": false,
+            "description": "When true, append simple patterns from the workspace root .gitignore to the exclude list. Conservative parser: ignores negation (!) and nested .gitignore files. Leave off if your repo commits files inside ignored paths."
           }
         }
       },

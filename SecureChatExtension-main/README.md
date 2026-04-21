@@ -143,6 +143,38 @@ If you already have a raw bearer token from another system, you can instead set 
 
 When using `vscode-auth-session`, run **Junior: Sign In for Azure/APIM Bearer Mode** to establish the login before sending requests.
 
+#### Sovereign / Government Clouds (Azure US Government, China, etc.)
+
+For tenants in Azure US Government, Azure China, or other sovereign clouds, the commercial `login.microsoftonline.com` authority will not issue tokens. VS Code ships a separate built-in authentication provider for these environments: **`microsoft-sovereign-cloud`**. Point Junior at that provider and use scopes for the sovereign audience.
+
+1. Set the VS Code-level setting that selects the authority:
+
+  ```jsonc
+  // VS Code user/workspace setting (not a junior.* setting)
+  "microsoft-sovereign-cloud.environment": "AzureUSGovernment"
+  // Other supported values: "AzureChinaCloud", or a custom { "Environment": { ... } } object
+  ```
+
+2. Switch Junior's auth-provider id to `microsoft-sovereign-cloud` and use the matching audience for your endpoint:
+
+  ```jsonc
+  {
+    "junior.azureOpenAI.authMode": "vscode-auth-session",
+    "junior.azureOpenAI.bearerTokenSource": "vscode-auth-session",
+    "junior.azureOpenAI.authProviderId": "microsoft-sovereign-cloud",
+    "junior.azureOpenAI.authScopes": [
+      // Pick the scope that matches your endpoint:
+      //   *.cognitiveservices.azure.us  ->  https://cognitiveservices.azure.us/.default
+      //   APIM in front of Foundry      ->  api://<gov-apim-app-clientid>/user_impersonation
+      "https://cognitiveservices.azure.us/.default"
+    ]
+  }
+  ```
+
+The audience (scope) is what controls the token's `aud` claim — it is **not** derived from the endpoint URL. If you switch a workspace from commercial to gov, you must update both `authProviderId` and `authScopes` together, otherwise the backend will return HTTP 401.
+
+The same `authProviderId` / `authScopes` substitution applies to the Copilot CLI BYOK settings further down (`junior.copilotCli.providerAuthProviderId` and `junior.copilotCli.providerAuthScopes`).
+
 Token refresh behavior for `vscode-auth-session`:
 
 - Junior asks the VS Code authentication provider for a token each time it builds a request.
@@ -193,6 +225,8 @@ If you want Junior itself to acquire a bearer token through VS Code sign-in inst
 Then run **Junior: Sign In for Copilot CLI Bearer Mode**. Junior will request the VS Code auth session, use that access token for the Copilot CLI BYOK provider at runtime, and avoid storing the raw bearer token in settings.
 
 Leave `junior.copilotCli.providerBearerTokenSource`, `junior.copilotCli.providerAuthProviderId`, and `junior.copilotCli.providerAuthScopes` empty unless you want Junior to manage bearer-token sign-in for the Copilot CLI provider.
+
+For sovereign clouds (Azure US Government, Azure China, etc.), set `junior.copilotCli.providerAuthProviderId` to `microsoft-sovereign-cloud`, configure the VS Code setting `microsoft-sovereign-cloud.environment` (e.g. `AzureUSGovernment`), and use a scope matching the gov audience — for example `https://cognitiveservices.azure.us/.default` for `*.cognitiveservices.azure.us`, or `api://<gov-apim-app-clientid>/user_impersonation` for APIM in front of Foundry. See the sovereign clouds note above under the local Azure/APIM bearer section for more detail.
 
 Token refresh behavior for Copilot CLI bearer mode is the same: Junior asks VS Code for a session when creating the provider config, silent refresh is used when available, and you are only prompted to sign in again when the existing session can no longer satisfy the request.
 

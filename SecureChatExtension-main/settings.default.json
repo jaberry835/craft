@@ -123,5 +123,19 @@
     // "junior.copilotCli.providerApiKey": "",
     // "junior.copilotCli.providerBearerToken": "",
 
+    //gov settings
+    "junior.copilotCli.providerAuthScopes": [
+    "https://cognitiveservices.azure..gov/.default"
+    ],
+    "junior.copilotCli.providerAuthProviderId": "microsoft-sovereign-cloud",
+    "microsoft-sovereign-cloud.environment": "custom",
+    "microsoft-sovereign-cloud.customEnvironment": {
+        "name": "Gov",
+        "activeDirectoryEndpointUrl": "https://login.microsoftonline..gov/",
+        "activeDirectoryResourceId": "https://management.azure..gov/",
+        "resourceManagerEndpointUrl": "https://management.azure..gov/",
+        "managementEndpointUrl": "https://management.azure..gov/"
+    },
+
     "azureFunctions.showProjectWarning": false
 }

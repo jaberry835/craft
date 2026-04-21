@@ -17,6 +17,9 @@ import { getCopilotCliBearerAuthSessionConfig } from './copilotCliSupport';
 
 let chatViewProvider: ChatViewProvider;
 let mcpClient: McpClient;
+let workspaceIndexerRef: WorkspaceIndexer | undefined;
+let symbolIndexerRef: SymbolIndexer | undefined;
+let semanticIndexerRef: SemanticIndexer | undefined;
 export const outputChannel = vscode.window.createOutputChannel('Junior');
 
 type LogLevel = 'INFO' | 'WARN' | 'ERROR';
@@ -36,6 +39,9 @@ export function activate(context: vscode.ExtensionContext) {
     const workspaceIndexer = new WorkspaceIndexer();
     const symbolIndexer = new SymbolIndexer();
     const semanticIndexer = new SemanticIndexer();
+    workspaceIndexerRef = workspaceIndexer;
+    symbolIndexerRef = symbolIndexer;
+    semanticIndexerRef = semanticIndexer;
 
     // Set up persistent index storage under globalStorage
     const indexStorageDir = vscode.Uri.joinPath(context.globalStorageUri, 'index').fsPath;
@@ -231,4 +237,8 @@ export function deactivate() {
     } catch {
         // Best-effort — extension host may be shutting down
     }
+    // Flush any pending debounced cache writes so we don't lose recent incremental updates.
+    try { workspaceIndexerRef?.dispose(); } catch { /* best-effort */ }
+    try { symbolIndexerRef?.dispose(); } catch { /* best-effort */ }
+    try { semanticIndexerRef?.dispose(); } catch { /* best-effort */ }
 }

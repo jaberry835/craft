@@ -33,14 +33,19 @@ const CACHE_VERSION = 1;
 const CACHE_FILENAME = 'fileIndex.json';
 /** Number of concurrent stat() calls during indexing. */
 const STAT_CONCURRENCY = 20;
-const MAX_FIND_FILES = 50000;
+const DEFAULT_MAX_FIND_FILES = 50000;
+/** Debounce window for coalescing cache writes during incremental updates. */
+const CACHE_SAVE_DEBOUNCE_MS = 1000;
 
 export class WorkspaceIndexer {
     private files: Map<string, FileEntry> = new Map();
-    private tree: string = '';
+    private treeCache: string | undefined;
+    private treeDirty: boolean = true;
     private storagePath: string | undefined;
     /** Files that were new or modified during the last indexWorkspace() call. */
     private lastChangedFiles: Set<string> = new Set();
+    private saveTimer: ReturnType<typeof setTimeout> | undefined;
+    private warnedFindCap: boolean = false;
 
     /** Set the directory used for persisting the index cache. */
     setStoragePath(dir: string) {
@@ -55,17 +60,33 @@ export class WorkspaceIndexer {
         if (!folders) { return; }
 
         const maxFileSize = getSetting<number>('workspace.maxFileSize') || 100000;
-        const excludePatterns = getSetting<string[]>('workspace.excludePatterns') || [];
+        const userExcludes = getSetting<string[]>('workspace.excludePatterns') || [];
+        const maxFindFiles = getSetting<number>('workspace.maxIndexedFiles') || DEFAULT_MAX_FIND_FILES;
+        const respectGitignore = getSetting<boolean>('workspace.respectGitignore') === true;
 
-        const exclude = excludePatterns.length > 0
-            ? `{${excludePatterns.join(',')}}`
+        const allExcludes = [...userExcludes];
+        if (respectGitignore) {
+            for (const folder of folders) {
+                allExcludes.push(...readGitignorePatterns(folder.uri.fsPath));
+            }
+        }
+
+        const exclude = allExcludes.length > 0
+            ? `{${allExcludes.join(',')}}`
             : undefined;
 
         // Load cached entries (if any)
         const cached = this.loadCache();
 
-        const uris = await vscode.workspace.findFiles('**/*', exclude, MAX_FIND_FILES, token);
+        const uris = await vscode.workspace.findFiles('**/*', exclude, maxFindFiles, token);
         const total = uris.length;
+
+        // Surface a clear warning if we hit the discovery cap — the index is silently incomplete.
+        if (total >= maxFindFiles && !this.warnedFindCap) {
+            this.warnedFindCap = true;
+            const msg = `Junior workspace indexer hit the file-count cap of ${maxFindFiles}. Some files were not indexed. Increase 'junior.workspace.maxIndexedFiles' or tighten 'junior.workspace.excludePatterns'.`;
+            try { vscode.window.showWarningMessage(msg); } catch { /* non-fatal */ }
+        }
         let done = 0;
         let cacheHits = 0;
 
@@ -120,10 +141,10 @@ export class WorkspaceIndexer {
 
         this.files = newFiles;
         this.lastChangedFiles = changedFiles;
-        this.tree = this.buildTree();
+        this.treeDirty = true;
 
-        // Persist cache for next activation
-        this.saveCache();
+        // Persist cache for next activation (full rebuild — write immediately, not debounced)
+        this.saveCacheNow();
     }
 
     /** Returns the set of file paths that changed since the last cached index. */
@@ -136,7 +157,11 @@ export class WorkspaceIndexer {
     }
 
     getFileTree(): string {
-        return this.tree || '(workspace not indexed)';
+        if (this.treeDirty || this.treeCache === undefined) {
+            this.treeCache = this.buildTree();
+            this.treeDirty = false;
+        }
+        return this.treeCache || '(workspace not indexed)';
     }
 
     getFiles(): FileEntry[] {
@@ -178,8 +203,8 @@ export class WorkspaceIndexer {
                 mtime: stat.mtime,
             });
             this.lastChangedFiles = new Set([relativePath]);
-            this.tree = this.buildTree();
-            this.saveCache();
+            this.treeDirty = true;
+            this.scheduleSave();
             return true;
         } catch {
             return false;
@@ -191,10 +216,23 @@ export class WorkspaceIndexer {
         const relativePath = vscode.workspace.asRelativePath(uri, false);
         const removed = this.files.delete(relativePath);
         if (removed) {
-            this.tree = this.buildTree();
-            this.saveCache();
+            this.treeDirty = true;
+            this.scheduleSave();
         }
         return removed;
+    }
+
+    /** Flush any pending debounced cache write. Call on extension shutdown. */
+    flush(): void {
+        if (this.saveTimer) {
+            clearTimeout(this.saveTimer);
+            this.saveTimer = undefined;
+            this.saveCacheNow();
+        }
+    }
+
+    dispose(): void {
+        this.flush();
     }
 
     // ── Cache persistence ──
@@ -222,7 +260,16 @@ export class WorkspaceIndexer {
         return map;
     }
 
-    private saveCache(): void {
+    /** Schedule a debounced cache write — coalesces rapid incremental updates. */
+    private scheduleSave(): void {
+        if (this.saveTimer) { return; }
+        this.saveTimer = setTimeout(() => {
+            this.saveTimer = undefined;
+            this.saveCacheNow();
+        }, CACHE_SAVE_DEBOUNCE_MS);
+    }
+
+    private saveCacheNow(): void {
         const cachePath = this.getCachePath();
         if (!cachePath) { return; }
         try {
@@ -239,7 +286,10 @@ export class WorkspaceIndexer {
                 });
             }
             const data = { version: CACHE_VERSION, files: entries };
-            fs.writeFileSync(cachePath, JSON.stringify(data), 'utf8');
+            // Atomic write: tmp file then rename, so partial writes don't corrupt the cache.
+            const tmp = cachePath + '.tmp';
+            fs.writeFileSync(tmp, JSON.stringify(data), 'utf8');
+            fs.renameSync(tmp, cachePath);
         } catch {
             // Non-fatal — indexing still works without cache
         }
@@ -304,4 +354,43 @@ export class WorkspaceIndexer {
         };
         return map[ext] || 'plaintext';
     }
+}
+
+/**
+ * Read a workspace folder's root .gitignore and convert simple entries to VS Code glob patterns.
+ *
+ * Intentionally minimal and conservative:
+ *   - Comments (#) and blank lines are skipped.
+ *   - Negation entries (!pattern) are skipped \u2014 partial honoring would over- or under-exclude.
+ *   - Trailing-slash entries are treated as directories (`**\/dir\/**`).
+ *   - Leading-slash entries are root-anchored relative to the workspace folder.
+ *   - Other entries get a `**\/` prefix so they match anywhere in the tree.
+ *
+ * Only the root .gitignore is read; nested .gitignore files are not parsed.
+ */
+function readGitignorePatterns(folderFsPath: string): string[] {
+    const out: string[] = [];
+    const gitignorePath = path.join(folderFsPath, '.gitignore');
+    let raw: string;
+    try {
+        if (!fs.existsSync(gitignorePath)) { return out; }
+        raw = fs.readFileSync(gitignorePath, 'utf8');
+    } catch {
+        return out;
+    }
+    for (const lineRaw of raw.split(/\r?\n/)) {
+        const line = lineRaw.trim();
+        if (!line || line.startsWith('#') || line.startsWith('!')) { continue; }
+        const isDir = line.endsWith('/');
+        let pat = isDir ? line.slice(0, -1) : line;
+        const rooted = pat.startsWith('/');
+        if (rooted) { pat = pat.slice(1); }
+        if (!pat) { continue; }
+        if (rooted) {
+            out.push(isDir ? `${pat}/**` : pat);
+        } else {
+            out.push(isDir ? `**/${pat}/**` : `**/${pat}`);
+        }
+    }
+    return out;
 }

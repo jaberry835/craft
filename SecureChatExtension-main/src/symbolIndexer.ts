@@ -14,10 +14,18 @@ export interface SymbolEntry {
 
 const CACHE_VERSION = 1;
 const CACHE_FILENAME = 'symbolIndex.json';
+/**
+ * Concurrency cap for bulk symbol-provider calls.
+ * Kept low because executeDocumentSymbolProvider is backed by language servers (TS, Python, etc.)
+ * that are not designed for high concurrent fan-out. Higher values can starve the user's editor.
+ */
+const SYMBOL_CONCURRENCY = 4;
+const CACHE_SAVE_DEBOUNCE_MS = 1000;
 
 export class SymbolIndexer {
     private symbolsByFile: Map<string, SymbolEntry[]> = new Map();
     private storagePath: string | undefined;
+    private saveTimer: ReturnType<typeof setTimeout> | undefined;
 
     /** Set the directory used for persisting the symbol index cache. */
     setStoragePath(dir: string) {
@@ -36,7 +44,17 @@ export class SymbolIndexer {
         // Load cached symbols from disk
         const cached = this.loadCache();
         const currentFilePaths = new Set(files.map(f => f.relativePath));
-        const needsReindex = changedFiles ?? currentFilePaths;
+        const changed = changedFiles ?? currentFilePaths;
+
+        // A file needs (re)indexing if it's in changedFiles OR it isn't in the cache yet.
+        // The second case matters on first run after the symbol cache was added/cleared,
+        // when the file index reports 0 changed files but the symbol cache is empty.
+        const needsReindex = new Set<string>();
+        for (const f of files) {
+            if (changed.has(f.relativePath) || !cached.has(f.relativePath)) {
+                needsReindex.add(f.relativePath);
+            }
+        }
 
         // Start with cached symbols for files that haven't changed
         const newSymbols = new Map<string, SymbolEntry[]>();
@@ -47,34 +65,43 @@ export class SymbolIndexer {
         }
 
         let done = 0;
-        let reindexed = 0;
+        const filesToReindex = files.filter(f => needsReindex.has(f.relativePath));
+        const skipped = total - filesToReindex.length;
+        done = skipped;
 
-        for (const file of files) {
+        // Process symbol-provider calls in capped concurrent batches.
+        // executeDocumentSymbolProvider is backed by per-language LSPs that don't tolerate
+        // high fan-out, so we keep this conservative (SYMBOL_CONCURRENCY=4).
+        for (let i = 0; i < filesToReindex.length; i += SYMBOL_CONCURRENCY) {
             if (token?.isCancellationRequested) { break; }
+            const batch = filesToReindex.slice(i, i + SYMBOL_CONCURRENCY);
 
-            if (needsReindex.has(file.relativePath)) {
-                try {
+            const results = await Promise.allSettled(
+                batch.map(async (file) => {
                     const symbols = await this.getDocumentSymbols(file.uri);
-                    if (symbols.length > 0) {
-                        newSymbols.set(file.relativePath, symbols);
-                    }
-                    reindexed++;
-                } catch {
-                    // Skip files whose symbol provider fails
+                    return { file, symbols };
+                })
+            );
+
+            for (const result of results) {
+                if (result.status !== 'fulfilled') { continue; }
+                const { file, symbols } = result.value;
+                if (symbols.length > 0) {
+                    newSymbols.set(file.relativePath, symbols);
                 }
             }
 
-            done++;
-            if (progress && done % 50 === 0) {
+            done += batch.length;
+            if (progress) {
                 progress.report({
                     message: `${done}/${total} symbol files`,
-                    increment: total > 0 ? (50 / total) * 100 : 0
+                    increment: total > 0 ? (batch.length / total) * 100 : 0
                 });
             }
         }
 
         this.symbolsByFile = newSymbols;
-        this.saveCache();
+        this.saveCacheNow();
     }
 
     getFileSymbols(relativePath: string): SymbolEntry[] {
@@ -127,6 +154,7 @@ export class SymbolIndexer {
             } else {
                 this.symbolsByFile.delete(relativePath);
             }
+            this.scheduleSave();
         } catch {
             // Skip files whose symbol provider fails
         }
@@ -134,7 +162,22 @@ export class SymbolIndexer {
 
     /** Remove a file from the symbol index */
     removeFile(relativePath: string): void {
-        this.symbolsByFile.delete(relativePath);
+        if (this.symbolsByFile.delete(relativePath)) {
+            this.scheduleSave();
+        }
+    }
+
+    /** Flush any pending debounced cache write. Call on extension shutdown. */
+    flush(): void {
+        if (this.saveTimer) {
+            clearTimeout(this.saveTimer);
+            this.saveTimer = undefined;
+            this.saveCacheNow();
+        }
+    }
+
+    dispose(): void {
+        this.flush();
     }
 
     // ── Cache persistence ──
@@ -162,7 +205,15 @@ export class SymbolIndexer {
         return map;
     }
 
-    private saveCache(): void {
+    private scheduleSave(): void {
+        if (this.saveTimer) { return; }
+        this.saveTimer = setTimeout(() => {
+            this.saveTimer = undefined;
+            this.saveCacheNow();
+        }, CACHE_SAVE_DEBOUNCE_MS);
+    }
+
+    private saveCacheNow(): void {
         const cachePath = this.getCachePath();
         if (!cachePath) { return; }
         try {
@@ -173,7 +224,9 @@ export class SymbolIndexer {
                 files[filePath] = symbols;
             }
             const data = { version: CACHE_VERSION, files };
-            fs.writeFileSync(cachePath, JSON.stringify(data), 'utf8');
+            const tmp = cachePath + '.tmp';
+            fs.writeFileSync(tmp, JSON.stringify(data), 'utf8');
+            fs.renameSync(tmp, cachePath);
         } catch {
             // Non-fatal — indexing still works without cache
         }

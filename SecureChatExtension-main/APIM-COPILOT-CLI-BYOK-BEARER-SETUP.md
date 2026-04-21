@@ -86,12 +86,12 @@ Replace the tenant ID and audience values with your own if they differ.
       </audiences>
     </validate-azure-ad-token>
 
+    <set-header name="api-key" exists-action="delete" />
+    <set-header name="Authorization" exists-action="delete" />
+
     <authentication-managed-identity
       resource="https://cognitiveservices.azure.com"
       ignore-error="false" />
-
-    <set-header name="api-key" exists-action="delete" />
-    <set-header name="Authorization" exists-action="delete" />
   </inbound>
   <backend>
     <forward-request timeout="60" />
@@ -102,6 +102,8 @@ Replace the tenant ID and audience values with your own if they differ.
   </on-error>
 </policies>
 ```
+
+**Policy order matters.** APIM evaluates inbound policies top‑to‑bottom. `authentication-managed-identity` writes a fresh `Authorization: Bearer <MI token>` for the backend call, so it must be the **last** step that touches `Authorization`. Specifically: validate the incoming user token first, then delete the inbound `api-key` and `Authorization` headers, then run `authentication-managed-identity`. If you put a `set-header name="Authorization" exists-action="delete"` *after* `authentication-managed-identity`, it wipes the MI token and the backend returns 401. Some commercial regions tolerate the wrong order; sovereign and air‑gapped clouds do not.
 
 If the backend rejects that audience, try:
 
@@ -218,6 +220,8 @@ Common causes:
 ### 403 or Backend Auth Errors
 
 Usually means APIM managed identity does not have backend inference access or the managed-identity audience is wrong.
+
+Also check policy ordering: if a `set-header name="Authorization" exists-action="delete"` runs **after** `authentication-managed-identity`, it wipes the MI token and the backend rejects the request even though the user's bearer validated successfully. `authentication-managed-identity` must be the last inbound step that touches `Authorization`. This is especially strict in sovereign and air‑gapped clouds.
 
 ### 404 Not Found
 

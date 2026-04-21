@@ -201,12 +201,12 @@ This is the bearer-mode policy shape that worked during testing.
       </audiences>
     </validate-azure-ad-token>
 
+    <set-header name="api-key" exists-action="delete" />
+    <set-header name="Authorization" exists-action="delete" />
+
     <authentication-managed-identity
       resource="https://cognitiveservices.azure.com"
       ignore-error="false" />
-
-    <set-header name="api-key" exists-action="delete" />
-    <set-header name="Authorization" exists-action="delete" />
   </inbound>
   <backend>
     <forward-request timeout="60" />
@@ -217,6 +217,8 @@ This is the bearer-mode policy shape that worked during testing.
   </on-error>
 </policies>
 ```
+
+**Policy order matters.** APIM executes inbound policies top‑to‑bottom. `authentication-managed-identity` writes a new `Authorization: Bearer <MI token>` for the backend call, so it must come **after** the `set-header name="Authorization" exists-action="delete"` step. If you put the delete last, it wipes the MI token and the backend call goes out with no `Authorization` header, producing a 401 from the Foundry/AOAI resource. Some regions/SKUs (notably commercial) tolerate the wrong order; sovereign and air‑gapped clouds do not. Always put `authentication-managed-identity` last in the inbound section.
 
 If you are using a non-Entra STS, replace `validate-azure-ad-token` with `validate-jwt` and your own issuer metadata.
 
