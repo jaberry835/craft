@@ -131,6 +131,7 @@
     "microsoft-sovereign-cloud.environment": "custom",
     "microsoft-sovereign-cloud.customEnvironment": {
         "name": "Gov",
+        "portalUrl": "https://portal.azure.us",
         "activeDirectoryEndpointUrl": "https://login.microsoftonline..gov/",
         "activeDirectoryResourceId": "https://management.azure..gov/",
         "resourceManagerEndpointUrl": "https://management.azure..gov/",

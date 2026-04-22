@@ -1,0 +1,41 @@
+// Sample: Local Junior agent talking directly to an Azure OpenAI / Foundry resource, key auth.
+//
+// What this configures:
+//   - junior.agentProvider:           local       (Junior's built-in agent loop)
+//   - junior.azureOpenAI.provider:    direct      (calls the resource URL directly, no APIM)
+//   - junior.azureOpenAI.authMode:    api-key     (default; resource key in api-key header)
+//
+// Setup steps:
+//   1. Copy the relevant entries into your settings.json.
+//   2. Replace the endpoint and deployment IDs with your own values.
+//   3. Run "Junior: Set API Key" and paste the resource key when prompted.
+//      (Stored in OS-credential-manager-backed VS Code SecretStorage.)
+//
+// Notes:
+//   - "endpoint" is the resource URL, e.g. https://my-resource.openai.azure.com
+//     or https://my-resource.cognitiveservices.azure.com.
+//   - "deploymentId" must match the Azure deployment name exactly.
+//   - Per-deployment apiVersion overrides the global junior.azureOpenAI.apiVersion.
+{
+    "junior.agentProvider": "local",
+
+    "junior.azureOpenAI.provider": "direct",
+    "junior.azureOpenAI.endpoint": "https://<your-resource>.openai.azure.com",
+    "junior.azureOpenAI.apiVersion": "2025-03-01-preview",
+    "junior.azureOpenAI.authMode": "api-key",
+
+    "junior.azureOpenAI.deployments": [
+        {
+            "name": "GPT-4o",
+            "deploymentId": "gpt-4o",
+            "apiVersion": "2025-03-01-preview"
+        },
+        {
+            "name": "GPT-4o Mini",
+            "deploymentId": "gpt-4o-mini",
+            "apiVersion": "2025-03-01-preview"
+        }
+    ],
+    "junior.azureOpenAI.activeDeployment": "gpt-4o",
+    "junior.inlineCompletions.deployment": "gpt-4o-mini"
+}

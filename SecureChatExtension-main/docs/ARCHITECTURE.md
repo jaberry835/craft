@@ -21,28 +21,49 @@ The architecture is influenced by [Microsoft Agent Framework](https://github.com
 ```
 src/
 ├── extension.ts              Entry point — wires everything together
-├── agentLoop.ts              Core orchestrator (model→tool loop)
+├── commandRegistrar.ts       VS Code command registration
 ├── agentPrompt.ts            System prompt (single source of truth)
-├── aoaiClient.ts             Azure OpenAI HTTP client (streaming SSE)
-├── builtinTools.ts           Tool definitions + handlers (20+ tools)
-├── chatViewProvider.ts       Webview panel — UI ↔ agent loop bridge
-├── agentRuntime.ts           AgentRuntime interface (shared by both runtimes)
-├── copilotCliSupport.ts      Copilot CLI detection, BYOK config, launch helpers
-├── copilotSdkRuntime.ts      AgentRuntime impl using @github/copilot-sdk
-├── permissions.ts            Permission level logic (local + Copilot CLI)
-├── mcpClient.ts              MCP server integration (stdio + HTTP)
-├── sessionManager.ts         Chat history persistence (JSON on disk)
-├── config.ts                 Settings access (dual-namespace fallback)
 ├── types.ts                  Shared wire-format types
+├── config.ts                 Settings access (dual-namespace fallback)
+├── errorFormatting.ts        User-facing error messages (Copilot CLI run errors)
 │
+│  ── Local agent runtime ──
+├── agentLoop.ts              Core orchestrator (model→tool loop)
+├── agentRuntime.ts           AgentRuntime interface (shared by both runtimes)
+├── aoaiClient.ts             Azure OpenAI HTTP client (streaming SSE)
 ├── contextManager.ts         Context window management + trimming
 ├── tokenTracker.ts           Session token/request usage tracking
 ├── toolValidator.ts          JSON Schema argument validation
-├── diffUtils.ts              LCS-based line diff computation
-├── inlineDiffDecorator.ts    Inline diff rendering + Accept/Reject CodeLens
-├── inlineCompletionProvider.ts  Ghost-text completions (FIM-style)
-├── commandRegistrar.ts       VS Code command registration
 │
+│  ── Copilot CLI runtime ──
+├── copilotCliSupport.ts      Copilot CLI detection, BYOK config, secret cache, launch helpers
+├── copilotSdkRuntime.ts      AgentRuntime impl using @github/copilot-sdk
+├── permissions.ts            Permission level logic (local + Copilot CLI)
+│
+│  ── UI / chat panel ──
+├── chatViewProvider.ts       Webview panel — UI ↔ agent loop bridge
+├── chatTranscript.ts         Versioned persisted-transcript schema
+├── sessionManager.ts         Chat history persistence (JSON on disk)
+├── sessionRestore.ts         Replays persisted sessions back into the webview
+├── providerRouter.ts         Active provider + model selection (extracted from chatViewProvider)
+├── planTreeProvider.ts       Native VS Code tree view for agent plans
+├── inlineDiffDecorator.ts    Inline diff rendering + Accept/Reject CodeLens
+├── diffUtils.ts              LCS-based line diff computation
+├── inlineCompletionProvider.ts  Ghost-text completions (FIM-style)
+│
+│  ── Tools ──
+├── builtinTools.ts           Tool registry, permissions, touched-file tracking
+├── tools/                    Tool handler modules (split by category)
+│   ├── types.ts              ToolContext, ToolCallbacks, BackgroundProcessEntry
+│   ├── fileTools.ts          read/write/edit/delete + path validation
+│   ├── searchTools.ts        grep + semantic + symbol search
+│   ├── terminalTools.ts      run + check terminal output, background processes
+│   ├── codeActionTools.ts    diagnostics, code actions, rename
+│   ├── planTools.ts          set_plan / update_plan_step
+│   └── index.ts              Barrel re-export of factories
+├── mcpClient.ts              MCP server integration (stdio + HTTP)
+│
+│  ── Indexing & retrieval ──
 ├── workspaceIndexer.ts       File tree indexing
 ├── symbolIndexer.ts          Document symbol indexing (LSP)
 ├── semanticIndexer.ts        TF-IDF semantic search (offline, no embeddings)
@@ -53,7 +74,7 @@ src/
 ├── framework/                Agent framework abstractions
 │   ├── types.ts              Framework-level types (decoupled from wire format)
 │   ├── chatClient.ts         IChatClient protocol + ChatClientWithMiddleware wrapper
-│   ├── middleware.ts          Three middleware layer interfaces + MiddlewarePipeline
+│   ├── middleware.ts         Three middleware layer interfaces + MiddlewarePipeline
 │   ├── tools.ts              IFunctionTool, ToolRegistry, ToolExecutor
 │   ├── toolAdapter.ts        Bridges BuiltinTools/MCP → IFunctionTool
 │   ├── contextProvider.ts    IContextProvider (before/after run hooks)
@@ -178,7 +199,7 @@ Context providers run before/after the agent loop and inject system messages. Th
 
 ## Tool System
 
-Tools are the agent's interface to the workspace. There are ~20 builtin tools registered in `builtinTools.ts`:
+Tools are the agent's interface to the workspace. `builtinTools.ts` owns the registry, permission gates, and touched-file tracking; the actual tool handlers live in category modules under `src/tools/` (`fileTools.ts`, `searchTools.ts`, `terminalTools.ts`, `codeActionTools.ts`, `planTools.ts`) and are wired in via factory functions. There are ~20 builtin tools:
 
 | Category | Tools |
 |----------|-------|
@@ -261,11 +282,18 @@ BYOK mode routes the Copilot CLI through a user-specified LLM provider instead o
 | `copilotCli.providerType` | `COPILOT_PROVIDER_TYPE` | `openai`, `azure`, or `anthropic` |
 | `copilotCli.providerBaseUrl` | `COPILOT_PROVIDER_BASE_URL` | API endpoint URL |
 | `copilotCli.model` | `COPILOT_MODEL` | Model / deployment ID |
-| `copilotCli.providerApiKey` | `COPILOT_PROVIDER_API_KEY` | API key |
+| `copilotCli.providerApiKey` | `COPILOT_PROVIDER_API_KEY` | API key (settings/env fallback — see SecretStorage below) |
 | `copilotCli.providerBearerToken` | `COPILOT_PROVIDER_BEARER_TOKEN` | Bearer token (alternative to API key) |
 | `copilotCli.providerWireApi` | `COPILOT_PROVIDER_WIRE_API` | Wire protocol: `completions` or `responses` |
+| `copilotCli.providerAzureApiVersion` | `COPILOT_PROVIDER_AZURE_API_VERSION` | Azure API version for direct Azure BYOK |
 
 For Azure and Anthropic providers, bearer credentials can also come from a VS Code authentication session (`copilotCli.providerBearerTokenSource = vscode-auth-session`), enabling Entra ID / managed identity flows without storing secrets in settings.
+
+**API key storage.** `copilotCliSupport.ts` exposes `resolveCopilotCliProviderApiKey()` and a process-wide secret cache (`COPILOT_CLI_API_KEY_SECRET_KEY = 'junior.copilotCli.providerApiKey'`). `extension.ts` loads the secret at activation and refreshes the cache via `SecretStorage.onDidChange`. The **Junior: Set Copilot CLI API Key** command writes to that key. Resolution order is:
+
+1. SecretStorage cache (set via the command)
+2. `junior.copilotCli.providerApiKey` setting
+3. `COPILOT_PROVIDER_API_KEY` environment variable
 
 ### Permission model
 
@@ -373,12 +401,14 @@ getSetting('agent.maxIterations')
 
 Provider options:
 
-| Provider | How it connects |
-|----------|----------------|
-| `direct` | Azure OpenAI endpoint + API key |
-| `apim` | Azure API Management gateway URL + subscription key |
-| `openai` | OpenAI-compatible API (OpenAI, Ollama, LM Studio, etc.) |
-| `copilot-cli` | GitHub Copilot CLI spawned via `@github/copilot-sdk` (GitHub auth or BYOK) |
+| Provider | How it connects | Auth modes |
+|----------|----------------|-----------|
+| `direct` | Azure OpenAI endpoint | `api-key`, `bearer-token`, `vscode-auth-session` |
+| `apim` | Azure API Management gateway URL with required path prefix | `api-key`, `bearer-token`, `vscode-auth-session` |
+| `openai` | OpenAI-compatible API (OpenAI, Ollama, LM Studio, etc.) | API key sent as `Authorization: Bearer` |
+| `copilot-cli` | GitHub Copilot CLI spawned via `@github/copilot-sdk` | GitHub auth or BYOK (key, bearer, or VS Code sign-in) |
+
+`junior.azureOpenAI.authMode` selects the local-runtime auth flow. For `vscode-auth-session`, `aoaiClient.getBearerTokenFromSession()` calls `vscode.authentication.getSession(authProviderId, authScopes, …)` per request, supporting silent refresh and sovereign cloud providers (`microsoft-sovereign-cloud`). Token claims (`aud`, `scp`, `exp`) are logged to the Junior output channel, never the raw token. AOAI keys are also stored in SecretStorage via the **Junior: Set API Key** command (`aoaiClient.storeApiKey()`); the `junior.azureOpenAI.apiKey` setting is a fallback.
 
 ## Session Persistence
 

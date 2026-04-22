@@ -9,8 +9,6 @@ esbuild.mjs
 *.vsix
 deploy.ps1
 settings.default.json
-developer-getstarted.md
-ARCHITECTURE.md
 tmp-vsix-inspect/**
 test/**
 vitest.config.ts

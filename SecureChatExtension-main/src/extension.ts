@@ -13,7 +13,7 @@ import { InlineDiffDecorator } from './inlineDiffDecorator';
 import { registerCommands } from './commandRegistrar';
 import { RetrievalRanker } from './retrievalRanker';
 import { RepoPatternStore } from './repoPatternStore';
-import { getCopilotCliBearerAuthSessionConfig } from './copilotCliSupport';
+import { getCopilotCliBearerAuthSessionConfig, COPILOT_CLI_API_KEY_SECRET_KEY, setCopilotCliApiKeySecretCache } from './copilotCliSupport';
 
 let chatViewProvider: ChatViewProvider;
 let mcpClient: McpClient;
@@ -36,6 +36,19 @@ export function activate(context: vscode.ExtensionContext) {
     log('Junior extension activating...');
     const aoaiClient = new AzureOpenAIClient();
     aoaiClient.setSecretStorage(context.secrets);
+
+    // Load the Copilot CLI provider API key from SecretStorage so sync
+    // consumers (availability checks, BYOK config) can resolve it without
+    // awaiting. Refresh the cache whenever the secret changes.
+    void context.secrets.get(COPILOT_CLI_API_KEY_SECRET_KEY).then(value => {
+        setCopilotCliApiKeySecretCache(value);
+    });
+    context.subscriptions.push(context.secrets.onDidChange(async (e) => {
+        if (e.key === COPILOT_CLI_API_KEY_SECRET_KEY) {
+            const value = await context.secrets.get(COPILOT_CLI_API_KEY_SECRET_KEY);
+            setCopilotCliApiKeySecretCache(value);
+        }
+    }));
     const workspaceIndexer = new WorkspaceIndexer();
     const symbolIndexer = new SymbolIndexer();
     const semanticIndexer = new SemanticIndexer();

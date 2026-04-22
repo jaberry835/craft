@@ -51,6 +51,37 @@ export function buildCopilotCliProcessEnv(): NodeJS.ProcessEnv {
     return env;
 }
 
+/**
+ * Secret-storage backed cache for the Copilot CLI provider API key.
+ *
+ * The cache is populated by `extension.ts` at activation (and refreshed via
+ * `vscode.SecretStorage.onDidChange`). Callers in this module are sync, so we
+ * expose a sync getter; the actual `SecretStorage` plumbing lives in the
+ * extension layer to keep this file free of `vscode` imports.
+ */
+export const COPILOT_CLI_API_KEY_SECRET_KEY = 'junior.copilotCli.providerApiKey';
+let cachedCopilotCliApiKeySecret: string | undefined;
+
+export function setCopilotCliApiKeySecretCache(value: string | undefined): void {
+    cachedCopilotCliApiKeySecret = value && value.trim() ? value : undefined;
+}
+
+export function getCopilotCliApiKeySecretCache(): string | undefined {
+    return cachedCopilotCliApiKeySecret;
+}
+
+/**
+ * Resolve the Copilot CLI provider API key in priority order:
+ * 1. SecretStorage cache (set via "Junior: Set Copilot CLI API Key")
+ * 2. `junior.copilotCli.providerApiKey` setting
+ * 3. `COPILOT_PROVIDER_API_KEY` environment variable
+ */
+export function resolveCopilotCliProviderApiKey(env: NodeJS.ProcessEnv = process.env): string {
+    const secret = cachedCopilotCliApiKeySecret;
+    if (secret) { return secret; }
+    return (getSetting<string>('copilotCli.providerApiKey') || env.COPILOT_PROVIDER_API_KEY || '').trim();
+}
+
 export function resolveConfiguredCopilotCliPath(env: NodeJS.ProcessEnv = buildCopilotCliProcessEnv()): string | undefined {
     const configuredPath = (getSetting<string>('copilotCli.path') || '').trim() || 'copilot';
     return resolveExecutable(configuredPath, env);
@@ -183,7 +214,7 @@ function getByokConfig(env: NodeJS.ProcessEnv): CopilotCliByokConfig {
     const type = ((getSetting<string>('copilotCli.providerType') || env.COPILOT_PROVIDER_TYPE || '').trim().toLowerCase() || 'openai') as 'openai' | 'azure' | 'anthropic';
     const baseUrl = (getSetting<string>('copilotCli.providerBaseUrl') || env.COPILOT_PROVIDER_BASE_URL || '').trim();
     const model = (getSetting<string>('copilotCli.model') || env.COPILOT_MODEL || '').trim();
-    const apiKey = (getSetting<string>('copilotCli.providerApiKey') || env.COPILOT_PROVIDER_API_KEY || '').trim();
+    const apiKey = resolveCopilotCliProviderApiKey(env);
     const bearerToken = (getSetting<string>('copilotCli.providerBearerToken') || env.COPILOT_PROVIDER_BEARER_TOKEN || '').trim();
     const wireApi = (getSetting<string>('copilotCli.providerWireApi') || env.COPILOT_PROVIDER_WIRE_API || '').trim();
     const azureApiVersion = (getSetting<string>('copilotCli.providerAzureApiVersion') || env.COPILOT_PROVIDER_AZURE_API_VERSION || '').trim();

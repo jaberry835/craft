@@ -8,7 +8,7 @@ import { McpClient } from './mcpClient';
 import { TokenTracker } from './tokenTracker';
 import { getSetting, updateSetting } from './config';
 import { getAzureOpenAIBearerAuthSessionConfig } from './aoaiClient';
-import { getCopilotCliBearerAuthSessionConfig } from './copilotCliSupport';
+import { getCopilotCliBearerAuthSessionConfig, COPILOT_CLI_API_KEY_SECRET_KEY, setCopilotCliApiKeySecretCache } from './copilotCliSupport';
 
 interface CommandRegistrarDeps {
     context: vscode.ExtensionContext;
@@ -36,6 +36,30 @@ export function registerCommands(deps: CommandRegistrarDeps): void {
         log,
         logError
     } = deps;
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('junior.openSampleSettings', async () => {
+            await openBundledFilePicker(context, {
+                folder: 'samples',
+                glob: '*.settings.json',
+                placeHolder: 'Pick a sample Junior settings file to open',
+                emptyMessage: 'Junior: No sample settings files are bundled with this extension.',
+                openAsPreview: false,
+            });
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('junior.openDocumentation', async () => {
+            await openBundledFilePicker(context, {
+                folder: 'docs',
+                glob: '*.md',
+                placeHolder: 'Pick a Junior documentation file to open',
+                emptyMessage: 'Junior: No documentation files are bundled with this extension.',
+                openAsPreview: true,
+            });
+        })
+    );
 
     context.subscriptions.push(
         vscode.commands.registerCommand('junior.openChat', () => {
@@ -78,6 +102,28 @@ export function registerCommands(deps: CommandRegistrarDeps): void {
                 await aoaiClient.storeApiKey(key);
                 vscode.window.showInformationMessage('API key stored securely. You can remove it from settings.json if present.');
             }
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('junior.setCopilotCliApiKey', async () => {
+            const key = await vscode.window.showInputBox({
+                prompt: 'Enter your Copilot CLI provider API key (BYOK)',
+                password: true,
+                placeHolder: 'Paste provider API key here (stored securely in VS Code SecretStorage)'
+            });
+            if (key === undefined) { return; }
+            const trimmed = key.trim();
+            if (!trimmed) {
+                await context.secrets.delete(COPILOT_CLI_API_KEY_SECRET_KEY);
+                setCopilotCliApiKeySecretCache(undefined);
+                vscode.window.showInformationMessage('Junior: Copilot CLI provider API key cleared from secure storage.');
+            } else {
+                await context.secrets.store(COPILOT_CLI_API_KEY_SECRET_KEY, trimmed);
+                setCopilotCliApiKeySecretCache(trimmed);
+                vscode.window.showInformationMessage('Junior: Copilot CLI provider API key stored securely. You can remove junior.copilotCli.providerApiKey from settings.json if present.');
+            }
+            chatViewProvider.refreshProviderAvailability();
         })
     );
 
@@ -349,4 +395,47 @@ function sendSelectionToChat(chatViewProvider: ChatViewProvider, prefix: string)
     const message = `${prefix}\`\`\`${lang}\n// File: ${file}\n${selection}\n\`\`\``;
     chatViewProvider.sendMessageFromExtension(message);
     vscode.commands.executeCommand('junior.chatView.focus');
+}
+
+interface BundledFilePickerOptions {
+    folder: string;
+    glob: string;
+    placeHolder: string;
+    emptyMessage: string;
+    openAsPreview: boolean;
+}
+
+async function openBundledFilePicker(
+    context: vscode.ExtensionContext,
+    options: BundledFilePickerOptions
+): Promise<void> {
+    const folderUri = vscode.Uri.joinPath(context.extensionUri, options.folder);
+    const pattern = new vscode.RelativePattern(folderUri, options.glob);
+    const matches = await vscode.workspace.findFiles(pattern);
+
+    if (matches.length === 0) {
+        vscode.window.showWarningMessage(options.emptyMessage);
+        return;
+    }
+
+    matches.sort((a, b) => a.path.localeCompare(b.path));
+
+    const items = matches.map(uri => ({
+        label: uri.path.split('/').pop() ?? uri.fsPath,
+        description: vscode.workspace.asRelativePath(uri, false),
+        uri,
+    }));
+
+    const picked = await vscode.window.showQuickPick(items, {
+        placeHolder: options.placeHolder,
+        matchOnDescription: true,
+    });
+    if (!picked) { return; }
+
+    if (options.openAsPreview && picked.uri.path.toLowerCase().endsWith('.md')) {
+        await vscode.commands.executeCommand('markdown.showPreview', picked.uri);
+    } else {
+        const doc = await vscode.workspace.openTextDocument(picked.uri);
+        await vscode.window.showTextDocument(doc, { preview: false });
+    }
 }

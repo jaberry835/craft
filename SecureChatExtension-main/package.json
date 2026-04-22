@@ -104,6 +104,21 @@
         "icon": "$(key)"
       },
       {
+        "command": "junior.setCopilotCliApiKey",
+        "title": "Junior: Set Copilot CLI API Key",
+        "icon": "$(key)"
+      },
+      {
+        "command": "junior.openSampleSettings",
+        "title": "Junior: Open Sample Settings",
+        "icon": "$(file-code)"
+      },
+      {
+        "command": "junior.openDocumentation",
+        "title": "Junior: Open Documentation",
+        "icon": "$(book)"
+      },
+      {
         "command": "junior.signInAzureOpenAIBearer",
         "title": "Junior: Sign In for Azure/APIM Bearer Mode",
         "icon": "$(account)"
@@ -676,7 +691,7 @@
           "junior.copilotCli.providerApiKey": {
             "type": "string",
             "default": "",
-            "description": "API key for the Copilot CLI BYOK provider. Equivalent to COPILOT_PROVIDER_API_KEY.",
+            "description": "API key for the Copilot CLI BYOK provider. Equivalent to COPILOT_PROVIDER_API_KEY. Prefer the \"Junior: Set Copilot CLI API Key\" command for secure OS-credential-manager storage; this setting is used as a fallback.",
             "order": 10
           },
           "junior.copilotCli.providerBearerToken": {

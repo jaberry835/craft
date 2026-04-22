@@ -8,7 +8,7 @@ import * as vscode from 'vscode';
 import { CopilotClient, CopilotSession } from '@github/copilot-sdk';
 import type { MCPServerConfig, PermissionRequest, PermissionRequestResult, SessionConfig } from '@github/copilot-sdk';
 import * as path from 'path';
-import { buildCopilotCliProcessEnv, getCopilotCliBearerAuthSessionConfig, resolveConfiguredCopilotCliLaunchSpec } from './copilotCliSupport';
+import { buildCopilotCliProcessEnv, getCopilotCliBearerAuthSessionConfig, resolveConfiguredCopilotCliLaunchSpec, resolveCopilotCliProviderApiKey } from './copilotCliSupport';
 import { BuiltinTools } from './builtinTools';
 import { shouldAutoApproveCopilotPermission } from './permissions';
 
@@ -757,7 +757,7 @@ export class CopilotSdkRuntime implements AgentRuntime {
         if (!baseUrl) { return undefined; }
 
         const type = (getSetting<string>('copilotCli.providerType') || cliEnv.COPILOT_PROVIDER_TYPE || 'openai') as 'openai' | 'azure' | 'anthropic';
-        const apiKey = getSetting<string>('copilotCli.providerApiKey') || cliEnv.COPILOT_PROVIDER_API_KEY || undefined;
+        const apiKey = resolveCopilotCliProviderApiKey(cliEnv) || undefined;
         const bearerToken = await this.resolveProviderBearerToken(cliEnv);
         const wireApi = (getSetting<string>('copilotCli.providerWireApi') || cliEnv.COPILOT_PROVIDER_WIRE_API || undefined) as 'completions' | 'responses' | undefined;
         const azureApiVersion = getSetting<string>('copilotCli.providerAzureApiVersion') || cliEnv.COPILOT_PROVIDER_AZURE_API_VERSION || undefined;

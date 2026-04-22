@@ -1,0 +1,33 @@
+// Sample: Local Junior agent with Azure OpenAI / Foundry through APIM, key auth.
+//
+// What this configures:
+//   - junior.agentProvider:           local        (Junior's built-in agent loop)
+//   - junior.azureOpenAI.provider:    apim         (calls APIM, not the resource directly)
+//   - junior.azureOpenAI.authMode:    api-key      (default; APIM subscription key in api-key header)
+//
+// Setup steps:
+//   1. Copy the relevant entries into your VS Code user or workspace settings.json.
+//   2. Replace the placeholder host and deployment IDs with your own values.
+//   3. Run "Junior: Set API Key" and paste your APIM subscription key when prompted.
+//      (The key is stored in OS-credential-manager-backed VS Code SecretStorage.)
+//   4. Optionally set junior.azureOpenAI.apiKey as a fallback (less secure).
+//
+// See also: APIM-JUNIOR-LOCAL-SETUP.md (Option A) for the matching APIM policy.
+{
+    "junior.agentProvider": "local",
+
+    "junior.azureOpenAI.provider": "apim",
+    "junior.azureOpenAI.apimBaseUrl": "https://<your-apim-host>.azure-api.net/foundryapi",
+    "junior.azureOpenAI.apiVersion": "2025-03-01-preview",
+    "junior.azureOpenAI.authMode": "api-key",
+
+    "junior.azureOpenAI.deployments": [
+        {
+            "name": "GPT-5.4",
+            "deploymentId": "gpt-5.4",
+            "apiVersion": "2025-03-01-preview"
+        }
+    ],
+    "junior.azureOpenAI.activeDeployment": "gpt-5.4",
+    "junior.inlineCompletions.deployment": "gpt-5.4"
+}
