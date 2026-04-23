@@ -11,6 +11,37 @@ Junior adds an AI chat panel and inline code completions to VS Code. It can conn
 - **OpenAI-compatible APIs** (OpenAI, GitHub Models, OpenRouter, Ollama, LM Studio)
 - **GitHub Copilot CLI** (optional, via the Copilot SDK)
 
+## New User Path
+
+If you are setting up Junior for the first time, use this path:
+
+1. Install the `.vsix`.
+2. Pick the sample settings file that matches your environment.
+3. Copy that sample into your VS Code user `settings.json`.
+4. Add an API key or sign in, depending on your environment.
+5. Open the chat with `Ctrl+Shift+I`.
+
+### Which setup should I choose?
+
+| If your environment looks like this | Use this sample | Auth |
+|---|---|---|
+| You have a direct Azure OpenAI / Foundry endpoint | [`samples/direct-key.settings.json`](samples/direct-key.settings.json) | Resource key |
+| You have Azure API Management (APIM) in front of Azure OpenAI / Foundry and were given a subscription key | [`samples/apim-key.settings.json`](samples/apim-key.settings.json) | APIM subscription key |
+| You have Azure API Management (APIM) and your team wants VS Code / Entra sign-in | [`samples/apim-bearer.settings.json`](samples/apim-bearer.settings.json) | Bearer token from VS Code sign-in |
+| You have an OpenAI-compatible endpoint such as OpenAI, GitHub Models, OpenRouter, Ollama, or LM Studio | [`samples/openai-compat-key.settings.json`](samples/openai-compat-key.settings.json) | Provider API key |
+| You want Junior to route agent turns through GitHub Copilot CLI | Go to [Optional: GitHub Copilot CLI Provider](#optional-github-copilot-cli-provider) | GitHub sign-in or BYOK |
+
+If you are not sure, start with the sample your administrator or team documentation gave you. In most enterprise setups, that is usually one of the APIM samples.
+
+### What you should see after setup
+
+After a successful first run:
+
+- Junior appears in the VS Code Activity Bar.
+- **Junior: Open Chat** opens a working chat panel.
+- the model picker shows at least one model or deployment.
+- requests do not fail with missing key, missing sign-in, or missing deployment errors.
+
 ## Before You Start
 
 You need:
@@ -22,6 +53,12 @@ You need:
 - at least one model or deployment that supports chat and tool calling
 
 You do **not** need to build the extension from source.
+
+Terms used in this guide:
+
+- **APIM** = Azure API Management
+- **Entra sign-in** = Microsoft identity sign-in through VS Code
+- **BYOK** = bring your own key / provider configuration
 
 ## Install
 
@@ -43,12 +80,12 @@ To browse the bundled sample settings and setup guides without leaving VS Code, 
 >
 > The links in the rest of this README open on GitHub when viewed from the Marketplace or Extensions view. The two commands above are the offline-friendly way to reach the same files.
 
-The fastest setup path is:
+The fastest setup path for most users is:
 
 1. Run **Junior: Open Sample Settings** and pick the file that matches your environment (see the table below for what each one does).
 2. Copy its contents into your VS Code user `settings.json` (Command Palette → **Preferences: Open User Settings (JSON)**).
 3. Replace the placeholder host names, app IDs, and deployment IDs.
-4. Run **Junior: Set API Key** (or **Junior: Sign In for Azure/APIM Bearer Mode** for bearer setups).
+4. Run **Junior: Set API Key** if your sample uses key auth, or **Junior: Sign In for Azure/APIM Bearer Mode** if your sample uses bearer auth.
 5. Open the chat with `Ctrl+Shift+I`.
 
 ### Bundled Sample Settings
@@ -90,7 +127,9 @@ Resolution order (highest first):
 2. `junior.copilotCli.providerApiKey` setting
 3. `COPILOT_PROVIDER_API_KEY` environment variable
 
-## Bearer Auth and VS Code Sign-In
+## Advanced: Bearer Auth and VS Code Sign-In
+
+Most new users can skip this section unless their endpoint expects `Authorization: Bearer ...` or their team specifically told them to use VS Code sign-in.
 
 If your endpoint expects `Authorization: Bearer ...`, Junior can either use a raw token or have VS Code do the sign-in for you.
 
@@ -136,6 +175,8 @@ If you already have a token from another system, set `authMode` to `bearer-token
 - The **Junior** output channel logs the resolved auth mode and safe token claims (`aud`, `scp`, `exp`) without printing the token itself.
 
 ## Optional: GitHub Copilot CLI Provider
+
+Most users do not need this section. Use it only if you want Junior to route agent turns through GitHub Copilot CLI instead of the built-in local provider.
 
 Junior can route agent turns through GitHub Copilot CLI via the Copilot SDK.
 
@@ -216,6 +257,8 @@ Type `/` in the chat input to see available commands. Any `.md` file in the comm
 Junior is compatible with [GitHub Spec Kit](https://github.com/github/spec-kit) command files. Initialize once with `specify init . --ai generic --ai-commands-dir .junior/commands` and commit the resulting `.junior/commands/` folder so the rest of the team gets the slash commands without installing Spec Kit.
 
 ## Settings Reference
+
+Everything below is reference material. If you are still doing first-run setup, you can stop after **Quick Start** and come back here only when you need a specific setting.
 
 All settings use the `junior.*` namespace. Only the settings most users touch are listed here; see `package.json` for the full list.
 

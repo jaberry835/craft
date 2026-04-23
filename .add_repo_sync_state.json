@@ -5,7 +5,7 @@
   "remote::https://github.com/adamruderman/SecureAPI::main": "477d1beb03b58ee6c47ed125e8c94e7e73aa0a65",
   "remote::https://github.com/adamruderman/SecureChatExtension::agent-framework-cli": "a6f3c62ca247812c4d519131e022218f95e35ab2",
   "remote::https://github.com/adamruderman/SecureChatExtension::ghcp-cli-brain": "f915ad57c67adb886c8077adf9931a41bd1001ae",
-  "remote::https://github.com/adamruderman/SecureChatExtension::main": "6d024926f1e9738a94127f3ea5f19a7ad23779cc",
+  "remote::https://github.com/adamruderman/SecureChatExtension::main": "a2137a687c05a77beb93d491708724818182e7f0",
   "remote::https://github.com/adamruderman/SecureChatExtension::msal-config": "76f8b2d12cbf037778e9108b137c9a4744e1600d",
   "remote::https://github.com/adamruderman/SecureChatExtension::refactor/agent-framework": "48f22d56eb09048c0cb2f0be59287edfa872904a",
   "remote::https://github.com/adamruderman/UserAccessChecker-Python::main": "501c9f9f0da72aa8f0dcf2f35c2238fd5328543e",

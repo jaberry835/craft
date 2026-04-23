@@ -103,6 +103,57 @@ Replace the tenant ID and audience values with your own if they differ.
 </policies>
 ```
 
+
+Policy for tracking user metrics
+
+```xml
+<policies>
+    <inbound>
+        <base />
+        <!-- Decode the inbound user bearer JWT (null if missing/invalid). -->
+        <set-variable name="userJwt" value="@(context.Request.Headers.GetValueOrDefault("Authorization","").StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) ? context.Request.Headers.GetValueOrDefault("Authorization","").Substring(7).AsJwt() : null)" />
+        <set-variable name="userId" value="@{
+            var jwt = (Jwt)context.Variables.GetValueOrDefault("userJwt");
+            return jwt == null
+                ? "anonymous"
+                : jwt.Claims.GetValueOrDefault("oid",
+                  jwt.Claims.GetValueOrDefault("sub", "unknown"));
+        }" />
+        <set-variable name="userName" value="@{
+            var jwt = (Jwt)context.Variables.GetValueOrDefault("userJwt");
+            return jwt == null
+                ? "anonymous"
+                : jwt.Claims.GetValueOrDefault("preferred_username",
+                  jwt.Claims.GetValueOrDefault("upn",
+                  jwt.Claims.GetValueOrDefault("unique_name",
+                  jwt.Claims.GetValueOrDefault("name", "unknown"))));
+        }" />
+        <set-variable name="tenantId" value="@{
+            var jwt = (Jwt)context.Variables.GetValueOrDefault("userJwt");
+            return jwt == null ? "unknown" : jwt.Claims.GetValueOrDefault("tid", "unknown");
+        }" />
+        <azure-openai-emit-token-metric namespace="FoundryProxy">
+            <dimension name="API ID" />
+            <dimension name="Operation ID" />
+            <dimension name="User ID" value="@((string)context.Variables["userId"])" />
+            <dimension name="User Name" value="@((string)context.Variables["userName"])" />
+            <dimension name="Tenant ID" value="@((string)context.Variables["tenantId"])" />
+            <dimension name="Subscription ID" />
+        </azure-openai-emit-token-metric>
+        <set-backend-service id="apim-generated-policy" backend-id="junior-foundry-ai-endpoint" />
+    </inbound>
+    <backend>
+        <base />
+    </backend>
+    <outbound>
+        <base />
+    </outbound>
+    <on-error>
+        <base />
+    </on-error>
+</policies>
+```
+
 **Policy order matters.** APIM evaluates inbound policies top‑to‑bottom. `authentication-managed-identity` writes a fresh `Authorization: Bearer <MI token>` for the backend call, so it must be the **last** step that touches `Authorization`. Specifically: validate the incoming user token first, then delete the inbound `api-key` and `Authorization` headers, then run `authentication-managed-identity`. If you put a `set-header name="Authorization" exists-action="delete"` *after* `authentication-managed-identity`, it wipes the MI token and the backend returns 401. Some commercial regions tolerate the wrong order; sovereign and air‑gapped clouds do not.
 
 If the backend rejects that audience, try:
