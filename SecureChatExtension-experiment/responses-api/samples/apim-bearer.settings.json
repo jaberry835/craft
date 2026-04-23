@@ -1,0 +1,79 @@
+// Sample: Local Junior agent with Azure OpenAI / Foundry through APIM, bearer auth (VS Code sign-in).
+//
+// What this configures:
+//   - junior.agentProvider:                   local                  (Junior's built-in agent loop)
+//   - junior.azureOpenAI.provider:            apim                   (calls APIM, not the resource directly)
+//   - junior.azureOpenAI.authMode:            vscode-auth-session    (Junior gets a token from VS Code per request)
+//   - junior.azureOpenAI.authProviderId:      microsoft              (or "microsoft-sovereign-cloud" for gov)
+//   - junior.azureOpenAI.authScopes:          token audience APIM validates against
+//
+// Important:
+//   The bearer-token audience is NOT derived from the URL. It comes from authScopes.
+//   It must match the <audience> entries in the APIM validate-azure-ad-token policy.
+//
+// Setup steps:
+//   1. Copy the relevant entries into your settings.json.
+//   2. Replace placeholders with your APIM host and your validating app-registration client id.
+//   3. Run "Junior: Sign In for Azure/APIM Bearer Mode" once to establish the VS Code sign-in.
+//
+// Alternative: if you have a raw bearer token from another system, set
+//   "junior.azureOpenAI.authMode": "bearer-token"
+// and put the token in junior.azureOpenAI.bearerToken (less recommended).
+//
+// See also: APIM-JUNIOR-LOCAL-SETUP.md (Option B) for the matching APIM policy.
+{
+    "microsoft-sovereign-cloud.environment": "custom",
+    "microsoft-sovereign-cloud.customEnvironment": {
+        "name": "Gov",
+        "portalUrl": "https://portal.azure.us",
+        "activeDirectoryEndpointUrl": "https://login.microsoftonline..gov/",
+        "activeDirectoryResourceId": "https://management.azure..gov/",
+        "resourceManagerEndpointUrl": "https://management.azure..gov/",
+        "managementEndpointUrl": "https://management.azure..gov/"
+    },
+    "junior.agentProvider": "local",
+
+    "junior.azureOpenAI.provider": "apim",
+    "junior.azureOpenAI.apimBaseUrl": "https://<your-apim-host>.azure-api.net/foundryapi-bearer",
+    "junior.azureOpenAI.apiVersion": "2025-03-01-preview",
+
+    "junior.azureOpenAI.authMode": "vscode-auth-session",
+    "junior.azureOpenAI.bearerTokenSource": "vscode-auth-session",
+    "junior.azureOpenAI.authProviderId": "microsoft-sovereign-cloud",
+    "junior.azureOpenAI.authScopes": [
+        "api://<apim-app-clientid>/user_impersonation",
+        "VSCODE_CLIENT_ID:<new-vscode-client-app-id>",
+        "VSCODE_TENANT:<tenant-id>"
+    ],
+
+    "junior.azureOpenAI.deployments": [
+        {
+            "name": "GPT-5.4",
+            "deploymentId": "gpt-5.4",
+            "apiVersion": "2025-03-01-preview"
+        }
+    ],
+    "junior.azureOpenAI.activeDeployment": "gpt-5.4",
+    "junior.inlineCompletions.deployment": "gpt-5.4"
+
+    // -------------------------------------------------------------------------
+    // Optional: opt into the new /openai/v1/responses wire API.
+    //
+    // - Enables typed reasoning events (the collapsible "Thinking" panel in
+    //   the chat view) and server-side conversation state.
+    // - When wireApi='responses', apimBaseUrl is treated as a true URL base:
+    //   the SDK appends /openai/v1/responses, so set it to the gateway host
+    //   ROOT (https://<your-apim-host>.azure-api.net) and use APIM API URL
+    //   suffix "openai/v1" with operation POST /responses.
+    // - Lower reasoningEffort (medium/low) is much faster than 'high'.
+    // - useServerSideState chains previous_response_id across iterations
+    //   inside a single user turn — biggest win on tool-call-heavy turns.
+    //
+    // To enable: add a comma to the line above, then uncomment the block:
+    //
+    // "junior.azureOpenAI.wireApi": "responses",
+    // "junior.azureOpenAI.reasoningEffort": "medium",
+    // "junior.azureOpenAI.reasoningSummary": "auto",
+    // "junior.azureOpenAI.useServerSideState": true
+    // -------------------------------------------------------------------------
+}

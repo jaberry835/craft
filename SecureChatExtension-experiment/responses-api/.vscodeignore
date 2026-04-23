@@ -1,0 +1,17 @@
+.vscode/**
+.junior/**
+src/**
+node_modules/**
+!node_modules/@vscode/codicons/dist/**
+tsconfig.json
+esbuild.mjs
+.gitignore
+*.vsix
+deploy.ps1
+settings.default.json
+tmp-vsix-inspect/**
+test/**
+vitest.config.ts
+out/**/*.map
+out/**/*.d.ts
+out/**/*.d.ts.map
