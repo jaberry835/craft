@@ -20,7 +20,15 @@ Environment variables:
   SECURITY_SITE_CONTAINER             – Container name (default: $web)
   SECURITY_SITE_BASE_URL              – (optional) override public URL of the static site
   SECURITY_SITE_TITLE                 – Title shown on the root landing page (default: Security Packages)
-  AZURE_SUBSCRIPTION_ID               – Subscription ID for policy compliance queries
+  SECURITY_POLICY_ALLOWED_SUBSCRIPTIONS – Comma-separated whitelist of subscription IDs
+                                          the policy compliance tool is permitted to query.
+                                          The first entry is used as the default when the
+                                          caller omits subscription_id. REQUIRED for the
+                                          get_policy_compliance tool to function.
+  SECURITY_POLICY_AUTH_MODE           – Authentication mode for ARM calls: 'OBO' (default)
+                                          or 'MI' (User-Assigned Managed Identity).
+  SECURITY_POLICY_MI_CLIENT_ID        – Client ID of the User-Assigned Managed Identity
+                                          to use when SECURITY_POLICY_AUTH_MODE=MI.
   AZURE_MANAGEMENT_ENDPOINT           – ARM endpoint (default: https://management.azure.com)
   AZURE_MANAGEMENT_SCOPE              – Token scope for ARM (default: https://management.azure.com/.default)
 """
@@ -42,7 +50,7 @@ try:
     from azure.core import MatchConditions
     from azure.core.exceptions import ResourceExistsError, ResourceModifiedError, ResourceNotFoundError
     from azure.storage.blob import BlobServiceClient, ContentSettings
-    from azure.identity import DefaultAzureCredential
+    from azure.identity import DefaultAzureCredential, ManagedIdentityCredential
     AZURE_STORAGE_AVAILABLE = True
 except ImportError as e:
     AZURE_STORAGE_AVAILABLE = False
@@ -59,6 +67,125 @@ except ImportError:
 def _env(name: str, default: Optional[str] = None) -> Optional[str]:
     v = os.getenv(name)
     return v if v is not None else default
+
+
+def _get_allowed_subscriptions() -> List[str]:
+    """Return the whitelist of subscription IDs the policy tool may query.
+
+    Reads SECURITY_POLICY_ALLOWED_SUBSCRIPTIONS (comma-separated). This is the
+    sole authority for which subscriptions can be queried; if it is empty the
+    tool refuses all requests.
+    """
+    raw = _env("SECURITY_POLICY_ALLOWED_SUBSCRIPTIONS", "") or ""
+    return [s.strip() for s in raw.split(",") if s.strip()]
+
+
+def _get_policy_arm_token(scope: str) -> str:
+    """Acquire an ARM access token using the configured auth mode.
+
+    SECURITY_POLICY_AUTH_MODE:
+      - 'OBO' (default): exchange the caller's user token for an ARM token.
+      - 'MI'           : use a User-Assigned Managed Identity
+                         (client ID from SECURITY_POLICY_MI_CLIENT_ID).
+    """
+    mode = (_env("SECURITY_POLICY_AUTH_MODE", "OBO") or "OBO").strip().upper()
+
+    if mode == "MI":
+        mi_client_id = _env("SECURITY_POLICY_MI_CLIENT_ID")
+        if not mi_client_id:
+            raise RuntimeError(
+                "SECURITY_POLICY_AUTH_MODE=MI requires SECURITY_POLICY_MI_CLIENT_ID "
+                "(client ID of the User-Assigned Managed Identity)."
+            )
+        credential = ManagedIdentityCredential(client_id=mi_client_id)
+        return credential.get_token(scope).token
+
+    if mode != "OBO":
+        raise RuntimeError(
+            f"Invalid SECURITY_POLICY_AUTH_MODE='{mode}'. Must be 'OBO' or 'MI'."
+        )
+
+    user_token = get_user_token()
+    if not user_token:
+        raise RuntimeError("No user token available – authentication required.")
+    credential = get_obo_credential(user_token, scope)
+    return credential.get_token(scope).token
+
+
+def _query_policy_compliance_for_sub(
+    sub_id: str,
+    management_endpoint: str,
+    headers: Dict[str, str],
+) -> Dict[str, Any]:
+    """Query Policy Insights summarize + assignment names for a single subscription."""
+    base_path = (
+        f"/subscriptions/{sub_id}"
+        f"/providers/Microsoft.PolicyInsights/policyStates/latest/summarize"
+    )
+    url = f"{management_endpoint}{base_path}?api-version=2019-10-01"
+
+    with httpx.Client(timeout=30.0) as client:
+        resp = client.post(url, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+
+    summaries = data.get("value", [])
+    if not summaries:
+        return {
+            "success": True,
+            "subscription_id": sub_id,
+            "summary": None,
+            "message": "No policy data returned.",
+        }
+
+    summary = summaries[0]
+    results = summary.get("results", {})
+
+    # Fetch policy assignment display names (best-effort)
+    assignment_names: Dict[str, str] = {}
+    try:
+        pa_path = (
+            f"/subscriptions/{sub_id}"
+            f"/providers/Microsoft.Authorization/policyAssignments"
+        )
+        pa_url = f"{management_endpoint}{pa_path}?api-version=2022-06-01"
+        with httpx.Client(timeout=30.0) as client2:
+            pa_resp = client2.get(pa_url, headers=headers)
+            if pa_resp.status_code == 200:
+                for pa in pa_resp.json().get("value", []):
+                    pa_id = pa.get("id", "").lower()
+                    pa_name = pa.get("properties", {}).get("displayName", "")
+                    if pa_id and pa_name:
+                        assignment_names[pa_id] = pa_name
+    except Exception as name_exc:
+        logger.warning(
+            "Could not fetch policy assignment names for %s: %s", sub_id, name_exc
+        )
+
+    policy_assignments = []
+    for assignment in summary.get("policyAssignments", []):
+        assignment_results = assignment.get("results", {})
+        a_id = assignment.get("policyAssignmentId", "")
+        friendly = assignment_names.get(a_id.lower(), "")
+        policy_assignments.append({
+            "assignment_id": a_id,
+            "display_name": friendly or a_id.rsplit("/", 1)[-1] or "(Unnamed)",
+            "compliant": assignment_results.get("resourceDetails", [{}]),
+            "total_resources": assignment_results.get("queryResultsCount", 0),
+            "non_compliant_resources": assignment_results.get("nonCompliantResources", 0),
+            "non_compliant_policies": assignment_results.get("nonCompliantPolicies", 0),
+        })
+
+    return {
+        "success": True,
+        "subscription_id": sub_id,
+        "overall": {
+            "total_resources": results.get("queryResultsCount", 0),
+            "non_compliant_resources": results.get("nonCompliantResources", 0),
+            "non_compliant_policies": results.get("nonCompliantPolicies", 0),
+        },
+        "policy_assignments": policy_assignments,
+    }
 
 
 def _get_static_site_blob_service() -> "BlobServiceClient":
@@ -549,134 +676,79 @@ def register_security_package_tools(mcp: FastMCP):
     # ----------------------------------------------------------------
 
     @mcp.tool
-    def get_policy_compliance(
-        resource_group: str = "",
-    ) -> Dict[str, Any]:
-        """Retrieve Azure Policy compliance details for a subscription.
+    def get_policy_compliance() -> Dict[str, Any]:
+        """Retrieve Azure Policy compliance details for the configured subscriptions.
 
         Calls the Azure Policy Insights REST API to return a compliance
         summary including counts of compliant, non-compliant, and exempt
         resources grouped by policy assignment.
 
-        The subscription is read from the ``AZURE_SUBSCRIPTION_ID``
-        environment variable.
+        This tool is fully deterministic — it takes no parameters. The set
+        of subscriptions queried is read exclusively from the
+        ``SECURITY_POLICY_ALLOWED_SUBSCRIPTIONS`` environment variable
+        (comma-separated). Every subscription in that list is queried and
+        its results are returned.
 
-        Args:
-            resource_group:  Optional resource-group name to scope the query.
+        Authentication is controlled by ``SECURITY_POLICY_AUTH_MODE``:
+          - ``OBO`` (default): on-behalf-of the calling user.
+          - ``MI``           : User-Assigned Managed Identity
+                               (``SECURITY_POLICY_MI_CLIENT_ID``).
 
         Returns:
-            A dict containing the compliance summary suitable for embedding
-            in a Security Package web page.
+            A dict with a ``subscriptions`` list containing one compliance
+            summary per configured subscription, suitable for embedding in
+            a Security Package web page.
         """
         if not HTTPX_AVAILABLE:
             return {"success": False, "error": "httpx is not installed."}
 
-        sub_id = _env("AZURE_SUBSCRIPTION_ID")
-        if not sub_id:
+        allowed = _get_allowed_subscriptions()
+        if not allowed:
             return {
                 "success": False,
-                "error": "AZURE_SUBSCRIPTION_ID is not set in the environment.",
+                "error": (
+                    "No subscriptions are permitted. Configure "
+                    "SECURITY_POLICY_ALLOWED_SUBSCRIPTIONS with one or more "
+                    "subscription IDs."
+                ),
             }
 
         management_endpoint = _env("AZURE_MANAGEMENT_ENDPOINT", "https://management.azure.com")
         management_scope = _env("AZURE_MANAGEMENT_SCOPE", "https://management.azure.com/.default")
 
-        # Build the summarize URL
-        if resource_group:
-            base_path = (
-                f"/subscriptions/{sub_id}/resourceGroups/{resource_group}"
-                f"/providers/Microsoft.PolicyInsights/policyStates/latest/summarize"
-            )
-        else:
-            base_path = (
-                f"/subscriptions/{sub_id}"
-                f"/providers/Microsoft.PolicyInsights/policyStates/latest/summarize"
-            )
-
-        url = f"{management_endpoint}{base_path}?api-version=2019-10-01"
-
         try:
-            user_token = get_user_token()
-            if not user_token:
-                return {"success": False, "error": "No user token available – authentication required."}
-            credential = get_obo_credential(user_token, management_scope)
-            token_resp = credential.get_token(management_scope)
-            access_token = token_resp.token
-
-            headers = {
-                "Authorization": f"Bearer {access_token}",
-                "Content-Type": "application/json",
-            }
-
-            with httpx.Client(timeout=30.0) as client:
-                resp = client.post(url, headers=headers)
-                resp.raise_for_status()
-                data = resp.json()
-
-            # Parse the summarize response
-            summaries = data.get("value", [])
-            if not summaries:
-                return {"success": True, "subscription_id": sub_id, "summary": None, "message": "No policy data returned."}
-
-            summary = summaries[0] if summaries else {}
-            results = summary.get("results", {})
-
-            # ── Fetch policy assignment display names ──────────────────
-            # The summarize API doesn't include friendly names, so we
-            # list all assignments and build a lookup table.
-            assignment_names: Dict[str, str] = {}
-            try:
-                if resource_group:
-                    pa_path = (
-                        f"/subscriptions/{sub_id}/resourceGroups/{resource_group}"
-                        f"/providers/Microsoft.Authorization/policyAssignments"
-                    )
-                else:
-                    pa_path = (
-                        f"/subscriptions/{sub_id}"
-                        f"/providers/Microsoft.Authorization/policyAssignments"
-                    )
-                pa_url = f"{management_endpoint}{pa_path}?api-version=2022-06-01"
-                with httpx.Client(timeout=30.0) as client2:
-                    pa_resp = client2.get(pa_url, headers=headers)
-                    if pa_resp.status_code == 200:
-                        for pa in pa_resp.json().get("value", []):
-                            pa_id = pa.get("id", "").lower()
-                            pa_name = pa.get("properties", {}).get("displayName", "")
-                            if pa_id and pa_name:
-                                assignment_names[pa_id] = pa_name
-            except Exception as name_exc:
-                logger.warning(f"Could not fetch policy assignment names: {name_exc}")
-
-            # Extract per-policy-assignment details
-            policy_assignments = []
-            for assignment in summary.get("policyAssignments", []):
-                assignment_results = assignment.get("results", {})
-                a_id = assignment.get("policyAssignmentId", "")
-                friendly = assignment_names.get(a_id.lower(), "")
-                policy_assignments.append({
-                    "assignment_id": a_id,
-                    "display_name": friendly or a_id.rsplit("/", 1)[-1] or "(Unnamed)",
-                    "compliant": assignment_results.get("resourceDetails", [{}]),
-                    "total_resources": assignment_results.get("queryResultsCount", 0),
-                    "non_compliant_resources": assignment_results.get("nonCompliantResources", 0),
-                    "non_compliant_policies": assignment_results.get("nonCompliantPolicies", 0),
-                })
-
-            compliance_result = {
-                "success": True,
-                "subscription_id": sub_id,
-                "resource_group": resource_group or None,
-                "queried_at": datetime.now(timezone.utc).isoformat(),
-                "overall": {
-                    "total_resources": results.get("queryResultsCount", 0),
-                    "non_compliant_resources": results.get("nonCompliantResources", 0),
-                    "non_compliant_policies": results.get("nonCompliantPolicies", 0),
-                },
-                "policy_assignments": policy_assignments,
-            }
-            return compliance_result
-
+            access_token = _get_policy_arm_token(management_scope)
         except Exception as exc:
-            logger.error(f"Failed to retrieve policy compliance: {exc}", exc_info=True)
-            return {"success": False, "error": str(exc)}
+            logger.error(f"Failed to acquire ARM token: {exc}", exc_info=True)
+            return {"success": False, "error": f"Token acquisition failed: {exc}"}
+
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        }
+
+        per_sub_results: List[Dict[str, Any]] = []
+
+        for sub_id in allowed:
+            try:
+                sub_result = _query_policy_compliance_for_sub(
+                    sub_id, management_endpoint, headers
+                )
+            except Exception as exc:
+                logger.error(
+                    "Failed to retrieve policy compliance for %s: %s",
+                    sub_id, exc, exc_info=True,
+                )
+                sub_result = {
+                    "success": False,
+                    "subscription_id": sub_id,
+                    "error": str(exc),
+                }
+            per_sub_results.append(sub_result)
+
+        return {
+            "success": all(r.get("success") for r in per_sub_results),
+            "queried_at": datetime.now(timezone.utc).isoformat(),
+            "subscription_count": len(per_sub_results),
+            "subscriptions": per_sub_results,
+        }
