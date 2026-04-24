@@ -45,26 +45,24 @@ Replace `tenant-id` and the `<audience>` value with your own.
 <policies>
     <inbound>
         <base />
-        <validate-azure-ad-token tenant-id="224e1b7d-7931-4c13-bce7-79f3873f0e34"
-                                 header-name="Authorization"
-                                 failed-validation-httpcode="401"
-                                 failed-validation-error-message="Unauthorized">
+        <validate-azure-ad-token tenant-id="224e1b7d-7931-4c13-bce7-79f3873f0e34" header-name="Authorization" failed-validation-httpcode="401" failed-validation-error-message="Unauthorized">
             <audiences>
                 <audience>api://aa6b2ff6-4168-4ffa-b0de-a91ef1726ac6</audience>
             </audiences>
         </validate-azure-ad-token>
-
         <!-- Decode the inbound user bearer JWT (null if missing/invalid). -->
         <set-variable name="userJwt" value="@(context.Request.Headers.GetValueOrDefault("Authorization","").StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) ? context.Request.Headers.GetValueOrDefault("Authorization","").Substring(7).AsJwt() : null)" />
         <set-variable name="userId" value="@{
             var jwt = (Jwt)context.Variables.GetValueOrDefault("userJwt");
-            return jwt == null ? "anonymous"
+            return jwt == null
+                ? "anonymous"
                 : jwt.Claims.GetValueOrDefault("oid",
                   jwt.Claims.GetValueOrDefault("sub", "unknown"));
         }" />
         <set-variable name="userName" value="@{
             var jwt = (Jwt)context.Variables.GetValueOrDefault("userJwt");
-            return jwt == null ? "anonymous"
+            return jwt == null
+                ? "anonymous"
                 : jwt.Claims.GetValueOrDefault("preferred_username",
                   jwt.Claims.GetValueOrDefault("upn",
                   jwt.Claims.GetValueOrDefault("unique_name",
@@ -74,22 +72,20 @@ Replace `tenant-id` and the `<audience>` value with your own.
             var jwt = (Jwt)context.Variables.GetValueOrDefault("userJwt");
             return jwt == null ? "unknown" : jwt.Claims.GetValueOrDefault("tid", "unknown");
         }" />
-
+        <set-variable name="modelName" value="@{
+            var body = context.Request.Body.As<JObject>(preserveContent: true);
+            return body?["model"]?.ToString() ?? "unknown";
+        }" />
         <azure-openai-emit-token-metric namespace="FoundryProxy">
             <dimension name="API ID" />
             <dimension name="Operation ID" />
-            <dimension name="User ID"   value="@((string)context.Variables["userId"])" />
+            <dimension name="User ID" value="@((string)context.Variables["userId"])" />
             <dimension name="User Name" value="@((string)context.Variables["userName"])" />
             <dimension name="Tenant ID" value="@((string)context.Variables["tenantId"])" />
-            <dimension name="Subscription ID" />
+            <dimension name="Model" value="@((string)context.Variables["modelName"])" />
+            <dimension name="App ID" value="@((string)((Jwt)context.Variables["userJwt"])?.Claims.GetValueOrDefault("appid", "unknown"))" />
         </azure-openai-emit-token-metric>
-
-        <!-- Strip the inbound user token, then attach the MI token for the backend. -->
-        <set-header name="api-key" exists-action="delete" />
-        <set-header name="Authorization" exists-action="delete" />
-        <authentication-managed-identity
-          resource="https://cognitiveservices.azure.com"
-          ignore-error="false" />
+        <set-backend-service id="apim-generated-policy" backend-id="junior-foundry-ai-endpoint" />
     </inbound>
     <backend>
         <base />
