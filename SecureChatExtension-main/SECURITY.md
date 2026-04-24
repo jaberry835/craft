@@ -38,22 +38,6 @@ Out of scope:
 - Misconfiguration in user-supplied `settings.json` (for example, leaving an
   API key in source control).
 
-## What We Care About
-
-The highest-risk surfaces in Junior are:
-
-1. **The chat webview** — model output is rendered as HTML. We strictly escape
-   all model-supplied content and use a CSP with a per-load nonce. Reports of
-   any path that lets model output execute script in the webview are taken
-   very seriously.
-2. **Tool execution** — agent tools can read/write files and execute terminal
-   commands with the user's privileges. Reports of permission-bypass paths or
-   prompt-injection that escalates beyond confirmed permission scope are
-   high-priority.
-3. **Secret handling** — API keys, bearer tokens, and OAuth refresh tokens.
-   Reports of these being logged, persisted to disk, or transmitted outside
-   the configured provider endpoint are high-priority.
-
 ## Supported Versions
 
 Only the latest released version receives security updates.

@@ -11,7 +11,8 @@ esbuild.mjs
 *.log
 *.tsbuildinfo
 deploy.ps1
-setup-copilot-cli-apim-entra.ps1
+copilot-entra.ps1
+copilot-entra.README.md
 slides/**
 copilot-logs/**
 tmp-copilot-logs/**
