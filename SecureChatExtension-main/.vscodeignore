@@ -1,5 +1,6 @@
 .vscode/**
 .junior/**
+.github/**
 src/**
 node_modules/**
 !node_modules/@vscode/codicons/dist/**
@@ -7,8 +8,13 @@ tsconfig.json
 esbuild.mjs
 .gitignore
 *.vsix
+*.log
+*.tsbuildinfo
 deploy.ps1
-settings.default.json
+setup-copilot-cli-apim-entra.ps1
+slides/**
+copilot-logs/**
+tmp-copilot-logs/**
 tmp-vsix-inspect/**
 test/**
 vitest.config.ts

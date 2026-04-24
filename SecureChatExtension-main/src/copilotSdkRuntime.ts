@@ -85,6 +85,7 @@ export class CopilotSdkRuntime implements AgentRuntime {
     private toolMetadataByCallId = new Map<string, ToolCallMetadata>();
     private lastBackgroundTaskSummary = '';
     private reasoningNarrationText = '';
+    private reasoningPanelOpen = false;
     private currentPromptContext = '';
     private longWaitStatusTimer?: NodeJS.Timeout;
     private lastLongWaitStatus = '';
@@ -117,6 +118,7 @@ export class CopilotSdkRuntime implements AgentRuntime {
         this.toolMetadataByCallId.clear();
         this.lastBackgroundTaskSummary = '';
         this.reasoningNarrationText = '';
+        this.reasoningPanelOpen = false;
         this.currentPromptContext = '';
     }
 
@@ -131,6 +133,7 @@ export class CopilotSdkRuntime implements AgentRuntime {
         this.toolMetadataByCallId.clear();
         this.lastBackgroundTaskSummary = '';
         this.reasoningNarrationText = '';
+        this.reasoningPanelOpen = false;
         this.currentPromptContext = '';
     }
 
@@ -213,6 +216,7 @@ export class CopilotSdkRuntime implements AgentRuntime {
         this.toolMetadataByCallId.clear();
         this.lastBackgroundTaskSummary = '';
         this.reasoningNarrationText = '';
+        this.reasoningPanelOpen = false;
         this.callbacks.sendToWebview({ type: 'agentPlan', steps: [] });
 
         this.messages.push({
@@ -475,9 +479,32 @@ export class CopilotSdkRuntime implements AgentRuntime {
             this.session.on('assistant.reasoning_delta', (event: any) => {
                 this.markActivity();
                 const delta = event.data?.deltaContent || '';
-                if (delta) {
-                    this.reasoningNarrationText += delta;
+                if (!delta) { return; }
+                const mode = this.reasoningDisplayMode();
+                if (mode === 'off') { return; }
+                if (mode === 'panel') {
+                    // Stream live into the collapsible Thinking panel above the
+                    // assistant bubble (matches the local agent's UX).
+                    // Close any open working block first so reasoning appears
+                    // at a clean break, not nested below tool actions.
+                    if (!this.reasoningPanelOpen) {
+                        if (this.workingBlock) {
+                            this.finalizeWorkingBlock();
+                        }
+                        // If assistant text was streaming, end it before reasoning
+                        if (this.assistantStarted) {
+                            this.callbacks.sendToWebview({ type: 'endAssistantMessage' });
+                            this.assistantStarted = false;
+                        }
+                        this.callbacks.sendToWebview({ type: 'reasoningStart' });
+                        this.reasoningPanelOpen = true;
+                    }
+                    this.callbacks.sendToWebview({ type: 'reasoningAppend', text: delta });
+                    return;
                 }
+                // mode === 'working' — keep legacy behavior: accumulate and
+                // flush as a progress entry inside the Working block.
+                this.reasoningNarrationText += delta;
             })
         );
 
@@ -848,7 +875,21 @@ export class CopilotSdkRuntime implements AgentRuntime {
         }
     }
 
+    private reasoningDisplayMode(): 'panel' | 'working' | 'off' {
+        const raw = (getSetting<string>('copilotCli.reasoningDisplay') || 'panel').toLowerCase();
+        if (raw === 'working' || raw === 'off') { return raw; }
+        return 'panel';
+    }
+
     private flushReasoningNarration(): void {
+        // Close any live panel first — 'panel' mode streams directly and
+        // never accumulates text, so this just toggles it shut at the
+        // appropriate boundary (assistant text start, tool start, end-of-turn).
+        if (this.reasoningPanelOpen) {
+            this.callbacks.sendToWebview({ type: 'reasoningEnd' });
+            this.reasoningPanelOpen = false;
+        }
+
         if (!this.reasoningNarrationText) {
             return;
         }
@@ -859,9 +900,8 @@ export class CopilotSdkRuntime implements AgentRuntime {
             return;
         }
 
-        // Route thinking text into the working block as progress entries
-        // (GHCP-style scrollable thinking inside the working block body)
-        // rather than rendering it as standalone narration bubbles.
+        // Legacy 'working' mode — route accumulated reasoning into the
+        // working block as a scrollable progress entry.
         if (!this.workingBlock) {
             this.startWorkingBlock('Working');
         }

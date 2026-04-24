@@ -255,6 +255,12 @@ export interface PersistedNarrationTranscriptItem {
     text: string;
 }
 
+export interface PersistedReasoningTranscriptItem {
+    id: string;
+    kind: 'reasoning';
+    text: string;
+}
+
 export interface PersistedWorkingBlockTranscriptItem {
     id: string;
     kind: 'working-block';
@@ -271,6 +277,7 @@ export type PersistedTranscriptItem =
     | PersistedUserTranscriptItem
     | PersistedAssistantTranscriptItem
     | PersistedNarrationTranscriptItem
+    | PersistedReasoningTranscriptItem
     | PersistedWorkingBlockTranscriptItem
     | PersistedErrorTranscriptItem;
 
@@ -278,6 +285,7 @@ export interface PersistedTranscript {
     version: 1;
     items: PersistedTranscriptItem[];
     activeAssistantMessageId?: string;
+    activeReasoningItemId?: string;
     activeWorkingBlockId?: string;
 }
 
@@ -349,6 +357,9 @@ export type ExtensionMessage =
     | { type: 'workingActionUpdated'; blockId: string; entryId: string; status: 'running' | 'done' | 'error'; text?: string; detail?: string; filePath?: string; icon?: string; repeatCount?: number }
     | { type: 'workingBlockCompleted'; blockId: string; summary: string; completedAt: number }
     | { type: 'narrationText'; text: string }
+    | { type: 'reasoningStart' }
+    | { type: 'reasoningAppend'; text: string }
+    | { type: 'reasoningEnd' }
     | { type: 'terminalOutput'; line: string }
     | { type: 'tokenUsage'; totalTokens: string; chatTokens: string; inlineTokens: string; chatPct: string; inlinePct: string; requests: number; chatPrompt: string; chatCompletion: string; inlinePrompt: string; inlineCompletion: string; chatPromptPct: string; chatCompletionPct: string; inlinePromptPct: string; inlineCompletionPct: string; chatRequests: number; inlineRequests: number; windowPct: number; contextWindow: string }
     | { type: 'slashCommands'; commands: Array<{ name: string; description: string }> }

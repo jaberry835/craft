@@ -1,33 +1,55 @@
-// Sample: Local Junior agent with Azure OpenAI / Foundry through APIM, key auth.
+// Sample: Local Junior agent with Azure AI Foundry through APIM, key auth.
+//
+// Defaults to the new /openai/v1/responses wire API (the recommended Foundry
+// path — typed reasoning events, server-side state, model in the body).
 //
 // What this configures:
 //   - junior.agentProvider:           local        (Junior's built-in agent loop)
 //   - junior.azureOpenAI.provider:    apim         (calls APIM, not the resource directly)
-//   - junior.azureOpenAI.authMode:    api-key      (default; APIM subscription key in api-key header)
+//   - junior.azureOpenAI.apimBaseUrl: APIM gateway HOST ROOT (no /openai/... path)
+//   - junior.azureOpenAI.wireApi:     responses    (uses POST /openai/v1/responses)
+//   - junior.azureOpenAI.authMode:    api-key      (APIM subscription key in api-key header)
 //
 // Setup steps:
-//   1. Copy the relevant entries into your VS Code user or workspace settings.json.
-//   2. Replace the placeholder host and deployment IDs with your own values.
-//   3. Run "Junior: Set API Key" and paste your APIM subscription key when prompted.
-//      (The key is stored in OS-credential-manager-backed VS Code SecretStorage.)
-//   4. Optionally set junior.azureOpenAI.apiKey as a fallback (less secure).
+//   1. Copy the relevant entries into your settings.json.
+//   2. Replace <your-apim-host> with your APIM hostname.
+//   3. Run "Junior: Set API Key" and paste your APIM subscription key.
 //
-// See also: APIM-JUNIOR-LOCAL-SETUP.md (Option A) for the matching APIM policy.
+// APIM side: import the Foundry template, set API URL suffix to "openai/v1",
+// expose POST /responses, and use APIM managed identity to the backend.
+// See docs/APIM-FOUNDRY-KEY-SETUP.md.
 {
     "junior.agentProvider": "local",
 
     "junior.azureOpenAI.provider": "apim",
-    "junior.azureOpenAI.apimBaseUrl": "https://<your-apim-host>.azure-api.net/foundryapi",
-    "junior.azureOpenAI.apiVersion": "2025-03-01-preview",
+    // Gateway host root — the SDK appends /openai/v1/responses itself.
+    "junior.azureOpenAI.apimBaseUrl": "https://<your-apim-host>.azure-api.net",
     "junior.azureOpenAI.authMode": "api-key",
+
+    // ── Wire API: /openai/v1/responses ────────────────────────────────────
+    "junior.azureOpenAI.wireApi": "responses",
+    "junior.azureOpenAI.reasoningEffort": "medium",   // none | low | medium | high | xhigh
+    "junior.azureOpenAI.reasoningSummary": "auto",    // auto | detailed | none
+    "junior.azureOpenAI.useServerSideState": true,    // chain previous_response_id across iterations
 
     "junior.azureOpenAI.deployments": [
         {
             "name": "GPT-5.4",
-            "deploymentId": "gpt-5.4",
-            "apiVersion": "2025-03-01-preview"
+            "deploymentId": "gpt-5.4"
         }
     ],
     "junior.azureOpenAI.activeDeployment": "gpt-5.4",
     "junior.inlineCompletions.deployment": "gpt-5.4"
+
+    // -------------------------------------------------------------------------
+    // OPT-OUT: classic /openai/deployments/{id}/chat/completions instead.
+    //
+    // Use only if your APIM/Foundry route does NOT expose /openai/v1/responses
+    // (older deployments, or APIM APIs imported with the Azure OpenAI template
+    // instead of the Foundry template). In that case:
+    //   1. Remove the four "wireApi" / "reasoning*" / "useServerSideState" lines above.
+    //   2. Append the path prefix to apimBaseUrl, e.g.
+    //      "https://<your-apim-host>.azure-api.net/foundryapi"
+    //   3. Add: "junior.azureOpenAI.apiVersion": "2025-03-01-preview"
+    // -------------------------------------------------------------------------
 }

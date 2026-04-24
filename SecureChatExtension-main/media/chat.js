@@ -40,6 +40,12 @@ window.onerror = function(msg, src, line, col, err) {
     let currentContentEl = null;
     let currentNarrationEl = null;
     let currentNarrationText = '';
+    // Reasoning panel ("Thinking..." details block) is opened when the
+    // responses-API client streams reasoning/reasoningSummary chunks; closes
+    // when the visible answer starts streaming or the iteration ends.
+    let currentReasoningEl = null;
+    let currentReasoningBodyEl = null;
+    let currentReasoningText = '';
     let agentRunning = false;
     let currentProvider = 'local';
     let currentPermissionLevel = 'default';
@@ -369,7 +375,7 @@ window.onerror = function(msg, src, line, col, err) {
         if (item.images && item.images.length > 0) {
             inner += '<div class="user-attachments">';
             for (const src of item.images) {
-                inner += '<img src="' + src + '" class="user-attach-img" />';
+                inner += '<img src="' + escapeHtml(src) + '" class="user-attach-img" />';
             }
             inner += '</div>';
         }
@@ -423,6 +429,70 @@ window.onerror = function(msg, src, line, col, err) {
         currentNarrationText = '';
     }
 
+    function renderReasoningItem(item) {
+        if (!item || !item.text) { return; }
+        closeLiveReasoning();
+        var panel = createReasoningPanel(false);
+        panel.bodyEl.textContent = item.text;
+        messagesEl.appendChild(panel.root);
+    }
+
+    function createReasoningPanel(open) {
+        var details = document.createElement('details');
+        details.className = 'reasoning-panel';
+        if (open) { details.open = true; }
+        var summary = document.createElement('summary');
+        summary.className = 'reasoning-summary';
+        summary.innerHTML = '<span class="reasoning-icon">\u2728</span><span class="reasoning-label">Thinking</span>';
+        details.appendChild(summary);
+        var body = document.createElement('div');
+        body.className = 'reasoning-body';
+        details.appendChild(body);
+        return { root: details, bodyEl: body };
+    }
+
+    function startLiveReasoning() {
+        if (currentReasoningEl && currentReasoningEl.parentNode) { return; }
+        closeLiveNarration();
+        var panel = createReasoningPanel(true);
+        currentReasoningEl = panel.root;
+        currentReasoningBodyEl = panel.bodyEl;
+        currentReasoningText = '';
+        messagesEl.appendChild(currentReasoningEl);
+        scrollToBottom();
+    }
+
+    function appendReasoningText(text) {
+        if (!text) { return; }
+        if (!currentReasoningEl || !currentReasoningEl.parentNode) {
+            startLiveReasoning();
+        }
+        currentReasoningText += text;
+        currentReasoningBodyEl.textContent = currentReasoningText;
+    }
+
+    function closeLiveReasoning() {
+        if (currentReasoningEl && currentReasoningBodyEl && !currentReasoningText) {
+            // Empty panel — drop it rather than leave a stray "Thinking" row.
+            if (currentReasoningEl.parentNode) {
+                currentReasoningEl.parentNode.removeChild(currentReasoningEl);
+            }
+        } else if (currentReasoningEl) {
+            // Collapse the panel after a short grace period so the user can
+            // still skim the last reasoning lines once the visible answer
+            // starts streaming.
+            var elToCollapse = currentReasoningEl;
+            setTimeout(function () {
+                if (elToCollapse && elToCollapse.parentNode) {
+                    elToCollapse.open = false;
+                }
+            }, 1800);
+        }
+        currentReasoningEl = null;
+        currentReasoningBodyEl = null;
+        currentReasoningText = '';
+    }
+
     function renderErrorItem(item) {
         showLocalError(item.message);
     }
@@ -463,6 +533,9 @@ window.onerror = function(msg, src, line, col, err) {
                     break;
                 case 'narration':
                     renderNarrationItem(item);
+                    break;
+                case 'reasoning':
+                    renderReasoningItem(item);
                     break;
                 case 'working-block':
                     restoreWorkingBlockItem(item.block);
@@ -675,7 +748,7 @@ window.onerror = function(msg, src, line, col, err) {
         pendingImages.forEach((dataUri, idx) => {
             const pill = document.createElement('div');
             pill.className = 'attach-pill image-pill';
-            pill.innerHTML = '<img src="' + dataUri + '" class="attach-thumb"/>' +
+            pill.innerHTML = '<img src="' + escapeHtml(dataUri) + '" class="attach-thumb"/>' +
                 '<span>Image ' + (idx + 1) + '</span>' +
                 '<button class="attach-remove" title="Remove">&times;</button>';
             pill.querySelector('.attach-remove').addEventListener('click', () => {
@@ -1124,6 +1197,7 @@ window.onerror = function(msg, src, line, col, err) {
             }
             case 'startAssistantMessage': {
                 closeLiveNarration();
+                closeLiveReasoning();
                 currentAssistantEl = document.createElement('div');
                 currentAssistantEl.className = 'msg assistant' + (currentProvider === 'copilot-cli' ? ' cli-provider' : '');
                 appendAssistantProviderBadge(currentAssistantEl, currentProvider);
@@ -1702,6 +1776,21 @@ window.onerror = function(msg, src, line, col, err) {
                 appendNarrationText(msg.text || '');
                 pinWorkingIndicatorToBottom();
                 scrollToBottom();
+                break;
+            }
+            case 'reasoningStart': {
+                startLiveReasoning();
+                pinWorkingIndicatorToBottom();
+                break;
+            }
+            case 'reasoningAppend': {
+                appendReasoningText(msg.text || '');
+                pinWorkingIndicatorToBottom();
+                scrollToBottom();
+                break;
+            }
+            case 'reasoningEnd': {
+                closeLiveReasoning();
                 break;
             }
             case 'tokenUsage': {

@@ -36,6 +36,7 @@ import { formatLocalAgentError } from './errorFormatting';
 
 // ── Framework imports ──
 import { AoaiChatClientAdapter } from './framework/aoaiAdapter';
+import { AoaiResponsesClient } from './aoaiResponsesClient';
 import { ChatClientWithMiddleware, type IChatClient } from './framework/chatClient';
 import { buildToolRegistryFromBuiltins, addMcpToolsToRegistry } from './framework/toolAdapter';
 import { ToolExecutor } from './framework/tools';
@@ -118,8 +119,15 @@ export class AgentLoop {
         this.defaultMaxIterations = getSetting<number>('agent.maxIterations') ?? 25;
         this.maxIterations = this.defaultMaxIterations;
 
-        // Initialize framework components
-        const chatAdapter = new AoaiChatClientAdapter(aoaiClient);
+        // Initialize framework components.
+        // Wire-API selection: 'responses' uses the new POST /openai/v1/responses route
+        // (typed reasoning events, server-side state, etc.); default 'chat-completions'
+        // preserves the legacy /openai/deployments/{id}/chat/completions path.
+        const wireApi = (getSetting<string>('azureOpenAI.wireApi') || 'chat-completions').toLowerCase();
+        const chatAdapter: IChatClient = wireApi === 'responses'
+            ? new AoaiResponsesClient(aoaiClient)
+            : new AoaiChatClientAdapter(aoaiClient);
+        this.log?.(`[agent] Chat client wireApi=${wireApi}`);
 
         // Build tool registry from existing tools
         const registry = buildToolRegistryFromBuiltins(builtinTools);
@@ -473,6 +481,13 @@ export class AgentLoop {
             storeWorkingPhases();
         };
 
+        // Server-side conversation state for the v1 'responses' wire API.
+        // When `junior.azureOpenAI.useServerSideState` is true, we thread
+        // the most recent response id into the next iteration's request so
+        // the upstream can skip re-deriving reasoning for prior turns.
+        const useServerSideState = !!getSetting<boolean>('azureOpenAI.useServerSideState');
+        let lastResponseId: string | undefined;
+
         try {
             // ── Core iteration loop ──
             while (iteration < this.maxIterations && this.running) {
@@ -520,12 +535,14 @@ export class AgentLoop {
                     },
                 });
                 let toolCalls: ToolCall[] = [];
+                let reasoningStreamOpen = false;
 
                 try {
                     const stream = this.chatClient.getResponseStream(requestMessages, {
                         tools,
                         signal: this.abortController!.signal,
                         reasoningMode: this.recoveryMiddleware.activeReasoningMode,
+                        ...(useServerSideState && lastResponseId ? { previousResponseId: lastResponseId } : {}),
                     });
 
                     for await (const chunk of stream) {
@@ -534,11 +551,27 @@ export class AgentLoop {
                         if (chunk.type === 'retry') {
                             streamBuffer.reset();
                             toolCalls = [];
+                            if (reasoningStreamOpen) {
+                                this.callbacks.sendToWebview({ type: 'reasoningEnd' });
+                                reasoningStreamOpen = false;
+                            }
                             continue;
                         }
 
                         if (chunk.type === 'text') {
+                            if (reasoningStreamOpen) {
+                                this.callbacks.sendToWebview({ type: 'reasoningEnd' });
+                                reasoningStreamOpen = false;
+                            }
                             streamBuffer.onTextChunk(chunk.text);
+                        } else if (chunk.type === 'reasoning' || chunk.type === 'reasoningSummary') {
+                            if (!reasoningStreamOpen) {
+                                this.callbacks.sendToWebview({ type: 'reasoningStart' });
+                                reasoningStreamOpen = true;
+                            }
+                            this.callbacks.sendToWebview({ type: 'reasoningAppend', text: chunk.text });
+                        } else if (chunk.type === 'responseId') {
+                            lastResponseId = chunk.id;
                         } else if (chunk.type === 'toolCallStarted') {
                             streamBuffer.onToolCallDetected();
                         } else if (chunk.type === 'toolCalls') {
@@ -549,7 +582,14 @@ export class AgentLoop {
                             }
                         }
                     }
+                    if (reasoningStreamOpen) {
+                        this.callbacks.sendToWebview({ type: 'reasoningEnd' });
+                        reasoningStreamOpen = false;
+                    }
                 } catch (streamErr: any) {
+                    if (reasoningStreamOpen) {
+                        this.callbacks.sendToWebview({ type: 'reasoningEnd' });
+                    }
                     streamBuffer.reset();
                     this.log?.(`[ERROR] Stream error (not recoverable): ${streamErr.message}`);
                     throw streamErr;

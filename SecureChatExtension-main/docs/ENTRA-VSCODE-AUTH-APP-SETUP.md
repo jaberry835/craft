@@ -65,7 +65,7 @@ Suggested scope values:
 
 If APIM already validates tokens against this app, do not change it. The point of the new VS Code client app is to fix who performs the interactive login, not to change the API that APIM protects.
 
-The matching APIM policy looks like this (see [APIM-JUNIOR-LOCAL-SETUP.md](APIM-JUNIOR-LOCAL-SETUP.md) for the full version):
+The matching APIM policy looks like this (see [APIM-FOUNDRY-BEARER-SETUP.md](APIM-FOUNDRY-BEARER-SETUP.md) for the full version):
 
 ```xml
 <validate-azure-ad-token
@@ -164,8 +164,8 @@ Keep your existing auth provider, and change `authScopes` so VS Code uses the ne
 {
   "junior.agentProvider": "local",
   "junior.azureOpenAI.provider": "apim",
-  "junior.azureOpenAI.apimBaseUrl": "https://<your-apim-host>.azure-api.net/foundryapi-bearer",
-  "junior.azureOpenAI.apiVersion": "2025-03-01-preview",
+  "junior.azureOpenAI.apimBaseUrl": "https://<your-apim-host>.azure-api.net",
+  "junior.azureOpenAI.wireApi": "responses",
   "junior.azureOpenAI.authMode": "vscode-auth-session",
   "junior.azureOpenAI.bearerTokenSource": "vscode-auth-session",
   "junior.azureOpenAI.authProviderId": "microsoft",

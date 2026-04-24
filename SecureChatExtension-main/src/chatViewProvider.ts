@@ -6,6 +6,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import { AgentLoop, AgentCallbacks } from './agentLoop';
 import { AgentRuntime } from './agentRuntime';
 import { CopilotSdkRuntime } from './copilotSdkRuntime';
@@ -23,6 +24,19 @@ import { RepoPatternStore } from './repoPatternStore';
 import { AgentTaskMemory } from './taskMemory';
 import { shouldPersistTranscriptMessage } from './chatTranscript';
 import { DEFAULT_PERMISSION_LEVEL } from './permissions';
+
+/**
+ * Strip a leading YAML frontmatter block (`---\n...\n---\n`) from a markdown
+ * string. Used for `.prompt.md` files (spec-kit, VS Code prompts) which carry
+ * tool/model metadata that the agent doesn't need in context.
+ */
+function stripFrontmatter(content: string): string {
+    if (!content.startsWith('---')) { return content; }
+    const end = content.indexOf('\n---', 3);
+    if (end === -1) { return content; }
+    const after = content.indexOf('\n', end + 4);
+    return after === -1 ? '' : content.slice(after + 1);
+}
 import { ProviderRouter } from './providerRouter';
 import { replaySessionMessages } from './sessionRestore';
 
@@ -1139,6 +1153,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     // ── Slash Command Support ──
+    // Supports two file shapes:
+    //   `<name>.md`         — Junior's native slash command file
+    //   `<name>.prompt.md`  — VS Code / spec-kit prompt file (may have YAML frontmatter)
 
     /** Get the list of directories to scan for slash command .md files */
     private getSlashCommandDirs(): string[] {
@@ -1150,6 +1167,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             path.join(root, '.junior', 'commands'),
             path.join(root, '.github', 'copilot', 'commands'),
             path.join(root, '.github', 'commands'),
+            // spec-kit (`specify init . --ai copilot`) writes prompts here
+            path.join(root, '.github', 'prompts'),
         ];
 
         const all = [...custom.map(d => path.isAbsolute(d) ? d : path.join(root, d)), ...defaults];
@@ -1165,15 +1184,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             try {
                 const entries = fs.readdirSync(dir);
                 for (const entry of entries) {
-                    if (!entry.endsWith('.md')) { continue; }
-                    const name = entry.replace(/\.md$/i, '');
+                    if (!/\.(prompt\.)?md$/i.test(entry)) { continue; }
+                    const name = entry.replace(/\.(prompt\.)?md$/i, '');
                     if (seen.has(name)) { continue; }
                     seen.add(name);
 
-                    // Read first line as description
+                    // Read first non-frontmatter line as description
                     let description = '';
                     try {
-                        const content = fs.readFileSync(path.join(dir, entry), 'utf-8');
+                        const content = stripFrontmatter(fs.readFileSync(path.join(dir, entry), 'utf-8'));
                         const firstLine = content.split('\n').find(l => l.trim().length > 0) || '';
                         description = firstLine.replace(/^#+ */, '').trim().slice(0, 80);
                     } catch { /* ignore */ }
@@ -1204,23 +1223,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         const userArgs = match[2].trim();
 
         for (const dir of this.getSlashCommandDirs()) {
-            const filePath = path.join(dir, commandName + '.md');
-            try {
-                if (fs.existsSync(filePath)) {
-                    const template = fs.readFileSync(filePath, 'utf-8').trim();
-                    this.log(`Slash command /${commandName} resolved from ${filePath}`);
+            for (const candidate of [commandName + '.md', commandName + '.prompt.md']) {
+                const filePath = path.join(dir, candidate);
+                try {
+                    if (fs.existsSync(filePath)) {
+                        const raw = fs.readFileSync(filePath, 'utf-8');
+                        const template = stripFrontmatter(raw).trim();
+                        this.log(`Slash command /${commandName} resolved from ${filePath}`);
 
-                    // Cap template at 8000 chars to avoid context blowup
-                    const capped = template.length > 8000
-                        ? template.slice(0, 8000) + '\n... [template truncated]'
-                        : template;
+                        // Cap template at 16000 chars to avoid context blowup
+                        const capped = template.length > 16000
+                            ? template.slice(0, 16000) + '\n... [template truncated]'
+                            : template;
 
-                    if (userArgs) {
-                        return `${capped}\n\n---\n\nUser request: ${userArgs}`;
+                        if (userArgs) {
+                            return `${capped}\n\n---\n\nUser request: ${userArgs}`;
+                        }
+                        return capped;
                     }
-                    return capped;
-                }
-            } catch { /* ignore read errors */ }
+                } catch { /* ignore read errors */ }
+            }
         }
 
         // No matching command file found — return original text
@@ -2045,6 +2067,45 @@ body { display: flex; flex-direction: column; }
     font-size: 12px;
 }
 .narration-row strong { color: var(--fg); }
+/* Reasoning panel — collapsible "Thinking" details from the v1 responses API */
+.reasoning-panel {
+    margin: 4px 0 6px;
+    padding: 0;
+    border-left: 2px solid var(--vscode-textBlockQuote-border, rgba(255,255,255,0.18));
+    background: rgba(255,255,255,0.03);
+    border-radius: 3px;
+}
+.reasoning-summary {
+    cursor: pointer;
+    list-style: none;
+    padding: 4px 8px;
+    font-size: 11.5px;
+    color: var(--vscode-descriptionForeground, #b2b8bf);
+    user-select: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.reasoning-summary::-webkit-details-marker { display: none; }
+.reasoning-summary::before {
+    content: '\\25B8';
+    font-size: 10px;
+    transition: transform 120ms ease;
+    color: var(--vscode-descriptionForeground, #b2b8bf);
+}
+.reasoning-panel[open] > .reasoning-summary::before {
+    transform: rotate(90deg);
+}
+.reasoning-icon { opacity: 0.7; }
+.reasoning-label { font-weight: 500; }
+.reasoning-body {
+    padding: 4px 10px 8px 22px;
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--vscode-descriptionForeground, #b2b8bf);
+    white-space: pre-wrap;
+    font-family: var(--vscode-editor-font-family, monospace);
+}
 .wb-progress-text code {
     font-size: 11px;
     padding: 1px 4px;
@@ -3019,12 +3080,9 @@ body { display: flex; flex-direction: column; }
 }
 
 function getNonce(): string {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-    let nonce = '';
-    for (let i = 0; i < 32; i++) {
-        nonce += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    return nonce;
+    // CSP nonces must be cryptographically unguessable. Use crypto.randomBytes,
+    // not Math.random(). 16 bytes -> 22 base64url chars of entropy.
+    return crypto.randomBytes(16).toString('base64').replace(/[+/=]/g, '');
 }
 
 

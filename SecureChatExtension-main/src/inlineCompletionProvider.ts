@@ -15,6 +15,7 @@
  */
 import * as vscode from 'vscode';
 import { AzureOpenAIClient } from './aoaiClient';
+import { AoaiResponsesClient } from './aoaiResponsesClient';
 import { getSetting } from './config';
 import { TokenTracker } from './tokenTracker';
 
@@ -25,6 +26,10 @@ const MAX_NEIGHBOR_CHARS = 2000;   // per neighbor tab
 const MAX_NEIGHBORS = 3;
 const DEBOUNCE_MS = 150;
 const DEFAULT_TIMEOUT_MS = 5000;
+// Responses API often takes longer (server-side reasoning, larger SSE preamble),
+// so give it more headroom by default. Users can still override via
+// junior.inlineCompletions.timeoutMs.
+const DEFAULT_TIMEOUT_MS_RESPONSES = 15000;
 const COOLDOWN_MS = 2500;
 const SINGLE_LINE_TOKENS = 64;
 const MULTI_LINE_TOKENS = 256;
@@ -85,6 +90,9 @@ export class InlineCompletionProvider implements vscode.InlineCompletionItemProv
 
     // Status bar
     private readonly statusBar: vscode.StatusBarItem;
+
+    // Lazy responses-API client (used when junior.azureOpenAI.wireApi === 'responses')
+    private responsesClient: AoaiResponsesClient | undefined;
 
     constructor(
         private readonly aoaiClient: AzureOpenAIClient,
@@ -186,9 +194,12 @@ export class InlineCompletionProvider implements vscode.InlineCompletionItemProv
                 const abortController = new AbortController();
                 this.pendingAbort = abortController;
 
-                // Hard timeout
-                const timeoutMs = getSetting<number>('inlineCompletions.timeoutMs') || DEFAULT_TIMEOUT_MS;
-                const timeoutId = setTimeout(() => abortController.abort(), timeoutMs);
+                // Hard timeout — bump the default when the responses wire API is in use.
+                const wireApi = (getSetting<string>('azureOpenAI.wireApi') || 'chat-completions').toLowerCase();
+                const defaultTimeout = wireApi === 'responses' ? DEFAULT_TIMEOUT_MS_RESPONSES : DEFAULT_TIMEOUT_MS;
+                const timeoutMs = getSetting<number>('inlineCompletions.timeoutMs') || defaultTimeout;
+                let timedOut = false;
+                const timeoutId = setTimeout(() => { timedOut = true; abortController.abort(); }, timeoutMs);
 
                 const onCancel = token.onCancellationRequested(() => abortController.abort());
 
@@ -196,7 +207,9 @@ export class InlineCompletionProvider implements vscode.InlineCompletionItemProv
 
                 try {
                     const candidateCount = Math.min(getSetting<number>('inlineCompletions.candidates') || 1, 3);
+                    const t0 = Date.now();
                     const results = await this.fetchCandidates(document, position, abortController.signal, candidateCount);
+                    const elapsed = Date.now() - t0;
 
                     if (results.length > 0 && !token.isCancellationRequested) {
                         const items = results.map(r =>
@@ -218,11 +231,16 @@ export class InlineCompletionProvider implements vscode.InlineCompletionItemProv
 
                         resolve(new vscode.InlineCompletionList(items));
                     } else {
+                        if (!token.isCancellationRequested && !abortController.signal.aborted) {
+                            this.log(`Inline completion: no suggestion returned (elapsed ${elapsed}ms, candidates=${candidateCount}).`);
+                        }
                         resolve(undefined);
                     }
                 } catch (err: any) {
                     if (err.message !== 'Aborted' && !abortController.signal.aborted) {
                         this.log(`Inline completion error: ${err.message}`);
+                    } else if (timedOut) {
+                        this.log(`Inline completion timed out after ${timeoutMs}ms (wireApi=${wireApi}). Increase junior.inlineCompletions.timeoutMs if your model needs more time.`);
                     }
                     resolve(undefined);
                 } finally {
@@ -443,12 +461,16 @@ export class InlineCompletionProvider implements vscode.InlineCompletionItemProv
 
         const temperature = Math.min((getSetting<number>('temperature') || 0.3) + temperatureOffset, 1.0);
 
+        // Route to the same wire API as the main agent loop. When the deployment / APIM
+        // route only exposes /v1/responses, hitting /chat/completions returns 404.
+        const wireApi = (getSetting<string>('azureOpenAI.wireApi') || 'chat-completions').toLowerCase();
+        const stream = wireApi === 'responses'
+            ? this.streamViaResponses(messages, abortSignal, maxTokens, temperature)
+            : this.aoaiClient.streamChat(messages, [], abortSignal, { maxTokens, temperature });
+
         let result = '';
         try {
-            for await (const chunk of this.aoaiClient.streamChat(messages, [], abortSignal, {
-                maxTokens,
-                temperature
-            })) {
+            for await (const chunk of stream) {
                 if (abortSignal.aborted) { return undefined; }
                 if (chunk.type === 'text') {
                     result += chunk.text;
@@ -471,6 +493,33 @@ export class InlineCompletionProvider implements vscode.InlineCompletionItemProv
 
         result = result.trimEnd();
         return result.length > 0 ? result : undefined;
+    }
+
+    /**
+     * Stream a completion via the /v1/responses wire API. Lazily constructs the
+     * AoaiResponsesClient on first use so we don't pay the cost when wireApi is
+     * the default chat-completions.
+     */
+    private async *streamViaResponses(
+        messages: { role: 'system' | 'user' | 'assistant'; content: string }[],
+        abortSignal: AbortSignal,
+        maxTokens: number,
+        temperature: number
+    ) {
+        if (!this.responsesClient) {
+            this.responsesClient = new AoaiResponsesClient(this.aoaiClient);
+        }
+        // Inline completions don't benefit from chain-of-thought; disable
+        // reasoning entirely so latency stays low and the token budget goes to
+        // visible output instead of hidden thinking. (gpt-5.4 supports 'none'.)
+        yield* this.responsesClient.getResponseStream(messages as any, {
+            tools: [],
+            maxTokens,
+            temperature,
+            reasoningEffort: 'none',
+            reasoningSummary: 'none',
+            signal: abortSignal,
+        });
     }
 
     dispose() {

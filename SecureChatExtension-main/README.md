@@ -23,7 +23,9 @@ If you are setting up Junior for the first time, use this path:
 
 ### Which setup should I choose?
 
-| If your environment looks like this | Use this sample | Auth |
+> The filenames in the table below are bundled inside the VSIX. The fastest way to open one is **Junior: Open Sample Settings** from the Command Palette — that works fully offline. The links also resolve on GitHub and the VS Code Marketplace.
+
+| If your environment looks like this | Sample file | Auth |
 |---|---|---|
 | You have a direct Azure OpenAI / Foundry endpoint | [`samples/direct-key.settings.json`](samples/direct-key.settings.json) | Resource key |
 | You have Azure API Management (APIM) in front of Azure OpenAI / Foundry and were given a subscription key | [`samples/apim-key.settings.json`](samples/apim-key.settings.json) | APIM subscription key |
@@ -201,11 +203,10 @@ Minimal selector settings:
 }
 ```
 
-For BYOK details (key, bearer, sovereign cloud), see:
+For BYOK details (key or bearer through APIM, sovereign cloud), see the same APIM guides Junior uses:
 
-- [docs/APIM-COPILOT-CLI-BYOK-SETUP.md](docs/APIM-COPILOT-CLI-BYOK-SETUP.md)
-- [docs/APIM-COPILOT-CLI-BYOK-KEY-SETUP.md](docs/APIM-COPILOT-CLI-BYOK-KEY-SETUP.md)
-- [docs/APIM-COPILOT-CLI-BYOK-BEARER-SETUP.md](docs/APIM-COPILOT-CLI-BYOK-BEARER-SETUP.md)
+- [docs/APIM-FOUNDRY-KEY-SETUP.md](docs/APIM-FOUNDRY-KEY-SETUP.md) — APIM in front of Foundry, subscription-key auth.
+- [docs/APIM-FOUNDRY-BEARER-SETUP.md](docs/APIM-FOUNDRY-BEARER-SETUP.md) — APIM in front of Foundry, Entra bearer auth (with managed identity to the backend).
 
 For Copilot SDK troubleshooting, set `junior.copilotCli.logSdkEvents` to `true` and inspect the **Junior** output channel.
 
@@ -247,14 +248,20 @@ Plain Markdown, capped at 4,000 characters. If both paths exist, the first one f
 
 ### Slash Commands and Spec Kit (Optional)
 
-Type `/` in the chat input to see available commands. Any `.md` file in the command directories below works as a slash command:
+Type `/` in the chat input to see available commands. Any `.md` or `.prompt.md` file in the command directories below works as a slash command (YAML frontmatter is stripped automatically):
 
 1. directories listed in `junior.slashCommands.directories`
 2. `.junior/commands/`
 3. `.github/copilot/commands/`
 4. `.github/commands/`
+5. `.github/prompts/`
 
-Junior is compatible with [GitHub Spec Kit](https://github.com/github/spec-kit) command files. Initialize once with `specify init . --ai generic --ai-commands-dir .junior/commands` and commit the resulting `.junior/commands/` folder so the rest of the team gets the slash commands without installing Spec Kit.
+Junior is compatible with [GitHub Spec Kit](https://github.com/github/spec-kit) — **no GitHub Copilot install, sign-in, or network access required**. Spec Kit is a Python CLI that just writes prompt templates into your repo; Junior reads them locally. Two ways to set it up:
+
+- **Portable (recommended for restricted environments)** — `specify init . --ai generic --ai-commands-dir .junior/commands`. Commit `.junior/commands/` so the whole team gets the slash commands without installing Spec Kit.
+- **Drop-in** — `specify init . --ai copilot` writes to `.github/prompts/` and gives you `/speckit.constitution`, `/speckit.specify`, `/speckit.plan`, `/speckit.tasks`, `/speckit.implement`, `/speckit.clarify`, and `/speckit.analyze`. The `--ai copilot` flag only selects which template variant Spec Kit writes — it does not require Copilot to be installed or signed in. Use this if you also use Copilot Chat in non-restricted projects and want one shared prompt set.
+
+The `.specify/scripts/powershell/` helpers Spec Kit drops in your repo run via Junior's terminal tool on Windows with no WSL.
 
 ## Settings Reference
 
@@ -271,10 +278,25 @@ All settings use the `junior.*` namespace. Only the settings most users touch ar
 | `junior.azureOpenAI.endpoint` | `""` | Resource URL. Used when `provider` is `direct`. |
 | `junior.azureOpenAI.apimBaseUrl` | `""` | APIM base URL with required path prefix. Used when `provider` is `apim`. |
 | `junior.azureOpenAI.openaiBaseUrl` | `"https://api.openai.com/v1"` | Base URL for OpenAI-compatible APIs. |
-| `junior.azureOpenAI.apiVersion` | `"2025-03-01-preview"` | Azure OpenAI API version for `direct` and `apim`. |
+| `junior.azureOpenAI.apiVersion` | `"2025-03-01-preview"` | Azure OpenAI API version. Used when `wireApi` is `chat-completions` (the v1 `responses` wire API does not require it). |
 | `junior.azureOpenAI.deployments` | `[]` | Selectable models. Each entry: `{ name, deploymentId, apiVersion? }`. |
 | `junior.azureOpenAI.activeDeployment` | `""` | Default chat model. |
 | `junior.azureOpenAI.apiKey` | `""` | Settings-based API key fallback. Prefer **Junior: Set API Key**. |
+
+### Wire API (responses vs. chat-completions)
+
+The APIM samples default to **`wireApi: responses`** — the new `/openai/v1/responses` route that the Azure AI Foundry portal exposes when you import the Foundry API template into APIM. It's faster on tool-call-heavy turns (server-side state), surfaces typed reasoning events for the **Thinking** panel, and puts the model in the request body so you don't need an `api-version` query parameter.
+
+If your APIM route does NOT expose `/openai/v1/responses` (older Azure OpenAI template imports, classic AOAI deployments, OpenAI-compat endpoints), set `junior.azureOpenAI.wireApi` to `chat-completions` (or remove it — that's still the built-in default) and Junior reverts to `/openai/deployments/{id}/chat/completions?api-version=...`.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `junior.azureOpenAI.wireApi` | `"chat-completions"` | `responses` for the Foundry `/openai/v1/responses` path; `chat-completions` for the classic Azure OpenAI deployment route. The bundled APIM samples set this to `responses`. |
+| `junior.azureOpenAI.reasoningEffort` | `"high"` | `none`, `low`, `medium`, `high`, or `xhigh`. Honored only when `wireApi=responses` and the deployment is reasoning-capable. Lower = faster + cheaper. |
+| `junior.azureOpenAI.reasoningSummary` | `"auto"` | `auto`, `detailed`, or `none`. Controls the streamed reasoning summary that powers the **Thinking** panel in the chat view. |
+| `junior.azureOpenAI.useServerSideState` | `false` | When `true` and `wireApi=responses`, threads `previous_response_id` across iterations within a turn so the model doesn't re-derive prior reasoning. |
+
+See [docs/APIM-FOUNDRY-KEY-SETUP.md](docs/APIM-FOUNDRY-KEY-SETUP.md) or [docs/APIM-FOUNDRY-BEARER-SETUP.md](docs/APIM-FOUNDRY-BEARER-SETUP.md) for the matching APIM configuration.
 
 ### Local Bearer Auth
 
@@ -450,10 +472,8 @@ The token's `aud` does not match what the backend expects. Check `junior.azureOp
 
 Run **Junior: Open Documentation** from the Command Palette to browse the bundled guides directly inside VS Code. The same files live in [`docs/`](docs/) in the repo:
 
-- [docs/APIM-JUNIOR-LOCAL-SETUP.md](docs/APIM-JUNIOR-LOCAL-SETUP.md) — APIM in front of Foundry for Junior local mode (key + bearer policies).
-- [docs/APIM-COPILOT-CLI-BYOK-SETUP.md](docs/APIM-COPILOT-CLI-BYOK-SETUP.md) — Index for the Copilot CLI APIM BYOK guides.
-- [docs/APIM-COPILOT-CLI-BYOK-KEY-SETUP.md](docs/APIM-COPILOT-CLI-BYOK-KEY-SETUP.md) — APIM key-mode policy for Copilot CLI BYOK.
-- [docs/APIM-COPILOT-CLI-BYOK-BEARER-SETUP.md](docs/APIM-COPILOT-CLI-BYOK-BEARER-SETUP.md) — APIM bearer-mode policy for Copilot CLI BYOK.
+- [docs/APIM-FOUNDRY-KEY-SETUP.md](docs/APIM-FOUNDRY-KEY-SETUP.md) — APIM in front of Foundry, subscription-key auth (works for both Junior local and Copilot CLI).
+- [docs/APIM-FOUNDRY-BEARER-SETUP.md](docs/APIM-FOUNDRY-BEARER-SETUP.md) — APIM in front of Foundry, Entra bearer auth with managed identity to the backend (works for both Junior local and Copilot CLI).
 - [docs/ENTRA-VSCODE-AUTH-APP-SETUP.md](docs/ENTRA-VSCODE-AUTH-APP-SETUP.md) — Two-app Entra registration pattern for VS Code sign-in.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — Internal architecture overview.
 - [docs/developer-getstarted.md](docs/developer-getstarted.md) — Building Junior from source.

@@ -2,9 +2,9 @@
   "name": "junior",
   "displayName": "Junior - AI junior programming assistant",
   "description": "An offline-capable AI coding assistant powered by Azure OpenAI, providing agentic chat, code analysis, editing, and project scaffolding.",
-  "version": "1.1.6",
+  "version": "1.1.7",
   "publisher": "Microsoft",
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/adamruderman/junior"
@@ -22,7 +22,6 @@
     "Programming Languages"
   ],
   "activationEvents": [
-    "onStartupFinished",
     "onView:junior.chatView"
   ],
   "main": "./out/extension.js",
@@ -279,14 +278,53 @@
           "junior.azureOpenAI.apimBaseUrl": {
             "type": "string",
             "default": "",
-            "description": "APIM gateway base URL including path prefix (e.g., https://my-apim.azure-api.net/foundryapi). Used when provider is 'apim'.",
+            "description": "APIM gateway base URL. For the Foundry /openai/v1 wire (the default in the bundled APIM samples), use the gateway host root only (e.g., https://my-apim.azure-api.net). For the classic chat-completions wire, include the API path prefix (e.g., https://my-apim.azure-api.net/foundryapi). Used when provider is 'apim'.",
             "order": 6
           },
           "junior.azureOpenAI.apiVersion": {
             "type": "string",
             "default": "2025-03-01-preview",
-            "description": "Azure OpenAI API version. Used when provider is 'direct' or 'apim'.",
+            "description": "Azure OpenAI API version. Used when provider is 'direct' or 'apim' AND wireApi is 'chat-completions' (the v1 'responses' wire API does not require it).",
             "order": 7
+          },
+          "junior.azureOpenAI.wireApi": {
+            "type": "string",
+            "enum": [
+              "chat-completions",
+              "responses"
+            ],
+            "default": "chat-completions",
+            "description": "Wire API to use for Azure OpenAI / APIM / OpenAI providers. 'chat-completions' uses the classic deployments-in-URL route (POST /openai/deployments/{id}/chat/completions). 'responses' uses the newer OpenAI-compatible v1 route (POST /openai/v1/responses) with the model in the body, no api-version, and typed reasoning events. APIM users: the 'responses' wire requires an APIM API exposing /openai/v1/responses (e.g. URL suffix 'openai/v1' over operations like POST /responses).",
+            "order": 14
+          },
+          "junior.azureOpenAI.reasoningEffort": {
+            "type": "string",
+            "enum": [
+              "minimal",
+              "low",
+              "medium",
+              "high"
+            ],
+            "default": "high",
+            "description": "Default reasoning.effort for the v1 'responses' wire API. Only applies when wireApi='responses' and the model supports reasoning (GPT-5 family, o-series). Higher = more visible thinking, more tokens, more latency.",
+            "order": 15
+          },
+          "junior.azureOpenAI.reasoningSummary": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "detailed",
+              "none"
+            ],
+            "default": "auto",
+            "description": "Default reasoning.summary for the v1 'responses' wire API. 'auto' lets the model decide when to surface a reasoning summary, 'detailed' always emits one, 'none' disables the reasoning panel stream.",
+            "order": 16
+          },
+          "junior.azureOpenAI.useServerSideState": {
+            "type": "boolean",
+            "default": false,
+            "description": "Opt into server-side conversation state on the v1 'responses' wire API (passes previous_response_id between turns instead of resending the full history). Off by default: requires the upstream to honor 'store: true' which some air-gapped deployments forbid.",
+            "order": 17
           }
         }
       },
@@ -747,6 +785,17 @@
             "default": false,
             "description": "Log raw Copilot SDK session events to the Junior output channel for CLI runtime debugging.",
             "order": 17
+          },
+          "junior.copilotCli.reasoningDisplay": {
+            "type": "string",
+            "enum": [
+              "panel",
+              "working",
+              "off"
+            ],
+            "default": "panel",
+            "description": "Where to surface model reasoning deltas emitted by the Copilot CLI: 'panel' renders the collapsible Thinking panel above each assistant reply (matches the local agent), 'working' folds them into the Working block as scrollable progress text, 'off' suppresses them entirely.",
+            "order": 18
           }
         }
       }

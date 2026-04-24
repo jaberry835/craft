@@ -30,6 +30,9 @@ export function shouldPersistTranscriptMessage(message: ExtensionMessage): boole
         case 'appendAssistantText':
         case 'endAssistantMessage':
         case 'narrationText':
+        case 'reasoningStart':
+        case 'reasoningAppend':
+        case 'reasoningEnd':
         case 'workingBlockStarted':
         case 'workingTextAppended':
         case 'workingActionAdded':
@@ -90,6 +93,37 @@ export function applyTranscriptMessage(
                 kind: 'narration',
                 text: message.text,
             });
+            return current;
+        }
+        case 'reasoningStart': {
+            const reasoning = {
+                id: nextId('reasoning'),
+                kind: 'reasoning' as const,
+                text: '',
+            };
+            current.items.push(reasoning);
+            current.activeReasoningItemId = reasoning.id;
+            return current;
+        }
+        case 'reasoningAppend': {
+            const reasoning = current.activeReasoningItemId
+                ? current.items.find((item): item is import('./types').PersistedReasoningTranscriptItem => item.kind === 'reasoning' && item.id === current.activeReasoningItemId)
+                : undefined;
+            if (reasoning) {
+                reasoning.text += message.text;
+            } else {
+                const created = {
+                    id: nextId('reasoning'),
+                    kind: 'reasoning' as const,
+                    text: message.text,
+                };
+                current.items.push(created);
+                current.activeReasoningItemId = created.id;
+            }
+            return current;
+        }
+        case 'reasoningEnd': {
+            current.activeReasoningItemId = undefined;
             return current;
         }
         case 'workingBlockStarted': {

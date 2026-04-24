@@ -52,3 +52,22 @@ export enum StatusBarAlignment {
     Left = 1,
     Right = 2,
 }
+
+export enum ConfigurationTarget {
+    Global = 1,
+    Workspace = 2,
+    WorkspaceFolder = 3,
+}
+
+export class MarkdownString {
+    value: string = '';
+    isTrusted: boolean = false;
+    supportThemeIcons: boolean = false;
+    constructor(value?: string, _supportThemeIcons?: boolean) {
+        this.value = value ?? '';
+    }
+    appendMarkdown(text: string): MarkdownString {
+        this.value += text;
+        return this;
+    }
+}

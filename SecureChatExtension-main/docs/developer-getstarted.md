@@ -185,5 +185,6 @@ When cutting a new VSIX:
 
 - [../README.md](../README.md) — user-facing setup, settings, providers, MCP, slash commands.
 - [ARCHITECTURE.md](ARCHITECTURE.md) — agent loop, framework layer, middleware, runtimes, retrieval, UI.
-- [APIM-COPILOT-CLI-BYOK-SETUP.md](APIM-COPILOT-CLI-BYOK-SETUP.md) — APIM in front of Foundry for the Copilot CLI BYOK runtime (key + bearer variants).
+- [APIM-FOUNDRY-KEY-SETUP.md](APIM-FOUNDRY-KEY-SETUP.md) — APIM in front of Foundry, subscription-key auth (works for Junior local and Copilot CLI BYOK).
+- [APIM-FOUNDRY-BEARER-SETUP.md](APIM-FOUNDRY-BEARER-SETUP.md) — APIM in front of Foundry, Entra bearer auth with managed identity to the backend.
 - [ENTRA-VSCODE-AUTH-APP-SETUP.md](ENTRA-VSCODE-AUTH-APP-SETUP.md) — two-app Entra registration pattern for VS Code auth sessions.

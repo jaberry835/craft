@@ -30,6 +30,13 @@ export interface ChatOptions {
     stop?: string[];
     /** Whether to use reasoning-compatible parameters (system→developer, no temp). */
     reasoningMode?: boolean;
+    /** Reasoning effort hint (responses wire API only). */
+    reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+    /** Reasoning summary mode (responses wire API only). */
+    reasoningSummary?: 'auto' | 'detailed' | 'none';
+    /** Server-side conversation state id (responses wire API only). When set, the
+     *  client sends only the new turn(s) plus this previous_response_id. */
+    previousResponseId?: string;
     /** AbortSignal for cancellation. */
     signal?: AbortSignal;
 }
@@ -49,6 +56,10 @@ export interface ChatResponse {
     usage?: TokenUsage;
     /** The model/deployment that produced this response. */
     modelId?: string;
+    /** Server-side response id (responses wire API only). */
+    responseId?: string;
+    /** Reasoning summary text aggregated across the stream (responses wire API only). */
+    reasoningSummary?: string;
 }
 
 // ── Streaming ──
@@ -56,9 +67,12 @@ export interface ChatResponse {
 /** A single chunk emitted during streaming. */
 export type ChatStreamChunk =
     | { type: 'text'; text: string }
+    | { type: 'reasoning'; text: string }
+    | { type: 'reasoningSummary'; text: string }
     | { type: 'toolCallStarted' }
     | { type: 'toolCalls'; calls: ToolCall[] }
     | { type: 'usage'; usage: TokenUsage }
+    | { type: 'responseId'; id: string }
     | { type: 'done' }
     | { type: 'retry'; reason: string };
 

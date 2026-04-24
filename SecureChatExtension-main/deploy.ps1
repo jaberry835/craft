@@ -136,7 +136,29 @@ function Invoke-Build {
             Remove-Item -Force
 
         Write-Step "Packaging extension (.vsix)"
-        npx @vscode/vsce package --no-dependencies | Write-Host
+        # vsce rewrites relative README links to absolute URLs and, by default,
+        # tries to *reach* the repository host (e.g. GitHub) to confirm it. In
+        # restricted/customer networks (cert-auth proxies, internal GitHub
+        # mirrors, fully offline) that lookup fails and packaging aborts.
+        # Pre-supplying --baseContentUrl/--baseImageUrl tells vsce to skip the
+        # network check and just rewrite links against that base.
+        $packageJson = Get-Content -Raw -Path $packageJsonPath | ConvertFrom-Json -Depth 100
+        $repoUrl = $null
+        if ($packageJson.repository -and $packageJson.repository.url) {
+            $repoUrl = ($packageJson.repository.url -replace '^git\+','' -replace '\.git$','').TrimEnd('/')
+        }
+        $vsceArgs = @('@vscode/vsce', 'package', '--no-dependencies')
+        if ($repoUrl) {
+            $rawBase = "$repoUrl/raw/main/"
+            # Note: current @vscode/vsce only accepts --baseContentUrl; the older
+            # --baseImageUrl flag was removed. baseContentUrl alone is enough to
+            # skip the repository host lookup that fails on restricted networks.
+            $vsceArgs += @('--baseContentUrl', $rawBase)
+            Write-Ok "Using --baseContentUrl=$rawBase (skips repository host lookup)"
+        } else {
+            Write-Warn "No repository.url in package.json; vsce may try to contact the repo host."
+        }
+        npx @vsceArgs | Write-Host
         if ($LASTEXITCODE -ne 0) { throw "vsce package failed" }
 
         $vsix = Get-ChildItem -Path . -Filter $VsixPattern | Select-Object -First 1

@@ -57,4 +57,17 @@
     ],
     "junior.azureOpenAI.activeDeployment": "gpt-4o",
     "junior.inlineCompletions.deployment": "gpt-4o"
+
+    // -------------------------------------------------------------------------
+    // Optional: opt into the new /openai/v1/responses wire API.
+    // Requires a reasoning-capable deployment (gpt-5.x / o-series) for the
+    // "Thinking" panel to populate. Lower reasoningEffort = faster.
+    //
+    // To enable: add a comma to the line above, then uncomment the block:
+    //
+    // "junior.azureOpenAI.wireApi": "responses",
+    // "junior.azureOpenAI.reasoningEffort": "medium",
+    // "junior.azureOpenAI.reasoningSummary": "auto",
+    // "junior.azureOpenAI.useServerSideState": true
+    // -------------------------------------------------------------------------
 }
