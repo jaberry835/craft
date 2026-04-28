@@ -534,6 +534,10 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
   
   private destroy$ = new Subject<void>();
   private shouldScroll = false;
+  /** Epoch ms until which ngAfterViewChecked should keep forcing scroll-to-bottom.
+   *  Used to handle late layout (e.g. wizard form mount, image decode, font swap)
+   *  that happens AFTER the initial post-stream scroll has fired. */
+  private pinToBottomUntil = 0;
   private currentPendingId?: string; // Track the pending session ID for this chat
   
   constructor(
@@ -597,6 +601,10 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
     if (this.shouldScroll) {
       this.scrollToBottom();
       this.shouldScroll = false;
+    } else if (Date.now() < this.pinToBottomUntil) {
+      // Late layout window: keep snapping to the bottom as long as the
+      // container's content keeps growing (wizard form mount, etc.).
+      this.scrollToBottom();
     }
   }
   
@@ -624,7 +632,11 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
       console.log('Using cached messages:', cachedMessages.length);
       this.messages = cachedMessages as DisplayMessage[];
       this.isLoading = false;
+      // Cached-message replay happens after new-session redirect. The wizard
+      // form (if any) mounts in a later CD cycle, so use the same scheduled /
+      // pinned scroll the stream-complete path uses.
       this.shouldScroll = true;
+      this.scheduleScrollToBottom();
       // Still load session details for the header
       this.chatService.getSession(this.sessionId)
         .pipe(takeUntil(this.destroy$))
@@ -979,6 +991,13 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
           }];
           this.streamingMessage = undefined;
         }
+        // The wizard form (if any) only renders once isStreaming flips to
+        // false, which can grow the chat container AFTER the last mid-stream
+        // auto-scroll fires. Schedule several scrolls (next tick + a couple of
+        // animation frames + a longer fallback) so we still land at the
+        // bottom once the form's layout has settled.
+        this.shouldScroll = true;
+        this.scheduleScrollToBottom();
       }
     });
   }
@@ -1493,9 +1512,36 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
   
   private scrollToBottom(): void {
     try {
+      // Prefer programmatic scroll on the container — it is deterministic
+      // even when layout shifts (e.g. the wizard form mounting) would
+      // otherwise interrupt a smooth scrollIntoView animation.
+      const container = this.messagesContainer?.nativeElement as HTMLElement | undefined;
+      if (container) {
+        container.scrollTop = container.scrollHeight;
+        return;
+      }
       this.scrollAnchor.nativeElement.scrollIntoView({ behavior: 'smooth' });
     } catch (err) {
       console.error('Scroll error:', err);
     }
+  }
+
+  /**
+   * Schedule multiple scroll-to-bottom passes so we still end up at the
+   * bottom after late layout (e.g. dynamically mounted wizard form fields,
+   * images decoding, fonts swapping).
+   */
+  private scheduleScrollToBottom(): void {
+    this.scrollToBottom();
+    // Keep ngAfterViewChecked snapping to the bottom for ~600ms so the
+    // wizard form mounting in a later change-detection cycle still scrolls.
+    this.pinToBottomUntil = Date.now() + 600;
+    requestAnimationFrame(() => {
+      this.scrollToBottom();
+      requestAnimationFrame(() => this.scrollToBottom());
+    });
+    setTimeout(() => this.scrollToBottom(), 100);
+    setTimeout(() => this.scrollToBottom(), 300);
+    setTimeout(() => this.scrollToBottom(), 600);
   }
 }
