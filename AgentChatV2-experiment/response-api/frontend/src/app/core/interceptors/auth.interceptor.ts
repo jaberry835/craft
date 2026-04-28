@@ -1,0 +1,188 @@
+import { HttpInterceptorFn, HttpRequest, HttpHandlerFn } from '@angular/common/http';
+import { inject } from '@angular/core';
+import { MsalService } from '@azure/msal-angular';
+import { InteractionRequiredAuthError, BrowserAuthError, SilentRequest } from '@azure/msal-browser';
+import { from, switchMap, catchError, throwError, EMPTY } from 'rxjs';
+import { environment } from '@env/environment';
+import { AuthService } from '../services/auth.service';
+
+/**
+ * URL patterns that don't require authentication (public endpoints).
+ * Requests to these URLs will pass through without a token.
+ */
+const PUBLIC_URL_PATTERNS = [
+  '/api/settings/ui',
+  '/api/health',
+];
+
+/**
+ * Module-level flag to prevent multiple simultaneous login redirects.
+ * MSAL cannot handle concurrent redirect calls; only the first should proceed.
+ * Resets automatically on page reload (which happens after redirect).
+ */
+let loginRedirectActive = false;
+
+/**
+ * Auth interceptor that attaches JWT tokens to API requests.
+ * 
+ * Key behavior:
+ * 1. Skips public endpoints that don't need authentication
+ * 2. First checks MSAL's token cache for a valid cached token (fast, no iframe)
+ * 3. Only calls acquireTokenSilent if no cached token exists
+ * 4. Falls back to redirect if silent fails (with duplicate-redirect guard)
+ */
+export const authInterceptor: HttpInterceptorFn = (
+  req: HttpRequest<unknown>,
+  next: HttpHandlerFn
+) => {
+  const msalService = inject(MsalService);
+  
+  // Only add token for API requests
+  const isApiRequest = (environment.apiUrl && req.url.startsWith(environment.apiUrl)) || 
+                       req.url.startsWith('/api') ||
+                       (environment.backendUrl && req.url.startsWith(environment.backendUrl));
+  
+  if (!isApiRequest) {
+    return next(req);
+  }
+
+  // Skip auth for public endpoints that don't need a token
+  if (PUBLIC_URL_PATTERNS.some(pattern => req.url.includes(pattern))) {
+    return next(req);
+  }
+  
+  const account = msalService.instance.getActiveAccount();
+  
+  if (!account) {
+    // If a redirect or consent re-auth is already in progress, don't trigger another.
+    if (loginRedirectActive || AuthService.isConsentPending()) {
+      console.log('[Auth] No active account but login/consent redirect already in progress');
+      return EMPTY;
+    }
+    console.warn('[Auth] No active account - triggering loginRedirect');
+    loginRedirectActive = true;
+    msalService.loginRedirect({ scopes: environment.loginScopes });
+    return EMPTY;
+  }
+  
+  // Build the token request
+  const tokenRequest: SilentRequest = {
+    scopes: environment.apiScopes,
+    account: account,
+    forceRefresh: false
+  };
+  
+  // OPTIMIZATION: Check cache first before calling acquireTokenSilent
+  // This avoids creating iframes for every API request when we already have a valid token
+  const cachedToken = getCachedAccessToken(msalService, tokenRequest);
+  
+  if (cachedToken) {
+    // We have a valid cached token - use it directly (no iframe needed)
+    const authReq = req.clone({
+      setHeaders: { Authorization: `Bearer ${cachedToken}` }
+    });
+    return next(authReq);
+  }
+  
+  // No cached token - need to acquire one silently (uses iframe)
+  return from(
+    msalService.instance.acquireTokenSilent(tokenRequest)
+  ).pipe(
+    switchMap(result => {
+      const authReq = req.clone({
+        setHeaders: { Authorization: `Bearer ${result.accessToken}` }
+      });
+      return next(authReq);
+    }),
+    catchError(error => {
+      console.error('[Auth] Token acquisition failed:', error.name);
+      
+      // If interaction required OR silent iframe timed out / was blocked,
+      // redirect to login so the user can re-authenticate.
+      // Guard against duplicate redirects — only the first concurrent failure triggers one.
+      if (
+        error instanceof InteractionRequiredAuthError ||
+        error instanceof BrowserAuthError
+      ) {
+        if (loginRedirectActive) {
+          console.warn(`[Auth] ${error.name} - redirect already in progress, skipping`);
+          return EMPTY;
+        }
+        console.warn(`[Auth] ${error.name} - triggering loginRedirect`);
+        loginRedirectActive = true;
+        msalService.loginRedirect({
+          scopes: environment.apiScopes,
+          account: account
+        });
+        return EMPTY;
+      }
+      
+      return throwError(() => error);
+    })
+  );
+};
+
+/**
+ * Check if there's a valid cached access token.
+ * This is much faster than acquireTokenSilent because it doesn't create iframes.
+ * 
+ * Returns the access token if cached and not expired, null otherwise.
+ */
+function getCachedAccessToken(msalService: MsalService, request: SilentRequest): string | null {
+  try {
+    // Get all cached tokens for this account
+    const tokenCache = msalService.instance.getTokenCache();
+    
+    // Try to get the access token from cache without network call
+    // MSAL's getAllAccounts and internal cache can be used
+    const account = request.account;
+    if (!account) return null;
+    
+    // Use MSAL's internal cache lookup
+    // The acquireTokenSilent with forceRefresh:false will use cache,
+    // but calling it creates Promise overhead. Instead, check cache directly.
+    const allAccounts = msalService.instance.getAllAccounts();
+    const activeAccount = allAccounts.find(a => a.homeAccountId === account.homeAccountId);
+    
+    if (!activeAccount) return null;
+    
+    // MSAL doesn't expose direct cache access easily, but we can check
+    // if acquireTokenSilent would succeed by looking at the cache state.
+    // The safest approach is to use the internal cache mechanism.
+    
+    // Get cached tokens - MSAL stores them in localStorage/sessionStorage
+    const cacheKey = `${account.homeAccountId}-${environment.msalConfig.auth.clientId}`;
+    const storage = window.localStorage;
+    
+    // Look for access token in cache
+    for (let i = 0; i < storage.length; i++) {
+      const key = storage.key(i);
+      if (key && key.includes(account.homeAccountId) && key.includes('accesstoken')) {
+        try {
+          const cached = JSON.parse(storage.getItem(key) || '{}');
+          const expiresOn = cached.expiresOn ? parseInt(cached.expiresOn, 10) : 0;
+          const now = Math.floor(Date.now() / 1000);
+          
+          // Check if token is still valid (with 5 min buffer)
+          if (expiresOn > now + 300) {
+            // Verify this token is for our requested scopes
+            const cachedScopes = (cached.target || '').toLowerCase().split(' ');
+            const requestedScopes = request.scopes.map(s => s.toLowerCase());
+            const hasAllScopes = requestedScopes.every(s => cachedScopes.includes(s));
+            
+            if (hasAllScopes && cached.secret) {
+              return cached.secret; // This is the actual access token
+            }
+          }
+        } catch {
+          // Ignore parse errors
+        }
+      }
+    }
+    
+    return null;
+  } catch {
+    // If anything fails, fall back to acquireTokenSilent
+    return null;
+  }
+}
