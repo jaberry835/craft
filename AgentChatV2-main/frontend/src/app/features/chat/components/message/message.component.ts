@@ -1155,9 +1155,13 @@ export class MessageComponent implements DoCheck, OnInit, OnDestroy {
         return false;
       };
 
-      // Rewrite <a> tags whose href ends in a document extension
+      // Rewrite <a> tags whose href ends in a document extension.
+      // The extension must be the FINAL path segment of the URL (followed by
+      // an optional query string and then the closing href quote).  Without
+      // the end-anchor lookahead, hosts like `chat-db.documents.azure.us`
+      // would match `.doc` mid-host and be turned into a download card.
       const docLinkPattern = new RegExp(
-        `(<a\\s[^>]*href=")(([^"]+\\.(${docExtensions})(?:\\?[^"]*)?))("[^>]*>)([\\s\\S]*?)(</a>)`, 'gi'
+        `(<a\\s[^>]*href=")(([^"]+\\.(${docExtensions})(?:\\?[^"]*)?))(?=")("[^>]*>)([\\s\\S]*?)(</a>)`, 'gi'
       );
       result = result.replace(docLinkPattern, (match, _prefix, fullUrl, _path, _ext, _suffix, _linkText, _closeTag) => {
         if (isNonDownloadUrl(fullUrl)) return match;
@@ -1165,9 +1169,14 @@ export class MessageComponent implements DoCheck, OnInit, OnDestroy {
         return this.buildDownloadCard(fullUrl, fileName);
       });
 
-      // Convert bare external document URLs in text (not inside <a> tags)
+      // Convert bare external document URLs in text (not inside <a> tags).
+      // Same end-anchor requirement: extension must be at the end of the URL
+      // token (followed by optional ?query, then whitespace / quote / `<` /
+      // EOS / common punctuation).  Otherwise URLs like
+      // `https://chat-db.documents.azure.us:443/` would be partially matched
+      // as `https://chat-db.doc` and rendered as a bogus download card.
       const bareDocUrlPattern = new RegExp(
-        `(?<!href="|">)(https?://[^\\s<"]+\\.(${docExtensions})(?:\\?[^\\s<"]*)?)`, 'gi'
+        `(?<!href="|">)(https?://[^\\s<"]+\\.(${docExtensions})(?:\\?[^\\s<"]*)?)(?=[\\s<"',.;:!?)\\]]|$)`, 'gi'
       );
       result = result.replace(bareDocUrlPattern, (match, fullUrl) => {
         if (isNonDownloadUrl(fullUrl)) return match;
