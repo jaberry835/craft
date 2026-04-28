@@ -71,6 +71,33 @@ def _env(name: str, default: Optional[str] = None) -> Optional[str]:
     return v if v is not None else default
 
 
+_SECRET_KEY_HINTS = (
+    "key", "secret", "password", "passwd", "token", "connectionstring",
+    "sastoken", "primarykey", "secondarykey", "accesskey",
+)
+
+
+def _redact_secrets(value: Any) -> Any:
+    """Recursively redact obvious secret-bearing fields in an ARM response.
+
+    Read-only ARM GETs typically don't return raw keys (you have to call
+    listKeys for that), but defense in depth: any field whose name hints
+    at a credential is replaced with "[REDACTED]".
+    """
+    if isinstance(value, dict):
+        out: Dict[str, Any] = {}
+        for k, v in value.items():
+            kl = k.lower()
+            if any(h in kl for h in _SECRET_KEY_HINTS) and isinstance(v, (str, int, float, bool)):
+                out[k] = "[REDACTED]"
+            else:
+                out[k] = _redact_secrets(v)
+        return out
+    if isinstance(value, list):
+        return [_redact_secrets(v) for v in value]
+    return value
+
+
 def _get_allowed_subscriptions() -> List[str]:
     """Return the whitelist of subscription IDs the policy tool may query.
 
@@ -1369,3 +1396,275 @@ def register_security_package_tools(mcp: FastMCP):
                 "Failed to render policy compliance HTML: %s", exc, exc_info=True
             )
             return {"success": False, "error": str(exc)}
+
+    # ----------------------------------------------------------------
+    # Tool 5 – Read-only Azure resource lookup (ARM GET)
+    # ----------------------------------------------------------------
+
+    @mcp.tool
+    def get_azure_resource(
+        resource_id: Optional[str] = None,
+        subscription_id: Optional[str] = None,
+        resource_group: Optional[str] = None,
+        resource_type: Optional[str] = None,
+        resource_name: Optional[str] = None,
+        api_version: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Read-only lookup of an Azure resource's properties via ARM GET.
+
+        Useful for drilling into a non-compliant resource surfaced by
+        ``get_policy_compliance`` — e.g. inspecting a storage account's
+        network rules, public access setting, or encryption config.
+
+        Three ways to identify the resource:
+
+        1. Full ARM ``resource_id`` (preferred when known — e.g. from a
+           ``get_policy_compliance`` row).
+        2. The four parts: ``subscription_id``, ``resource_group``,
+           ``resource_type``, ``resource_name``.
+        3. Just ``resource_name`` (and optionally ``resource_type`` to
+           disambiguate). The tool searches all allowed subscriptions
+           via Azure Resource Graph and uses the unique match. If
+           multiple resources share the name, the call returns the list
+           of candidates so the caller can pick one.
+
+        ``api_version`` is optional. If omitted, the tool discovers a
+        recent stable API version from the providers metadata endpoint.
+
+        Security:
+          - Only HTTP GET is performed. The tool cannot create, modify,
+            or delete resources.
+          - The subscription must be in
+            ``SECURITY_POLICY_ALLOWED_SUBSCRIPTIONS`` or the call is
+            refused.
+          - The user's identity is used (OBO) — the caller still needs
+            ``Reader`` (or higher) RBAC on the resource. ARM will reject
+            the GET if they don't.
+
+        Args:
+            resource_id: Full ARM resource ID (preferred).
+            subscription_id: Subscription containing the resource.
+            resource_group: Resource group name.
+            resource_type: Provider/type, e.g. ``Microsoft.Storage/storageAccounts``.
+            resource_name: Resource name.
+            api_version: Optional ARM api-version. Auto-discovered when omitted.
+
+        Returns:
+            ``{"success": True, "resource_id": str, "api_version": str,
+              "resource": {...}}`` on success — ``resource`` is the raw
+            ARM response with any obvious secret fields redacted.
+            ``{"success": False, "error": str}`` on failure.
+        """
+        if not HTTPX_AVAILABLE:
+            return {"success": False, "error": "httpx is not installed."}
+
+        management_endpoint = _env("AZURE_MANAGEMENT_ENDPOINT", "https://management.azure.com")
+        management_scope = _env("AZURE_MANAGEMENT_SCOPE", "https://management.azure.com/.default")
+
+        try:
+            access_token = _get_policy_arm_token(management_scope)
+        except Exception as exc:
+            logger.error("get_azure_resource: failed to acquire ARM token: %s", exc, exc_info=True)
+            return {"success": False, "error": f"Failed to acquire ARM token: {exc}"}
+
+        headers = {"Authorization": f"Bearer {access_token}"}
+
+        allowed = _get_allowed_subscriptions()
+        if not allowed:
+            return {
+                "success": False,
+                "error": (
+                    "No subscriptions are permitted. Configure "
+                    "SECURITY_POLICY_ALLOWED_SUBSCRIPTIONS."
+                ),
+            }
+
+        # ── Build/validate the resource ID ──────────────────────
+        if resource_id:
+            rid = resource_id.strip()
+        elif subscription_id and resource_group and resource_type and resource_name:
+            rid = (
+                f"/subscriptions/{subscription_id}"
+                f"/resourceGroups/{resource_group}"
+                f"/providers/{resource_type}/{resource_name}"
+            )
+        elif resource_name:
+            # Name-only lookup via Azure Resource Graph.
+            kql_parts = [f"name =~ '{resource_name.replace(chr(39), chr(39)*2)}'"]
+            if resource_type:
+                kql_parts.append(
+                    f"type =~ '{resource_type.replace(chr(39), chr(39)*2).lower()}'"
+                )
+            query = (
+                "Resources | where "
+                + " and ".join(kql_parts)
+                + " | project id, name, type, location, resourceGroup, subscriptionId"
+                + " | limit 25"
+            )
+            try:
+                with httpx.Client(timeout=30.0) as client:
+                    rg_resp = client.post(
+                        f"{management_endpoint}/providers/Microsoft.ResourceGraph/resources",
+                        params={"api-version": "2022-10-01"},
+                        headers={**headers, "Content-Type": "application/json"},
+                        json={"subscriptions": allowed, "query": query},
+                    )
+                    rg_resp.raise_for_status()
+                    rg_data = rg_resp.json()
+            except httpx.HTTPStatusError as exc:
+                return {
+                    "success": False,
+                    "error": (
+                        f"Resource Graph lookup failed: HTTP "
+                        f"{exc.response.status_code} {exc.response.text[:300]}"
+                    ),
+                }
+            except Exception as exc:
+                return {"success": False, "error": f"Resource Graph lookup failed: {exc}"}
+
+            matches = rg_data.get("data") or []
+            if not matches:
+                return {
+                    "success": False,
+                    "error": (
+                        f"No resource named '{resource_name}'"
+                        + (f" of type '{resource_type}'" if resource_type else "")
+                        + " found in any allowed subscription."
+                    ),
+                }
+            if len(matches) > 1:
+                return {
+                    "success": False,
+                    "error": (
+                        f"Multiple resources match '{resource_name}'. "
+                        "Pass 'resource_type' to disambiguate, or use the "
+                        "full 'resource_id' from one of the candidates."
+                    ),
+                    "candidates": matches,
+                }
+            rid = matches[0].get("id", "")
+            if not rid:
+                return {"success": False, "error": "Resource Graph match had no 'id' field."}
+        else:
+            return {
+                "success": False,
+                "error": (
+                    "Provide one of: 'resource_id'; the four parts "
+                    "(subscription_id + resource_group + resource_type + "
+                    "resource_name); or just 'resource_name' (optionally "
+                    "with 'resource_type' to disambiguate)."
+                ),
+            }
+
+        if not rid.startswith("/subscriptions/"):
+            return {
+                "success": False,
+                "error": "resource_id must start with /subscriptions/<subId>.",
+            }
+
+        # Extract subscription ID and provider/type for whitelist + api-version lookup.
+        parts = [p for p in rid.split("/") if p]
+        try:
+            sub_idx = parts.index("subscriptions")
+            sub_id = parts[sub_idx + 1]
+        except (ValueError, IndexError):
+            return {"success": False, "error": "Could not parse subscription from resource_id."}
+
+        if sub_id.lower() not in {s.lower() for s in allowed}:
+            return {
+                "success": False,
+                "error": (
+                    f"Subscription {sub_id} is not in "
+                    "SECURITY_POLICY_ALLOWED_SUBSCRIPTIONS."
+                ),
+            }
+
+        # Provider namespace + type path (e.g. Microsoft.Storage / storageAccounts)
+        try:
+            prov_idx = parts.index("providers")
+            provider_ns = parts[prov_idx + 1]
+            # Type path is the alternating segments after the provider:
+            # providers/<ns>/<type>/<name>[/<subtype>/<subname>...]
+            type_segments = parts[prov_idx + 2:]
+            # Take every other element starting at 0: type, subtype, ...
+            type_path = "/".join(type_segments[::2])
+        except (ValueError, IndexError):
+            return {"success": False, "error": "Could not parse provider/type from resource_id."}
+
+        # ── Resolve api-version if not supplied ─────────────────
+        resolved_api_version = api_version
+        if not resolved_api_version:
+            try:
+                with httpx.Client(timeout=20.0) as client:
+                    pr = client.get(
+                        f"{management_endpoint}/subscriptions/{sub_id}"
+                        f"/providers/{provider_ns}",
+                        params={"api-version": "2021-04-01"},
+                        headers=headers,
+                    )
+                    pr.raise_for_status()
+                    pdata = pr.json()
+                # Find the matching resourceTypes entry by case-insensitive type path.
+                target = type_path.lower()
+                versions: List[str] = []
+                for rt in pdata.get("resourceTypes", []) or []:
+                    if (rt.get("resourceType") or "").lower() == target:
+                        versions = rt.get("apiVersions") or []
+                        break
+                if not versions:
+                    return {
+                        "success": False,
+                        "error": (
+                            f"Could not auto-discover api-version for "
+                            f"{provider_ns}/{type_path}. Pass 'api_version' explicitly."
+                        ),
+                    }
+                # Prefer a stable (non-preview) version, newest first.
+                stable = [v for v in versions if "preview" not in v.lower()]
+                resolved_api_version = (stable or versions)[0]
+            except httpx.HTTPStatusError as exc:
+                return {
+                    "success": False,
+                    "error": (
+                        f"api-version discovery failed: HTTP {exc.response.status_code} "
+                        f"{exc.response.text[:300]}"
+                    ),
+                }
+            except Exception as exc:
+                return {"success": False, "error": f"api-version discovery failed: {exc}"}
+
+        # ── GET the resource ────────────────────────────────────
+        url = f"{management_endpoint}{rid}"
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                r = client.get(url, params={"api-version": resolved_api_version}, headers=headers)
+                if r.status_code == 404:
+                    return {
+                        "success": False,
+                        "error": f"Resource not found (404): {rid}",
+                    }
+                if r.status_code == 403:
+                    return {
+                        "success": False,
+                        "error": (
+                            "Access denied (403). The calling user needs "
+                            "'Reader' RBAC (or higher) on this resource."
+                        ),
+                    }
+                r.raise_for_status()
+                body = r.json()
+        except httpx.HTTPStatusError as exc:
+            return {
+                "success": False,
+                "error": f"ARM GET failed: HTTP {exc.response.status_code} {exc.response.text[:300]}",
+            }
+        except Exception as exc:
+            logger.error("get_azure_resource: ARM GET failed: %s", exc, exc_info=True)
+            return {"success": False, "error": f"ARM GET failed: {exc}"}
+
+        return {
+            "success": True,
+            "resource_id": rid,
+            "api_version": resolved_api_version,
+            "resource": _redact_secrets(body),
+        }
