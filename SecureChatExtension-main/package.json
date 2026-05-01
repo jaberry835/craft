@@ -151,6 +151,11 @@
         "command": "junior.selectAgentProvider",
         "title": "Junior: Select Agent Provider",
         "icon": "$(server-process)"
+      },
+      {
+        "command": "junior.createCustomAgent",
+        "title": "Junior: Create Custom Agent...",
+        "icon": "$(add)"
       }
     ],
     "menus": {

@@ -39,6 +39,9 @@ function stripFrontmatter(content: string): string {
 }
 import { ProviderRouter } from './providerRouter';
 import { replaySessionMessages } from './sessionRestore';
+import { CustomAgentDef, CustomAgentStore } from './customAgents';
+import { CustomAgentEditor } from './customAgentEditor';
+import { acquireSearchEntraToken, createSearchKnowledgeTool } from './tools/searchKnowledge';
 
 /** Minimum interval (ms) between consecutive agent loop submissions */
 const MIN_SUBMISSION_INTERVAL_MS = 2000;
@@ -55,6 +58,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private currentPermissionLevel: AgentPermissionLevel = DEFAULT_PERMISSION_LEVEL;
     /** Active chat mode */
     private activeMode: ChatMode = 'agent';
+    /** Active custom agent id, if any. When set, runs use the agent loop with the persona overlay. */
+    private activeCustomAgentId: string | null = null;
+    /** Cached list of custom agents to push to the webview. */
+    private customAgentsCache: CustomAgentDef[] = [];
     private log: (msg: string) => void;
     private lastSubmissionTime = 0;
     private restoringTranscript = false;
@@ -70,7 +77,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         log?: (msg: string) => void,
         private tokenTracker?: TokenTracker,
         private inlineDiffDecorator?: InlineDiffDecorator,
-        private globalState?: vscode.Memento
+        private globalState?: vscode.Memento,
+        private customAgentStore?: CustomAgentStore,
+        private extensionContext?: vscode.ExtensionContext,
     ) {
         this.log = log || (() => {});
         this.providerRouter = new ProviderRouter(
@@ -79,6 +88,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         );
         const currentSession = this.sessionManager.getCurrentSession();
         this.activeMode = this.getSessionMode(currentSession);
+        this.activeCustomAgentId = currentSession.activeCustomAgentId ?? null;
         this.currentPermissionLevel = currentSession.activePermissionLevel ?? DEFAULT_PERMISSION_LEVEL;
         this.refreshProviderAvailability();
         this.applyPermissionLevel(this.currentPermissionLevel, { persist: false, sync: false });
@@ -411,6 +421,132 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
     }
 
+    // ── Custom Agents ──
+
+    /** Push the current custom agent list + active selection to the webview. */
+    private async syncCustomAgentsToWebview(): Promise<void> {
+        if (!this.customAgentStore) {
+            this.sendToWebview({ type: 'setCustomAgents', agents: [], activeId: this.activeCustomAgentId });
+            return;
+        }
+        const agents = await this.customAgentStore.list();
+        this.customAgentsCache = agents;
+        // Drop the active selection if the agent has been deleted.
+        if (this.activeCustomAgentId && !agents.some(a => a.id === this.activeCustomAgentId)) {
+            this.activeCustomAgentId = null;
+        }
+        this.sendToWebview({
+            type: 'setCustomAgents',
+            agents: agents.map(a => ({ id: a.id, name: a.name, description: a.description, scope: a.scope ?? 'global' })),
+            activeId: this.activeCustomAgentId,
+        });
+    }
+
+    /**
+     * Apply the active custom agent (if any) to the existing AgentLoop. Must be
+     * called before each run so newly-created or edited agents take effect.
+     * Custom agents always force the local provider in agent mode.
+     */
+    private async applyActiveCustomAgent(): Promise<void> {
+        if (!this.agentLoop) { return; }
+        if (!this.activeCustomAgentId || !this.customAgentStore) {
+            this.agentLoop.setPersona(null);
+            return;
+        }
+        const def = await this.customAgentStore.get(this.activeCustomAgentId);
+        if (!def) {
+            this.activeCustomAgentId = null;
+            this.agentLoop.setPersona(null);
+            return;
+        }
+        const extraTools = [];
+        if (def.search) {
+            const embedding = def.search.embedding;
+            const tool = createSearchKnowledgeTool(def, {
+                getSearchKey: () => this.customAgentStore!.getSearchKey(def.id),
+                getEntraToken: () => acquireSearchEntraToken(def.search?.endpoint, {
+                    authProviderId: def.search?.authProviderId,
+                    entraScope: def.search?.entraScope,
+                }),
+                getEmbeddingKey: embedding && embedding.auth === 'key'
+                    ? () => this.customAgentStore!.getEmbeddingKey(def.id)
+                    : undefined,
+                getEmbeddingEntraToken: embedding && embedding.auth === 'entra'
+                    ? () => acquireSearchEntraToken(embedding.endpoint, {
+                        authProviderId: embedding.authProviderId,
+                        // Embedding endpoints (Azure OpenAI / APIM) use the Cognitive Services audience.
+                        entraScope: embedding.entraScope || 'https://cognitiveservices.azure.com/.default',
+                    })
+                    : undefined,
+                onCitations: (payload) => {
+                    this.sendToWebview({
+                        type: 'searchCitations',
+                        agentName: payload.agentName,
+                        query: payload.query,
+                        citations: payload.citations,
+                    });
+                },
+            });
+            if (tool) { extraTools.push(tool); }
+        }
+        this.agentLoop.setPersona({ systemPrompt: def.systemPrompt, extraTools });
+    }
+
+    private async handleSelectCustomAgent(id: string | null): Promise<void> {
+        if (this.activeProvider === 'copilot-cli' && id) {
+            this.sendToWebview({ type: 'error', message: 'Custom agents are only available with the Local provider.' });
+            await this.syncCustomAgentsToWebview();
+            return;
+        }
+        this.activeCustomAgentId = id;
+        if (this.sessionManager.getCurrentSession()) {
+            // Persist to the current session.
+            const sess = this.sessionManager.getCurrentSession();
+            (sess as any).activeCustomAgentId = id ?? undefined;
+        }
+        if (id) {
+            // Custom agents always run in agent mode.
+            this.setChatMode('agent');
+        }
+        await this.applyActiveCustomAgent();
+        await this.syncCustomAgentsToWebview();
+    }
+
+    private async openCustomAgentEditor(existingId?: string): Promise<void> {
+        if (!this.customAgentStore || !this.extensionContext) {
+            vscode.window.showErrorMessage('Custom agents are not available in this build.');
+            return;
+        }
+        const existing = existingId ? await this.customAgentStore.get(existingId) : undefined;
+        await CustomAgentEditor.open(this.extensionContext, this.customAgentStore, {
+            existing,
+            onSaved: async (saved) => {
+                this.activeCustomAgentId = saved.id;
+                await this.applyActiveCustomAgent();
+                await this.syncCustomAgentsToWebview();
+                this.setChatMode('agent');
+            },
+        });
+    }
+
+    private async handleDeleteCustomAgent(id: string): Promise<void> {
+        if (!this.customAgentStore) { return; }
+        const def = await this.customAgentStore.get(id);
+        if (!def) { return; }
+        const choice = await vscode.window.showWarningMessage(
+            `Delete custom agent "${def.name}"?`,
+            { modal: true },
+            'Delete',
+        );
+        if (choice !== 'Delete') { return; }
+        await this.customAgentStore.delete(id, def.scope ?? 'global');
+        if (this.activeCustomAgentId === id) {
+            this.activeCustomAgentId = null;
+            await this.applyActiveCustomAgent();
+        }
+        await this.syncCustomAgentsToWebview();
+    }
+
     private handleWebviewMessage(msg: WebviewMessage) {
         try {
             switch (msg.type) {
@@ -441,6 +577,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     break;
                 case 'selectChatMode':
                     this.setChatMode(msg.mode);
+                    break;
+                case 'selectCustomAgent':
+                    void this.handleSelectCustomAgent(msg.id);
+                    break;
+                case 'createCustomAgent':
+                    void this.openCustomAgentEditor();
+                    break;
+                case 'editCustomAgent':
+                    void this.openCustomAgentEditor(msg.id);
+                    break;
+                case 'deleteCustomAgent':
+                    void this.handleDeleteCustomAgent(msg.id);
                     break;
                 case 'runPlanInAgent':
                     this.sendToWebview({ type: 'planReady', visible: false });
@@ -509,6 +657,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     this.sendToWebview({ type: 'setAgentProvider', provider: this.activeProvider });
                     this.syncPermissionLevelToWebview();
                     this.sendToWebview({ type: 'setChatMode', mode: this.activeMode });
+                    void this.syncCustomAgentsToWebview();
                     this.syncModelsToWebview();
                     this.restoreSession();
                     this.sendSessionList();
@@ -643,6 +792,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
         const slashDisplayText = displayText !== text ? displayText : undefined;
         try {
+            await this.applyActiveCustomAgent();
             await this.agentLoop.run(mode, text, images, files, slashDisplayText);
 
             // If files were changed, wait for Keep/Undo (user clicks file names to review diffs)
@@ -1414,6 +1564,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 .codicon-arrow-up:before { content: "\\eaa1"; }
 .codicon-debug-stop:before { content: "\\eaf7"; }
 .codicon-add:before { content: "\\ea60"; }
+.codicon-person:before { content: "\\eb29"; }
+.codicon-trash:before { content: "\\ea81"; }
 .codicon-loading.codicon-modifier-spin {
     animation: codicon-spin 1.5s steps(30) infinite;
 }
@@ -1656,6 +1808,55 @@ body { display: flex; flex-direction: column; }
 }
 .tool-block .tool-result.success { color: var(--success-fg); }
 .tool-block .tool-result.failure { color: var(--error-fg); }
+.sources-card {
+    background: var(--tool-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin: 6px 0;
+    padding: 8px 10px;
+    font-size: 12px;
+}
+.sources-card .sources-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-weight: 600;
+}
+.sources-card .sources-header .codicon { opacity: 0.7; }
+.sources-card .sources-count {
+    margin-left: auto;
+    font-weight: 400;
+    opacity: 0.6;
+    font-size: 11px;
+}
+.sources-card .sources-query {
+    margin: 4px 0 6px 22px;
+    opacity: 0.65;
+    font-style: italic;
+    font-size: 11px;
+}
+.sources-card .sources-list {
+    list-style: decimal;
+    margin: 0;
+    padding-left: 22px;
+}
+.sources-card .sources-item { margin: 4px 0; }
+.sources-card .sources-item-title {
+    color: var(--vscode-textLink-foreground);
+    text-decoration: none;
+    font-weight: 500;
+}
+.sources-card a.sources-item-title:hover { text-decoration: underline; }
+.sources-card .sources-item-meta {
+    opacity: 0.55;
+    font-size: 11px;
+}
+.sources-card .sources-item-snippet {
+    margin-top: 2px;
+    opacity: 0.75;
+    font-size: 11px;
+    line-height: 1.4;
+}
 
 /* CONFIRM DIALOG */
 .confirm-dialog {
@@ -2405,6 +2606,10 @@ body { display: flex; flex-direction: column; }
     height: 14px;
     display: block;
 }
+.mode-icon .codicon {
+    font-size: 14px;
+    line-height: 1;
+}
 .mode-menu {
     position: absolute;
     bottom: calc(100% + 6px);
@@ -2457,6 +2662,42 @@ body { display: flex; flex-direction: column; }
 }
 .mode-option.active .mode-option-check {
     opacity: 1;
+}
+.mode-menu-separator {
+    height: 1px;
+    background: var(--vscode-panel-border, rgba(255,255,255,0.08));
+    margin: 4px 2px;
+}
+.mode-option-action { font-style: italic; opacity: 0.85; }
+.mode-option-action:hover { opacity: 1; }
+.mode-option-custom { position: relative; }
+.mode-option-custom .mode-option-actions {
+    display: none;
+    align-items: center;
+    gap: 2px;
+    margin-left: 4px;
+}
+.mode-option-custom:hover .mode-option-actions { display: inline-flex; }
+.mode-option-custom .mode-option-actions button {
+    background: none;
+    border: none;
+    color: var(--fg);
+    opacity: 0.55;
+    cursor: pointer;
+    padding: 2px 4px;
+    border-radius: 3px;
+    font-size: 11px;
+}
+.mode-option-custom .mode-option-actions button:hover {
+    opacity: 1;
+    background: rgba(255,255,255,0.08);
+}
+.mode-option-scope {
+    font-size: 9.5px;
+    opacity: 0.55;
+    margin-left: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
 }
 
 /* Tools button SVG */
@@ -3040,6 +3281,12 @@ body { display: flex; flex-direction: column; }
                         <span class="mode-icon" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M4 4h8M6.5 8H12M6.5 12H12" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><circle cx="4.25" cy="4" r=".85" fill="currentColor"/><circle cx="4.25" cy="8" r=".85" fill="currentColor"/><circle cx="4.25" cy="12" r=".85" fill="currentColor"/></svg></span>
                         <span class="mode-option-label">Plan</span>
                         <span class="mode-option-check" aria-hidden="true"><i class="codicon codicon-check"></i></span>
+                    </button>
+                    <div id="custom-agent-list"></div>
+                    <div class="mode-menu-separator" role="separator"></div>
+                    <button class="mode-option mode-option-action" data-action="create-custom-agent" role="menuitem" type="button">
+                        <span class="mode-icon" aria-hidden="true"><i class="codicon codicon-add"></i></span>
+                        <span class="mode-option-label">Create custom agent…</span>
                     </button>
                 </div>
             </div>

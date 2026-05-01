@@ -58,3 +58,4 @@ Last Updated: 4/17
 | 2026-04-28 21:34 UTC | AgentChatV2 | experiment/response-api | +105 |
 | 2026-04-28 21:56 UTC | AgentChatV2 | main | ~2 |
 | 2026-04-28 21:57 UTC | Rude-MCPServer | main | ~1 |
+| 2026-05-01 21:27 UTC | SecureChatExtension | main | +7, ~8 |

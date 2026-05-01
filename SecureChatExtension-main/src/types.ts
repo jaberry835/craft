@@ -157,6 +157,8 @@ export interface ChatSession {
     updatedAt: number;
     activeMode?: ChatMode;
     activePermissionLevel?: AgentPermissionLevel;
+    /** Id of the active custom agent, if any. When set, the chat runs in agent mode with the persona applied. */
+    activeCustomAgentId?: string;
     runtimeState?: RuntimeSessionState;
 }
 
@@ -300,6 +302,10 @@ export type WebviewMessage =
     | { type: 'selectAgentProvider'; provider: AgentProvider }
     | { type: 'selectPermissionLevel'; level: AgentPermissionLevel }
     | { type: 'selectChatMode'; mode: ChatMode }
+    | { type: 'selectCustomAgent'; id: string | null }
+    | { type: 'createCustomAgent' }
+    | { type: 'editCustomAgent'; id: string }
+    | { type: 'deleteCustomAgent'; id: string }
     | { type: 'runPlanInAgent' }
     | { type: 'attachFile' }
     | { type: 'confirmAction'; actionId: string; approved: boolean; allowSession?: boolean; category?: string }
@@ -329,6 +335,8 @@ export type ExtensionMessage =
     | { type: 'setAgentProvider'; provider: AgentProvider }
     | { type: 'setPermissionLevel'; level: AgentPermissionLevel }
     | { type: 'setChatMode'; mode: ChatMode }
+    | { type: 'setCustomAgents'; agents: Array<{ id: string; name: string; description?: string; scope: 'workspace' | 'global' }>; activeId: string | null }
+    | { type: 'searchCitations'; agentName: string; query: string; citations: Array<{ index: number; title: string; url?: string; snippet?: string; score?: number; rerankerScore?: number }> }
     | { type: 'planReady'; visible: boolean }
     | { type: 'agentStarted' }
     | { type: 'agentPlan'; steps: AgentPlanStep[] }

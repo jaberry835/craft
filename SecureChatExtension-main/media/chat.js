@@ -24,7 +24,8 @@ window.onerror = function(msg, src, line, col, err) {
     const modeTriggerIconEl = document.getElementById('mode-trigger-icon');
     const modeTriggerLabelEl = document.getElementById('mode-trigger-label');
     const modeMenuEl = document.getElementById('mode-menu');
-    const modeOptions = modeMenuEl ? Array.from(modeMenuEl.querySelectorAll('.mode-option')) : [];
+    const modeOptions = modeMenuEl ? Array.from(modeMenuEl.querySelectorAll('.mode-option[data-mode]')) : [];
+    const customAgentListEl = document.getElementById('custom-agent-list');
     const planActionBarEl = document.getElementById('plan-action-bar');
     const btnRunPlan = document.getElementById('btn-run-plan');
     const workingEl = document.getElementById('working-indicator');
@@ -50,6 +51,8 @@ window.onerror = function(msg, src, line, col, err) {
     let currentProvider = 'local';
     let currentPermissionLevel = 'default';
     let currentMode = 'agent';
+    let customAgents = [];
+    let activeCustomAgentId = null;
     const toolStateById = new Map();
     const workingBlocksById = new Map();
     const workingEntriesById = new Map();
@@ -314,6 +317,59 @@ window.onerror = function(msg, src, line, col, err) {
         workingEl.classList.remove('active');
     }
 
+    function renderSourcesCard(agentName, query, citations) {
+        if (!messagesEl || !citations || citations.length === 0) { return; }
+        var card = document.createElement('div');
+        card.className = 'sources-card';
+        var header = document.createElement('div');
+        header.className = 'sources-header';
+        header.innerHTML =
+            '<i class="codicon codicon-search" aria-hidden="true"></i>' +
+            '<span class="sources-title">' + escapeHtml(agentName) + ' \u2014 Sources</span>' +
+            '<span class="sources-count">' + citations.length + '</span>';
+        card.appendChild(header);
+        if (query) {
+            var q = document.createElement('div');
+            q.className = 'sources-query';
+            q.textContent = '\u201C' + query + '\u201D';
+            card.appendChild(q);
+        }
+        var list = document.createElement('ol');
+        list.className = 'sources-list';
+        citations.forEach(function(c) {
+            var li = document.createElement('li');
+            li.className = 'sources-item';
+            var titleEl;
+            if (c.url) {
+                titleEl = document.createElement('a');
+                titleEl.href = c.url;
+                titleEl.target = '_blank';
+                titleEl.rel = 'noopener noreferrer';
+            } else {
+                titleEl = document.createElement('span');
+            }
+            titleEl.className = 'sources-item-title';
+            titleEl.textContent = c.title || ('Result ' + c.index);
+            li.appendChild(titleEl);
+            var meta = document.createElement('span');
+            meta.className = 'sources-item-meta';
+            var score = (typeof c.rerankerScore === 'number') ? c.rerankerScore
+                      : (typeof c.score === 'number' ? c.score : null);
+            if (score !== null) { meta.textContent = ' \u00B7 score ' + score.toFixed(2); }
+            li.appendChild(meta);
+            if (c.snippet) {
+                var snip = document.createElement('div');
+                snip.className = 'sources-item-snippet';
+                snip.textContent = c.snippet;
+                li.appendChild(snip);
+            }
+            list.appendChild(li);
+        });
+        card.appendChild(list);
+        messagesEl.appendChild(card);
+        pinWorkingIndicatorToBottom();
+    }
+
     function getModePlaceholder(mode) {
         if (mode === 'ask') { return 'Ask Junior about the codebase...'; }
         if (mode === 'plan') { return 'Plan the work before execution...'; }
@@ -323,20 +379,93 @@ window.onerror = function(msg, src, line, col, err) {
     function setChatMode(mode) {
         currentMode = mode || 'agent';
         var meta = MODE_META[currentMode] || MODE_META.agent;
+        var displayLabel = meta.label;
+        var displayIcon = meta.icon;
+        if (activeCustomAgentId) {
+            var ag = customAgents.find(function(a) { return a.id === activeCustomAgentId; });
+            if (ag) {
+                displayLabel = ag.name;
+                displayIcon = '<i class="codicon codicon-person"></i>';
+            }
+        }
         if (modeTriggerLabelEl) {
-            modeTriggerLabelEl.textContent = meta.label;
+            modeTriggerLabelEl.textContent = displayLabel;
         }
         if (modeTriggerIconEl) {
-            modeTriggerIconEl.innerHTML = meta.icon;
+            modeTriggerIconEl.innerHTML = displayIcon;
         }
         modeOptions.forEach(function(btn) {
-            var active = btn.dataset.mode === currentMode;
+            var active = !activeCustomAgentId && btn.dataset.mode === currentMode;
             btn.classList.toggle('active', active);
             btn.setAttribute('aria-checked', active ? 'true' : 'false');
         });
+        renderCustomAgentList();
         if (!agentRunning && inputEl) {
             inputEl.placeholder = getModePlaceholder(currentMode);
         }
+    }
+
+    function renderCustomAgentList() {
+        if (!customAgentListEl) { return; }
+        customAgentListEl.innerHTML = '';
+        customAgents.forEach(function(ag) {
+            var btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'mode-option mode-option-custom' + (ag.id === activeCustomAgentId ? ' active' : '');
+            btn.setAttribute('role', 'menuitemradio');
+            btn.setAttribute('aria-checked', ag.id === activeCustomAgentId ? 'true' : 'false');
+            btn.dataset.customAgentId = ag.id;
+            var icon = document.createElement('span');
+            icon.className = 'mode-icon';
+            icon.setAttribute('aria-hidden', 'true');
+            icon.innerHTML = '<i class="codicon codicon-person"></i>';
+            var label = document.createElement('span');
+            label.className = 'mode-option-label';
+            label.textContent = ag.name;
+            if (ag.scope === 'workspace') {
+                var scope = document.createElement('span');
+                scope.className = 'mode-option-scope';
+                scope.textContent = 'WS';
+                label.appendChild(scope);
+            }
+            var actions = document.createElement('span');
+            actions.className = 'mode-option-actions';
+            var editBtn = document.createElement('button');
+            editBtn.type = 'button';
+            editBtn.title = 'Edit agent';
+            editBtn.innerHTML = '<i class="codicon codicon-edit"></i>';
+            editBtn.addEventListener('click', function(ev) {
+                ev.stopPropagation();
+                closeModeMenu();
+                vscode.postMessage({ type: 'editCustomAgent', id: ag.id });
+            });
+            var delBtn = document.createElement('button');
+            delBtn.type = 'button';
+            delBtn.title = 'Delete agent';
+            delBtn.innerHTML = '<i class="codicon codicon-trash"></i>';
+            delBtn.addEventListener('click', function(ev) {
+                ev.stopPropagation();
+                vscode.postMessage({ type: 'deleteCustomAgent', id: ag.id });
+            });
+            actions.appendChild(editBtn);
+            actions.appendChild(delBtn);
+            var check = document.createElement('span');
+            check.className = 'mode-option-check';
+            check.setAttribute('aria-hidden', 'true');
+            check.innerHTML = '<i class="codicon codicon-check"></i>';
+            btn.appendChild(icon);
+            btn.appendChild(label);
+            btn.appendChild(actions);
+            btn.appendChild(check);
+            btn.addEventListener('click', function() {
+                activeCustomAgentId = ag.id;
+                closeModeMenu();
+                setPlanReadyVisibility(false);
+                vscode.postMessage({ type: 'selectCustomAgent', id: ag.id });
+                inputEl.focus();
+            });
+            customAgentListEl.appendChild(btn);
+        });
     }
 
     function closeModeMenu() {
@@ -590,13 +719,27 @@ window.onerror = function(msg, src, line, col, err) {
     modeOptions.forEach(function(btn) {
         btn.addEventListener('click', function() {
             var mode = btn.dataset.mode || 'agent';
+            // Selecting a built-in mode clears any active custom agent.
+            if (activeCustomAgentId) {
+                activeCustomAgentId = null;
+                vscode.postMessage({ type: 'selectCustomAgent', id: null });
+            }
             setChatMode(mode);
             closeModeMenu();
             setPlanReadyVisibility(false);
-            vscode.postMessage({ type: 'selectChatMode', mode });
+            vscode.postMessage({ type: 'selectChatMode', mode: mode });
             inputEl.focus();
         });
     });
+
+    // "+ Create custom agent…" footer row.
+    var createAgentBtn = modeMenuEl ? modeMenuEl.querySelector('[data-action="create-custom-agent"]') : null;
+    if (createAgentBtn) {
+        createAgentBtn.addEventListener('click', function() {
+            closeModeMenu();
+            vscode.postMessage({ type: 'createCustomAgent' });
+        });
+    }
 
     document.addEventListener('click', function(e) {
         if (!modeSwitchEl || modeSwitchEl.contains(e.target)) { return; }
@@ -1596,6 +1739,17 @@ window.onerror = function(msg, src, line, col, err) {
             }
             case 'setChatMode': {
                 setChatMode(msg.mode || 'agent');
+                break;
+            }
+            case 'setCustomAgents': {
+                customAgents = Array.isArray(msg.agents) ? msg.agents : [];
+                activeCustomAgentId = msg.activeId || null;
+                setChatMode(currentMode);
+                break;
+            }
+            case 'searchCitations': {
+                renderSourcesCard(msg.agentName || 'Agent', msg.query || '', Array.isArray(msg.citations) ? msg.citations : []);
+                scrollToBottom();
                 break;
             }
             case 'planReady': {

@@ -14,6 +14,8 @@ import { registerCommands } from './commandRegistrar';
 import { RetrievalRanker } from './retrievalRanker';
 import { RepoPatternStore } from './repoPatternStore';
 import { getCopilotCliBearerAuthSessionConfig, COPILOT_CLI_API_KEY_SECRET_KEY, setCopilotCliApiKeySecretCache } from './copilotCliSupport';
+import { CustomAgentStore } from './customAgents';
+import { CustomAgentEditor } from './customAgentEditor';
 
 let chatViewProvider: ChatViewProvider;
 let mcpClient: McpClient;
@@ -111,7 +113,9 @@ export function activate(context: vscode.ExtensionContext) {
         log,
         tokenTracker,
         inlineDiffDecorator,
-        context.globalState
+        context.globalState,
+        CustomAgentStore.fromContext(context),
+        context,
     );
 
     context.subscriptions.push(
@@ -141,6 +145,14 @@ export function activate(context: vscode.ExtensionContext) {
         logError
     });
     context.subscriptions.push({ dispose: () => tokenTracker.dispose() });
+
+    // ── Custom Agents: command palette entry to open the editor ──
+    const customAgentStore = CustomAgentStore.fromContext(context);
+    context.subscriptions.push(
+        vscode.commands.registerCommand('junior.createCustomAgent', () => {
+            void CustomAgentEditor.open(context, customAgentStore);
+        })
+    );
 
     // ── Auto-start: phased indexing ──
     // Phase 1 runs immediately: fast file index (stat-only, cached).

@@ -3,6 +3,7 @@
  */
 import * as cp from 'child_process';
 import { ToolEntry, ToolContext } from './types';
+import { detectNetworkEgress, scrubEnvForShell } from '../security';
 
 export function createTerminalTools(ctx: ToolContext): ToolEntry[] {
     return [
@@ -69,15 +70,35 @@ export function createTerminalTools(ctx: ToolContext): ToolEntry[] {
                 const approved = await ctx.requestConfirmation(`Run command: ${command}${background ? ' (background)' : ''}`, 'terminal');
                 if (!approved) { return { success: false, result: 'User declined the terminal command.' }; }
 
+                // Phase-1 prompt-injection mitigation: any command that performs network
+                // egress requires a SECOND, explicit confirmation that names the tool and
+                // any URL/host fragments we extracted. This breaks the classic
+                // "model reads poisoned file -> model curls attacker -> data exfil" chain
+                // even when the user previously enabled session-level terminal approval.
+                const egress = detectNetworkEgress(command);
+                if (egress.detected) {
+                    const targetSummary = egress.targets.length
+                        ? ` to ${egress.targets.slice(0, 3).join(', ')}${egress.targets.length > 3 ? ', ...' : ''}`
+                        : '';
+                    const egressDesc = `Allow network egress via ${egress.tools.join('/')}${targetSummary}? Command: ${command}`;
+                    const egressApproved = await ctx.requestConfirmation(egressDesc, 'terminal');
+                    if (!egressApproved) { return { success: false, result: 'User declined the network-egress command.' }; }
+                }
+
                 const root = ctx.getWorkspaceRoot();
                 const cwd = args.cwd ? ctx.validatePath(args.cwd as string) || root : root;
                 const isWindows = process.platform === 'win32';
                 const shell = isWindows ? 'cmd.exe' : '/bin/sh';
                 const shellArgs = isWindows ? ['/c', command] : ['-c', command];
 
+                // Phase-1 mitigation: strip secret-shaped env vars before spawning the
+                // child shell so that `env` / `printenv` / `Get-ChildItem env:` cannot
+                // leak inherited credentials back into the LLM context.
+                const { env: scrubbedEnv } = scrubEnvForShell(process.env);
+
                 const proc = cp.spawn(shell, shellArgs, {
                     cwd,
-                    env: { ...process.env },
+                    env: scrubbedEnv,
                     stdio: ['ignore', 'pipe', 'pipe'],
                 });
 
