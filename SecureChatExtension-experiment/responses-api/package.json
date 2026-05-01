@@ -786,6 +786,17 @@
             "default": false,
             "description": "Log raw Copilot SDK session events to the Junior output channel for CLI runtime debugging.",
             "order": 17
+          },
+          "junior.copilotCli.reasoningDisplay": {
+            "type": "string",
+            "enum": [
+              "panel",
+              "working",
+              "off"
+            ],
+            "default": "panel",
+            "description": "Where to surface model reasoning deltas emitted by the Copilot CLI: 'panel' renders the collapsible Thinking panel above each assistant reply (matches the local agent), 'working' folds them into the Working block as scrollable progress text, 'off' suppresses them entirely.",
+            "order": 18
           }
         }
       }

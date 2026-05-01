@@ -72,44 +72,13 @@ Replace the tenant ID and audience values with your own if they differ.
 
 ```xml
 <policies>
-  <inbound>
-    <set-backend-service base-url="https://agent-poc-resource.services.ai.azure.com/openai" />
-
-    <validate-azure-ad-token
-      tenant-id="224e1b7d-7931-4c13-bce7-79f3873f0e34"
-      header-name="Authorization"
-      failed-validation-httpcode="401"
-      failed-validation-error-message="Unauthorized">
-      <audiences>
-        <audience>api://aa6b2ff6-4168-4ffa-b0de-a91ef1726ac6</audience>
-        <audience>aa6b2ff6-4168-4ffa-b0de-a91ef1726ac6</audience>
-      </audiences>
-    </validate-azure-ad-token>
-
-    <set-header name="api-key" exists-action="delete" />
-    <set-header name="Authorization" exists-action="delete" />
-
-    <authentication-managed-identity
-      resource="https://cognitiveservices.azure.com"
-      ignore-error="false" />
-  </inbound>
-  <backend>
-    <forward-request timeout="60" />
-  </backend>
-  <outbound />
-  <on-error>
-    <base />
-  </on-error>
-</policies>
-```
-
-
-Policy for tracking user metrics
-
-```xml
-<policies>
     <inbound>
         <base />
+        <validate-azure-ad-token tenant-id="224e1b7d-7931-4c13-bce7-79f3873f0e34" header-name="Authorization" failed-validation-httpcode="401" failed-validation-error-message="Unauthorized">
+            <audiences>
+                <audience>api://aa6b2ff6-4168-4ffa-b0de-a91ef1726ac6</audience>
+            </audiences>
+        </validate-azure-ad-token>
         <!-- Decode the inbound user bearer JWT (null if missing/invalid). -->
         <set-variable name="userJwt" value="@(context.Request.Headers.GetValueOrDefault("Authorization","").StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) ? context.Request.Headers.GetValueOrDefault("Authorization","").Substring(7).AsJwt() : null)" />
         <set-variable name="userId" value="@{
