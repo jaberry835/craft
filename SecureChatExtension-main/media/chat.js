@@ -17,6 +17,15 @@ window.onerror = function(msg, src, line, col, err) {
     const statusEl = document.getElementById('status-bar');
     const planPanelEl = document.getElementById('plan-panel');
     const modelSelectEl = document.getElementById('model-select');
+    const modelControlEl = document.getElementById('model-control');
+    const modelTriggerEl = document.getElementById('model-trigger');
+    const modelTriggerLabelEl = document.getElementById('model-trigger-label');
+    const modelTriggerMetaEl = document.getElementById('model-trigger-meta');
+    const modelMenuEl = document.getElementById('model-menu');
+    const modelSearchEl = document.getElementById('model-search');
+    const modelListEl = document.getElementById('model-list');
+    const modelReasoningSubmenuEl = document.getElementById('model-reasoning-submenu');
+    const modelNoteEl = document.getElementById('model-note');
     const permissionSelectEl = document.getElementById('permission-select');
     const providerSelectEl = document.getElementById('provider-select');
     const modeSwitchEl = document.getElementById('mode-switch');
@@ -51,6 +60,12 @@ window.onerror = function(msg, src, line, col, err) {
     let currentProvider = 'local';
     let currentPermissionLevel = 'default';
     let currentMode = 'agent';
+    let currentModels = [];
+    let currentActiveDeployment = '';
+    let currentReasoningConfig = null;
+    let reasoningHoverTimer = null;
+    let reasoningCloseTimer = null;
+    let reasoningAnchorEl = null;
     let customAgents = [];
     let activeCustomAgentId = null;
     const toolStateById = new Map();
@@ -242,6 +257,7 @@ window.onerror = function(msg, src, line, col, err) {
         const text = inputEl.value.trim();
         if (!text && pendingImages.length === 0 && pendingFiles.length === 0) { return; }
         closeModeMenu();
+        closeModelMenu();
         const msg = { type: 'sendMessage', text: text || '(see attachments)', mode: currentMode };
         if (pendingImages.length > 0) { msg.images = pendingImages.slice(); }
         if (pendingFiles.length > 0) { msg.files = pendingFiles.slice(); }
@@ -695,6 +711,28 @@ window.onerror = function(msg, src, line, col, err) {
         });
     }
 
+    if (modelTriggerEl) {
+        modelTriggerEl.addEventListener('click', function(e) {
+            e.stopPropagation();
+            toggleModelMenu();
+        });
+    }
+
+    if (modelSearchEl) {
+        modelSearchEl.addEventListener('input', function() {
+            renderModelOptions();
+        });
+    }
+
+    if (modelReasoningSubmenuEl) {
+        modelReasoningSubmenuEl.addEventListener('mouseenter', function() {
+            cancelReasoningClose();
+        });
+        modelReasoningSubmenuEl.addEventListener('mouseleave', function() {
+            scheduleReasoningClose();
+        });
+    }
+
     if (providerSelectEl) {
         providerSelectEl.addEventListener('change', () => {
             const provider = providerSelectEl.value;
@@ -742,13 +780,16 @@ window.onerror = function(msg, src, line, col, err) {
     }
 
     document.addEventListener('click', function(e) {
-        if (!modeSwitchEl || modeSwitchEl.contains(e.target)) { return; }
+        if (modeSwitchEl && modeSwitchEl.contains(e.target)) { return; }
+        if (modelControlEl && modelControlEl.contains(e.target)) { return; }
         closeModeMenu();
+        closeModelMenu();
     });
 
     document.addEventListener('keydown', function(e) {
         if (e.key === 'Escape') {
             closeModeMenu();
+            closeModelMenu();
         }
     });
 
@@ -791,20 +832,25 @@ window.onerror = function(msg, src, line, col, err) {
         permissionSelectEl.title = PERMISSION_META[nextValue].description;
     }
 
-    function setModels(models, activeDeployment) {
+    function setModels(models, activeDeployment, reasoning) {
         if (!modelSelectEl) { return; }
-        const current = activeDeployment || modelSelectEl.value;
+        currentModels = Array.isArray(models) ? models.slice() : [];
+        const current = activeDeployment || modelSelectEl.value || currentActiveDeployment;
         modelSelectEl.innerHTML = '';
-        if (!models || models.length === 0) {
+        if (currentModels.length === 0) {
             const opt = document.createElement('option');
             opt.value = '';
             opt.textContent = 'No models configured';
             modelSelectEl.appendChild(opt);
             modelSelectEl.disabled = true;
+            currentActiveDeployment = '';
+            updateModelTrigger();
+            renderModelOptions();
+            setReasoningConfig(null);
             return;
         }
 
-        for (const m of models) {
+        for (const m of currentModels) {
             const opt = document.createElement('option');
             opt.value = m.deploymentId;
             const label = m.name || m.deploymentId;
@@ -817,6 +863,275 @@ window.onerror = function(msg, src, line, col, err) {
         if (current) {
             modelSelectEl.value = current;
         }
+        currentActiveDeployment = modelSelectEl.value || currentModels[0].deploymentId;
+        updateModelTrigger();
+        renderModelOptions();
+        setReasoningConfig(reasoning);
+    }
+
+    function setReasoningConfig(reasoning) {
+        currentReasoningConfig = reasoning || null;
+        const visible = !!(reasoning && reasoning.visible);
+        if (!visible) {
+            if (modelTriggerMetaEl) { modelTriggerMetaEl.textContent = ''; }
+            closeReasoningSubmenu();
+            return;
+        }
+
+        updateModelTrigger();
+        renderReasoningOptions();
+        if (modelNoteEl) {
+            modelNoteEl.textContent = reasoning.wireApi === 'responses'
+                ? (reasoning.summary === 'none' ? 'Reasoning summaries are hidden for this model.' : '')
+                : 'Set Azure OpenAI Wire API to responses to use these controls.';
+        }
+    }
+
+    function toggleModelMenu() {
+        if (!modelMenuEl || !modelTriggerEl || modelTriggerEl.disabled) { return; }
+        closeModeMenu();
+        const open = modelMenuEl.classList.contains('hidden');
+        modelControlEl.classList.toggle('open', open);
+        modelMenuEl.classList.toggle('hidden', !open);
+        modelTriggerEl.classList.toggle('active', open);
+        modelTriggerEl.setAttribute('aria-expanded', open ? 'true' : 'false');
+        if (open && modelSearchEl) {
+            modelSearchEl.value = '';
+            renderModelOptions();
+            closeReasoningSubmenu();
+            positionModelMenu();
+            setTimeout(function() { modelSearchEl.focus(); }, 0);
+        }
+    }
+
+    function closeModelMenu() {
+        if (!modelMenuEl || !modelTriggerEl) { return; }
+        clearReasoningHoverTimer();
+        cancelReasoningClose();
+        closeReasoningSubmenu();
+        modelControlEl.classList.remove('open');
+        modelMenuEl.classList.add('hidden');
+        modelTriggerEl.classList.remove('active');
+        modelTriggerEl.setAttribute('aria-expanded', 'false');
+    }
+
+    function positionModelMenu() {
+        if (!modelMenuEl || !modelControlEl) { return; }
+        modelMenuEl.style.left = '0px';
+        const rect = modelMenuEl.getBoundingClientRect();
+        const margin = 8;
+        let offset = 0;
+        if (rect.left < margin) {
+            offset = margin - rect.left;
+        } else if (rect.right > window.innerWidth - margin) {
+            offset = window.innerWidth - margin - rect.right;
+        }
+        modelMenuEl.style.left = offset + 'px';
+    }
+
+    function openReasoningSubmenu(anchorEl) {
+        if (!modelReasoningSubmenuEl || !currentReasoningConfig || !anchorEl) { return; }
+        cancelReasoningClose();
+        reasoningAnchorEl = anchorEl;
+        renderReasoningOptions();
+        modelReasoningSubmenuEl.classList.remove('hidden');
+        positionReasoningSubmenu();
+    }
+
+    function closeReasoningSubmenu() {
+        if (!modelReasoningSubmenuEl) { return; }
+        modelReasoningSubmenuEl.classList.add('hidden');
+        modelReasoningSubmenuEl.classList.remove('open-left', 'open-right', 'open-inside');
+        modelReasoningSubmenuEl.style.transform = '';
+        modelReasoningSubmenuEl.style.top = '';
+        reasoningAnchorEl = null;
+    }
+
+    function positionReasoningSubmenu() {
+        if (!modelReasoningSubmenuEl || !reasoningAnchorEl || !modelMenuEl) { return; }
+        modelReasoningSubmenuEl.classList.remove('open-left', 'open-right', 'open-inside');
+        modelReasoningSubmenuEl.style.transform = '';
+        const anchorRect = reasoningAnchorEl.getBoundingClientRect();
+        const menuRect = modelMenuEl.getBoundingClientRect();
+        const margin = 8;
+        modelReasoningSubmenuEl.style.top = '0px';
+        modelReasoningSubmenuEl.classList.add('open-right');
+
+        const submenuHeight = modelReasoningSubmenuEl.getBoundingClientRect().height;
+        const preferredViewportTop = anchorRect.bottom - submenuHeight;
+        const clampedViewportTop = Math.max(margin, preferredViewportTop);
+        modelReasoningSubmenuEl.style.top = (clampedViewportTop - menuRect.top) + 'px';
+
+        let rect = modelReasoningSubmenuEl.getBoundingClientRect();
+        if (rect.left >= margin && rect.right <= window.innerWidth - margin) { return; }
+
+        if (rect.right > window.innerWidth - margin) {
+            modelReasoningSubmenuEl.classList.remove('open-right');
+            modelReasoningSubmenuEl.classList.add('open-left');
+            rect = modelReasoningSubmenuEl.getBoundingClientRect();
+        }
+        if (rect.left >= margin && rect.right <= window.innerWidth - margin) { return; }
+
+        modelReasoningSubmenuEl.classList.remove('open-left', 'open-right');
+        modelReasoningSubmenuEl.classList.add('open-inside');
+        rect = modelReasoningSubmenuEl.getBoundingClientRect();
+        if (rect.left < margin) {
+            modelReasoningSubmenuEl.style.transform = 'translateX(' + (margin - rect.left) + 'px)';
+        } else if (rect.right > window.innerWidth - margin) {
+            modelReasoningSubmenuEl.style.transform = 'translateX(' + (window.innerWidth - margin - rect.right) + 'px)';
+        } else {
+            modelReasoningSubmenuEl.style.transform = '';
+        }
+    }
+
+    function updateModelTrigger() {
+        const selected = currentModels.find(m => m.deploymentId === currentActiveDeployment) || currentModels[0];
+        if (modelTriggerEl) { modelTriggerEl.disabled = currentModels.length === 0; }
+        if (modelTriggerLabelEl) { modelTriggerLabelEl.textContent = selected ? (selected.name || selected.deploymentId) : 'No models configured'; }
+        const effortLabel = currentReasoningConfig && currentReasoningConfig.visible
+            ? formatReasoningEffort(currentReasoningConfig.effort)
+            : '';
+        if (modelTriggerMetaEl) { modelTriggerMetaEl.textContent = effortLabel ? '\u00b7 ' + effortLabel : ''; }
+    }
+
+    function scheduleReasoningHover(anchorEl, model) {
+        clearReasoningHoverTimer();
+        cancelReasoningClose();
+        if (!model || !model.supportsReasoning || !currentReasoningConfig || !currentReasoningConfig.visible) { return; }
+        reasoningHoverTimer = setTimeout(function() {
+            openReasoningSubmenu(anchorEl);
+        }, 650);
+    }
+
+    function clearReasoningHoverTimer() {
+        if (reasoningHoverTimer) {
+            clearTimeout(reasoningHoverTimer);
+            reasoningHoverTimer = null;
+        }
+    }
+
+    function scheduleReasoningClose() {
+        clearReasoningHoverTimer();
+        cancelReasoningClose();
+        reasoningCloseTimer = setTimeout(function() {
+            closeReasoningSubmenu();
+        }, 220);
+    }
+
+    function cancelReasoningClose() {
+        if (reasoningCloseTimer) {
+            clearTimeout(reasoningCloseTimer);
+            reasoningCloseTimer = null;
+        }
+    }
+
+    function renderModelOptions() {
+        if (!modelListEl) { return; }
+        closeReasoningSubmenu();
+        const query = (modelSearchEl && modelSearchEl.value || '').trim().toLowerCase();
+        modelListEl.innerHTML = '';
+        const filtered = currentModels.filter(function(m) {
+            const label = (m.name || m.deploymentId || '').toLowerCase();
+            return !query || label.includes(query) || (m.deploymentId || '').toLowerCase().includes(query);
+        });
+        if (filtered.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'model-note';
+            empty.textContent = 'No matching models';
+            modelListEl.appendChild(empty);
+            return;
+        }
+        filtered.forEach(function(m) {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'model-option' + (m.deploymentId === currentActiveDeployment ? ' active' : '');
+            btn.setAttribute('role', 'menuitemradio');
+            btn.setAttribute('aria-checked', m.deploymentId === currentActiveDeployment ? 'true' : 'false');
+            const label = m.name || m.deploymentId;
+            btn.title = label + (label !== m.deploymentId ? ' - ' + m.deploymentId : '');
+            btn.innerHTML = '<span class="model-option-check"><i class="codicon codicon-check"></i></span>' +
+                '<span class="model-option-name"></span>' +
+                '<span class="model-option-meta"></span>';
+            btn.querySelector('.model-option-name').textContent = label;
+            const meta = btn.querySelector('.model-option-meta');
+            if (meta) { meta.textContent = m.supportsReasoning ? formatReasoningEffort(currentReasoningConfig && currentReasoningConfig.effort) : ''; }
+            btn.addEventListener('click', function() {
+                currentActiveDeployment = m.deploymentId;
+                modelSelectEl.value = m.deploymentId;
+                updateModelTrigger();
+                renderModelOptions();
+                closeModelMenu();
+                vscode.postMessage({ type: 'selectModelById', deploymentId: m.deploymentId });
+                inputEl.focus();
+            });
+            btn.addEventListener('mouseenter', function() {
+                scheduleReasoningHover(btn, m);
+            });
+            btn.addEventListener('mouseleave', function() {
+                scheduleReasoningClose();
+            });
+            modelListEl.appendChild(btn);
+        });
+    }
+
+    function renderReasoningOptions() {
+        if (!modelReasoningSubmenuEl || !currentReasoningConfig) { return; }
+        const effortGroup = modelReasoningSubmenuEl.querySelector('[data-reasoning-group="effort"]');
+        const summaryGroup = modelReasoningSubmenuEl.querySelector('[data-reasoning-group="summary"]');
+        if (effortGroup) {
+            effortGroup.innerHTML = '<div class="reasoning-section-title">Thinking Effort</div>';
+            [
+                ['none', 'None', 'No reasoning applied'],
+                ['low', 'Low', 'Faster responses with less reasoning'],
+                ['medium', 'Medium', 'Balanced reasoning and speed'],
+                ['high', 'High', 'Greater reasoning depth but slower'],
+                ['xhigh', 'Xhigh', 'Maximum reasoning depth but slower']
+            ].forEach(function(option) {
+                effortGroup.appendChild(createReasoningOption('effort', option[0], option[1], option[2], currentReasoningConfig.effort === option[0]));
+            });
+        }
+        if (summaryGroup) {
+            summaryGroup.innerHTML = '<div class="reasoning-section-title">Summary</div>';
+            [
+                ['auto', 'Auto', 'Let the model decide'],
+                ['detailed', 'Detailed', 'Always request a summary'],
+                ['none', 'None', 'Hide the reasoning panel stream']
+            ].forEach(function(option) {
+                summaryGroup.appendChild(createReasoningOption('summary', option[0], option[1], option[2], currentReasoningConfig.summary === option[0]));
+            });
+        }
+        updateModelTrigger();
+    }
+
+    function createReasoningOption(kind, value, label, meta, active) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'reasoning-option' + (active ? ' active' : '');
+        btn.setAttribute('role', 'menuitemradio');
+        btn.setAttribute('aria-checked', active ? 'true' : 'false');
+        btn.innerHTML = '<span class="reasoning-option-check"><i class="codicon codicon-check"></i></span>' +
+            '<span class="reasoning-option-label"></span>' +
+            '<span class="reasoning-option-meta"></span>';
+        btn.querySelector('.reasoning-option-label').textContent = label;
+        btn.querySelector('.reasoning-option-meta').textContent = meta;
+        btn.addEventListener('click', function(e) {
+            e.stopPropagation();
+            if (kind === 'effort') {
+                currentReasoningConfig.effort = value;
+                vscode.postMessage({ type: 'updateReasoningConfig', effort: value });
+            } else {
+                currentReasoningConfig.summary = value;
+                vscode.postMessage({ type: 'updateReasoningConfig', summary: value });
+            }
+            renderReasoningOptions();
+            renderModelOptions();
+        });
+        return btn;
+    }
+
+    function formatReasoningEffort(effort) {
+        const value = effort || 'high';
+        return value.charAt(0).toUpperCase() + value.slice(1);
     }
 
     // ── Image paste from clipboard ──
@@ -1714,12 +2029,15 @@ window.onerror = function(msg, src, line, col, err) {
                     const opt = Array.from(modelSelectEl.options).find(o => o.textContent === msg.model || o.value === msg.model);
                     if (opt) {
                         modelSelectEl.value = opt.value;
+                        currentActiveDeployment = opt.value;
+                        updateModelTrigger();
+                        renderModelOptions();
                     }
                 }
                 break;
             }
             case 'setModels': {
-                setModels(msg.models, msg.activeDeployment);
+                setModels(msg.models, msg.activeDeployment, msg.reasoning);
                 break;
             }
             case 'setAgentProviders': {

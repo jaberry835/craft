@@ -165,6 +165,8 @@ export interface ChatSession {
 export type AgentProvider = 'local' | 'copilot-cli';
 export type ChatMode = 'ask' | 'plan' | 'agent';
 export type AgentPermissionLevel = 'default' | 'bypass';
+export type ReasoningEffort = 'none' | 'low' | 'medium' | 'high' | 'xhigh';
+export type ReasoningSummary = 'auto' | 'detailed' | 'none';
 
 export interface AgentProviderOption {
     value: AgentProvider;
@@ -299,6 +301,7 @@ export type WebviewMessage =
     | { type: 'newSession' }
     | { type: 'selectModel' }
     | { type: 'selectModelById'; deploymentId: string }
+    | { type: 'updateReasoningConfig'; effort?: ReasoningEffort; summary?: ReasoningSummary }
     | { type: 'selectAgentProvider'; provider: AgentProvider }
     | { type: 'selectPermissionLevel'; level: AgentPermissionLevel }
     | { type: 'selectChatMode'; mode: ChatMode }
@@ -330,7 +333,7 @@ export type WebviewMessage =
 export type ExtensionMessage =
     | { type: 'addUserMessage'; text: string; images?: string[]; fileNames?: string[] }
     | { type: 'restoreTranscript'; transcript: PersistedTranscript }
-    | { type: 'setModels'; models: Array<{ name: string; deploymentId: string }>; activeDeployment?: string; disabled?: boolean; title?: string }
+    | { type: 'setModels'; models: Array<{ name: string; deploymentId: string; supportsReasoning?: boolean }>; activeDeployment?: string; disabled?: boolean; title?: string; reasoning?: { visible: boolean; supported: boolean; effort: ReasoningEffort; summary: ReasoningSummary; wireApi: string; modelId?: string; title?: string } }
     | { type: 'setAgentProviders'; providers: AgentProviderOption[]; activeProvider: AgentProvider }
     | { type: 'setAgentProvider'; provider: AgentProvider }
     | { type: 'setPermissionLevel'; level: AgentPermissionLevel }

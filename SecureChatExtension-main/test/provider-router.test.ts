@@ -97,6 +97,64 @@ describe('ProviderRouter — getModelConfig (local)', () => {
         expect(cfg.models).toEqual([]);
         expect(cfg.activeDeployment).toBeUndefined();
     });
+
+    it('surfaces reasoning config for reasoning-capable local models', () => {
+        setConfiguration({
+            'azureOpenAI.deployments': [
+                { name: 'GPT-5', deploymentId: 'gpt-5-chat' },
+            ],
+            'azureOpenAI.activeDeployment': 'gpt-5-chat',
+            'azureOpenAI.wireApi': 'responses',
+            'azureOpenAI.reasoningEffort': 'medium',
+            'azureOpenAI.reasoningSummary': 'detailed',
+        });
+        const { router } = makeRouter();
+        const cfg = router.getModelConfig();
+        expect(cfg.models[0].supportsReasoning).toBe(true);
+        expect(cfg.reasoning).toMatchObject({
+            visible: true,
+            supported: true,
+            effort: 'medium',
+            summary: 'detailed',
+            wireApi: 'responses',
+            modelId: 'gpt-5-chat',
+        });
+    });
+
+    it('accepts GHCP-style none and xhigh reasoning effort values', () => {
+        setConfiguration({
+            'azureOpenAI.deployments': [
+                { name: 'GPT-5', deploymentId: 'gpt-5-chat' },
+            ],
+            'azureOpenAI.activeDeployment': 'gpt-5-chat',
+            'azureOpenAI.reasoningEffort': 'xhigh',
+        });
+        const { router } = makeRouter();
+        expect(router.getModelConfig().reasoning?.effort).toBe('xhigh');
+
+        setConfiguration({
+            'azureOpenAI.deployments': [
+                { name: 'GPT-5', deploymentId: 'gpt-5-chat' },
+            ],
+            'azureOpenAI.activeDeployment': 'gpt-5-chat',
+            'azureOpenAI.reasoningEffort': 'none',
+        });
+        const { router: routerWithNone } = makeRouter();
+        expect(routerWithNone.getModelConfig().reasoning?.effort).toBe('none');
+    });
+
+    it('lets deployment config override inferred reasoning support', () => {
+        setConfiguration({
+            'azureOpenAI.deployments': [
+                { name: 'GPT-5', deploymentId: 'gpt-5-chat', supportsReasoning: false },
+            ],
+            'azureOpenAI.activeDeployment': 'gpt-5-chat',
+        });
+        const { router } = makeRouter();
+        const cfg = router.getModelConfig();
+        expect(cfg.models[0].supportsReasoning).not.toBe(true);
+        expect(cfg.reasoning?.visible).toBe(false);
+    });
 });
 
 describe('ProviderRouter — getModelConfig (copilot-cli)', () => {

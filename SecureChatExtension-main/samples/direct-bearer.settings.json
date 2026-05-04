@@ -52,7 +52,8 @@
         {
             "name": "GPT-4o",
             "deploymentId": "gpt-4o",
-            "apiVersion": "2025-03-01-preview"
+            "apiVersion": "2025-03-01-preview",
+            "supportsReasoning": false
         }
     ],
     "junior.azureOpenAI.activeDeployment": "gpt-4o",

@@ -569,6 +569,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 case 'selectModelById':
                     this.handleSelectModelById(msg.deploymentId);
                     break;
+                case 'updateReasoningConfig':
+                    void this.handleUpdateReasoningConfig(msg.effort, msg.summary);
+                    break;
                 case 'selectAgentProvider':
                     this.handleSelectAgentProvider(msg.provider);
                     break;
@@ -1296,6 +1299,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 this.copilotRuntime = undefined;
             }
         });
+    }
+
+    private async handleUpdateReasoningConfig(effort?: import('./types').ReasoningEffort, summary?: import('./types').ReasoningSummary) {
+        await this.providerRouter.updateReasoningConfig({ effort, summary });
     }
 
     private async handleSelectAgentProvider(provider: AgentProvider) {
@@ -2810,37 +2817,206 @@ body { display: flex; flex-direction: column; }
 }
 .history-item .hi-delete:hover { opacity: 1; color: var(--error-fg); background: rgba(255,68,68,0.1); }
 
+.model-control {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 1;
+    min-width: 0;
+}
 #model-select {
-    width: auto;
-    min-width: 120px;
+    display: none;
+}
+.model-trigger {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 116px;
     max-width: 220px;
     min-height: 28px;
     box-sizing: border-box;
+    border: 1px solid rgba(255,255,255,0.09);
     background: rgba(255,255,255,0.03);
     color: var(--vscode-dropdown-foreground, var(--input-fg));
-    border: 1px solid rgba(255,255,255,0.09);
     border-radius: 8px;
-    padding: 4px 10px 4px 10px;
+    padding: 4px 8px;
     font-family: inherit;
     font-size: 12.5px;
     line-height: 1.2;
-    vertical-align: middle;
     outline: none;
     cursor: pointer;
     transition: background 0.12s ease, border-color 0.12s ease;
 }
-#model-select:hover {
+.model-trigger:hover,
+.model-trigger.active {
     background: rgba(255,255,255,0.05);
     border-color: rgba(255,255,255,0.14);
 }
-#model-select:focus {
-    border-color: var(--vscode-focusBorder, var(--btn-bg));
+.model-trigger:focus-visible {
+    outline: 1px solid var(--vscode-focusBorder, #3794ff);
+    outline-offset: 1px;
 }
-#model-select option {
-    background: var(--vscode-dropdown-listBackground, var(--vscode-dropdown-background, #252526));
-    color: var(--vscode-dropdown-foreground, var(--input-fg));
-    padding: 4px 8px;
-    font-size: 12.5px;
+.model-trigger:disabled {
+    opacity: 0.55;
+    cursor: default;
+}
+.model-trigger-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.model-trigger-meta {
+    color: var(--vscode-descriptionForeground, #b2b8bf);
+    font-size: 11.5px;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+.model-trigger-chevron {
+    width: 10px;
+    height: 10px;
+    opacity: 0.65;
+    flex-shrink: 0;
+    transition: transform 0.12s ease;
+}
+.model-control.open .model-trigger-chevron {
+    transform: rotate(180deg);
+}
+.model-menu,
+.model-reasoning-submenu {
+    background: var(--vscode-editorWidget-background, #252526);
+    color: var(--fg);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 8px;
+    box-shadow: 0 12px 28px rgba(0,0,0,0.28);
+}
+.model-menu.hidden,
+.model-reasoning-submenu.hidden {
+    display: none;
+}
+.model-menu {
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 0;
+    z-index: 40;
+    width: min(280px, calc(100vw - 24px));
+    padding: 5px;
+}
+.model-search {
+    width: 100%;
+    box-sizing: border-box;
+    margin: 0 0 4px;
+    padding: 6px 7px;
+    border: none;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+    background: transparent;
+    color: var(--input-fg);
+    font-family: inherit;
+    font-size: 12px;
+    outline: none;
+}
+.model-list {
+    max-height: 210px;
+    overflow-y: auto;
+}
+.model-option,
+.reasoning-option {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    border: none;
+    background: transparent;
+    color: var(--fg);
+    border-radius: 5px;
+    padding: 5px 7px;
+    font-family: inherit;
+    font-size: 12px;
+    cursor: pointer;
+}
+.model-option:hover,
+.reasoning-option:hover {
+    background: rgba(255,255,255,0.07);
+}
+.model-option.active,
+.reasoning-option.active {
+    background: rgba(255,255,255,0.09);
+}
+.model-option-check,
+.reasoning-option-check {
+    width: 14px;
+    flex-shrink: 0;
+    color: var(--vscode-textLink-foreground, #3794ff);
+    opacity: 0;
+}
+.model-option.active .model-option-check,
+.reasoning-option.active .reasoning-option-check {
+    opacity: 1;
+}
+.model-option-name,
+.reasoning-option-label {
+    min-width: 0;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: left;
+}
+.model-option-meta,
+.reasoning-option-meta {
+    color: var(--vscode-descriptionForeground, #b2b8bf);
+    font-size: 11px;
+    white-space: nowrap;
+}
+.model-reasoning-submenu {
+    position: absolute;
+    left: calc(100% + 7px);
+    top: 0;
+    z-index: 45;
+    width: 320px;
+    max-width: calc(100vw - 24px);
+    padding: 6px;
+}
+.model-reasoning-submenu.open-left {
+    left: auto;
+    right: calc(100% + 7px);
+}
+.model-reasoning-submenu.open-right {
+    left: calc(100% + 7px);
+    right: auto;
+}
+.model-reasoning-submenu.open-inside {
+    left: 0;
+    right: auto;
+    width: 100%;
+}
+.reasoning-section-title {
+    padding: 5px 7px 4px;
+    color: var(--vscode-descriptionForeground, #b2b8bf);
+    font-size: 11px;
+}
+.reasoning-option-meta {
+    flex: 1.4;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-align: left;
+}
+.reasoning-option-group + .reasoning-option-group {
+    margin-top: 5px;
+    padding-top: 5px;
+    border-top: 1px solid rgba(255,255,255,0.08);
+}
+.model-note {
+    padding: 6px 7px 4px;
+    color: var(--vscode-descriptionForeground, #b2b8bf);
+    font-size: 11px;
+    line-height: 1.35;
+}
+.model-note:empty {
+    display: none;
+}
+.model-trigger:focus {
+    border-color: var(--vscode-focusBorder, var(--btn-bg));
 }
 
 /* Provider bar – sits below the composer shell, matches GHCP bottom bar */
@@ -3290,9 +3466,25 @@ body { display: flex; flex-direction: column; }
                     </button>
                 </div>
             </div>
-            <select id="model-select" title="Choose model deployment">
-                <option value="">Loading models...</option>
-            </select>
+            <div id="model-control" class="model-control">
+                <select id="model-select" title="Choose model deployment" tabindex="-1" aria-hidden="true">
+                    <option value="">Loading models...</option>
+                </select>
+                <button id="model-trigger" class="model-trigger" type="button" title="Choose model deployment" aria-haspopup="menu" aria-expanded="false">
+                    <span id="model-trigger-label" class="model-trigger-label">Loading models...</span>
+                    <span id="model-trigger-meta" class="model-trigger-meta"></span>
+                    <span class="model-trigger-chevron" aria-hidden="true"><i class="codicon codicon-chevron-down"></i></span>
+                </button>
+                <div id="model-menu" class="model-menu hidden" role="menu" aria-label="Models">
+                    <input id="model-search" class="model-search" type="text" placeholder="Search models" aria-label="Search models" />
+                    <div id="model-list" class="model-list"></div>
+                    <div id="model-reasoning-submenu" class="model-reasoning-submenu hidden" role="menu" aria-label="Reasoning options">
+                        <div class="reasoning-option-group" data-reasoning-group="effort"></div>
+                        <div class="reasoning-option-group" data-reasoning-group="summary"></div>
+                        <div id="model-note" class="model-note"></div>
+                    </div>
+                </div>
+            </div>
             <button id="btn-tools" class="composer-btn" title="MCP Tools"><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="4" width="14" height="1.2" rx="0.6"/><circle cx="10.5" cy="4.6" r="2"/><rect x="1" y="10.8" width="14" height="1.2" rx="0.6"/><circle cx="5.5" cy="11.4" r="2"/></svg></button>
             <div class="composer-spacer"></div>
             <button id="btn-send" class="composer-btn" title="Send message (Enter)"><i class="codicon codicon-arrow-up"></i></button>

@@ -5,7 +5,7 @@
  * Extracted from ChatViewProvider to keep provider-switching logic in one place.
  */
 import * as vscode from 'vscode';
-import { AgentProvider, AgentProviderOption, ExtensionMessage } from './types';
+import { AgentProvider, AgentProviderOption, ExtensionMessage, ReasoningEffort, ReasoningSummary } from './types';
 import { getSetting, updateSetting } from './config';
 import {
     CopilotCliAvailability,
@@ -14,10 +14,41 @@ import {
 } from './copilotCliSupport';
 
 export interface ModelConfig {
-    models: Array<{ name: string; deploymentId: string }>;
+    models: Array<{ name: string; deploymentId: string; supportsReasoning?: boolean }>;
     activeDeployment?: string;
     disabled?: boolean;
     title?: string;
+    reasoning?: {
+        visible: boolean;
+        supported: boolean;
+        effort: ReasoningEffort;
+        summary: ReasoningSummary;
+        wireApi: string;
+        modelId?: string;
+        title?: string;
+    };
+}
+
+type DeploymentConfig = {
+    name?: string;
+    deploymentId: string;
+    supportsReasoning?: boolean;
+};
+
+function modelLooksReasoningCapable(model: string): boolean {
+    const normalized = model.trim().toLowerCase();
+    return /(^|[-_./])o\d/.test(normalized)
+        || normalized.startsWith('o') && /^o\d/.test(normalized)
+        || normalized.includes('gpt-5')
+        || normalized.includes('gpt5');
+}
+
+function normalizeReasoningEffort(value: unknown): ReasoningEffort {
+    return value === 'none' || value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh' ? value : 'high';
+}
+
+function normalizeReasoningSummary(value: unknown): ReasoningSummary {
+    return value === 'auto' || value === 'detailed' || value === 'none' ? value : 'auto';
 }
 
 export class ProviderRouter {
@@ -40,11 +71,32 @@ export class ProviderRouter {
         if (this.activeProvider === 'copilot-cli') {
             return this.getCopilotCliModelConfig();
         }
-        const deployments = getSetting<Array<{ name: string; deploymentId: string }>>('azureOpenAI.deployments') || [];
+        const deployments = getSetting<DeploymentConfig[]>('azureOpenAI.deployments') || [];
         const activeDeployment = getSetting<string>('azureOpenAI.activeDeployment') || undefined;
+        const models = deployments.map(d => {
+            const label = d.name || d.deploymentId;
+            const supportsReasoning = d.supportsReasoning ?? modelLooksReasoningCapable(`${label} ${d.deploymentId}`);
+            return supportsReasoning
+                ? { name: label, deploymentId: d.deploymentId, supportsReasoning: true }
+                : { name: label, deploymentId: d.deploymentId };
+        });
+        const activeModel = models.find(m => m.deploymentId === activeDeployment) ?? models[0];
+        const wireApi = (getSetting<string>('azureOpenAI.wireApi') || 'chat-completions').toLowerCase();
+        const supported = !!activeModel?.supportsReasoning;
         return {
-            models: deployments.map(d => ({ name: d.name || d.deploymentId, deploymentId: d.deploymentId })),
-            activeDeployment
+            models,
+            activeDeployment,
+            reasoning: {
+                visible: supported,
+                supported,
+                effort: normalizeReasoningEffort(getSetting<string>('azureOpenAI.reasoningEffort')),
+                summary: normalizeReasoningSummary(getSetting<string>('azureOpenAI.reasoningSummary')),
+                wireApi,
+                modelId: activeModel?.deploymentId,
+                title: wireApi === 'responses'
+                    ? 'Reasoning settings for this model'
+                    : 'Reasoning controls apply when Azure OpenAI Wire API is set to responses'
+            }
         };
     }
 
@@ -74,8 +126,18 @@ export class ProviderRouter {
     }
 
     syncModelsToWebview(): void {
-        const { models, activeDeployment, disabled, title } = this.getModelConfig();
-        this.sendToWebview({ type: 'setModels', models, activeDeployment, disabled, title });
+        const { models, activeDeployment, disabled, title, reasoning } = this.getModelConfig();
+        this.sendToWebview({ type: 'setModels', models, activeDeployment, disabled, title, reasoning });
+    }
+
+    async updateReasoningConfig(config: { effort?: ReasoningEffort; summary?: ReasoningSummary }): Promise<void> {
+        if (config.effort) {
+            await updateSetting('azureOpenAI.reasoningEffort', config.effort, vscode.ConfigurationTarget.Global);
+        }
+        if (config.summary) {
+            await updateSetting('azureOpenAI.reasoningSummary', config.summary, vscode.ConfigurationTarget.Global);
+        }
+        this.syncModelsToWebview();
     }
 
     getAgentProviderOptions(): AgentProviderOption[] {

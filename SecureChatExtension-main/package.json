@@ -256,6 +256,10 @@
                 "apiVersion": {
                   "type": "string",
                   "description": "API version — used for Azure OpenAI only (e.g., 2025-03-01-preview)"
+                },
+                "supportsReasoning": {
+                  "type": "boolean",
+                  "description": "Optional override for showing reasoning controls in the chat model selector. If omitted, Junior infers support for GPT-5 and o-series model names."
                 }
               }
             },
@@ -305,13 +309,14 @@
           "junior.azureOpenAI.reasoningEffort": {
             "type": "string",
             "enum": [
-              "minimal",
+              "none",
               "low",
               "medium",
-              "high"
+              "high",
+              "xhigh"
             ],
             "default": "high",
-            "description": "Default reasoning.effort for the v1 'responses' wire API. Only applies when wireApi='responses' and the model supports reasoning (GPT-5 family, o-series). Higher = more visible thinking, more tokens, more latency.",
+            "description": "Default reasoning.effort for the v1 'responses' wire API. Only applies when wireApi='responses' and the model supports reasoning (GPT-5 family, o-series). 'none' disables reasoning; higher values use more reasoning tokens and latency.",
             "order": 15
           },
           "junior.azureOpenAI.reasoningSummary": {

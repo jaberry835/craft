@@ -30,9 +30,9 @@
     "junior.azureOpenAI.openaiBaseUrl": "https://api.openai.com/v1",
 
     "junior.azureOpenAI.deployments": [
-        { "name": "GPT-4o",      "deploymentId": "gpt-4o" },
-        { "name": "GPT-4o Mini", "deploymentId": "gpt-4o-mini" },
-        { "name": "o4-mini",     "deploymentId": "o4-mini" }
+        { "name": "GPT-4o",      "deploymentId": "gpt-4o",      "supportsReasoning": false },
+        { "name": "GPT-4o Mini", "deploymentId": "gpt-4o-mini", "supportsReasoning": false },
+        { "name": "o4-mini",     "deploymentId": "o4-mini",     "supportsReasoning": true }
     ],
     "junior.azureOpenAI.activeDeployment": "gpt-4o",
     "junior.inlineCompletions.deployment": "gpt-4o-mini"
