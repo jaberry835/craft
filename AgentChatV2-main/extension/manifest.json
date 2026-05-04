@@ -1,0 +1,49 @@
+{
+  "manifest_version": 3,
+  "name": "Security Package Assist",
+  "version": "0.1.0",
+  "description": "AgentChatV2-powered side panel that explains and helps fill the customer's security package wizard.",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "sidePanel",
+    "identity"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:5000/*"
+  ],
+  "action": {
+    "default_title": "Security Package Assist",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "content_script.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ],
+  "options_page": "options.html",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "128": "icons/icon128.png"
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAot5kOFb89HWZMie4gTZZO3/TK2RITMzYIslo8Po+nnq3e5Tdmp+s9KJxCE74Ps5e8R5jlLRkQXzuWetgz5vHe95GJLIVCOx1RvDV9rzOkVjmMOISSRtx81iaZFhH/+siY19SH4M2w0g3A157mwdA/6N83m5Hqkhy2ubJqP1Uv+q3iQzsXvYZ9pZZg3VvuflMsulxul6onwHZOcFgpKIcHB9OCrj1IEK98sICPlmPgC16QviOvX37NPhi5P89hMVyrE1UDQIjvIyXGPtCEdtzMNsOOt9utR1R23fos1oFTOFSo6XrfIq3yoFAVnnHD8lbCBlngUm8vVAXzzohGZNklQIDAQAB"
+}

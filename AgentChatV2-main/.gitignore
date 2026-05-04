@@ -3,6 +3,10 @@ node_modules/
 __pycache__/
 *.pyc
 *.pyo
+
+# Browser extension signing key (never commit)
+extension-key.pem
+**/extension-key.pem
 .venv/
 venv/
 env/

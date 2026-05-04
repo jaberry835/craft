@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Security Package Assist – Options</title>
+  <style>
+    :root {
+      --fg: #1f2328;
+      --muted: #57606a;
+      --bg: #f6f8fa;
+      --card: #ffffff;
+      --border: #d8dee4;
+      --border-strong: #afb8c1;
+      --accent: #0969da;
+      --accent-hover: #0860c7;
+      --ok: #1a7f37;
+      --err: #cf222e;
+      --shadow: 0 1px 2px rgba(27, 31, 36, 0.06), 0 0 0 1px rgba(27, 31, 36, 0.04);
+      --radius: 8px;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      background: var(--bg);
+      color: var(--fg);
+      font-family: -apple-system, "Segoe UI", "Segoe UI Variable", system-ui, Roboto, sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+      margin: 0;
+      padding: 0;
+    }
+
+    .page {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 32px 28px 64px;
+    }
+
+    header.topbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    header.topbar .logo {
+      width: 36px; height: 36px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, #0969da 0%, #1f6feb 100%);
+      color: #fff;
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 700; font-size: 16px;
+      box-shadow: var(--shadow);
+    }
+    header.topbar h1 {
+      font-size: 18px;
+      font-weight: 600;
+      margin: 0;
+      letter-spacing: -0.005em;
+    }
+    header.topbar .subtitle {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 2px;
+    }
+
+    section.card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 20px 24px;
+      margin-bottom: 16px;
+    }
+    section.card > h2 {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      font-weight: 600;
+      margin: 0 0 16px;
+    }
+
+    .field {
+      display: block;
+      margin: 0 0 16px;
+    }
+    .field:last-child { margin-bottom: 0; }
+    .field > .label {
+      display: block;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--fg);
+      margin-bottom: 6px;
+    }
+
+    input[type="text"],
+    input:not([type]),
+    select {
+      width: 100%;
+      padding: 7px 10px;
+      font-size: 13px;
+      font-family: inherit;
+      color: var(--fg);
+      background: #fff;
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      transition: border-color .12s, box-shadow .12s;
+    }
+    input:focus, select:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(9, 105, 218, 0.25);
+    }
+    input::placeholder { color: #8c959f; }
+
+    select[multiple] {
+      padding: 4px;
+      min-height: 160px;
+    }
+    select[multiple] option {
+      padding: 4px 8px;
+      border-radius: 4px;
+    }
+
+    .hint {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 6px;
+      line-height: 1.45;
+    }
+    .hint code {
+      font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+      font-size: 11.5px;
+      background: var(--bg);
+      padding: 1px 5px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+    }
+    .hint.ok  { color: var(--ok); }
+    .hint.err { color: var(--err); }
+
+    .agent-row {
+      display: flex;
+      gap: 8px;
+      align-items: stretch;
+    }
+    .agent-row select { flex: 1; }
+
+    button {
+      font: inherit;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--fg);
+      background: #fff;
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      padding: 7px 14px;
+      cursor: pointer;
+      transition: background .12s, border-color .12s, box-shadow .12s;
+      white-space: nowrap;
+    }
+    button:hover { background: var(--bg); border-color: #8c959f; }
+    button:active { background: #eaeef2; }
+    button:focus-visible {
+      outline: none;
+      box-shadow: 0 0 0 3px rgba(9, 105, 218, 0.25);
+      border-color: var(--accent);
+    }
+
+    button.primary {
+      color: #fff;
+      background: var(--accent);
+      border-color: var(--accent);
+    }
+    button.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+    button.primary:active { background: #074fa3; }
+
+    .check {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      cursor: pointer;
+    }
+    .check input[type="checkbox"] {
+      width: 16px; height: 16px;
+      margin: 2px 0 0;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+    .check .check-body { flex: 1; }
+    .check .check-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--fg);
+    }
+    .check .hint { margin-top: 2px; }
+
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-top: 8px;
+    }
+    .actions #status {
+      font-size: 12.5px;
+      color: var(--muted);
+    }
+    .actions #status.ok  { color: var(--ok); }
+    .actions #status.err { color: var(--err); }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="topbar">
+      <div class="logo" aria-hidden="true">SP</div>
+      <div>
+        <h1>Security Package Assist</h1>
+        <div class="subtitle">Extension options</div>
+      </div>
+    </header>
+
+    <section class="card">
+      <h2>Backend</h2>
+
+      <div class="field">
+        <label class="label" for="backendUrl">Backend base URL</label>
+        <input id="backendUrl" type="text" placeholder="https://your-agentchat-backend.example.com" />
+        <div class="hint">Root URL of your AgentChatV2 backend — no trailing <code>/api</code>.</div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Agents</h2>
+
+      <div class="field">
+        <label class="label" for="agentId">Primary (orchestrator) agent</label>
+        <div class="agent-row">
+          <select id="agentId">
+            <option value="">(none loaded — click Load agents)</option>
+          </select>
+          <button id="loadAgents" type="button">Load agents</button>
+        </div>
+        <div class="hint">Pick the orchestrator that owns the security-package prompt and MCP tools. Requires the backend URL and auth settings below.</div>
+        <div id="agentsStatus" class="hint"></div>
+      </div>
+
+      <div class="field">
+        <label class="label" for="specialistAgentIds">Specialist agents (optional)</label>
+        <select id="specialistAgentIds" multiple>
+          <option value="">(load agents first)</option>
+        </select>
+        <div class="hint">Hold <code>Ctrl</code> / <code>⌘</code> to select multiple. When any are selected, the extension runs your primary agent as an orchestrator that consults these specialists (Magentic pattern). Leave empty to call the primary agent on its own.</div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Authentication</h2>
+
+      <div class="field">
+        <label class="label" for="tenantId">Entra tenant id</label>
+        <input id="tenantId" type="text" placeholder="00000000-0000-0000-0000-000000000000" />
+      </div>
+
+      <div class="field">
+        <label class="label" for="clientId">Entra app (client) id</label>
+        <input id="clientId" type="text" placeholder="00000000-0000-0000-0000-000000000000" />
+      </div>
+
+      <div class="field">
+        <label class="label" for="scope">OAuth scope</label>
+        <input id="scope" type="text" placeholder="api://your-backend-app-id/.default" />
+        <div class="hint">Whatever scope your backend's token validator expects. Defaults to <code>openid profile offline_access</code>.</div>
+      </div>
+
+      <div class="field">
+        <label class="label" for="authority">Authority (cloud)</label>
+        <input id="authority" type="text" placeholder="https://login.microsoftonline.com" />
+        <div class="hint">Use <code>https://login.microsoftonline.us</code> for Azure Government, or <code>https://login.microsoftonline.com</code> for commercial. Defaults to commercial.</div>
+      </div>
+
+      <div class="field">
+        <label class="label" for="devToken">Dev token (optional)</label>
+        <input id="devToken" type="text" placeholder="paste a bearer token for local testing" />
+        <div class="hint">If set, the extension skips OAuth and uses this token directly. Clear for production.</div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Developer</h2>
+
+      <label class="check field" for="showDevViews">
+        <input id="showDevViews" type="checkbox" />
+        <span class="check-body">
+          <span class="check-title">Show developer views</span>
+          <div class="hint">Adds <i>Page</i> and <i>Wizard</i> source toggles to the Preview and JSON tabs. Useful while debugging the extractor; hide for everyday use.</div>
+        </span>
+      </label>
+    </section>
+
+    <div class="actions">
+      <button id="save" class="primary" type="button">Save changes</button>
+      <span id="status"></span>
+    </div>
+  </div>
+
+  <script src="options.js"></script>
+</body>
+</html>

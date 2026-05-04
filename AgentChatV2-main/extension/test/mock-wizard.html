@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Mock Security Package Wizard</title>
+  <style>
+    body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; max-width: 760px; margin: 24px auto; padding: 0 16px; color: #222; }
+    h1 { font-size: 20px; margin-bottom: 4px; }
+    .subtitle { color: #666; margin-bottom: 16px; }
+    .stepper { display: flex; gap: 8px; margin: 16px 0 24px; }
+    .step { flex: 1; padding: 6px 8px; border-radius: 4px; background: #eee; font-size: 12px; text-align: center; color: #777; cursor: pointer; }
+    .step.active { background: #2667d6; color: white; font-weight: 600; }
+    .step.done { background: #d6e4f7; color: #2667d6; }
+    fieldset { border: 1px solid #ddd; border-radius: 6px; padding: 14px 18px; margin-bottom: 18px; }
+    legend { font-weight: 600; padding: 0 6px; }
+    label { display: block; margin: 12px 0 4px; font-size: 13px; font-weight: 500; }
+    input[type=text], input[type=email], input[type=url], input[type=number], select, textarea {
+      width: 100%; padding: 7px 9px; font-size: 14px;
+      border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;
+    }
+    textarea { min-height: 70px; resize: vertical; }
+    .help { color: #666; font-size: 12px; margin-top: 3px; }
+    .row { display: flex; gap: 14px; }
+    .row > div { flex: 1; }
+    .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+    button { padding: 8px 16px; font-size: 14px; border-radius: 4px; border: 1px solid #ccc; background: #f5f5f5; cursor: pointer; }
+    button.primary { background: #2667d6; color: white; border-color: #2667d6; }
+    .invalid-feedback { color: #c33; font-size: 12px; margin-top: 3px; display: none; }
+    .invalid input, .invalid select, .invalid textarea { border-color: #c33; }
+    .invalid .invalid-feedback { display: block; }
+    .review { background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 6px; padding: 14px 18px; }
+    .review dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; margin: 0; }
+    .review dt { color: #666; font-weight: 500; }
+    .review dd { margin: 0; }
+    .review .empty { color: #999; font-style: italic; }
+    .panel { display: none; }
+    .panel.active { display: block; }
+    .submit-banner { padding: 14px; background: #dafbe1; border: 1px solid #1a7f37; border-radius: 6px; color: #1a7f37; margin-bottom: 16px; display: none; }
+    .submit-banner.show { display: block; }
+  </style>
+</head>
+<body>
+  <h1>SecPak Portal — New Application</h1>
+  <p class="subtitle">Submit a new application's security package for review.</p>
+
+  <div id="submit-banner" class="submit-banner">Package submitted for review. (demo)</div>
+
+  <div class="stepper" aria-label="Wizard progress">
+    <div class="step" data-step="1">1. Application info</div>
+    <div class="step" data-step="2">2. Data &amp; access</div>
+    <div class="step" data-step="3">3. Network</div>
+    <div class="step" data-step="4">4. Review &amp; submit</div>
+  </div>
+
+  <form id="wizard">
+    <!-- ============ STEP 1: Application info ============ -->
+    <section class="panel" data-panel="1">
+      <fieldset>
+        <legend>Application identity</legend>
+        <label for="app-name">Application name</label>
+        <input id="app-name" name="appName" type="text" required value="Genesis" />
+        <div class="help">Short, recognizable name. This becomes the package title.</div>
+
+        <div class="row">
+          <div>
+            <label for="env">Environment</label>
+            <select id="env" name="environment" required>
+              <option value="">-- select --</option>
+              <option>Dev</option>
+              <option selected>Test</option>
+              <option>Prod</option>
+            </select>
+            <div class="help">Each environment needs its own package.</div>
+          </div>
+          <div>
+            <label for="owner-email">Application owner email</label>
+            <input id="owner-email" name="ownerEmail" type="email" required placeholder="user@contoso.com" />
+            <div class="help">Person accountable for this application.</div>
+          </div>
+        </div>
+
+        <label for="business-unit">Business unit</label>
+        <input id="business-unit" name="businessUnit" type="text" placeholder="e.g. Customer Engineering" />
+        <div class="help">Owning organization. Used to route review.</div>
+
+        <label for="app-description">Application description</label>
+        <textarea id="app-description" name="appDescription" placeholder="What does the app do? Who uses it?"></textarea>
+        <div class="help">2–3 sentences describing the purpose and intended users.</div>
+      </fieldset>
+    </section>
+
+    <!-- ============ STEP 2: Data & access ============ -->
+    <section class="panel" data-panel="2">
+      <fieldset>
+        <legend>Data classification &amp; access</legend>
+        <label for="data-class">Highest data classification handled</label>
+        <select id="data-class" name="dataClassification" required aria-describedby="data-class-help">
+          <option value="">-- select --</option>
+          <option>Public</option>
+          <option>Internal</option>
+          <option>Confidential</option>
+          <option>Restricted</option>
+        </select>
+        <div id="data-class-help" class="help">If your app stores or processes data of a given classification, pick the highest.</div>
+
+        <label>User identity provider</label>
+        <div>
+          <label style="font-weight: normal;"><input type="radio" name="idp" value="entra" /> Microsoft Entra ID</label>
+          <label style="font-weight: normal;"><input type="radio" name="idp" value="entra-b2b" /> Entra ID (B2B / guests)</label>
+          <label style="font-weight: normal;"><input type="radio" name="idp" value="local" /> Local accounts</label>
+          <label style="font-weight: normal;"><input type="radio" name="idp" value="none" /> No user authentication</label>
+        </div>
+        <div class="help">Local accounts and "no auth" require additional review.</div>
+
+        <label for="data-residency">Data residency requirement</label>
+        <input id="data-residency" name="dataResidency" type="text" placeholder="e.g. US Gov, EU, none" />
+
+        <label><input type="checkbox" id="contains-pii" name="containsPii" /> Contains PII</label>
+        <div class="help">Personally identifiable information about real people.</div>
+
+        <label for="retention">Data retention period (days)</label>
+        <input id="retention" name="retentionDays" type="number" min="0" placeholder="e.g. 365" />
+
+        <label for="justification">Business justification</label>
+        <textarea id="justification" name="justification" placeholder="Why does this app exist?"></textarea>
+      </fieldset>
+    </section>
+
+    <!-- ============ STEP 3: Network ============ -->
+    <section class="panel" data-panel="3">
+      <fieldset>
+        <legend>Network exposure</legend>
+        <label for="ingress">Inbound exposure</label>
+        <select id="ingress" name="ingress" required>
+          <option value="">-- select --</option>
+          <option>Internet (public)</option>
+          <option>Corporate network only</option>
+          <option>Private VNet only</option>
+          <option>No inbound</option>
+        </select>
+        <div class="help">How users / other systems reach this application.</div>
+
+        <label><input type="checkbox" id="has-public-endpoint" name="hasPublicEndpoint" /> Has at least one public endpoint</label>
+        <label><input type="checkbox" id="waf-enabled" name="wafEnabled" /> Web Application Firewall in front of public endpoints</label>
+        <label><input type="checkbox" id="vnet-integrated" name="vnetIntegrated" /> Workload is VNet-integrated</label>
+
+        <label for="egress">Outbound destinations</label>
+        <textarea id="egress" name="egressDestinations" placeholder="e.g. graph.microsoft.com, internal-payments-api"></textarea>
+
+        <label for="open-ports">Open inbound ports</label>
+        <input id="open-ports" name="openPorts" type="text" placeholder="e.g. 443" />
+        <div class="help">Comma-separated list. Most apps need only 443.</div>
+      </fieldset>
+    </section>
+
+    <!-- ============ STEP 4: Review & submit ============ -->
+    <section class="panel" data-panel="4">
+      <fieldset>
+        <legend>Review &amp; submit</legend>
+        <p class="help">Confirm the values you entered. Use Back to make changes.</p>
+        <div class="review"><dl id="review-list"></dl></div>
+
+        <label style="margin-top: 18px;">
+          <input type="checkbox" id="attest" name="attest" required />
+          I attest that the information provided is accurate to the best of my knowledge.
+        </label>
+        <div class="invalid-feedback">Attestation is required to submit.</div>
+      </fieldset>
+    </section>
+
+    <div class="actions">
+      <button type="button" id="btn-back">Back</button>
+      <button type="button" id="btn-next" class="primary">Save and continue</button>
+      <button type="button" id="btn-submit" class="primary" style="display:none">Submit for review</button>
+    </div>
+  </form>
+
+  <script>
+    const TOTAL = 4;
+    let current = 1;
+
+    function go(step) {
+      current = Math.max(1, Math.min(TOTAL, step));
+      document.querySelectorAll(".panel").forEach((p) => {
+        p.classList.toggle("active", Number(p.dataset.panel) === current);
+      });
+      document.querySelectorAll(".step").forEach((s) => {
+        const n = Number(s.dataset.step);
+        s.classList.toggle("active", n === current);
+        s.classList.toggle("done",   n <  current);
+      });
+      document.getElementById("btn-back").disabled = current === 1;
+      document.getElementById("btn-next").style.display   = current < TOTAL ? "" : "none";
+      document.getElementById("btn-submit").style.display = current === TOTAL ? "" : "none";
+      if (current === TOTAL) renderReview();
+      location.hash = `#step-${current}`;
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+
+    function renderReview() {
+      const dl = document.getElementById("review-list");
+      const data = collectAll();
+      dl.innerHTML = "";
+      if (!data.length) { dl.innerHTML = "<dd class='empty'>No values entered.</dd>"; return; }
+      for (const { label, value } of data) {
+        const dt = document.createElement("dt"); dt.textContent = label;
+        const dd = document.createElement("dd");
+        if (value == null || value === "" || value === false) { dd.className = "empty"; dd.textContent = "— not provided —"; }
+        else if (value === true) { dd.textContent = "Yes"; }
+        else { dd.textContent = value; }
+        dl.append(dt, dd);
+      }
+    }
+
+    function collectAll() {
+      const out = []; const seenRadio = new Set();
+      document.querySelectorAll("#wizard input, #wizard select, #wizard textarea").forEach((el) => {
+        if (el.type === "submit" || el.type === "button") return;
+        if (el.id === "attest") return;
+        const labelEl = el.id ? document.querySelector(`label[for="${el.id}"]`) : el.closest("label");
+        const label = labelEl ? labelEl.innerText.trim() : (el.name || el.id);
+        if (el.type === "radio") {
+          if (seenRadio.has(el.name)) return;
+          seenRadio.add(el.name);
+          const checked = document.querySelector(`input[name="${el.name}"]:checked`);
+          out.push({ label: el.name, value: checked ? (checked.parentElement.innerText.trim() || checked.value) : "" });
+          return;
+        }
+        if (el.type === "checkbox") { out.push({ label, value: el.checked }); return; }
+        out.push({ label, value: el.value });
+      });
+      return out;
+    }
+
+    document.getElementById("btn-back").addEventListener("click", () => go(current - 1));
+    document.getElementById("btn-next").addEventListener("click", () => go(current + 1));
+    document.getElementById("btn-submit").addEventListener("click", () => {
+      const attest = document.getElementById("attest");
+      if (!attest.checked) { attest.parentElement.classList.add("invalid"); return; }
+      document.getElementById("submit-banner").classList.add("show");
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    });
+    document.querySelectorAll(".step").forEach((s) => s.addEventListener("click", () => go(Number(s.dataset.step))));
+
+    const m = /^#step-(\d)$/.exec(location.hash);
+    go(m ? Number(m[1]) : 1);
+  </script>
+</body>
+</html>

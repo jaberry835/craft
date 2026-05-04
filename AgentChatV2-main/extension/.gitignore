@@ -1,0 +1,2 @@
+# Never commit the extension's private key.
+extension-key.pem
