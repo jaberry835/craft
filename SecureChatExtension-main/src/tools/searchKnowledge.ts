@@ -23,6 +23,7 @@ import * as https from 'https';
 import { URL } from 'url';
 import { ToolEntry } from './types';
 import { CustomAgentDef, CustomAgentSearchConfig, CustomAgentEmbeddingConfig, isValidHttpsEndpoint } from '../customAgents';
+import { getConfiguredTlsOptions } from '../network';
 
 export interface Citation {
     /** 1-based result index for footnote numbering. */
@@ -329,6 +330,7 @@ function postJson(urlStr: string, headers: Record<string, string>, body: string)
             path: u.pathname + u.search,
             headers: { ...headers, 'content-length': Buffer.byteLength(body).toString() },
             timeout: TIMEOUT_MS,
+            ...getConfiguredTlsOptions(),
         }, (res) => {
             const chunks: Buffer[] = [];
             let total = 0;

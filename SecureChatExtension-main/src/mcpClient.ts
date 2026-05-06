@@ -15,6 +15,7 @@ import * as path from 'path';
 import type { MCPServerConfig as CopilotSdkMcpServerConfig } from '@github/copilot-sdk';
 import { McpAuthSessionConfig, McpServerConfig, McpToolInfo, ToolDefinition, ToolResult } from './types';
 import { getSetting } from './config';
+import { getConfiguredTlsOptions } from './network';
 
 interface JsonRpcRequest {
     jsonrpc: '2.0';
@@ -634,7 +635,8 @@ export class McpClient {
                 path: parsed.pathname + parsed.search,
                 method: 'POST',
                 headers: reqHeaders,
-                timeout: timeoutMs
+                timeout: timeoutMs,
+                ...(isHttps ? getConfiguredTlsOptions() : {})
             };
 
             this.outputChannel.appendLine(`[${conn.serverName}] HTTP POST ${parsed.pathname} (${body.slice(0, 200)})`);

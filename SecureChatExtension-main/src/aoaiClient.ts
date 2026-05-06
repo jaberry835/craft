@@ -7,6 +7,7 @@ import * as http from 'http';
 import * as vscode from 'vscode';
 import { AoaiConfig, ChatMessage, ToolDefinition, AoaiStreamChunk, ToolCall, TokenUsage } from './types';
 import { getSetting } from './config';
+import { getConfiguredTlsOptions } from './network';
 
 export interface AzureOpenAIBearerAuthSessionConfig {
     providerId: string;
@@ -420,6 +421,7 @@ export class AzureOpenAIClient {
                 {
                     method: 'POST',
                     timeout: requestTimeoutMs,
+                    ...(isHttps ? getConfiguredTlsOptions() : {}),
                     headers: {
                         'Content-Type': 'application/json',
                         ...authHeaders

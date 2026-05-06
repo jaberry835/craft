@@ -29,6 +29,7 @@ import type {
     ToolDefinition,
 } from './framework/types';
 import { getSetting } from './config';
+import { getConfiguredTlsOptions } from './network';
 
 // ── Request shaping ────────────────────────────────────────────────────────
 
@@ -518,7 +519,12 @@ function postSseRequest(
 
         const req = mod.request(
             url,
-            { method: 'POST', timeout: AoaiResponsesClient['REQUEST_TIMEOUT_MS'], headers },
+            {
+                method: 'POST',
+                timeout: AoaiResponsesClient['REQUEST_TIMEOUT_MS'],
+                ...(isHttps ? getConfiguredTlsOptions() : {}),
+                headers,
+            },
             (res) => {
                 if (res.statusCode && res.statusCode >= 400) {
                     let errBody = '';

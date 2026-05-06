@@ -392,6 +392,17 @@
         }
       },
       {
+        "title": "Network",
+        "properties": {
+          "junior.network.caCertPath": {
+            "type": "string",
+            "default": "",
+            "description": "Optional path to a PEM file containing additional trusted CA certificates for local Junior HTTPS calls. Leave empty to use the default Node/OS trust behavior.",
+            "order": 0
+          }
+        }
+      },
+      {
         "title": "Model Behavior",
         "properties": {
           "junior.maxTokens": {
