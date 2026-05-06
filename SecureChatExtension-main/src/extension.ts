@@ -16,7 +16,7 @@ import { RepoPatternStore } from './repoPatternStore';
 import { getCopilotCliBearerAuthSessionConfig, COPILOT_CLI_API_KEY_SECRET_KEY, setCopilotCliApiKeySecretCache } from './copilotCliSupport';
 import { CustomAgentStore } from './customAgents';
 import { CustomAgentEditor } from './customAgentEditor';
-import { setNetworkLogger } from './network';
+import { setNetworkLogger, setNetworkStorageUri } from './network';
 
 let chatViewProvider: ChatViewProvider;
 let mcpClient: McpClient;
@@ -38,6 +38,7 @@ function logError(msg: string) { log(msg, 'ERROR'); }
 export function activate(context: vscode.ExtensionContext) {
     log('Junior extension activating...');
     setNetworkLogger((msg, level = 'INFO') => log(`[network] ${msg}`, level));
+    setNetworkStorageUri(context.globalStorageUri);
     const aoaiClient = new AzureOpenAIClient();
     aoaiClient.setSecretStorage(context.secrets);
 

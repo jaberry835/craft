@@ -90,6 +90,8 @@ The fastest setup path for most users is:
 4. Run **Junior: Set API Key** if your sample uses key auth, or **Junior: Sign In for Azure/APIM Bearer Mode** if your sample uses bearer auth.
 5. Open the chat with `Ctrl+Shift+I`.
 
+> **Tip:** If you are running VS Code directly on a network that uses a private or enterprise TLS certificate chain, run **Junior: Add CA Refresh Script** after the normal settings step. Junior creates a user-level refresh script and PEM cache in VS Code extension storage, then writes Junior User settings so every workspace can use them. Paste your site's refresh code into the script so it writes the full PEM chain to the `$CaCertPath` parameter. On the first certificate validation failure, Junior will ask permission to run that script and retry the request once after it succeeds.
+
 ### Bundled Sample Settings
 
 | Sample | Provider | Auth |
@@ -224,6 +226,7 @@ For Copilot SDK troubleshooting, set `junior.copilotCli.logSdkEvents` to `true` 
 | Inspect token usage | Run **Junior: Show Token Usage** |
 | Open a bundled sample settings file | Run **Junior: Open Sample Settings** |
 | Open a bundled setup guide | Run **Junior: Open Documentation** |
+| Add a user-level CA refresh script | Run **Junior: Add CA Refresh Script** |
 
 Normal workflow:
 

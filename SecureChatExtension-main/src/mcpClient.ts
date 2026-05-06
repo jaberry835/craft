@@ -15,7 +15,7 @@ import * as path from 'path';
 import type { MCPServerConfig as CopilotSdkMcpServerConfig } from '@github/copilot-sdk';
 import { McpAuthSessionConfig, McpServerConfig, McpToolInfo, ToolDefinition, ToolResult } from './types';
 import { getSetting } from './config';
-import { getConfiguredTlsOptions } from './network';
+import { getConfiguredTlsOptions, withCaRefreshRetry } from './network';
 
 interface JsonRpcRequest {
     jsonrpc: '2.0';
@@ -609,7 +609,7 @@ export class McpClient {
 
     /** Send a JSON-RPC request over HTTP. Handles both JSON and SSE responses. */
     private httpPost(conn: HttpConnection, body: string, timeoutMs: number, allowAuthRetry = true, abortSignal?: AbortSignal): Promise<{ body: string; headers: http.IncomingHttpHeaders; contentType: string }> {
-        return new Promise((resolve, reject) => {
+        const send = () => new Promise<{ body: string; headers: http.IncomingHttpHeaders; contentType: string }>((resolve, reject) => {
             if (abortSignal?.aborted) {
                 reject(new Error('Aborted'));
                 return;
@@ -698,6 +698,7 @@ export class McpClient {
             req.write(body);
             req.end();
         });
+        return withCaRefreshRetry(send, `calling MCP server ${conn.serverName}`);
     }
 
     disconnectServer(name: string) {

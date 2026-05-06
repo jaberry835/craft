@@ -118,6 +118,11 @@
         "icon": "$(book)"
       },
       {
+        "command": "junior.addCaRefreshScript",
+        "title": "Junior: Add CA Refresh Script",
+        "icon": "$(shield)"
+      },
+      {
         "command": "junior.signInAzureOpenAIBearer",
         "title": "Junior: Sign In for Azure/APIM Bearer Mode",
         "icon": "$(account)"
@@ -397,8 +402,14 @@
           "junior.network.caCertPath": {
             "type": "string",
             "default": "",
-            "description": "Optional path to a PEM file containing additional trusted CA certificates for local Junior HTTPS calls. Leave empty to use the default Node/OS trust behavior.",
+            "description": "PEM CA bundle used for local Junior HTTPS calls. Leave empty for default Node/OS trust, or run 'Junior: Add CA Refresh Script' to create a user-level PEM cache and configure this setting automatically.",
             "order": 0
+          },
+          "junior.network.caCertRefreshScriptPath": {
+            "type": "string",
+            "default": "",
+            "description": "PowerShell script Junior may offer to run after TLS certificate validation failures to refresh junior.network.caCertPath. Normally created and configured by 'Junior: Add CA Refresh Script' in VS Code extension storage.",
+            "order": 1
           }
         }
       },

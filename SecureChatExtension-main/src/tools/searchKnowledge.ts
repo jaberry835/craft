@@ -23,7 +23,7 @@ import * as https from 'https';
 import { URL } from 'url';
 import { ToolEntry } from './types';
 import { CustomAgentDef, CustomAgentSearchConfig, CustomAgentEmbeddingConfig, isValidHttpsEndpoint } from '../customAgents';
-import { getConfiguredTlsOptions } from '../network';
+import { getConfiguredTlsOptions, withCaRefreshRetry } from '../network';
 
 export interface Citation {
     /** 1-based result index for footnote numbering. */
@@ -321,7 +321,7 @@ function formatFieldValue(v: unknown): string {
 function postJson(urlStr: string, headers: Record<string, string>, body: string): Promise<any> {
     const TIMEOUT_MS = 30_000;
     const MAX_BYTES = 5 * 1024 * 1024; // 5 MB cap on response body
-    return new Promise((resolve, reject) => {
+    const send = () => new Promise<any>((resolve, reject) => {
         const u = new URL(urlStr);
         const req = https.request({
             method: 'POST',
@@ -364,6 +364,7 @@ function postJson(urlStr: string, headers: Record<string, string>, body: string)
         req.write(body);
         req.end();
     });
+    return withCaRefreshRetry(send, 'querying search knowledge');
 }
 
 function toNumber(v: unknown): number | undefined {

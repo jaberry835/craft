@@ -9,6 +9,7 @@ import { TokenTracker } from './tokenTracker';
 import { getSetting, updateSetting } from './config';
 import { getAzureOpenAIBearerAuthSessionConfig } from './aoaiClient';
 import { getCopilotCliBearerAuthSessionConfig, COPILOT_CLI_API_KEY_SECRET_KEY, setCopilotCliApiKeySecretCache } from './copilotCliSupport';
+import { installCaRefreshScriptToUserProfile } from './network';
 
 interface CommandRegistrarDeps {
     context: vscode.ExtensionContext;
@@ -58,6 +59,19 @@ export function registerCommands(deps: CommandRegistrarDeps): void {
                 emptyMessage: 'Junior: No documentation files are bundled with this extension.',
                 openAsPreview: true,
             });
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('junior.addCaRefreshScript', async () => {
+            try {
+                await installCaRefreshScriptToUserProfile(context.extensionUri, context.globalStorageUri);
+            } catch (err: unknown) {
+                const message = err instanceof Error ? err.message : String(err);
+                const stack = err instanceof Error ? err.stack : '';
+                logError(`addCaRefreshScript error: ${message}\n${stack}`);
+                vscode.window.showErrorMessage(`Junior: Could not add CA refresh script — ${message}`);
+            }
         })
     );
 

@@ -2,6 +2,7 @@
 .junior/**
 .github/**
 src/**
+!templates/**
 node_modules/**
 !node_modules/@vscode/codicons/dist/**
 tsconfig.json

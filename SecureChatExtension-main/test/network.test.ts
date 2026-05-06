@@ -6,6 +6,7 @@ import * as vscode from 'vscode';
 import {
     getConfiguredCaCertificate,
     getConfiguredTlsOptions,
+    isTlsCertificateError,
     resetNetworkStateForTests,
     setNetworkLogger,
 } from '../src/network';
@@ -71,5 +72,11 @@ describe('network CA certificate settings', () => {
         const warnings = logs.filter((m) => m.includes('could not be read'));
         expect(warnings).toHaveLength(1);
         expect(warnings[0]).toContain(pemPath);
+    });
+
+    it('detects certificate validation errors that can be recovered by refreshing the CA bundle', () => {
+        expect(isTlsCertificateError({ code: 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', message: 'certificate rejected' })).toBe(true);
+        expect(isTlsCertificateError(new Error('unable to verify the first certificate'))).toBe(true);
+        expect(isTlsCertificateError(new Error('socket hang up'))).toBe(false);
     });
 });

@@ -29,7 +29,7 @@ import type {
     ToolDefinition,
 } from './framework/types';
 import { getSetting } from './config';
-import { getConfiguredTlsOptions } from './network';
+import { getConfiguredTlsOptions, withCaRefreshRetry } from './network';
 
 // ── Request shaping ────────────────────────────────────────────────────────
 
@@ -503,7 +503,7 @@ function postSseRequest(
     authToken: string,
     abortSignal?: AbortSignal,
 ): Promise<AsyncIterable<string>> {
-    return new Promise((resolve, reject) => {
+    const send = () => new Promise<AsyncIterable<string>>((resolve, reject) => {
         if (abortSignal?.aborted) { reject(new Error('Aborted')); return; }
         const isHttps = url.protocol === 'https:';
         const mod = isHttps ? https : http;
@@ -582,4 +582,5 @@ function postSseRequest(
         req.write(body);
         req.end();
     });
+    return withCaRefreshRetry(send, 'calling the Responses API');
 }

@@ -7,7 +7,7 @@ import * as http from 'http';
 import * as vscode from 'vscode';
 import { AoaiConfig, ChatMessage, ToolDefinition, AoaiStreamChunk, ToolCall, TokenUsage } from './types';
 import { getSetting } from './config';
-import { getConfiguredTlsOptions } from './network';
+import { getConfiguredTlsOptions, withCaRefreshRetry } from './network';
 
 export interface AzureOpenAIBearerAuthSessionConfig {
     providerId: string;
@@ -403,7 +403,7 @@ export class AzureOpenAIClient {
         provider: 'direct' | 'apim' | 'openai' = 'direct',
         timeoutBudgetMs: number = AzureOpenAIClient.REQUEST_TIMEOUT_MS
     ): Promise<AsyncIterable<string>> {
-        return new Promise((resolve, reject) => {
+        const send = () => new Promise<AsyncIterable<string>>((resolve, reject) => {
             if (abortSignal?.aborted) {
                 reject(new Error('Aborted'));
                 return;
@@ -508,6 +508,7 @@ export class AzureOpenAIClient {
             req.write(body);
             req.end();
         });
+        return withCaRefreshRetry(send, 'calling Azure OpenAI');
     }
 
     private buildAuthHeaders(authHeader: 'api-key' | 'bearer', authToken: string): Record<string, string> {
