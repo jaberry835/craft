@@ -1,0 +1,39 @@
+// Sample: Local Junior agent with an OpenAI-compatible endpoint, key auth.
+//
+// Use this for OpenAI itself or any service that follows the OpenAI-style REST API
+// (GitHub Models, OpenRouter, Ollama, LM Studio, vLLM, etc.).
+//
+// What this configures:
+//   - junior.agentProvider:               local         (Junior's built-in agent loop)
+//   - junior.azureOpenAI.provider:        openai        (OpenAI-compatible /v1 routes)
+//   - junior.azureOpenAI.openaiBaseUrl:   base URL for the compatible API
+//   - auth:                               api key sent as Authorization: Bearer <key>
+//
+// Setup steps:
+//   1. Copy the relevant entries into your settings.json.
+//   2. Replace openaiBaseUrl with your provider's base URL (see table below).
+//   3. Replace deployment IDs with model names exposed by that provider.
+//   4. Run "Junior: Set API Key" and paste the provider key when prompted.
+//
+// In "openai" provider mode, deploymentId is the model name and apiVersion is ignored.
+//
+// Common compatible endpoints:
+//   OpenAI          https://api.openai.com/v1
+//   GitHub Models   https://models.inference.ai.azure.com
+//   OpenRouter      https://openrouter.ai/api/v1
+//   Ollama          http://localhost:11434/v1
+//   LM Studio       http://localhost:1234/v1
+{
+    "junior.agentProvider": "local",
+
+    "junior.azureOpenAI.provider": "openai",
+    "junior.azureOpenAI.openaiBaseUrl": "https://api.openai.com/v1",
+
+    "junior.azureOpenAI.deployments": [
+        { "name": "GPT-4o",      "deploymentId": "gpt-4o",      "supportsReasoning": false },
+        { "name": "GPT-4o Mini", "deploymentId": "gpt-4o-mini", "supportsReasoning": false },
+        { "name": "o4-mini",     "deploymentId": "o4-mini",     "supportsReasoning": true }
+    ],
+    "junior.azureOpenAI.activeDeployment": "gpt-4o",
+    "junior.inlineCompletions.deployment": "gpt-4o-mini"
+}
