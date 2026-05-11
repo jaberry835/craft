@@ -4,7 +4,7 @@
 $repos = @(
     #@{ Url = "https://github.com/adamruderman/UserAccessCheckerApi"; Branch = "main" }
     @{ Url = "https://github.com/adamruderman/AgentChatV2"; Branch = "main" },
-        @{ Url = "https://github.com/adamruderman/AgentChatV2"; Branch = "experiment/response-api" }
+    @{ Url = "https://github.com/adamruderman/AgentChatV2"; Branch = "experiment/response-api" }
 
     @{ Url = "https://github.com/adamruderman/Rude-MCPServer"; Branch = "main" }
     #@{ Url = "https://github.com/adamruderman/UserAccessChecker-Python"; Branch = "main" }
@@ -17,7 +17,8 @@ $repos = @(
     @{ Url = "https://github.com/adamruderman/SecureChatExtension"; Branch = "main" }
     #@{Url = "https://github.com/adamruderman/SecureChatExtension"; Branch = "msal-config" },
     @{Url = "https://github.com/adamruderman/SecureChatExtension"; Branch = "experiment/responses-api" },
-     @{ Url = "https://github.com/adamruderman/SecureChatExtension"; Branch = "squad-integration" }
+   #@{ Url = "https://github.com/adamruderman/SecureChatExtension"; Branch = "squad-integration" },
+    @{ Url = "https://github.com/adamruderman/SecureChatExtension"; Branch = "feature/junior-dev-team" }
     
      
 )
