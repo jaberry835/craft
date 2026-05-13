@@ -17,6 +17,21 @@ export function getSetting<T>(path: string, defaultValue?: T): T | undefined {
     return defaultValue;
 }
 
+/**
+ * Read a setting only when the user explicitly configured it, ignoring package defaults.
+ */
+export function getConfiguredSetting<T>(path: string): T | undefined {
+    for (const namespace of [PRIMARY_NAMESPACE, LEGACY_NAMESPACE]) {
+        const inspected = vscode.workspace.getConfiguration(namespace).inspect<T>(path);
+        const value = inspected?.workspaceFolderValue
+            ?? inspected?.workspaceValue
+            ?? inspected?.globalValue;
+        if (value !== undefined) { return value; }
+    }
+
+    return undefined;
+}
+
 /** Update settings in the new `junior.*` namespace. */
 export async function updateSetting(
     path: string,

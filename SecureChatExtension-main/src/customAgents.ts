@@ -4,6 +4,7 @@
  *
  * Storage:
  *   - Workspace agents:  `.vscode/junior-agents.json` (committable; secrets MUST NOT live here)
+ *   - Workspace agent files: `.github/agents/*.agent.md` and `.copilot/agents/*.agent.md` (read-only)
  *   - Global agents:     vscode.Memento globalState key `junior.customAgents.global`
  *   - Secrets:           vscode.SecretStorage keyed `junior.customAgent.<id>.searchKey`
  *
@@ -14,10 +15,12 @@ import * as path from 'path';
 import * as fs from 'fs';
 
 const WORKSPACE_FILE = path.join('.vscode', 'junior-agents.json');
+const WORKSPACE_AGENT_MD_DIRS = [path.join('.github', 'agents'), path.join('.copilot', 'agents')];
 const GLOBAL_STATE_KEY = 'junior.customAgents.global';
 const SECRET_KEY_PREFIX = 'junior.customAgent.';
 
 export type CustomAgentScope = 'workspace' | 'global';
+export type CustomAgentSource = 'junior' | 'agent-md';
 
 export type CustomAgentSearchAuth = 'key' | 'entra';
 export type CustomAgentSearchQueryType = 'simple' | 'semantic' | 'hybrid';
@@ -88,6 +91,10 @@ export interface CustomAgentDef {
     search?: CustomAgentSearchConfig;
     /** Where this agent lives. Set by the store at load time. */
     scope?: CustomAgentScope;
+    /** Source format for the agent definition. `.agent.md` files are discovered read-only. */
+    source?: CustomAgentSource;
+    /** True when the agent should not be edited/deleted through Junior's custom-agent editor. */
+    readonly?: boolean;
 }
 
 /** Validate that an endpoint is an https URL with a hostname.
@@ -206,8 +213,48 @@ export function validateCustomAgent(def: Partial<CustomAgentDef>): CustomAgentDe
 
 /** Strip transient fields and credential-shaped extras before persisting. */
 function serializeForDisk(def: CustomAgentDef): CustomAgentDef {
-    const { scope: _scope, ...rest } = def;
+    const { scope: _scope, source: _source, readonly: _readonly, ...rest } = def;
     return rest as CustomAgentDef;
+}
+
+interface AgentMarkdownFrontmatter {
+    name?: string;
+    description?: string;
+}
+
+function parseAgentMarkdown(raw: string): { metadata: AgentMarkdownFrontmatter; body: string } {
+    if (!raw.startsWith('---')) {
+        return { metadata: {}, body: raw.trimStart() };
+    }
+
+    const end = raw.indexOf('\n---', 3);
+    if (end === -1) {
+        return { metadata: {}, body: raw.trimStart() };
+    }
+
+    const frontmatter = raw.slice(3, end).trim();
+    const after = raw.indexOf('\n', end + 4);
+    const body = after === -1 ? '' : raw.slice(after + 1).trimStart();
+    const metadata: AgentMarkdownFrontmatter = {};
+
+    for (const line of frontmatter.split(/\r?\n/)) {
+        const match = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
+        if (!match) { continue; }
+        const key = match[1].toLowerCase();
+        let value = match[2].trim();
+        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+            value = value.slice(1, -1);
+        }
+        if (key === 'name') { metadata.name = value; }
+        if (key === 'description') { metadata.description = value; }
+    }
+
+    return { metadata, body };
+}
+
+function buildAgentMdCompatibilityPrompt(systemPrompt: string, relPath: string): string {
+    const compatibility = `\n\n## Junior compatibility\nThis agent was discovered from \`${relPath}\`. Follow that agent definition as your primary persona.\n\nJunior provides a \`runSubagent\` tool for delegated teammate work when this agent is active. Use \`runSubagent\` for Squad spawns instead of platform-specific tools such as \`task\`. Include the Squad member name in \`agentName\` or \`name\`, and include the visible working label in \`description\`. Multiple \`runSubagent\` calls in one turn can run concurrently. Junior ignores Squad template model labels such as Claude/Sonnet names and runs every coordinator/subagent call through the currently selected Junior model; do not display those template labels as if they are active. For Squad projects, preserve the file-backed workflow: read and update \`.squad/\` files, keep agent decisions inspectable, and summarize each squad member's work clearly by name.`;
+    return `${systemPrompt.trim()}${compatibility}`;
 }
 
 export class CustomAgentStore {
@@ -240,7 +287,7 @@ export class CustomAgentStore {
             const raw = await fs.promises.readFile(file, 'utf8');
             const parsed = JSON.parse(raw);
             const arr = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.agents) ? parsed.agents : [];
-            return arr.map((d: any) => ({ ...validateCustomAgent(d), scope: 'workspace' as const }));
+            return arr.map((d: any) => ({ ...validateCustomAgent(d), scope: 'workspace' as const, source: 'junior' as const }));
         } catch (err: any) {
             const msg = err?.message || String(err);
             console.warn(`[junior] Failed to load ${WORKSPACE_FILE}: ${msg}`);
@@ -252,6 +299,49 @@ export class CustomAgentStore {
             }
             return [];
         }
+    }
+
+    private async loadWorkspaceAgentMarkdown(): Promise<CustomAgentDef[]> {
+        if (!this.workspaceFolder) { return []; }
+        const out: CustomAgentDef[] = [];
+
+        for (const relDir of WORKSPACE_AGENT_MD_DIRS) {
+            const absDir = path.join(this.workspaceFolder.uri.fsPath, relDir);
+            if (!fs.existsSync(absDir)) { continue; }
+            let entries: fs.Dirent[];
+            try {
+                entries = await fs.promises.readdir(absDir, { withFileTypes: true });
+            } catch {
+                continue;
+            }
+
+            for (const entry of entries) {
+                if (!entry.isFile() || !entry.name.endsWith('.agent.md')) { continue; }
+                const absPath = path.join(absDir, entry.name);
+                const relPath = path.join(relDir, entry.name).replace(/\\/g, '/');
+                try {
+                    const raw = await fs.promises.readFile(absPath, 'utf8');
+                    const { metadata, body } = parseAgentMarkdown(raw);
+                    const name = metadata.name || entry.name.replace(/\.agent\.md$/i, '').replace(/[-_]+/g, ' ');
+                    const validated = validateCustomAgent({
+                        id: `agent-md-${slugifyAgentName(name)}`,
+                        name,
+                        description: metadata.description || `${relPath} workspace agent`,
+                        systemPrompt: buildAgentMdCompatibilityPrompt(body || raw, relPath),
+                    });
+                    out.push({
+                        ...validated,
+                        scope: 'workspace',
+                        source: 'agent-md',
+                        readonly: true,
+                    });
+                } catch (err: any) {
+                    console.warn(`[junior] Failed to load ${relPath}: ${err?.message || String(err)}`);
+                }
+            }
+        }
+
+        return out;
     }
 
     private async saveWorkspaceAgents(agents: CustomAgentDef[]): Promise<void> {
@@ -266,7 +356,7 @@ export class CustomAgentStore {
         const raw = this.globalState.get<CustomAgentDef[]>(GLOBAL_STATE_KEY) || [];
         const out: CustomAgentDef[] = [];
         for (const d of raw) {
-            try { out.push({ ...validateCustomAgent(d), scope: 'global' }); }
+            try { out.push({ ...validateCustomAgent(d), scope: 'global', source: 'junior' }); }
             catch { /* skip invalid */ }
         }
         return out;
@@ -279,10 +369,12 @@ export class CustomAgentStore {
     /** List all agents. Workspace entries shadow global entries with the same id. */
     async list(): Promise<CustomAgentDef[]> {
         const ws = await this.loadWorkspaceAgents();
+        const agentMd = await this.loadWorkspaceAgentMarkdown();
         const global = this.loadGlobalAgents();
         const map = new Map<string, CustomAgentDef>();
         for (const a of global) { map.set(a.id, a); }
         for (const a of ws) { map.set(a.id, a); }
+        for (const a of agentMd) { map.set(a.id, a); }
         return [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
     }
 

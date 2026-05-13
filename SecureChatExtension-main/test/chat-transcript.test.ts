@@ -104,4 +104,32 @@ describe('chat transcript persistence', () => {
         expect(transcript?.items[0]).toMatchObject({ kind: 'user', text: 'Hello history' });
         expect(transcript?.items[1]).toMatchObject({ kind: 'assistant', provider: 'copilot-cli', text: 'Restored exactly.' });
     });
+
+    it('persists Dev Team standup events as standalone transcript items', () => {
+        let transcript = createEmptyTranscript();
+        transcript = applyTranscriptMessage(transcript, {
+            type: 'devTeamRoomEvent',
+            event: {
+                teamId: 'balanced',
+                teamName: 'Balanced Dev Team',
+                memberRole: 'HR SME',
+                agentName: 'HR',
+                permission: 'read',
+                phase: 'consult',
+                status: 'blocked',
+                title: 'HR SME reported a blocker',
+                detail: 'Need official policy text before implementation.',
+            },
+        });
+
+        expect(transcript.items).toHaveLength(1);
+        expect(transcript.items[0]).toMatchObject({
+            kind: 'dev-team-room-event',
+            event: {
+                teamName: 'Balanced Dev Team',
+                memberRole: 'HR SME',
+                status: 'blocked',
+            },
+        });
+    });
 });

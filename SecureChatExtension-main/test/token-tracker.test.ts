@@ -90,7 +90,12 @@ describe('TokenTracker.record', () => {
     });
 
     it('reports percentage of context window', () => {
-        setConfiguration({ 'agent.contextWindow': 1000 });
+        getConfigurationMock.mockImplementation(() => ({
+            get: (path: string, def?: unknown) => path === 'agent.contextWindow' ? 1000 : def,
+            has: () => false,
+            inspect: (path: string) => path === 'agent.contextWindow' ? { globalValue: 1000 } : undefined,
+            update: () => Promise.resolve(),
+        }));
         const t = new TokenTracker();
         // 250 tokens / 1000 window = 25%
         t.record('chat', { prompt_tokens: 200, completion_tokens: 50, total_tokens: 250 });
@@ -105,7 +110,12 @@ describe('TokenTracker.record', () => {
     });
 
     it('caps windowPct at 100 when context exceeds window', () => {
-        setConfiguration({ 'agent.contextWindow': 100 });
+        getConfigurationMock.mockImplementation(() => ({
+            get: (path: string, def?: unknown) => path === 'agent.contextWindow' ? 100 : def,
+            has: () => false,
+            inspect: (path: string) => path === 'agent.contextWindow' ? { globalValue: 100 } : undefined,
+            update: () => Promise.resolve(),
+        }));
         const t = new TokenTracker();
         t.setContextSize(500);
 
@@ -119,7 +129,12 @@ describe('TokenTracker.record', () => {
     });
 
     it('uses dynamic context window override when provided', () => {
-        setConfiguration({ 'agent.contextWindow': 1000 });
+        getConfigurationMock.mockImplementation(() => ({
+            get: (path: string, def?: unknown) => path === 'agent.contextWindow' ? 1000 : def,
+            has: () => false,
+            inspect: (path: string) => path === 'agent.contextWindow' ? { globalValue: 1000 } : undefined,
+            update: () => Promise.resolve(),
+        }));
         const t = new TokenTracker();
         // Override the window to 100; 50 tokens / 100 = 50%
         t.setContextSize(50, 100);

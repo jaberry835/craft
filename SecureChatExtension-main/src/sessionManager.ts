@@ -25,6 +25,10 @@ const MAX_SESSIONS = 20;
 const MAX_MESSAGE_LENGTH = 8000;
 const SESSIONS_FILE = 'sessions.json';
 
+function isInternalDevTeamUserMessage(text: string): boolean {
+    return /^Junior Dev Team member execution pass\./i.test(text.trim());
+}
+
 interface SessionsOnDisk {
     activeId?: string;
     sessions: Record<string, ChatSession>;
@@ -199,19 +203,41 @@ export class SessionManager {
         this.currentSession.activeMode = activeMode ?? this.currentSession.activeMode ?? 'agent';
         this.currentSession.activePermissionLevel = activePermissionLevel ?? this.currentSession.activePermissionLevel ?? DEFAULT_PERMISSION_LEVEL;
 
-        // Auto-title from first user message
+        // Auto-title from first visible user message. Dev Team worker passes add
+        // internal user messages to AgentLoop; those should not name the chat.
         if (this.currentSession.title === 'New Chat') {
-            const firstUser = messages.find(m => m.role === 'user');
-            if (firstUser?.content) {
-                const text = typeof firstUser.content === 'string'
-                    ? firstUser.content
-                    : (firstUser.content.find((p: any) => p.type === 'text') as any)?.text || '';
+            const text = this.getFirstVisibleUserText(messages);
+            if (text) {
                 this.currentSession.title = text.slice(0, 60) + (text.length > 60 ? '...' : '');
             }
         }
 
         this.sessions.set(this.currentSession.id, this.currentSession);
         this.saveSessions();
+    }
+
+    private getFirstVisibleUserText(messages: ChatMessage[]): string {
+        const transcriptUser = this.currentSession.transcript?.items.find(item => item.kind === 'user');
+        if (transcriptUser && transcriptUser.kind === 'user' && transcriptUser.text.trim()) {
+            return transcriptUser.text.trim();
+        }
+
+        for (const message of messages) {
+            if (message.role !== 'user') { continue; }
+            const text = this.extractUserMessageText(message).trim();
+            if (!text || isInternalDevTeamUserMessage(text)) { continue; }
+            return text;
+        }
+        return '';
+    }
+
+    private extractUserMessageText(message: ChatMessage): string {
+        if (typeof message.displayText === 'string' && message.displayText.trim()) { return message.displayText; }
+        if (typeof message.content === 'string') { return message.content; }
+        if (Array.isArray(message.content)) {
+            return (message.content.find((part: any) => part.type === 'text') as any)?.text || '';
+        }
+        return '';
     }
 
     recordTranscriptMessage(

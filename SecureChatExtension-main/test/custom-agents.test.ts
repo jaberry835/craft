@@ -146,6 +146,31 @@ describe('CustomAgentStore', () => {
         expect(list[0].scope).toBe('workspace');
     });
 
+    it('discovers read-only workspace agents from .github/agents/*.agent.md', async () => {
+        const { store } = makeStore(tmpDir);
+        const dir = path.join(tmpDir, '.github', 'agents');
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, 'squad.agent.md'), `---
+name: Squad
+description: "Your AI team."
+---
+
+You are Squad. Use runSubagent for teammate work.
+`, 'utf8');
+
+        const list = await store.list();
+        const squad = list.find(a => a.id === 'agent-md-squad');
+        expect(squad).toBeTruthy();
+        expect(squad?.name).toBe('Squad');
+        expect(squad?.description).toBe('Your AI team.');
+        expect(squad?.scope).toBe('workspace');
+        expect(squad?.source).toBe('agent-md');
+        expect(squad?.readonly).toBe(true);
+        expect(squad?.systemPrompt).toContain('You are Squad.');
+        expect(squad?.systemPrompt).toContain('Junior compatibility');
+        expect(squad?.systemPrompt).toContain('Junior provides a `runSubagent` tool');
+    });
+
     it('isolates secrets per agent id and clears them on delete', async () => {
         const { store, secrets } = makeStore(tmpDir);
         await store.save({ id: 'a', name: 'A', systemPrompt: 'p' }, 'workspace');

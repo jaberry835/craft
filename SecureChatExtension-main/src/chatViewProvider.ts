@@ -7,6 +7,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import * as cp from 'child_process';
 import { AgentLoop, AgentCallbacks } from './agentLoop';
 import { AgentRuntime } from './agentRuntime';
 import { CopilotSdkRuntime } from './copilotSdkRuntime';
@@ -14,7 +15,7 @@ import { AzureOpenAIClient } from './aoaiClient';
 import { BuiltinTools } from './builtinTools';
 import { McpClient } from './mcpClient';
 import { SessionManager } from './sessionManager';
-import { AgentPermissionLevel, AgentProvider, AgentProviderOption, ChatMode, ExtensionMessage, WebviewMessage } from './types';
+import { AgentPermissionLevel, AgentProvider, AgentProviderOption, ChatMode, ContextAttachmentKind, DevTeamResponseSummary, ExtensionMessage, WebviewMessage } from './types';
 import { getSetting, updateSetting } from './config';
 import { TokenTracker } from './tokenTracker';
 import { formatCopilotCliRunError } from './errorFormatting';
@@ -37,19 +38,68 @@ function stripFrontmatter(content: string): string {
     const after = content.indexOf('\n', end + 4);
     return after === -1 ? '' : content.slice(after + 1);
 }
+
+function prefixDevTeamNarration(speaker: string, text: string): string {
+    const trimmed = text.trim();
+    if (!trimmed) { return text; }
+    const prefix = `**${speaker}:**`;
+    if (trimmed.startsWith(prefix)) { return text; }
+    return `${prefix} ${trimmed}\n\n`;
+}
+
+function buildDevTeamMemberWorkOrder(team: DevTeamDef, member: DevTeamDef['members'][number], userRequest: string, memberNotes: string, consultContext: string): string {
+    const notes = memberNotes.trim() || 'No prior notes from this member.';
+    return `Junior Dev Team member execution pass.
+
+Team: ${team.name}
+Member: ${member.role}
+Permission: ${member.permission}
+
+Original human request:
+${userRequest}
+
+Your consult notes:
+${notes}
+
+Team consult context:
+${consultContext}
+
+Act now as ${member.role}. If implementation is needed, inspect the workspace and make the appropriate file edits using tools. Keep the scope tight and avoid unrelated changes.
+
+Implementation completeness rules:
+- If the team consult context contains grounded source-backed content for requested pages, sections, records, docs, or data, populate the deliverable from that content in this pass.
+- Do not create empty shells, placeholder pages, or "populate later" sections for grounded content that is already available in the consult context.
+- If some content is genuinely unavailable, still build the available grounded portions and mark only the unavailable portions as pending.
+- Treat "I created the structure but need source content later" as incomplete when source excerpts are already present above.
+
+Visible output rules for this worker pass:
+- Write brief activity updates only, one short sentence at a time.
+- Do not write final-answer sections such as "What changed", "What I validated", "What remains", "Recommendation", or "Next steps".
+- Do not produce a detailed implementation summary; the Dev Team final synthesis will do that after your pass.
+- End with one compact completion note in this form: "Done: <changed/checked in one sentence>."`;
+}
 import { ProviderRouter } from './providerRouter';
 import { replaySessionMessages } from './sessionRestore';
 import { CustomAgentDef, CustomAgentStore } from './customAgents';
 import { CustomAgentEditor } from './customAgentEditor';
+import { DevTeamDef, DevTeamStore } from './devTeams';
+import { DevTeamEditor } from './devTeamEditor';
+import { buildDevTeamConsultContext, DevTeamConsultResult, DevTeamRuntime, selectDevTeamExecutionResults } from './devTeamRuntime';
 import { acquireSearchEntraToken, createSearchKnowledgeTool } from './tools/searchKnowledge';
 
 /** Minimum interval (ms) between consecutive agent loop submissions */
 const MIN_SUBMISSION_INTERVAL_MS = 2000;
+const MAX_CONTEXT_ATTACHMENT_CHARS = 120000;
+const MAX_UNTRACKED_CONTEXT_FILES = 20;
+const MAX_UNTRACKED_CONTEXT_FILE_CHARS = 40000;
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
     private webviewView?: vscode.WebviewView;
     private webviewPanel?: vscode.WebviewPanel;
     private agentLoop?: AgentLoop;
+    private devTeamRuntime?: DevTeamRuntime;
+    private devTeamConsultAbortController?: AbortController;
+    private activeDevTeamNarrationSpeaker?: string;
     /** Copilot CLI runtime — used when agentProvider is 'copilot-cli' */
     private copilotRuntime?: AgentRuntime;
     /** Provider routing — model config, provider switching, availability */
@@ -60,8 +110,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private activeMode: ChatMode = 'agent';
     /** Active custom agent id, if any. When set, runs use the agent loop with the persona overlay. */
     private activeCustomAgentId: string | null = null;
+    /** Active Dev Team id, if any. When set, runs use a team coordinator persona overlay. */
+    private activeDevTeamId: string | null = null;
+    /** Per-turn Dev Team participation summary for the next assistant response. */
+    private pendingDevTeamResponseSummary?: DevTeamResponseSummary;
+    /** Recent terminal output streamed from Junior-run commands, used by the Terminal context attachment. */
+    private recentTerminalLines: string[] = [];
     /** Cached list of custom agents to push to the webview. */
     private customAgentsCache: CustomAgentDef[] = [];
+    /** Cached list of Dev Teams to push to the webview. */
+    private devTeamsCache: DevTeamDef[] = [];
     private log: (msg: string) => void;
     private lastSubmissionTime = 0;
     private restoringTranscript = false;
@@ -79,6 +137,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         private inlineDiffDecorator?: InlineDiffDecorator,
         private globalState?: vscode.Memento,
         private customAgentStore?: CustomAgentStore,
+        private devTeamStore?: DevTeamStore,
         private extensionContext?: vscode.ExtensionContext,
     ) {
         this.log = log || (() => {});
@@ -89,6 +148,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         const currentSession = this.sessionManager.getCurrentSession();
         this.activeMode = this.getSessionMode(currentSession);
         this.activeCustomAgentId = currentSession.activeCustomAgentId ?? null;
+        this.activeDevTeamId = currentSession.activeDevTeamId ?? null;
         this.currentPermissionLevel = currentSession.activePermissionLevel ?? DEFAULT_PERMISSION_LEVEL;
         this.refreshProviderAvailability();
         this.applyPermissionLevel(this.currentPermissionLevel, { persist: false, sync: false });
@@ -190,6 +250,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     sendToWebview(msg: ExtensionMessage) {
+        if (msg.type === 'terminalOutput') {
+            this.captureRecentTerminalLine(msg.line);
+        }
+        if (msg.type === 'narrationText' && this.activeDevTeamNarrationSpeaker) {
+            msg = { ...msg, text: prefixDevTeamNarration(this.activeDevTeamNarrationSpeaker, msg.text) };
+        }
+        if (msg.type === 'startAssistantMessage') {
+            const team = this.pendingDevTeamResponseSummary;
+            if (team) {
+                msg = { ...msg, team };
+                this.pendingDevTeamResponseSummary = undefined;
+            }
+        }
         this.webview?.postMessage(msg);
         if (!this.restoringTranscript) {
             this.captureTranscriptMessage(msg);
@@ -235,6 +308,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             case 'workingActionUpdated':
             case 'workingBlockCompleted':
             case 'terminalOutput':
+            case 'devTeamRoomEvent':
                 return false;
             default:
                 return true;
@@ -352,6 +426,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             this.copilotRuntime?.clearMessages();
         } else {
             if (this.agentLoop?.isRunning()) { this.agentLoop.cancel(); }
+            this.devTeamConsultAbortController?.abort();
+            this.devTeamConsultAbortController = undefined;
             this.builtinTools.resetSessionApprovals();
             this.agentLoop?.clearMessages();
         }
@@ -368,6 +444,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     cancelAgent() {
+        this.devTeamConsultAbortController?.abort();
+        this.devTeamConsultAbortController = undefined;
         if (this.activeProvider === 'copilot-cli') {
             this.copilotRuntime?.cancel();
         } else {
@@ -378,6 +456,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     /** Public method for the command registrar to switch providers */
     setAgentProvider(provider: AgentProvider) {
         this.handleSelectAgentProvider(provider);
+    }
+
+    /** Public command entry for opening the Junior Dev Team editor. */
+    createDevTeam() {
+        void this.openDevTeamEditor();
     }
 
     private getSessionMode(session = this.sessionManager.getCurrentSession()): ChatMode {
@@ -437,8 +520,47 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
         this.sendToWebview({
             type: 'setCustomAgents',
-            agents: agents.map(a => ({ id: a.id, name: a.name, description: a.description, scope: a.scope ?? 'global' })),
+            agents: agents.map(a => ({
+                id: a.id,
+                name: a.name,
+                description: a.description,
+                scope: a.scope ?? 'global',
+                source: a.source,
+                readonly: a.readonly,
+            })),
             activeId: this.activeCustomAgentId,
+        });
+    }
+
+    /** Push the current Dev Team list + active selection to the webview. */
+    private async syncDevTeamsToWebview(): Promise<void> {
+        if (!this.devTeamStore) {
+            this.sendToWebview({ type: 'setDevTeams', teams: [], activeId: this.activeDevTeamId });
+            return;
+        }
+        const teams = await this.devTeamStore.list();
+        this.devTeamsCache = teams;
+        if (this.activeDevTeamId && !teams.some(team => team.id === this.activeDevTeamId)) {
+            this.activeDevTeamId = null;
+        }
+        const agents = this.customAgentStore ? await this.customAgentStore.list() : [];
+        const agentById = new Map(agents.map(agent => [agent.id, agent]));
+        this.sendToWebview({
+            type: 'setDevTeams',
+            teams: teams.map(team => ({
+                id: team.id,
+                name: team.name,
+                description: team.description,
+                scope: team.scope ?? 'global',
+                memberCount: team.members.length,
+                members: team.members.map(member => ({
+                    role: member.role,
+                    agentName: member.agentId ? agentById.get(member.agentId)?.name : undefined,
+                    permission: member.permission,
+                    deploymentId: member.deploymentId,
+                })),
+            })),
+            activeId: this.activeDevTeamId,
         });
     }
 
@@ -449,6 +571,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
      */
     private async applyActiveCustomAgent(): Promise<void> {
         if (!this.agentLoop) { return; }
+        if (this.activeDevTeamId) {
+            await this.applyActiveDevTeam();
+            return;
+        }
         if (!this.activeCustomAgentId || !this.customAgentStore) {
             this.agentLoop.setPersona(null);
             return;
@@ -460,6 +586,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             return;
         }
         const extraTools = [];
+        if (def.source === 'agent-md') {
+            extraTools.push(this.agentLoop.createSubagentTool());
+        }
         if (def.search) {
             const embedding = def.search.embedding;
             const tool = createSearchKnowledgeTool(def, {
@@ -492,17 +621,93 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.agentLoop.setPersona({ systemPrompt: def.systemPrompt, extraTools });
     }
 
+    private async applyActiveDevTeam(): Promise<void> {
+        if (!this.agentLoop) { return; }
+        if (!this.activeDevTeamId || !this.devTeamStore) {
+            this.agentLoop.setPersona(null);
+            return;
+        }
+        const team = await this.devTeamStore.get(this.activeDevTeamId);
+        if (!team) {
+            this.activeDevTeamId = null;
+            this.agentLoop.setPersona(null);
+            return;
+        }
+        const agents = this.customAgentStore ? await this.customAgentStore.list() : [];
+        this.agentLoop.setPersona({ systemPrompt: this.buildDevTeamPrompt(team, agents), extraTools: [] });
+    }
+
+    private buildDevTeamPrompt(team: DevTeamDef, agents: CustomAgentDef[]): string {
+        const agentById = new Map(agents.map(agent => [agent.id, agent]));
+        const memberLines = team.members.map(member => {
+            const agent = member.agentId ? agentById.get(member.agentId) : undefined;
+            const model = member.deploymentId ? `model ${member.deploymentId}` : 'current model';
+            const permission = member.permission === 'write'
+                ? 'may propose and apply edits when assigned implementation work'
+                : member.permission === 'read'
+                    ? 'read-only investigation only'
+                    : 'review-only: provide findings and recommendations, do not edit files';
+            return `- ${member.role}${agent ? ` (${agent.name})` : ''}: ${permission}; preferred ${model}.${agent?.description ? ` Specialty: ${agent.description}` : ''}`;
+        });
+        const routingLines = (team.routing || []).map(rule => {
+            const roles = rule.memberIds
+                .map(id => team.members.find(member => member.id === id)?.role)
+                .filter(Boolean)
+                .join(', ');
+            return `- If the request matches /${rule.pattern}/i, include: ${roles}.`;
+        });
+        const personaSections = team.members
+            .map(member => {
+                const agent = member.agentId ? agentById.get(member.agentId) : undefined;
+                if (!agent?.systemPrompt) { return ''; }
+                return `### ${member.role}${agent.name ? ` - ${agent.name}` : ''}\n${agent.systemPrompt.trim()}`;
+            })
+            .filter(Boolean);
+
+        return `You are Junior Dev Team, a coordinated AI development team running inside VS Code.
+
+## Team
+Name: ${team.name}
+${team.description ? `Description: ${team.description}\n` : ''}
+## Members
+${memberLines.join('\n')}
+
+## Coordination Rules
+- Act as the Dev Team lead first: decide which members should contribute, then synthesize their perspectives into one useful answer.
+- Make consulted member contributions visible using short labeled sections when it helps the user understand the work.
+- Only write a section under a member role when that role actually contributed consult notes in the current turn. Put team-level synthesis under headings like Recommendation, Plan, Architecture, Risks, or Next steps. Do not use "Coordinator" as a visible speaker or heading.
+- Keep file edits controlled: only members with Can edit permission may be represented as applying changes; review/read-only members provide analysis, risks, and recommendations.
+- If multiple members disagree, summarize the tradeoff and make a recommendation.
+- If a consulted member reports a true blocker with no safe scoped implementation path, stop before implementation and ask the human for the missing input. Do not fabricate specialist knowledge or claim completion.
+- If members say a full build is blocked but a minimal, cited, source-backed scope is safe, proceed only with that bounded scope when the user's mode permits edits; do not show file contents as instructions instead of creating files.
+- If grounded source-backed content was available to the worker, do not present unpopulated pages or "populate later" as a successful completion. Call it out as incomplete unless the files were populated from the grounded content.
+- Do not create generic HR, legal, privacy, approval, or canonical-document blockers from the domain alone. Only treat those as blockers when the consulted source excerpts or the user explicitly impose them.
+- Grounded source excerpts may be compacted for the Standup token budget. Do not describe that as the user's prompt being truncated, and do not ask the user to paste source material solely because Junior compacted retrieved excerpts.
+- When the original user request was in Agent mode, do not say you cannot write files merely because the final synthesis pass is read-only. Either summarize the worker changes that were made, or explain the specific standup blocker that prevented writes.
+- Per-member model preferences are part of team strategy. If this runtime is using a single active model, still preserve the intended perspective and capability described for each member.
+- Stay grounded in the actual workspace and use tools normally. Do not pretend work happened if you did not inspect or change anything.
+${team.memoryEnabled ? '- Capture durable project decisions in the final answer when they should become team memory.' : ''}
+
+${routingLines.length ? `## Routing Hints\n${routingLines.join('\n')}\n` : ''}
+${personaSections.length ? `## Member Personas\n${personaSections.join('\n\n')}\n` : ''}`;
+    }
+
     private async handleSelectCustomAgent(id: string | null): Promise<void> {
+        this.pendingDevTeamResponseSummary = undefined;
         if (this.activeProvider === 'copilot-cli' && id) {
             this.sendToWebview({ type: 'error', message: 'Custom agents are only available with the Local provider.' });
             await this.syncCustomAgentsToWebview();
             return;
         }
         this.activeCustomAgentId = id;
+        if (id) {
+            this.activeDevTeamId = null;
+        }
         if (this.sessionManager.getCurrentSession()) {
             // Persist to the current session.
             const sess = this.sessionManager.getCurrentSession();
             (sess as any).activeCustomAgentId = id ?? undefined;
+            (sess as any).activeDevTeamId = undefined;
         }
         if (id) {
             // Custom agents always run in agent mode.
@@ -510,6 +715,29 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
         await this.applyActiveCustomAgent();
         await this.syncCustomAgentsToWebview();
+        await this.syncDevTeamsToWebview();
+    }
+
+    private async handleSelectDevTeam(id: string | null): Promise<void> {
+        this.pendingDevTeamResponseSummary = undefined;
+        if (this.activeProvider === 'copilot-cli' && id) {
+            this.sendToWebview({ type: 'error', message: 'Junior Dev Teams are only available with the Local provider.' });
+            await this.syncDevTeamsToWebview();
+            return;
+        }
+        this.activeDevTeamId = id;
+        if (id) {
+            this.activeCustomAgentId = null;
+        }
+        const sess = this.sessionManager.getCurrentSession();
+        (sess as any).activeDevTeamId = id ?? undefined;
+        (sess as any).activeCustomAgentId = undefined;
+        if (id) {
+            this.setChatMode('agent');
+        }
+        await this.applyActiveCustomAgent();
+        await this.syncCustomAgentsToWebview();
+        await this.syncDevTeamsToWebview();
     }
 
     private async openCustomAgentEditor(existingId?: string): Promise<void> {
@@ -518,12 +746,48 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             return;
         }
         const existing = existingId ? await this.customAgentStore.get(existingId) : undefined;
+        if (existing?.readonly) {
+            vscode.window.showInformationMessage(`Junior discovered "${existing.name}" from an agent markdown file. Edit that file directly to change it.`);
+            return;
+        }
         await CustomAgentEditor.open(this.extensionContext, this.customAgentStore, {
             existing,
             onSaved: async (saved) => {
+                this.pendingDevTeamResponseSummary = undefined;
                 this.activeCustomAgentId = saved.id;
+                this.activeDevTeamId = null;
+                const sess = this.sessionManager.getCurrentSession();
+                (sess as any).activeCustomAgentId = saved.id;
+                (sess as any).activeDevTeamId = undefined;
                 await this.applyActiveCustomAgent();
                 await this.syncCustomAgentsToWebview();
+                await this.syncDevTeamsToWebview();
+                this.setChatMode('agent');
+            },
+        });
+    }
+
+    private async openDevTeamEditor(existingId?: string): Promise<void> {
+        if (!this.devTeamStore || !this.extensionContext) {
+            vscode.window.showErrorMessage('Junior Dev Teams are not available in this build.');
+            return;
+        }
+        const existing = existingId ? await this.devTeamStore.get(existingId) : undefined;
+        const modelConfig = this.getModelConfig();
+        await DevTeamEditor.open(this.extensionContext, this.devTeamStore, {
+            existing,
+            customAgents: this.customAgentStore ? await this.customAgentStore.list() : [],
+            models: modelConfig.models.map(model => ({ name: model.name, deploymentId: model.deploymentId })),
+            onSaved: async (saved) => {
+                this.pendingDevTeamResponseSummary = undefined;
+                this.activeDevTeamId = saved.id;
+                this.activeCustomAgentId = null;
+                const sess = this.sessionManager.getCurrentSession();
+                (sess as any).activeDevTeamId = saved.id;
+                (sess as any).activeCustomAgentId = undefined;
+                await this.applyActiveCustomAgent();
+                await this.syncCustomAgentsToWebview();
+                await this.syncDevTeamsToWebview();
                 this.setChatMode('agent');
             },
         });
@@ -533,6 +797,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         if (!this.customAgentStore) { return; }
         const def = await this.customAgentStore.get(id);
         if (!def) { return; }
+        if (def.readonly) {
+            vscode.window.showInformationMessage(`Junior discovered "${def.name}" from an agent markdown file. Remove the source file to hide it from the agent picker.`);
+            return;
+        }
         const choice = await vscode.window.showWarningMessage(
             `Delete custom agent "${def.name}"?`,
             { modal: true },
@@ -545,6 +813,24 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             await this.applyActiveCustomAgent();
         }
         await this.syncCustomAgentsToWebview();
+    }
+
+    private async handleDeleteDevTeam(id: string): Promise<void> {
+        if (!this.devTeamStore) { return; }
+        const team = await this.devTeamStore.get(id);
+        if (!team) { return; }
+        const choice = await vscode.window.showWarningMessage(
+            `Delete Junior Dev Team "${team.name}"?`,
+            { modal: true },
+            'Delete',
+        );
+        if (choice !== 'Delete') { return; }
+        await this.devTeamStore.delete(id, team.scope ?? 'global');
+        if (this.activeDevTeamId === id) {
+            this.activeDevTeamId = null;
+            await this.applyActiveCustomAgent();
+        }
+        await this.syncDevTeamsToWebview();
     }
 
     private handleWebviewMessage(msg: WebviewMessage) {
@@ -592,6 +878,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     break;
                 case 'deleteCustomAgent':
                     void this.handleDeleteCustomAgent(msg.id);
+                    break;
+                case 'selectDevTeam':
+                    void this.handleSelectDevTeam(msg.id);
+                    break;
+                case 'createDevTeam':
+                    void this.openDevTeamEditor();
+                    break;
+                case 'editDevTeam':
+                    void this.openDevTeamEditor(msg.id);
+                    break;
+                case 'deleteDevTeam':
+                    void this.handleDeleteDevTeam(msg.id);
                     break;
                 case 'runPlanInAgent':
                     this.sendToWebview({ type: 'planReady', visible: false });
@@ -641,6 +939,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 case 'attachFile':
                     this.handleAttachFile();
                     break;
+                case 'attachContext':
+                    void this.handleAttachContext(msg.kind);
+                    break;
                 case 'showTokenUsage':
                     if (this.tokenTracker) { this.tokenTracker.showDetailedUsage(); }
                     break;
@@ -661,6 +962,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     this.syncPermissionLevelToWebview();
                     this.sendToWebview({ type: 'setChatMode', mode: this.activeMode });
                     void this.syncCustomAgentsToWebview();
+                    void this.syncDevTeamsToWebview();
                     this.syncModelsToWebview();
                     this.restoreSession();
                     this.sendSessionList();
@@ -707,6 +1009,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     private async handleUserMessage(text: string, mode: ChatMode, images?: string[], files?: { name: string; content: string }[]) {
         if (!text.trim() && (!images || images.length === 0) && (!files || files.length === 0)) { return; }
+        this.pendingDevTeamResponseSummary = undefined;
         const autoExecuteApprovedPlan = mode === 'plan' && this.isPlanExecutionApproval(text);
         const effectiveMode: ChatMode = autoExecuteApprovedPlan ? 'agent' : mode;
 
@@ -796,7 +1099,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         const slashDisplayText = displayText !== text ? displayText : undefined;
         try {
             await this.applyActiveCustomAgent();
-            await this.agentLoop.run(mode, text, images, files, slashDisplayText);
+            text = await this.prepareDevTeamRunIfNeeded(mode, text, displayText);
+            const finalMode: ChatMode = this.activeDevTeamId ? 'ask' : mode;
+            await this.agentLoop.run(finalMode, text, images, files, slashDisplayText);
 
             // If files were changed, wait for Keep/Undo (user clicks file names to review diffs)
             const summary = this.builtinTools.getPendingChangeSummary();
@@ -809,8 +1114,244 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         } finally {
             // Always persist — even if cancelled or errored
             this.sessionManager.updateMessages(this.agentLoop.getMessages(), undefined, this.activeMode, this.currentPermissionLevel);
+            this.pendingDevTeamResponseSummary = undefined;
             this.sendSessionList();
         }
+    }
+
+    private async prepareDevTeamRunIfNeeded(mode: ChatMode, text: string, displayText: string): Promise<string> {
+        const context = await this.runDevTeamConsultsIfNeeded(mode, text, displayText);
+        if (!context) { return text; }
+        this.sendToWebview({ type: 'agentStarted' });
+        return `${text}\n\n---\n${context}`;
+    }
+
+    private async runDevTeamConsultsIfNeeded(mode: ChatMode, text: string, displayText: string): Promise<string> {
+        if (!this.activeDevTeamId || !this.devTeamStore || this.activeProvider !== 'local') { return ''; }
+        const team = await this.devTeamStore.get(this.activeDevTeamId);
+        if (!team) { return ''; }
+        const agents = this.customAgentStore ? await this.customAgentStore.list() : [];
+        this.devTeamRuntime ??= new DevTeamRuntime(
+            this.aoaiClient,
+            { sendToWebview: msg => this.sendToWebview(msg) },
+            this.tokenTracker,
+            this.log,
+            this.customAgentStore ? {
+                getSearchKey: agentId => this.customAgentStore!.getSearchKey(agentId),
+                getSearchEntraToken: config => acquireSearchEntraToken(config.endpoint, {
+                    authProviderId: config.authProviderId,
+                    entraScope: config.entraScope,
+                }),
+                getEmbeddingKey: agentId => this.customAgentStore!.getEmbeddingKey(agentId),
+                getEmbeddingEntraToken: config => acquireSearchEntraToken(config.endpoint, {
+                    authProviderId: config.authProviderId,
+                    entraScope: config.entraScope || 'https://cognitiveservices.azure.com/.default',
+                }),
+                onCitations: payload => this.sendToWebview({
+                    type: 'searchCitations',
+                    agentName: payload.agentName,
+                    query: payload.query,
+                    citations: payload.citations,
+                }),
+            } : undefined,
+        );
+        this.devTeamConsultAbortController = new AbortController();
+        try {
+            const results = await this.devTeamRuntime.consult(team, agents, {
+                mode,
+                userText: text,
+                displayText,
+                signal: this.devTeamConsultAbortController.signal,
+            });
+            this.pendingDevTeamResponseSummary = this.buildDevTeamResponseSummaryFromResults(team, agents, results);
+            const consultContext = buildDevTeamConsultContext(results);
+            await this.runDevTeamMemberExecutionsIfNeeded(team, agents, results, { mode, text, displayText, consultContext });
+            this.pendingDevTeamResponseSummary = this.buildDevTeamResponseSummaryFromResults(team, agents, results);
+            return consultContext;
+        } finally {
+            this.devTeamConsultAbortController = undefined;
+        }
+    }
+
+    private async runDevTeamMemberExecutionsIfNeeded(
+        team: DevTeamDef,
+        agents: CustomAgentDef[],
+        results: DevTeamConsultResult[],
+        options: { mode: ChatMode; text: string; displayText: string; consultContext: string },
+    ): Promise<void> {
+        if (!this.agentLoop || options.mode !== 'agent') { return; }
+        const writeResults = selectDevTeamExecutionResults(results);
+        if (writeResults.length === 0) { return; }
+
+        for (const result of writeResults) {
+            if (this.devTeamConsultAbortController?.signal.aborted) { break; }
+            const member = result.member;
+            const agent = result.agent ?? (member.agentId ? agents.find(candidate => candidate.id === member.agentId) : undefined);
+            this.pendingDevTeamResponseSummary = this.buildSingleMemberResponseSummary(team, member, agent, 'executed');
+            this.sendToWebview({
+                type: 'devTeamRoomEvent',
+                event: {
+                    teamId: team.id,
+                    teamName: team.name,
+                    memberRole: member.role,
+                    agentName: agent?.name,
+                    permission: member.permission,
+                    phase: 'execute',
+                    status: 'started',
+                    title: `${member.role} started implementation`,
+                    detail: 'Applying the approved standup notes in the workspace.',
+                },
+            });
+            this.sendToWebview({ type: 'agentStarted' });
+            this.agentLoop.setPersona({
+                systemPrompt: this.buildDevTeamMemberWorkerPrompt(team, member, agent),
+                extraTools: this.buildCustomAgentExtraTools(agent),
+            });
+            if (member.deploymentId) {
+                this.aoaiClient.setDeploymentOverride(member.deploymentId);
+            }
+            const workOrder = buildDevTeamMemberWorkOrder(team, member, options.displayText || options.text, result.text, options.consultContext);
+            let workerStatus: 'done' | 'failed' = 'done';
+            try {
+                await this.agentLoop.run('agent', workOrder, undefined, undefined, `${member.role}: ${options.displayText}`);
+            } catch (err) {
+                workerStatus = 'failed';
+                throw err;
+            } finally {
+                if (workerStatus === 'failed') {
+                    this.sendToWebview({
+                        type: 'devTeamRoomEvent',
+                        event: {
+                            teamId: team.id,
+                            teamName: team.name,
+                            memberRole: member.role,
+                            agentName: agent?.name,
+                            permission: member.permission,
+                            phase: 'execute',
+                            status: 'failed',
+                            title: `${member.role} implementation failed`,
+                            detail: 'Worker pass stopped before completion.',
+                        },
+                    });
+                }
+            }
+            result.executed = true;
+            const summary = this.builtinTools.getPendingChangeSummary();
+            if (summary) {
+                this.sendToWebview({
+                    type: 'devTeamRoomEvent',
+                    event: {
+                        teamId: team.id,
+                        teamName: team.name,
+                        memberRole: member.role,
+                        agentName: agent?.name,
+                        permission: member.permission,
+                        phase: 'execute',
+                        status: 'done',
+                        title: `${member.role} finished implementation`,
+                        detail: `${summary.files.length} changed ${summary.files.length === 1 ? 'file is' : 'files are'} ready. Final synthesis is continuing; Keep/Undo will remain available afterward.`,
+                    },
+                });
+            } else {
+                this.sendToWebview({
+                    type: 'devTeamRoomEvent',
+                    event: {
+                        teamId: team.id,
+                        teamName: team.name,
+                        memberRole: member.role,
+                        agentName: agent?.name,
+                        permission: member.permission,
+                        phase: 'execute',
+                        status: 'done',
+                        title: `${member.role} finished implementation`,
+                        detail: 'Worker pass completed; validation and final synthesis can continue.',
+                    },
+                });
+            }
+        }
+
+        await this.applyActiveDevTeam();
+    }
+
+    private buildCustomAgentExtraTools(agent: CustomAgentDef | undefined) {
+        if (!agent?.search || !this.customAgentStore) { return []; }
+        const embedding = agent.search.embedding;
+        const tool = createSearchKnowledgeTool(agent, {
+            getSearchKey: () => this.customAgentStore!.getSearchKey(agent.id),
+            getEntraToken: () => acquireSearchEntraToken(agent.search?.endpoint, {
+                authProviderId: agent.search?.authProviderId,
+                entraScope: agent.search?.entraScope,
+            }),
+            getEmbeddingKey: embedding && embedding.auth === 'key'
+                ? () => this.customAgentStore!.getEmbeddingKey(agent.id)
+                : undefined,
+            getEmbeddingEntraToken: embedding && embedding.auth === 'entra'
+                ? () => acquireSearchEntraToken(embedding.endpoint, {
+                    authProviderId: embedding.authProviderId,
+                    entraScope: embedding.entraScope || 'https://cognitiveservices.azure.com/.default',
+                })
+                : undefined,
+            onCitations: (payload) => this.sendToWebview({ type: 'searchCitations', ...payload }),
+        });
+        return tool ? [tool] : [];
+    }
+
+    private buildDevTeamMemberWorkerPrompt(team: DevTeamDef, member: DevTeamDef['members'][number], agent: CustomAgentDef | undefined): string {
+        const customInstructions = agent?.systemPrompt?.trim()
+            ? `\n\n## Linked Custom Agent Instructions\n${agent.systemPrompt.trim()}`
+            : '';
+        return `You are ${member.role}, a member of the Junior Dev Team "${team.name}" running as an active worker inside VS Code.
+
+## Permission
+You are running in Junior's normal Agent mode for this member pass. You may inspect the workspace, edit files, run safe validation commands, and use available tools when needed. Follow Junior's normal confirmation and safety rules; if a write or terminal action needs approval, request it through the tools rather than telling the user to save files manually.
+
+## Scope
+- Work only on the task assigned in the current member work order.
+- Use concise activity-log narration so the user can see what you are doing.
+- Keep visible worker output short: one sentence per update, no long Markdown sections, and no final-answer-style summary.
+- Do not speak for other team members. Use their consult notes only as input.
+- Before editing, read the team consult context. Stop only if the consult context explicitly says execution is blocked with no safe scoped path. If the context permits a bounded or minimal implementation, edit the workspace for that approved scope and leave excluded work untouched.
+- Treat retrieved source excerpts in the team consult context as sufficient source material for the requested bounded implementation. Do not invent HR, legal, privacy, approval, canonical-document, or publication blockers unless the source excerpts themselves mark content confidential, personal, restricted, or missing.
+- When grounded source-backed content is present for requested pages, sections, records, docs, or data, populate the files from that content in this pass. Do not leave empty shells, placeholder pages, or "populate later" sections for content the standup already provided.
+- If the source context covers only part of the request, implement the covered portion and label unknown or excluded parts instead of blocking all file edits.
+- Grounded source excerpts may be compacted for the Standup token budget. Do not describe that as the user's prompt being truncated, and do not ask the user to paste source material solely because Junior compacted retrieved excerpts.
+- Do not say you cannot write files from this session. When assigned implementation work, use the same file-editing tools and approval flow as normal Agent mode.
+- If you cannot complete the assigned work safely, explain the blocker and stop.
+- End with a compact completion note only. The Dev Team lead will produce the detailed final answer after this worker pass.${agent?.description ? `\n\nSpecialty: ${agent.description}` : ''}${customInstructions}`;
+    }
+
+    private buildSingleMemberResponseSummary(team: DevTeamDef, member: DevTeamDef['members'][number], agent: CustomAgentDef | undefined, status: 'consulted' | 'executed' | 'failed'): DevTeamResponseSummary {
+        return {
+            id: team.id,
+            name: team.name,
+            members: [{
+                role: member.role,
+                agentName: agent?.name,
+                permission: member.permission,
+                deploymentId: member.deploymentId,
+                status,
+            }],
+        };
+    }
+
+    private buildDevTeamResponseSummaryFromResults(team: DevTeamDef, agents: CustomAgentDef[], results: DevTeamConsultResult[]): DevTeamResponseSummary {
+        const agentById = new Map(agents.map(agent => [agent.id, agent]));
+        const members: DevTeamConsultResult[] = results.length > 0 ? results : team.members.map(member => ({ member, text: '' }));
+        return {
+            id: team.id,
+            name: team.name,
+            members: members.map(result => {
+                const agent = result.agent ?? (result.member.agentId ? agentById.get(result.member.agentId) : undefined);
+                return {
+                    role: result.member.role,
+                    agentName: agent?.name,
+                    permission: result.member.permission,
+                    deploymentId: result.member.deploymentId,
+                    status: result.error ? 'failed' as const : result.executed ? 'executed' as const : 'consulted' as const,
+                    error: result.error,
+                };
+            }),
+        };
     }
 
     /** Handle user message with the Copilot CLI runtime */
@@ -1194,7 +1735,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     private pendingFileChangeResolve?: (action: 'keep' | 'undo') => void;
 
-    private waitForFileChangeAction(): Promise<void> {
+    private waitForFileChangeAction(): Promise<'keep' | 'undo'> {
         return new Promise((resolve) => {
             this.pendingFileChangeResolve = async (action) => {
                 if (action === 'undo') {
@@ -1206,14 +1747,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 }
                 // Clear inline diff decorations
                 this.inlineDiffDecorator?.clearAll();
-                resolve();
+                resolve(action);
             };
             // Timeout: auto-keep after 5 minutes
             setTimeout(() => {
                 if (this.pendingFileChangeResolve) {
                     this.builtinTools.clearPendingChanges();
                     this.pendingFileChangeResolve = undefined;
-                    resolve();
+                    resolve('keep');
                 }
             }, 300000);
         });
@@ -1290,6 +1831,207 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 this.log(`Failed to read attached file: ${err.message}`);
             }
         }
+    }
+
+    private captureRecentTerminalLine(line: string): void {
+        const normalized = line.replace(/\r?\n$/, '');
+        if (!normalized.trim()) { return; }
+        this.recentTerminalLines.push(normalized);
+        if (this.recentTerminalLines.length > 300) {
+            this.recentTerminalLines.splice(0, this.recentTerminalLines.length - 300);
+        }
+    }
+
+    private async handleAttachContext(kind: ContextAttachmentKind): Promise<void> {
+        try {
+            const attachment = await this.resolveContextAttachment(kind);
+            this.sendToWebview({ type: 'contextAttached', kind, name: attachment.name, content: attachment.content });
+        } catch (err: any) {
+            this.sendToWebview({ type: 'error', message: err?.message || String(err) });
+        }
+    }
+
+    private async resolveContextAttachment(kind: ContextAttachmentKind): Promise<{ name: string; content: string }> {
+        switch (kind) {
+            case 'selection':
+                return this.buildSelectionAttachment();
+            case 'active-file':
+                return this.buildActiveFileAttachment();
+            case 'open-editors':
+                return this.buildOpenEditorsAttachment();
+            case 'diagnostics':
+                return this.buildDiagnosticsAttachment();
+            case 'git-diff':
+                return this.buildGitDiffAttachment();
+            case 'terminal':
+                return this.buildTerminalAttachment();
+        }
+    }
+
+    private buildSelectionAttachment(): { name: string; content: string } {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor || editor.selection.isEmpty) {
+            throw new Error('Select code in the editor before attaching Selection context.');
+        }
+        const document = editor.document;
+        const relPath = vscode.workspace.asRelativePath(document.uri, false);
+        const startLine = editor.selection.start.line + 1;
+        const endLine = editor.selection.end.line + 1;
+        const selectedText = document.getText(editor.selection);
+        const name = `Selection: ${relPath}:${startLine}-${endLine}`;
+        return {
+            name,
+            content: this.truncateContextAttachment(name, `Selection from ${relPath} (lines ${startLine}-${endLine}, language ${document.languageId}):\n\n${selectedText}`),
+        };
+    }
+
+    private buildActiveFileAttachment(): { name: string; content: string } {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            throw new Error('Open a file before attaching Active File context.');
+        }
+        const document = editor.document;
+        const relPath = vscode.workspace.asRelativePath(document.uri, false);
+        const name = `Active file: ${relPath}`;
+        const cursorLine = editor.selection.active.line + 1;
+        return {
+            name,
+            content: this.truncateContextAttachment(name, `Active file ${relPath} (language ${document.languageId}, cursor line ${cursorLine}):\n\n${document.getText()}`),
+        };
+    }
+
+    private buildOpenEditorsAttachment(): { name: string; content: string } {
+        const openEditors = this.collectOpenEditors();
+        if (openEditors.length === 0) {
+            throw new Error('There are no open editor tabs to attach.');
+        }
+        const activeUri = vscode.window.activeTextEditor?.document.uri;
+        const activePath = activeUri ? vscode.workspace.asRelativePath(activeUri, false) : undefined;
+        const lines = openEditors.map(file => `${file === activePath ? '* ' : '- '}${file}`);
+        return {
+            name: 'Open editors',
+            content: `Open editor tabs (* marks active editor):\n${lines.join('\n')}`,
+        };
+    }
+
+    private buildDiagnosticsAttachment(): { name: string; content: string } {
+        const lines = this.collectDetailedDiagnostics(80);
+        if (lines.length === 0) {
+            throw new Error('There are no current errors or warnings to attach.');
+        }
+        return {
+            name: 'Diagnostics',
+            content: this.truncateContextAttachment('Diagnostics', `Current workspace diagnostics:\n${lines.join('\n')}`),
+        };
+    }
+
+    private async buildGitDiffAttachment(): Promise<{ name: string; content: string }> {
+        const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!workspaceRoot) {
+            throw new Error('Open a workspace before attaching Git Diff context.');
+        }
+        const unstaged = await this.runGit(workspaceRoot, ['diff', '--no-ext-diff', '--']);
+        const staged = await this.runGit(workspaceRoot, ['diff', '--cached', '--no-ext-diff', '--']);
+        const untracked = await this.buildUntrackedFilesAttachmentSection(workspaceRoot);
+        const sections: string[] = [];
+        if (unstaged.trim()) { sections.push(`Unstaged changes:\n${unstaged.trimEnd()}`); }
+        if (staged.trim()) { sections.push(`Staged changes:\n${staged.trimEnd()}`); }
+        if (untracked.trim()) { sections.push(untracked.trimEnd()); }
+        if (sections.length === 0) {
+            throw new Error('There are no staged, unstaged, or untracked Git changes to attach.');
+        }
+        return {
+            name: 'Git diff',
+            content: this.truncateContextAttachment('Git diff', sections.join('\n\n')),
+        };
+    }
+
+    private async buildUntrackedFilesAttachmentSection(workspaceRoot: string): Promise<string> {
+        const raw = await this.runGit(workspaceRoot, ['ls-files', '--others', '--exclude-standard', '-z']);
+        const files = raw.split('\0').filter(Boolean).slice(0, MAX_UNTRACKED_CONTEXT_FILES);
+        if (files.length === 0) { return ''; }
+
+        const sections: string[] = [];
+        for (const relPath of files) {
+            const absPath = path.resolve(workspaceRoot, relPath);
+            if (!this.isPathInside(absPath, workspaceRoot)) {
+                continue;
+            }
+            try {
+                const stat = await fs.promises.stat(absPath);
+                if (!stat.isFile()) { continue; }
+                if (stat.size > MAX_UNTRACKED_CONTEXT_FILE_CHARS * 4) {
+                    sections.push(`--- ${relPath} ---\n[Skipped: untracked file is too large (${stat.size} bytes).]`);
+                    continue;
+                }
+                const bytes = await fs.promises.readFile(absPath);
+                const decoded = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+                if (decoded.includes('\u0000')) {
+                    sections.push(`--- ${relPath} ---\n[Skipped: untracked file appears to be binary.]`);
+                    continue;
+                }
+                const content = decoded.length > MAX_UNTRACKED_CONTEXT_FILE_CHARS
+                    ? `${decoded.slice(0, MAX_UNTRACKED_CONTEXT_FILE_CHARS)}\n\n[Truncated: ${decoded.length - MAX_UNTRACKED_CONTEXT_FILE_CHARS} characters omitted.]`
+                    : decoded;
+                sections.push(`--- ${relPath} ---\n${content.trimEnd()}`);
+            } catch (err: any) {
+                sections.push(`--- ${relPath} ---\n[Skipped: ${err?.message || String(err)}]`);
+            }
+        }
+
+        const omitted = raw.split('\0').filter(Boolean).length - files.length;
+        const suffix = omitted > 0 ? `\n\n[${omitted} additional untracked files omitted.]` : '';
+        return sections.length > 0 ? `Untracked files:\n${sections.join('\n\n')}${suffix}` : '';
+    }
+
+    private isPathInside(candidate: string, parent: string): boolean {
+        const relative = path.relative(parent, candidate);
+        return !!relative && !relative.startsWith('..') && !path.isAbsolute(relative);
+    }
+
+    private buildTerminalAttachment(): { name: string; content: string } {
+        if (this.recentTerminalLines.length === 0) {
+            throw new Error('Junior has not captured terminal output in this session yet. Run a command with Junior first, then attach Terminal context.');
+        }
+        const lines = this.recentTerminalLines.slice(-200).join('\n');
+        return {
+            name: 'Recent terminal output',
+            content: this.truncateContextAttachment('Recent terminal output', `Recent terminal output captured from Junior-run commands:\n${lines}`),
+        };
+    }
+
+    private collectDetailedDiagnostics(limit: number): string[] {
+        const lines: string[] = [];
+        for (const [uri, diagnostics] of vscode.languages.getDiagnostics() as [vscode.Uri, vscode.Diagnostic[]][]) {
+            const relPath = vscode.workspace.asRelativePath(uri, false);
+            for (const diagnostic of diagnostics) {
+                if (diagnostic.severity > vscode.DiagnosticSeverity.Warning) { continue; }
+                const severity = diagnostic.severity === vscode.DiagnosticSeverity.Error ? 'Error' : 'Warning';
+                const startLine = diagnostic.range.start.line + 1;
+                const startColumn = diagnostic.range.start.character + 1;
+                lines.push(`${relPath}:${startLine}:${startColumn}: [${severity}] ${diagnostic.message}`);
+                if (lines.length >= limit) { return lines; }
+            }
+        }
+        return lines;
+    }
+
+    private runGit(cwd: string, args: string[]): Promise<string> {
+        return new Promise((resolve, reject) => {
+            cp.execFile('git', args, { cwd, maxBuffer: 2 * 1024 * 1024 }, (error, stdout, stderr) => {
+                if (error) {
+                    reject(new Error((stderr || error.message || 'Git command failed.').trim()));
+                    return;
+                }
+                resolve(stdout.toString());
+            });
+        });
+    }
+
+    private truncateContextAttachment(name: string, content: string): string {
+        if (content.length <= MAX_CONTEXT_ATTACHMENT_CHARS) { return content; }
+        const omitted = content.length - MAX_CONTEXT_ATTACHMENT_CHARS;
+        return `${content.slice(0, MAX_CONTEXT_ATTACHMENT_CHARS)}\n\n[${name} truncated: ${omitted} characters omitted.]`;
     }
 
     private async handleSelectModelById(deploymentId: string) {
@@ -1493,9 +2235,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private restoreSession() {
         const session = this.sessionManager.getCurrentSession();
         this.activeMode = this.getSessionMode(session);
+        this.activeCustomAgentId = session.activeCustomAgentId ?? null;
+        this.activeDevTeamId = session.activeDevTeamId ?? null;
         this.applyPermissionLevel(session.activePermissionLevel ?? DEFAULT_PERMISSION_LEVEL, { persist: false });
         this.sendToWebview({ type: 'setChatMode', mode: this.activeMode });
         this.sendToWebview({ type: 'planReady', visible: false });
+        void this.syncCustomAgentsToWebview();
+        void this.syncDevTeamsToWebview();
 
         if (session.transcript && session.transcript.items.length > 0) {
             this.restoringTranscript = true;
@@ -1718,6 +2464,215 @@ body { display: flex; flex-direction: column; }
     height: 14px;
     display: block;
 }
+.dev-team-response-header {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 0 0 8px;
+    padding: 8px 10px;
+    border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--vscode-sideBar-background, #1f1f1f) 76%, transparent);
+}
+.dev-team-response-title {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--vscode-foreground);
+}
+.dev-team-response-icon {
+    color: var(--accent, #2eaadc);
+}
+.dev-team-response-roster {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+.dev-team-member-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    max-width: 100%;
+    padding: 2px 7px 2px 5px;
+    border-radius: 999px;
+    border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
+    color: var(--vscode-descriptionForeground, #9aa0a6);
+    background: color-mix(in srgb, var(--vscode-editor-background) 88%, transparent);
+    font-size: 11px;
+    line-height: 1.45;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.dev-team-member-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    flex: 0 0 auto;
+    border-radius: 999px;
+    background: color-mix(in srgb, currentColor 14%, transparent);
+    font-size: 11px;
+    line-height: 1;
+}
+.dev-team-member-status {
+    flex: 0 0 auto;
+    color: currentColor;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    opacity: 0.9;
+}
+.dev-team-member-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.dev-team-member-agent {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--vscode-descriptionForeground, #9aa0a6);
+}
+.dev-team-member-agent::before {
+    content: '/';
+    margin: 0 2px 0 1px;
+    opacity: 0.55;
+}
+.dev-team-member-chip.permission-write { color: var(--vscode-testing-iconPassed, #73c991); }
+.dev-team-member-chip.permission-review { color: var(--vscode-testing-iconQueued, #cca700); }
+.dev-team-member-chip.permission-read { color: var(--vscode-descriptionForeground, #9aa0a6); }
+.dev-team-member-chip.consult-executed {
+    color: var(--vscode-testing-iconPassed, #73c991);
+    border-color: color-mix(in srgb, var(--vscode-testing-iconPassed, #73c991) 45%, transparent);
+    background: color-mix(in srgb, var(--vscode-testing-iconPassed, #73c991) 10%, var(--vscode-editor-background));
+}
+.dev-team-member-chip.consult-failed {
+    color: var(--vscode-errorForeground, #f48771);
+    border-color: color-mix(in srgb, var(--vscode-errorForeground, #f48771) 42%, transparent);
+    background: color-mix(in srgb, var(--vscode-errorForeground, #f48771) 9%, var(--vscode-editor-background));
+}
+.dev-team-speaker-heading {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    max-width: 100%;
+    margin: 14px 0 6px;
+    padding: 2px 0;
+    color: var(--vscode-foreground);
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.35;
+}
+.dev-team-speaker-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    flex: 0 0 auto;
+    border-radius: 999px;
+    color: var(--accent, #2eaadc);
+    background: color-mix(in srgb, currentColor 14%, transparent);
+    font-size: 11px;
+    line-height: 1;
+}
+.dev-team-speaker-heading.permission-write .dev-team-speaker-icon { color: var(--vscode-testing-iconPassed, #73c991); }
+.dev-team-speaker-heading.permission-review .dev-team-speaker-icon { color: var(--vscode-testing-iconQueued, #cca700); }
+.dev-team-speaker-heading.permission-read .dev-team-speaker-icon { color: var(--vscode-descriptionForeground, #9aa0a6); }
+.dev-team-speaker-heading.team-synthesis {
+    margin-top: 4px;
+}
+.dev-team-speaker-heading.team-synthesis .dev-team-speaker-icon {
+    color: var(--accent, #2eaadc);
+}
+.dev-team-speaker-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.dev-team-speaker-agent {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--vscode-descriptionForeground, #9aa0a6);
+    font-size: 11px;
+    font-weight: 500;
+}
+.dev-team-speaker-agent::before {
+    content: '/';
+    margin: 0 4px 0 1px;
+    opacity: 0.55;
+}
+.dev-team-room-event {
+    display: grid;
+    grid-template-columns: 22px minmax(0, 1fr);
+    gap: 8px;
+    align-items: start;
+    margin: 5px 0;
+    padding: 7px 9px;
+    border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--vscode-sideBar-background, #1f1f1f) 70%, transparent);
+}
+.dev-team-room-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 999px;
+    color: var(--accent, #2eaadc);
+    background: color-mix(in srgb, currentColor 14%, transparent);
+    font-size: 12px;
+    line-height: 1;
+}
+.dev-team-room-event.status-done .dev-team-room-icon { color: var(--vscode-testing-iconPassed, #73c991); }
+.dev-team-room-event.status-blocked .dev-team-room-icon { color: var(--vscode-testing-iconQueued, #cca700); }
+.dev-team-room-event.status-failed .dev-team-room-icon { color: var(--vscode-errorForeground, #f48771); }
+.dev-team-room-copy {
+    min-width: 0;
+}
+.dev-team-room-title {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 6px;
+    align-items: baseline;
+    color: var(--vscode-foreground);
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.35;
+}
+.dev-team-room-agent {
+    color: var(--vscode-descriptionForeground, #9aa0a6);
+    font-size: 11px;
+    font-weight: 500;
+}
+.dev-team-room-agent::before {
+    content: '/';
+    margin-right: 4px;
+    opacity: 0.55;
+}
+.dev-team-room-detail {
+    margin-top: 2px;
+    color: var(--vscode-descriptionForeground, #b2b8bf);
+    font-size: 12px;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+}
+.dev-team-room-meta {
+    margin-top: 3px;
+    color: var(--vscode-descriptionForeground, #9aa0a6);
+    font-size: 10.5px;
+    line-height: 1.3;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
 .msg.assistant .content {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
@@ -1863,6 +2818,15 @@ body { display: flex; flex-direction: column; }
     opacity: 0.75;
     font-size: 11px;
     line-height: 1.4;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.sources-card .sources-more {
+    margin: 5px 0 0 22px;
+    color: var(--vscode-descriptionForeground, #9aa0a6);
+    font-size: 11px;
+    line-height: 1.3;
 }
 
 /* CONFIRM DIALOG */
@@ -2117,6 +3081,9 @@ body { display: flex; flex-direction: column; }
 .working-block-wrapper {
     margin: 4px 0;
     flex-shrink: 0;
+}
+.working-block-wrapper.hidden-working-block {
+    display: none;
 }
 .working-block {
     border-radius: 8px;
@@ -2552,6 +3519,52 @@ body { display: flex; flex-direction: column; }
     background: rgba(255,255,255,0.1);
 }
 #btn-attach .codicon { font-size: 14px; }
+#btn-attach.active {
+    opacity: 1;
+    background: rgba(255,255,255,0.1);
+}
+.attach-menu {
+    position: absolute;
+    left: 8px;
+    bottom: 36px;
+    min-width: 210px;
+    background: var(--vscode-dropdown-background, var(--input-bg));
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.28);
+    padding: 5px;
+    z-index: 100;
+}
+.attach-menu.hidden { display: none; }
+.attach-option {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 28px;
+    padding: 5px 8px;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--fg);
+    font: inherit;
+    font-size: 12px;
+    text-align: left;
+    cursor: pointer;
+}
+.attach-option:hover {
+    background: rgba(255,255,255,0.08);
+}
+.attach-option .codicon {
+    width: 16px;
+    text-align: center;
+    opacity: 0.85;
+}
+.attach-menu-separator {
+    height: 1px;
+    background: var(--border);
+    margin: 4px 2px;
+}
 
 /* Chat mode dropdown */
 .mode-dropdown {
@@ -2621,9 +3634,9 @@ body { display: flex; flex-direction: column; }
     position: absolute;
     bottom: calc(100% + 6px);
     left: 0;
-    min-width: 112px;
+    min-width: 176px;
     width: max-content;
-    max-width: 132px;
+    max-width: 260px;
     padding: 4px;
     border-radius: 12px;
     border: 1px solid rgba(255,255,255,0.12);
@@ -3238,6 +4251,16 @@ body { display: flex; flex-direction: column; }
     max-width: 200px;
 }
 .attach-pill span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attach-pill.context-pill {
+    border-color: rgba(55, 148, 255, 0.55);
+}
+.attach-file-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    flex-shrink: 0;
+}
 .attach-thumb { height: 24px; width: 24px; object-fit: cover; border-radius: 2px; }
 .attach-remove {
     background: none;
@@ -3431,7 +4454,17 @@ body { display: flex; flex-direction: column; }
         <div id="slash-autocomplete"></div>
         <textarea id="input" rows="1" placeholder="Ask Junior anything..." autofocus></textarea>
         <div id="composer-toolbar">
-            <button id="btn-attach" class="composer-btn" title="Attach context"><i class="codicon codicon-add"></i></button>
+            <button id="btn-attach" class="composer-btn" title="Attach context" aria-haspopup="menu" aria-expanded="false"><i class="codicon codicon-add"></i></button>
+            <div id="attach-menu" class="attach-menu hidden" role="menu" aria-label="Attach context">
+                <button class="attach-option" data-attach-kind="file" role="menuitem" type="button"><i class="codicon codicon-file"></i><span>File...</span></button>
+                <div class="attach-menu-separator" role="separator"></div>
+                <button class="attach-option" data-attach-kind="selection" role="menuitem" type="button"><i class="codicon codicon-symbol-snippet"></i><span>Selection</span></button>
+                <button class="attach-option" data-attach-kind="active-file" role="menuitem" type="button"><i class="codicon codicon-file-code"></i><span>Active file</span></button>
+                <button class="attach-option" data-attach-kind="open-editors" role="menuitem" type="button"><i class="codicon codicon-layout-sidebar-left"></i><span>Open editors</span></button>
+                <button class="attach-option" data-attach-kind="diagnostics" role="menuitem" type="button"><i class="codicon codicon-warning"></i><span>Diagnostics</span></button>
+                <button class="attach-option" data-attach-kind="git-diff" role="menuitem" type="button"><i class="codicon codicon-git-compare"></i><span>Git diff</span></button>
+                <button class="attach-option" data-attach-kind="terminal" role="menuitem" type="button"><i class="codicon codicon-terminal"></i><span>Recent terminal</span></button>
+            </div>
             <div id="mode-switch" class="mode-dropdown">
                 <button id="mode-trigger" class="mode-trigger" type="button" title="Chat mode" aria-haspopup="menu" aria-expanded="false">
                     <span id="mode-trigger-icon" class="mode-icon" aria-hidden="true">
@@ -3459,10 +4492,15 @@ body { display: flex; flex-direction: column; }
                         <span class="mode-option-check" aria-hidden="true"><i class="codicon codicon-check"></i></span>
                     </button>
                     <div id="custom-agent-list"></div>
+                    <div id="dev-team-list"></div>
                     <div class="mode-menu-separator" role="separator"></div>
                     <button class="mode-option mode-option-action" data-action="create-custom-agent" role="menuitem" type="button">
                         <span class="mode-icon" aria-hidden="true"><i class="codicon codicon-add"></i></span>
                         <span class="mode-option-label">Create custom agent…</span>
+                    </button>
+                    <button class="mode-option mode-option-action" data-action="create-dev-team" role="menuitem" type="button">
+                        <span class="mode-icon" aria-hidden="true"><i class="codicon codicon-add"></i></span>
+                        <span class="mode-option-label">Create Dev Team…</span>
                     </button>
                 </div>
             </div>

@@ -159,6 +159,8 @@ export interface ChatSession {
     activePermissionLevel?: AgentPermissionLevel;
     /** Id of the active custom agent, if any. When set, the chat runs in agent mode with the persona applied. */
     activeCustomAgentId?: string;
+    /** Id of the active Junior Dev Team, if any. When set, the chat runs in agent mode with a team persona applied. */
+    activeDevTeamId?: string;
     runtimeState?: RuntimeSessionState;
 }
 
@@ -167,6 +169,7 @@ export type ChatMode = 'ask' | 'plan' | 'agent';
 export type AgentPermissionLevel = 'default' | 'bypass';
 export type ReasoningEffort = 'none' | 'low' | 'medium' | 'high' | 'xhigh';
 export type ReasoningSummary = 'auto' | 'detailed' | 'none';
+export type ContextAttachmentKind = 'selection' | 'active-file' | 'open-editors' | 'diagnostics' | 'git-diff' | 'terminal';
 
 export interface AgentProviderOption {
     value: AgentProvider;
@@ -232,6 +235,7 @@ export interface WorkingBlock {
     id: string;
     status: WorkingBlockStatus;
     title: string;
+    hidden?: boolean;
     summary?: string;
     entries: WorkingBlockEntry[];
     startedAt: number;
@@ -251,12 +255,44 @@ export interface PersistedAssistantTranscriptItem {
     kind: 'assistant';
     text: string;
     provider: AgentProvider;
+    team?: DevTeamResponseSummary;
+}
+
+export interface DevTeamResponseSummary {
+    id: string;
+    name: string;
+    members: Array<{
+        role: string;
+        agentName?: string;
+        permission: 'write' | 'review' | 'read';
+        deploymentId?: string;
+        status?: 'consulted' | 'executed' | 'failed';
+        error?: string;
+    }>;
+}
+
+export interface DevTeamRoomEvent {
+    teamId: string;
+    teamName: string;
+    memberRole?: string;
+    agentName?: string;
+    permission?: 'write' | 'review' | 'read';
+    phase?: 'consult' | 'execute' | 'review';
+    status: 'opened' | 'started' | 'done' | 'blocked' | 'failed' | 'completed';
+    title: string;
+    detail?: string;
 }
 
 export interface PersistedNarrationTranscriptItem {
     id: string;
     kind: 'narration';
     text: string;
+}
+
+export interface PersistedDevTeamRoomEventTranscriptItem {
+    id: string;
+    kind: 'dev-team-room-event';
+    event: DevTeamRoomEvent;
 }
 
 export interface PersistedReasoningTranscriptItem {
@@ -281,6 +317,7 @@ export type PersistedTranscriptItem =
     | PersistedUserTranscriptItem
     | PersistedAssistantTranscriptItem
     | PersistedNarrationTranscriptItem
+    | PersistedDevTeamRoomEventTranscriptItem
     | PersistedReasoningTranscriptItem
     | PersistedWorkingBlockTranscriptItem
     | PersistedErrorTranscriptItem;
@@ -309,8 +346,13 @@ export type WebviewMessage =
     | { type: 'createCustomAgent' }
     | { type: 'editCustomAgent'; id: string }
     | { type: 'deleteCustomAgent'; id: string }
+    | { type: 'selectDevTeam'; id: string | null }
+    | { type: 'createDevTeam' }
+    | { type: 'editDevTeam'; id: string }
+    | { type: 'deleteDevTeam'; id: string }
     | { type: 'runPlanInAgent' }
     | { type: 'attachFile' }
+    | { type: 'attachContext'; kind: ContextAttachmentKind }
     | { type: 'confirmAction'; actionId: string; approved: boolean; allowSession?: boolean; category?: string }
     | { type: 'continueIteration'; shouldContinue: boolean }
     | { type: 'fileChangeAction'; action: 'keep' | 'undo' }
@@ -338,12 +380,13 @@ export type ExtensionMessage =
     | { type: 'setAgentProvider'; provider: AgentProvider }
     | { type: 'setPermissionLevel'; level: AgentPermissionLevel }
     | { type: 'setChatMode'; mode: ChatMode }
-    | { type: 'setCustomAgents'; agents: Array<{ id: string; name: string; description?: string; scope: 'workspace' | 'global' }>; activeId: string | null }
+    | { type: 'setCustomAgents'; agents: Array<{ id: string; name: string; description?: string; scope: 'workspace' | 'global'; source?: 'junior' | 'agent-md'; readonly?: boolean }>; activeId: string | null }
+    | { type: 'setDevTeams'; teams: Array<{ id: string; name: string; description?: string; scope: 'workspace' | 'global'; memberCount: number; members?: DevTeamResponseSummary['members'] }>; activeId: string | null }
     | { type: 'searchCitations'; agentName: string; query: string; citations: Array<{ index: number; title: string; url?: string; snippet?: string; score?: number; rerankerScore?: number }> }
     | { type: 'planReady'; visible: boolean }
     | { type: 'agentStarted' }
     | { type: 'agentPlan'; steps: AgentPlanStep[] }
-    | { type: 'startAssistantMessage' }
+    | { type: 'startAssistantMessage'; team?: DevTeamResponseSummary }
     | { type: 'appendAssistantText'; text: string }
     | { type: 'endAssistantMessage' }
     | { type: 'toolCall'; name: string; args: string; id: string }
@@ -354,6 +397,7 @@ export type ExtensionMessage =
     | { type: 'setStatus'; status: string }
     | { type: 'confirmAction'; actionId: string; description: string; category?: string; diff?: string }
     | { type: 'fileAttached'; name: string; content: string }
+    | { type: 'contextAttached'; kind: ContextAttachmentKind; name: string; content: string }
     | { type: 'sessionList'; sessions: Array<{ id: string; title: string; updatedAt: number; messageCount: number }>; activeId: string }
     | { type: 'sessionSwitched' }
     | { type: 'fileChangeTick'; file: string; additions: number; deletions: number }
@@ -368,6 +412,7 @@ export type ExtensionMessage =
     | { type: 'workingActionUpdated'; blockId: string; entryId: string; status: 'running' | 'done' | 'error'; text?: string; detail?: string; filePath?: string; icon?: string; repeatCount?: number }
     | { type: 'workingBlockCompleted'; blockId: string; summary: string; completedAt: number }
     | { type: 'narrationText'; text: string }
+    | { type: 'devTeamRoomEvent'; event: DevTeamRoomEvent }
     | { type: 'reasoningStart' }
     | { type: 'reasoningAppend'; text: string }
     | { type: 'reasoningEnd' }

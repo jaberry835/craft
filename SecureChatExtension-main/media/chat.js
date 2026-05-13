@@ -35,12 +35,14 @@ window.onerror = function(msg, src, line, col, err) {
     const modeMenuEl = document.getElementById('mode-menu');
     const modeOptions = modeMenuEl ? Array.from(modeMenuEl.querySelectorAll('.mode-option[data-mode]')) : [];
     const customAgentListEl = document.getElementById('custom-agent-list');
+    const devTeamListEl = document.getElementById('dev-team-list');
     const planActionBarEl = document.getElementById('plan-action-bar');
     const btnRunPlan = document.getElementById('btn-run-plan');
     const workingEl = document.getElementById('working-indicator');
     const workingTextEl = document.getElementById('working-text');
 
     const btnAttach = document.getElementById('btn-attach');
+    const attachMenuEl = document.getElementById('attach-menu');
     const btnSend = document.getElementById('btn-send');
     const btnTools = document.getElementById('btn-tools');
     const attachPreview = document.getElementById('attach-preview');
@@ -57,6 +59,7 @@ window.onerror = function(msg, src, line, col, err) {
     let currentReasoningBodyEl = null;
     let currentReasoningText = '';
     let agentRunning = false;
+    let pendingAgentDone = false;
     let currentProvider = 'local';
     let currentPermissionLevel = 'default';
     let currentMode = 'agent';
@@ -68,6 +71,9 @@ window.onerror = function(msg, src, line, col, err) {
     let reasoningAnchorEl = null;
     let customAgents = [];
     let activeCustomAgentId = null;
+    let devTeams = [];
+    let activeDevTeamId = null;
+    let currentAssistantTeam = null;
     const toolStateById = new Map();
     const workingBlocksById = new Map();
     const workingEntriesById = new Map();
@@ -258,6 +264,7 @@ window.onerror = function(msg, src, line, col, err) {
         if (!text && pendingImages.length === 0 && pendingFiles.length === 0) { return; }
         closeModeMenu();
         closeModelMenu();
+        closeAttachMenu();
         const msg = { type: 'sendMessage', text: text || '(see attachments)', mode: currentMode };
         if (pendingImages.length > 0) { msg.images = pendingImages.slice(); }
         if (pendingFiles.length > 0) { msg.files = pendingFiles.slice(); }
@@ -271,7 +278,25 @@ window.onerror = function(msg, src, line, col, err) {
 
 
     if (btnAttach) {
-        btnAttach.addEventListener('click', () => vscode.postMessage({ type: 'attachFile' }));
+        btnAttach.addEventListener('click', function(e) {
+            e.stopPropagation();
+            toggleAttachMenu();
+        });
+    }
+
+    if (attachMenuEl) {
+        attachMenuEl.querySelectorAll('[data-attach-kind]').forEach(function(btn) {
+            btn.addEventListener('click', function(e) {
+                e.stopPropagation();
+                const kind = btn.getAttribute('data-attach-kind');
+                closeAttachMenu();
+                if (kind === 'file') {
+                    vscode.postMessage({ type: 'attachFile' });
+                } else {
+                    vscode.postMessage({ type: 'attachContext', kind: kind });
+                }
+            });
+        });
     }
 
     // Send / Stop button
@@ -293,6 +318,7 @@ window.onerror = function(msg, src, line, col, err) {
     function setAgentRunning(running) {
         agentRunning = running;
         closeModeMenu();
+        closeAttachMenu();
         if (!btnSend) return;
         if (modeTriggerEl) {
             modeTriggerEl.disabled = running;
@@ -335,6 +361,7 @@ window.onerror = function(msg, src, line, col, err) {
 
     function renderSourcesCard(agentName, query, citations) {
         if (!messagesEl || !citations || citations.length === 0) { return; }
+        var visibleCitations = citations.slice(0, 3);
         var card = document.createElement('div');
         card.className = 'sources-card';
         var header = document.createElement('div');
@@ -352,7 +379,7 @@ window.onerror = function(msg, src, line, col, err) {
         }
         var list = document.createElement('ol');
         list.className = 'sources-list';
-        citations.forEach(function(c) {
+        visibleCitations.forEach(function(c) {
             var li = document.createElement('li');
             li.className = 'sources-item';
             var titleEl;
@@ -376,17 +403,31 @@ window.onerror = function(msg, src, line, col, err) {
             if (c.snippet) {
                 var snip = document.createElement('div');
                 snip.className = 'sources-item-snippet';
-                snip.textContent = c.snippet;
+                snip.textContent = compactSourceSnippet(c.snippet);
                 li.appendChild(snip);
             }
             list.appendChild(li);
         });
         card.appendChild(list);
+        if (citations.length > visibleCitations.length) {
+            var more = document.createElement('div');
+            more.className = 'sources-more';
+            more.textContent = '+' + (citations.length - visibleCitations.length) + ' more source' + (citations.length - visibleCitations.length === 1 ? '' : 's') + ' used in the standup';
+            card.appendChild(more);
+        }
         messagesEl.appendChild(card);
         pinWorkingIndicatorToBottom();
     }
 
+    function compactSourceSnippet(snippet) {
+        var compact = String(snippet || '').replace(/\s+/g, ' ').trim();
+        if (compact.length <= 120) { return compact; }
+        return compact.slice(0, 117).trimEnd() + '...';
+    }
+
     function getModePlaceholder(mode) {
+        if (activeDevTeamId) { return 'Ask the Junior Dev Team to plan, build, review, or test...'; }
+        if (activeCustomAgentId) { return 'Ask this custom agent for help...'; }
         if (mode === 'ask') { return 'Ask Junior about the codebase...'; }
         if (mode === 'plan') { return 'Plan the work before execution...'; }
         return 'Ask Junior anything...';
@@ -397,11 +438,17 @@ window.onerror = function(msg, src, line, col, err) {
         var meta = MODE_META[currentMode] || MODE_META.agent;
         var displayLabel = meta.label;
         var displayIcon = meta.icon;
-        if (activeCustomAgentId) {
+        if (activeDevTeamId) {
+            var team = devTeams.find(function(t) { return t.id === activeDevTeamId; });
+            if (team) {
+                displayLabel = team.name;
+                displayIcon = MODE_META.agent.icon;
+            }
+        } else if (activeCustomAgentId) {
             var ag = customAgents.find(function(a) { return a.id === activeCustomAgentId; });
             if (ag) {
                 displayLabel = ag.name;
-                displayIcon = '<i class="codicon codicon-person"></i>';
+                displayIcon = ag.source === 'agent-md' ? '<i class="codicon codicon-organization"></i>' : '<i class="codicon codicon-person"></i>';
             }
         }
         if (modeTriggerLabelEl) {
@@ -411,11 +458,12 @@ window.onerror = function(msg, src, line, col, err) {
             modeTriggerIconEl.innerHTML = displayIcon;
         }
         modeOptions.forEach(function(btn) {
-            var active = !activeCustomAgentId && btn.dataset.mode === currentMode;
+            var active = !activeCustomAgentId && !activeDevTeamId && btn.dataset.mode === currentMode;
             btn.classList.toggle('active', active);
             btn.setAttribute('aria-checked', active ? 'true' : 'false');
         });
         renderCustomAgentList();
+        renderDevTeamList();
         if (!agentRunning && inputEl) {
             inputEl.placeholder = getModePlaceholder(currentMode);
         }
@@ -434,11 +482,76 @@ window.onerror = function(msg, src, line, col, err) {
             var icon = document.createElement('span');
             icon.className = 'mode-icon';
             icon.setAttribute('aria-hidden', 'true');
-            icon.innerHTML = '<i class="codicon codicon-person"></i>';
+            icon.innerHTML = ag.source === 'agent-md' ? '<i class="codicon codicon-organization"></i>' : '<i class="codicon codicon-person"></i>';
             var label = document.createElement('span');
             label.className = 'mode-option-label';
             label.textContent = ag.name;
             if (ag.scope === 'workspace') {
+                var scope = document.createElement('span');
+                scope.className = 'mode-option-scope';
+                scope.textContent = ag.source === 'agent-md' ? 'MD' : 'WS';
+                label.appendChild(scope);
+            }
+            var actions = document.createElement('span');
+            actions.className = 'mode-option-actions';
+            if (!ag.readonly) {
+                var editBtn = document.createElement('button');
+                editBtn.type = 'button';
+                editBtn.title = 'Edit agent';
+                editBtn.innerHTML = '<i class="codicon codicon-edit"></i>';
+                editBtn.addEventListener('click', function(ev) {
+                    ev.stopPropagation();
+                    closeModeMenu();
+                    vscode.postMessage({ type: 'editCustomAgent', id: ag.id });
+                });
+                var delBtn = document.createElement('button');
+                delBtn.type = 'button';
+                delBtn.title = 'Delete agent';
+                delBtn.innerHTML = '<i class="codicon codicon-trash"></i>';
+                delBtn.addEventListener('click', function(ev) {
+                    ev.stopPropagation();
+                    vscode.postMessage({ type: 'deleteCustomAgent', id: ag.id });
+                });
+                actions.appendChild(editBtn);
+                actions.appendChild(delBtn);
+            }
+            var check = document.createElement('span');
+            check.className = 'mode-option-check';
+            check.setAttribute('aria-hidden', 'true');
+            check.innerHTML = '<i class="codicon codicon-check"></i>';
+            btn.appendChild(icon);
+            btn.appendChild(label);
+            btn.appendChild(actions);
+            btn.appendChild(check);
+            btn.addEventListener('click', function() {
+                activeCustomAgentId = ag.id;
+                activeDevTeamId = null;
+                closeModeMenu();
+                setPlanReadyVisibility(false);
+                vscode.postMessage({ type: 'selectCustomAgent', id: ag.id });
+                inputEl.focus();
+            });
+            customAgentListEl.appendChild(btn);
+        });
+    }
+
+    function renderDevTeamList() {
+        if (!devTeamListEl) { return; }
+        devTeamListEl.innerHTML = '';
+        devTeams.forEach(function(team) {
+            var btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'mode-option mode-option-custom' + (team.id === activeDevTeamId ? ' active' : '');
+            btn.setAttribute('role', 'menuitemradio');
+            btn.setAttribute('aria-checked', team.id === activeDevTeamId ? 'true' : 'false');
+            var icon = document.createElement('span');
+            icon.className = 'mode-icon';
+            icon.setAttribute('aria-hidden', 'true');
+            icon.innerHTML = MODE_META.agent.icon;
+            var label = document.createElement('span');
+            label.className = 'mode-option-label';
+            label.textContent = team.name;
+            if (team.scope === 'workspace') {
                 var scope = document.createElement('span');
                 scope.className = 'mode-option-scope';
                 scope.textContent = 'WS';
@@ -448,20 +561,20 @@ window.onerror = function(msg, src, line, col, err) {
             actions.className = 'mode-option-actions';
             var editBtn = document.createElement('button');
             editBtn.type = 'button';
-            editBtn.title = 'Edit agent';
+            editBtn.title = 'Edit Dev Team';
             editBtn.innerHTML = '<i class="codicon codicon-edit"></i>';
             editBtn.addEventListener('click', function(ev) {
                 ev.stopPropagation();
                 closeModeMenu();
-                vscode.postMessage({ type: 'editCustomAgent', id: ag.id });
+                vscode.postMessage({ type: 'editDevTeam', id: team.id });
             });
             var delBtn = document.createElement('button');
             delBtn.type = 'button';
-            delBtn.title = 'Delete agent';
+            delBtn.title = 'Delete Dev Team';
             delBtn.innerHTML = '<i class="codicon codicon-trash"></i>';
             delBtn.addEventListener('click', function(ev) {
                 ev.stopPropagation();
-                vscode.postMessage({ type: 'deleteCustomAgent', id: ag.id });
+                vscode.postMessage({ type: 'deleteDevTeam', id: team.id });
             });
             actions.appendChild(editBtn);
             actions.appendChild(delBtn);
@@ -474,13 +587,14 @@ window.onerror = function(msg, src, line, col, err) {
             btn.appendChild(actions);
             btn.appendChild(check);
             btn.addEventListener('click', function() {
-                activeCustomAgentId = ag.id;
+                activeDevTeamId = team.id;
+                activeCustomAgentId = null;
                 closeModeMenu();
                 setPlanReadyVisibility(false);
-                vscode.postMessage({ type: 'selectCustomAgent', id: ag.id });
+                vscode.postMessage({ type: 'selectDevTeam', id: team.id });
                 inputEl.focus();
             });
-            customAgentListEl.appendChild(btn);
+            devTeamListEl.appendChild(btn);
         });
     }
 
@@ -493,6 +607,8 @@ window.onerror = function(msg, src, line, col, err) {
 
     function toggleModeMenu() {
         if (!modeSwitchEl || !modeMenuEl || !modeTriggerEl || modeTriggerEl.disabled) { return; }
+        closeAttachMenu();
+        closeModelMenu();
         var open = modeMenuEl.classList.contains('hidden');
         modeSwitchEl.classList.toggle('open', open);
         modeMenuEl.classList.toggle('hidden', !open);
@@ -510,6 +626,67 @@ window.onerror = function(msg, src, line, col, err) {
         badge.className = 'assistant-provider-badge';
         badge.innerHTML = '<span class="assistant-provider-icon" aria-hidden="true"><svg viewBox="0 0 16 16" focusable="false"><path d="M6.25 2.5a.75.75 0 0 1 1.5 0v1.15h3A2.25 2.25 0 0 1 13 5.9v4.2a2.25 2.25 0 0 1-2.25 2.25h-3V13.5a.75.75 0 0 1-1.5 0v-1.15h-.8A2.45 2.45 0 0 1 3 9.9V9a.75.75 0 0 1 1.5 0v.9c0 .52.42.95.95.95h5.3a.75.75 0 0 0 .75-.75V5.9a.75.75 0 0 0-.75-.75h-5.3A.95.95 0 0 0 4.5 6.1V7a.75.75 0 0 1-1.5 0v-.9A2.45 2.45 0 0 1 5.45 3.65h.8V2.5Z" fill="currentColor"></path><path d="M1.53 7.47a.75.75 0 0 1 1.06 0L4 8.88l1.41-1.41a.75.75 0 1 1 1.06 1.06l-1.94 1.94a.75.75 0 0 1-1.06 0L1.53 8.53a.75.75 0 0 1 0-1.06Z" fill="currentColor"></path></svg></span><span>Copilot CLI</span>';
         container.appendChild(badge);
+    }
+
+    function permissionLabel(permission) {
+        if (permission === 'write') { return 'Can edit'; }
+        if (permission === 'read') { return 'Read only'; }
+        return 'Review only';
+    }
+
+    function devTeamMemberIcon(member) {
+        var text = ((member && (member.role + ' ' + (member.agentName || ''))) || '').toLowerCase();
+        if (/lead|architect|planner|principal/.test(text)) { return '🏗️'; }
+        if (/front\s*end|ui|ux|design|web/.test(text)) { return '🎨'; }
+        if (/back\s*end|api|server|service|platform/.test(text)) { return '🔧'; }
+        if (/test|qa|quality|review|code reviewer/.test(text)) { return '🧪'; }
+        if (/doc|scribe|writer|readme/.test(text)) { return '📋'; }
+        if (/security|auth|threat|risk/.test(text)) { return '🛡️'; }
+        if (/data|db|database|sql|search/.test(text)) { return '🗄️'; }
+        if (/devops|infra|deploy|cloud|ops/.test(text)) { return '🚀'; }
+        if (/human|people|team|hr|teammate/.test(text)) { return '👥'; }
+        if (/sme|expert|domain|hpde|hr/.test(text)) { return '💡'; }
+        if (member && member.permission === 'write') { return '🛠️'; }
+        if (member && member.permission === 'read') { return '🔎'; }
+        return '✨';
+    }
+
+    function devTeamMemberStatusText(member) {
+        if (member.status === 'failed') { return 'Unavailable'; }
+        return '';
+    }
+
+    function appendDevTeamResponseHeader(container, team) {
+        if (!team || !Array.isArray(team.members) || team.members.length === 0) { return; }
+        const header = document.createElement('div');
+        header.className = 'dev-team-response-header';
+        const title = document.createElement('div');
+        title.className = 'dev-team-response-title';
+        const icon = document.createElement('span');
+        icon.className = 'dev-team-response-icon';
+        icon.setAttribute('aria-hidden', 'true');
+        icon.innerHTML = '<i class="codicon codicon-organization"></i>';
+        const name = document.createElement('span');
+        name.textContent = team.name || 'Junior Dev Team';
+        title.appendChild(icon);
+        title.appendChild(name);
+        const roster = document.createElement('div');
+        roster.className = 'dev-team-response-roster';
+        team.members.forEach(function(member) {
+            const chip = document.createElement('span');
+            chip.className = 'dev-team-member-chip permission-' + (member.permission || 'review') + (member.status === 'failed' ? ' consult-failed' : member.status === 'executed' ? ' consult-executed' : '');
+            chip.title = permissionLabel(member.permission) + (member.deploymentId ? ' · ' + member.deploymentId : '') + (member.error ? ' · ' + member.error : '');
+            var status = devTeamMemberStatusText(member);
+            chip.innerHTML =
+                '<span class="dev-team-member-icon" aria-hidden="true">' + escapeHtml(devTeamMemberIcon(member)) + '</span>' +
+                (status ? '<span class="dev-team-member-status">' + escapeHtml(status) + '</span>' : '') +
+                '<span class="dev-team-member-name">' + escapeHtml(member.role || 'Member') + '</span>' +
+                (member.agentName ? '<span class="dev-team-member-agent">' + escapeHtml(member.agentName) + '</span>' : '');
+            roster.appendChild(chip);
+        });
+        header.appendChild(title);
+        header.appendChild(roster);
+        container.appendChild(header);
     }
 
     function renderUserMessageItem(item) {
@@ -542,9 +719,10 @@ window.onerror = function(msg, src, line, col, err) {
         const assistantEl = document.createElement('div');
         assistantEl.className = 'msg assistant' + (item.provider === 'copilot-cli' ? ' cli-provider' : '');
         appendAssistantProviderBadge(assistantEl, item.provider);
+        appendDevTeamResponseHeader(assistantEl, item.team);
         const contentEl = document.createElement('div');
         contentEl.className = 'content';
-        contentEl.innerHTML = renderMarkdownLite(item.text);
+        renderAssistantContent(contentEl, item.text, item.team);
         assistantEl.appendChild(contentEl);
         messagesEl.appendChild(assistantEl);
     }
@@ -555,6 +733,57 @@ window.onerror = function(msg, src, line, col, err) {
         narRow.className = 'narration-row';
         narRow.innerHTML = renderMarkdownLite(item.text);
         messagesEl.appendChild(narRow);
+    }
+
+    function renderDevTeamRoomEventItem(item) {
+        appendDevTeamRoomEvent(item.event || item);
+    }
+
+    function appendDevTeamRoomEvent(event) {
+        if (!event) { return; }
+        closeLiveNarration();
+        var row = document.createElement('div');
+        row.className = 'dev-team-room-event status-' + escapeClassName(event.status || 'started');
+        var member = event.memberRole ? {
+            role: event.memberRole,
+            agentName: event.agentName,
+            permission: event.permission || 'review',
+            status: event.status === 'failed' ? 'failed' : event.status === 'done' ? 'consulted' : undefined
+        } : null;
+        var iconHtml = member
+            ? '<span class="dev-team-room-icon" aria-hidden="true">' + escapeHtml(devTeamMemberIcon(member)) + '</span>'
+            : '<span class="dev-team-room-icon team" aria-hidden="true"><i class="codicon codicon-organization"></i></span>';
+        var agentText = event.agentName ? '<span class="dev-team-room-agent">' + escapeHtml(event.agentName) + '</span>' : '';
+        var meta = [event.phase ? formatDevTeamPhase(event.phase) : '', event.status ? formatDevTeamStatus(event.status) : '']
+            .filter(Boolean)
+            .join(' · ');
+        row.innerHTML =
+            iconHtml +
+            '<div class="dev-team-room-copy">' +
+                '<div class="dev-team-room-title"><span>' + escapeHtml(event.title || event.teamName || 'Junior Dev Team') + '</span>' + agentText + '</div>' +
+                (event.detail ? '<div class="dev-team-room-detail">' + escapeHtml(event.detail) + '</div>' : '') +
+                (meta ? '<div class="dev-team-room-meta">' + escapeHtml(meta) + '</div>' : '') +
+            '</div>';
+        messagesEl.appendChild(row);
+    }
+
+    function formatDevTeamPhase(phase) {
+        if (phase === 'execute') { return 'implementation pass'; }
+        if (phase === 'review') { return 'review pass'; }
+        return 'consult pass';
+    }
+
+    function formatDevTeamStatus(status) {
+        if (status === 'opened') { return 'standup started'; }
+        if (status === 'completed') { return 'standup finished'; }
+        if (status === 'blocked') { return 'blocker'; }
+        if (status === 'failed') { return 'unavailable'; }
+        if (status === 'done') { return 'done'; }
+        return 'working';
+    }
+
+    function escapeClassName(value) {
+        return String(value || '').toLowerCase().replace(/[^a-z0-9_-]+/g, '-');
     }
 
     function appendNarrationText(text) {
@@ -599,7 +828,7 @@ window.onerror = function(msg, src, line, col, err) {
     function startLiveReasoning() {
         if (currentReasoningEl && currentReasoningEl.parentNode) { return; }
         closeLiveNarration();
-        var panel = createReasoningPanel(true);
+        var panel = createReasoningPanel(!currentAssistantTeam && !activeDevTeamId);
         currentReasoningEl = panel.root;
         currentReasoningBodyEl = panel.bodyEl;
         currentReasoningText = '';
@@ -678,6 +907,9 @@ window.onerror = function(msg, src, line, col, err) {
                     break;
                 case 'narration':
                     renderNarrationItem(item);
+                    break;
+                case 'dev-team-room-event':
+                    renderDevTeamRoomEventItem(item);
                     break;
                 case 'reasoning':
                     renderReasoningItem(item);
@@ -762,6 +994,10 @@ window.onerror = function(msg, src, line, col, err) {
                 activeCustomAgentId = null;
                 vscode.postMessage({ type: 'selectCustomAgent', id: null });
             }
+            if (activeDevTeamId) {
+                activeDevTeamId = null;
+                vscode.postMessage({ type: 'selectDevTeam', id: null });
+            }
             setChatMode(mode);
             closeModeMenu();
             setPlanReadyVisibility(false);
@@ -779,17 +1015,28 @@ window.onerror = function(msg, src, line, col, err) {
         });
     }
 
+    var createDevTeamBtn = modeMenuEl ? modeMenuEl.querySelector('[data-action="create-dev-team"]') : null;
+    if (createDevTeamBtn) {
+        createDevTeamBtn.addEventListener('click', function() {
+            closeModeMenu();
+            vscode.postMessage({ type: 'createDevTeam' });
+        });
+    }
+
     document.addEventListener('click', function(e) {
         if (modeSwitchEl && modeSwitchEl.contains(e.target)) { return; }
         if (modelControlEl && modelControlEl.contains(e.target)) { return; }
+        if ((attachMenuEl && attachMenuEl.contains(e.target)) || (btnAttach && btnAttach.contains(e.target))) { return; }
         closeModeMenu();
         closeModelMenu();
+        closeAttachMenu();
     });
 
     document.addEventListener('keydown', function(e) {
         if (e.key === 'Escape') {
             closeModeMenu();
             closeModelMenu();
+            closeAttachMenu();
         }
     });
 
@@ -890,6 +1137,7 @@ window.onerror = function(msg, src, line, col, err) {
     function toggleModelMenu() {
         if (!modelMenuEl || !modelTriggerEl || modelTriggerEl.disabled) { return; }
         closeModeMenu();
+        closeAttachMenu();
         const open = modelMenuEl.classList.contains('hidden');
         modelControlEl.classList.toggle('open', open);
         modelMenuEl.classList.toggle('hidden', !open);
@@ -913,6 +1161,30 @@ window.onerror = function(msg, src, line, col, err) {
         modelMenuEl.classList.add('hidden');
         modelTriggerEl.classList.remove('active');
         modelTriggerEl.setAttribute('aria-expanded', 'false');
+    }
+
+    function toggleAttachMenu() {
+        if (!attachMenuEl) {
+            vscode.postMessage({ type: 'attachFile' });
+            return;
+        }
+        const open = attachMenuEl.classList.contains('hidden');
+        closeModeMenu();
+        closeModelMenu();
+        attachMenuEl.classList.toggle('hidden', !open);
+        if (btnAttach) {
+            btnAttach.classList.toggle('active', open);
+            btnAttach.setAttribute('aria-expanded', open ? 'true' : 'false');
+        }
+    }
+
+    function closeAttachMenu() {
+        if (!attachMenuEl) { return; }
+        attachMenuEl.classList.add('hidden');
+        if (btnAttach) {
+            btnAttach.classList.remove('active');
+            btnAttach.setAttribute('aria-expanded', 'false');
+        }
     }
 
     function positionModelMenu() {
@@ -1217,8 +1489,9 @@ window.onerror = function(msg, src, line, col, err) {
         });
         pendingFiles.forEach((f, idx) => {
             const pill = document.createElement('div');
-            pill.className = 'attach-pill file-pill';
-            pill.innerHTML = '<span class="attach-file-icon">&#128196;</span>' +
+            pill.className = 'attach-pill file-pill' + (f.contextKind ? ' context-pill' : '');
+            const icon = f.contextKind ? '<i class="codicon codicon-quote"></i>' : '<i class="codicon codicon-file"></i>';
+            pill.innerHTML = '<span class="attach-file-icon">' + icon + '</span>' +
                 '<span>' + escapeHtml(f.name) + '</span>' +
                 '<button class="attach-remove" title="Remove">&times;</button>';
             pill.querySelector('.attach-remove').addEventListener('click', () => {
@@ -1409,8 +1682,12 @@ window.onerror = function(msg, src, line, col, err) {
         if (!currentContentEl) { return; }
         // Save scroll position intent
         var atBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 40;
-        currentContentEl.innerHTML = renderMarkdownLite(streamRawText);
+        renderAssistantContent(currentContentEl, streamRawText, getCurrentAssistantRenderTeam());
         if (atBottom) { scrollToBottom(); }
+    }
+
+    function getCurrentAssistantRenderTeam() {
+        return currentAssistantTeam || (currentAssistantEl && currentAssistantEl.__devTeam) || null;
     }
 
     /** Schedule a debounced markdown re-render */
@@ -1459,6 +1736,20 @@ window.onerror = function(msg, src, line, col, err) {
 
     /** Finalize the assistant message after the drain completes naturally */
     var pendingEndMessage = null;
+    function assistantStreamPending() {
+        return !!pendingEndMessage || !!currentAssistantEl || streamBuffer.length > 0 || !!streamDrainTimer || !!streamRenderTimer;
+    }
+
+    function finishAgentDoneWhenIdle() {
+        if (!pendingAgentDone || assistantStreamPending()) { return; }
+        pendingAgentDone = false;
+        inputEl.disabled = false;
+        inputEl.placeholder = getModePlaceholder(currentMode);
+        inputEl.focus();
+        setAgentRunning(false);
+        hideGlobalWorkingIndicator();
+    }
+
     function finalizeAssistantMessage() {
         if (!pendingEndMessage) { return; }
         var els = pendingEndMessage;
@@ -1466,7 +1757,7 @@ window.onerror = function(msg, src, line, col, err) {
         if (els.contentEl) {
             var rawText = streamRawText.trim();
             if (rawText.length > 0) {
-                els.contentEl.innerHTML = renderMarkdownLite(streamRawText);
+                renderAssistantContent(els.contentEl, streamRawText, els.team || getCurrentAssistantRenderTeam());
             } else {
                 if (els.assistantEl && els.assistantEl.parentNode) {
                     els.assistantEl.parentNode.removeChild(els.assistantEl);
@@ -1475,9 +1766,11 @@ window.onerror = function(msg, src, line, col, err) {
         }
         currentAssistantEl = null;
         currentContentEl = null;
+        currentAssistantTeam = null;
         streamRawText = '';
         streamBuffer = '';
         scrollToBottom();
+        finishAgentDoneWhenIdle();
     }
 
     function escapeHtml(text) {
@@ -1623,6 +1916,150 @@ window.onerror = function(msg, src, line, col, err) {
         return html;
     }
 
+    function renderAssistantContent(contentEl, text, team) {
+        if (!contentEl) { return; }
+        contentEl.innerHTML = renderAssistantMarkdown(text, team);
+        applyDevTeamSpeakerDecorations(contentEl, team);
+    }
+
+    function renderAssistantMarkdown(text, team) {
+        var tokenized = tokenizeDevTeamSpeakerHeadings(text || '', team);
+        var html = decorateDevTeamSpeakerTokens(decorateDevTeamSpeakerHeadings(renderMarkdownLite(tokenized.text), team), tokenized.members);
+        return decoratePlainDevTeamSpeakerLines(html, team);
+    }
+
+    function applyDevTeamSpeakerDecorations(contentEl, team) {
+        if (!team || !Array.isArray(team.members) || team.members.length === 0 || !contentEl) { return; }
+        var synthesis = htmlToNode(devTeamSynthesisHeadingHtml(team));
+        if (synthesis) { contentEl.insertBefore(synthesis, contentEl.firstChild); }
+
+        var membersByKey = devTeamMembersBySpeakerKey(team);
+        Array.from(contentEl.childNodes).forEach(function(node) {
+            if (node.nodeType !== Node.TEXT_NODE || !node.textContent) { return; }
+            var parts = node.textContent.split(/(\n)/);
+            var fragment = document.createDocumentFragment();
+            var changed = false;
+            parts.forEach(function(part) {
+                if (part === '\n') {
+                    fragment.appendChild(document.createTextNode(part));
+                    return;
+                }
+                var plain = part.trim().replace(/:$/, '');
+                var member = plain ? membersByKey.get(normalizeDevTeamSpeakerKey(plain)) : undefined;
+                if (member) {
+                    var heading = htmlToNode(devTeamSpeakerHeadingHtml(member));
+                    if (heading) { fragment.appendChild(heading); }
+                    changed = true;
+                    return;
+                }
+                fragment.appendChild(document.createTextNode(part));
+            });
+            if (changed && node.parentNode) {
+                node.parentNode.replaceChild(fragment, node);
+            }
+        });
+    }
+
+    function htmlToNode(html) {
+        var template = document.createElement('template');
+        template.innerHTML = html.trim();
+        return template.content.firstElementChild;
+    }
+
+    function tokenizeDevTeamSpeakerHeadings(text, team) {
+        if (!team || !Array.isArray(team.members) || team.members.length === 0 || !text) { return { text: text, members: [] }; }
+        var membersByKey = devTeamMembersBySpeakerKey(team);
+        var tokenMembers = [];
+        var tokenText = text.split('\n').map(function(line) {
+            if (/^\s*[-*]\s+/.test(line) || /^\s*\d+\.\s+/.test(line)) { return line; }
+            var trimmed = line.trim();
+            if (!trimmed) { return line; }
+            var heading = trimmed.match(/^#{1,3}\s+(.+)$/);
+            var plain = (heading ? heading[1] : trimmed)
+                .replace(/^\*\*(.+?)\*\*:?$/, '$1')
+                .replace(/^<strong>(.+?)<\/strong>:?$/i, '$1')
+                .replace(/:$/, '')
+                .trim();
+            var member = membersByKey.get(normalizeDevTeamSpeakerKey(plain));
+            if (!member) { return line; }
+            var token = '%%DEVTEAM_SPEAKER_' + tokenMembers.length + '%%';
+            tokenMembers.push(member);
+            return token;
+        }).join('\n');
+        return { text: tokenText, members: tokenMembers };
+    }
+
+    function decorateDevTeamSpeakerTokens(html, members) {
+        if (!members || members.length === 0 || !html) { return html; }
+        return html.replace(/%%DEVTEAM_SPEAKER_(\d+)%%/g, function(match, indexText) {
+            var member = members[parseInt(indexText, 10)];
+            return member ? devTeamSpeakerHeadingHtml(member) : '';
+        });
+    }
+
+    function decorateDevTeamSpeakerHeadings(html, team) {
+        if (!team || !Array.isArray(team.members) || team.members.length === 0 || !html) { return html; }
+        var membersByKey = devTeamMembersBySpeakerKey(team);
+        return html.replace(/<h([1-3])>([\s\S]*?)<\/h\1>/g, function(match, level, labelHtml) {
+            var plain = labelHtml.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+            var member = membersByKey.get(normalizeDevTeamSpeakerKey(plain));
+            if (!member) { return match; }
+            return devTeamSpeakerHeadingHtml(member);
+        });
+    }
+
+    function decoratePlainDevTeamSpeakerLines(html, team) {
+        if (!team || !Array.isArray(team.members) || team.members.length === 0 || !html) { return html; }
+        var membersByKey = devTeamMembersBySpeakerKey(team);
+        return html.split('\n').map(function(line) {
+            var plain = line
+                .replace(/<strong>(.*?)<\/strong>/gi, '$1')
+                .replace(/<em>(.*?)<\/em>/gi, '$1')
+                .replace(/<[^>]+>/g, '')
+                .replace(/&amp;/g, '&')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .replace(/:$/, '');
+            if (!plain) { return line; }
+            var member = membersByKey.get(normalizeDevTeamSpeakerKey(plain));
+            return member ? devTeamSpeakerHeadingHtml(member) : line;
+        }).join('\n');
+    }
+
+    function devTeamSynthesisHeadingHtml(team) {
+        return '<div class="dev-team-speaker-heading team-synthesis">' +
+            '<span class="dev-team-speaker-icon team" aria-hidden="true"><i class="codicon codicon-organization"></i></span>' +
+            '<span class="dev-team-speaker-name">' + escapeHtml(team.name || 'Junior Dev Team') + '</span>' +
+            '<span class="dev-team-speaker-agent">Synthesis</span>' +
+            '</div>';
+    }
+
+    function devTeamSpeakerHeadingHtml(member) {
+        var agent = member.agentName ? '<span class="dev-team-speaker-agent">' + escapeHtml(member.agentName) + '</span>' : '';
+        return '<div class="dev-team-speaker-heading permission-' + escapeClassName(member.permission || 'review') + '">' +
+            '<span class="dev-team-speaker-icon" aria-hidden="true">' + escapeHtml(devTeamMemberIcon(member)) + '</span>' +
+            '<span class="dev-team-speaker-name">' + escapeHtml(member.role || 'Member') + '</span>' +
+            agent +
+            '</div>';
+    }
+
+    function devTeamMembersBySpeakerKey(team) {
+        var members = new Map();
+        (team.members || []).forEach(function(member) {
+            if (member.role) { members.set(normalizeDevTeamSpeakerKey(member.role), member); }
+            if (member.agentName) { members.set(normalizeDevTeamSpeakerKey(member.agentName), member); }
+            if (member.role && member.agentName) {
+                members.set(normalizeDevTeamSpeakerKey(member.role + ' / ' + member.agentName), member);
+                members.set(normalizeDevTeamSpeakerKey(member.role + ' (' + member.agentName + ')'), member);
+            }
+        });
+        return members;
+    }
+
+    function normalizeDevTeamSpeakerKey(value) {
+        return String(value || '').toLowerCase().replace(/&amp;/g, '&').replace(/[^a-z0-9]+/g, ' ').trim();
+    }
+
     // ── Delegate click handler for copy buttons ──
     messagesEl.addEventListener('click', (e) => {
         const btn = e.target.closest('.copy-btn');
@@ -1656,9 +2093,12 @@ window.onerror = function(msg, src, line, col, err) {
             case 'startAssistantMessage': {
                 closeLiveNarration();
                 closeLiveReasoning();
+                currentAssistantTeam = msg.team || null;
                 currentAssistantEl = document.createElement('div');
+                currentAssistantEl.__devTeam = currentAssistantTeam;
                 currentAssistantEl.className = 'msg assistant' + (currentProvider === 'copilot-cli' ? ' cli-provider' : '');
                 appendAssistantProviderBadge(currentAssistantEl, currentProvider);
+                appendDevTeamResponseHeader(currentAssistantEl, currentAssistantTeam);
                 currentContentEl = document.createElement('div');
                 currentContentEl.className = 'content';
                 currentAssistantEl.appendChild(currentContentEl);
@@ -1679,7 +2119,7 @@ window.onerror = function(msg, src, line, col, err) {
             case 'endAssistantMessage': {
                 // If drain is still running, let it finish naturally then finalize
                 if (streamBuffer.length > 0 || streamDrainTimer) {
-                    pendingEndMessage = { contentEl: currentContentEl, assistantEl: currentAssistantEl };
+                    pendingEndMessage = { contentEl: currentContentEl, assistantEl: currentAssistantEl, team: getCurrentAssistantRenderTeam() };
                     // Patch the drain loop to call finalizeAssistantMessage when done
                     if (streamDrainTimer) { clearInterval(streamDrainTimer); streamDrainTimer = null; }
                     streamDrainTimer = setInterval(function() {
@@ -1709,7 +2149,7 @@ window.onerror = function(msg, src, line, col, err) {
                     if (currentContentEl) {
                         var rawText = streamRawText.trim();
                         if (rawText.length > 0) {
-                            currentContentEl.innerHTML = renderMarkdownLite(streamRawText);
+                            renderAssistantContent(currentContentEl, streamRawText, getCurrentAssistantRenderTeam());
                         } else {
                             if (currentAssistantEl && currentAssistantEl.parentNode) {
                                 currentAssistantEl.parentNode.removeChild(currentAssistantEl);
@@ -1718,9 +2158,11 @@ window.onerror = function(msg, src, line, col, err) {
                     }
                     currentAssistantEl = null;
                     currentContentEl = null;
+                    currentAssistantTeam = null;
                     streamRawText = '';
                     streamBuffer = '';
                     scrollToBottom();
+                    finishAgentDoneWhenIdle();
                 }
                 break;
             }
@@ -2065,6 +2507,12 @@ window.onerror = function(msg, src, line, col, err) {
                 setChatMode(currentMode);
                 break;
             }
+            case 'setDevTeams': {
+                devTeams = Array.isArray(msg.teams) ? msg.teams : [];
+                activeDevTeamId = msg.activeId || null;
+                setChatMode(currentMode);
+                break;
+            }
             case 'searchCitations': {
                 renderSourcesCard(msg.agentName || 'Agent', msg.query || '', Array.isArray(msg.citations) ? msg.citations : []);
                 scrollToBottom();
@@ -2075,6 +2523,7 @@ window.onerror = function(msg, src, line, col, err) {
                 break;
             }
             case 'agentStarted': {
+                pendingAgentDone = false;
                 inputEl.disabled = true;
                 inputEl.placeholder = currentMode === 'plan' ? 'Planning...' : currentMode === 'ask' ? 'Answering...' : 'Agent is working...';
                 setAgentRunning(true);
@@ -2092,6 +2541,7 @@ window.onerror = function(msg, src, line, col, err) {
                 if (streamDrainTimer) { clearInterval(streamDrainTimer); streamDrainTimer = null; }
                 if (streamRenderTimer) { clearTimeout(streamRenderTimer); streamRenderTimer = null; }
                 pendingEndMessage = null;
+                pendingAgentDone = false;
                 streamBuffer = '';
                 streamRawText = '';
                 setAgentRunning(false);
@@ -2102,6 +2552,7 @@ window.onerror = function(msg, src, line, col, err) {
                 }
                 currentAssistantEl = null;
                 currentContentEl = null;
+                currentAssistantTeam = null;
                 toolStateById.clear();
                 workingBlocksById.clear();
                 workingEntriesById.clear();
@@ -2157,10 +2608,11 @@ window.onerror = function(msg, src, line, col, err) {
                 } else {
                     statusEl.textContent = '';
                     statusEl.classList.remove('active');
-                    inputEl.disabled = false;
-                    inputEl.placeholder = getModePlaceholder(currentMode);
-                    inputEl.focus();
-                    setAgentRunning(false);
+                    if (!agentRunning) {
+                        inputEl.disabled = false;
+                        inputEl.placeholder = getModePlaceholder(currentMode);
+                        inputEl.focus();
+                    }
                     hideGlobalWorkingIndicator();
                     var activeBlock = getActiveWorkingBlock();
                     if (activeBlock) {
@@ -2170,6 +2622,18 @@ window.onerror = function(msg, src, line, col, err) {
                 break;
             }
             case 'agentDone': {
+                if (streamBuffer.length > 0 || streamDrainTimer) {
+                    flushStreamBuffer();
+                    if (currentContentEl && streamRawText.trim().length > 0) {
+                        renderAssistantContent(currentContentEl, streamRawText, getCurrentAssistantRenderTeam());
+                    }
+                    pendingEndMessage = null;
+                    currentAssistantEl = null;
+                    currentContentEl = null;
+                    currentAssistantTeam = null;
+                    streamRawText = '';
+                    streamBuffer = '';
+                }
                 inputEl.disabled = false;
                 inputEl.placeholder = getModePlaceholder(currentMode);
                 inputEl.focus();
@@ -2183,12 +2647,21 @@ window.onerror = function(msg, src, line, col, err) {
                     finalizeWorkingBlock(liveBlock, liveBlock.data.summary || liveBlock.data.title, true);
                 }
                 activeWorkingBlockId = null;
+                pendingAgentDone = true;
+                finishAgentDoneWhenIdle();
                 break;
             }
             case 'fileAttached': {
                 // Extension read a workspace file and sent it back
                 if (msg.name && msg.content) {
                     pendingFiles.push({ name: msg.name, content: msg.content });
+                    refreshAttachPreview();
+                }
+                break;
+            }
+            case 'contextAttached': {
+                if (msg.name && msg.content) {
+                    pendingFiles.push({ name: msg.name, content: msg.content, contextKind: msg.kind });
                     refreshAttachPreview();
                 }
                 break;
@@ -2246,6 +2719,12 @@ window.onerror = function(msg, src, line, col, err) {
             }
             case 'narrationText': {
                 appendNarrationText(msg.text || '');
+                pinWorkingIndicatorToBottom();
+                scrollToBottom();
+                break;
+            }
+            case 'devTeamRoomEvent': {
+                appendDevTeamRoomEvent(msg.event);
                 pinWorkingIndicatorToBottom();
                 scrollToBottom();
                 break;
@@ -2428,7 +2907,7 @@ window.onerror = function(msg, src, line, col, err) {
     function createWorkingBlock(block) {
         var titleText = block.title && block.title !== 'Working' ? block.title : '';
         var wrapper = document.createElement('div');
-        wrapper.className = 'working-block-wrapper live';
+        wrapper.className = 'working-block-wrapper live' + (block.hidden ? ' hidden-working-block' : '');
         wrapper.dataset.blockId = block.id;
 
         var card = document.createElement('div');

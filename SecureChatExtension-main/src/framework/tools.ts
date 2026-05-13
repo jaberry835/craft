@@ -155,6 +155,11 @@ const SELF_TIMED_TOOLS = new Set([
     'run_terminal_command',  // Has its own 30-120s timeout
 ]);
 
+/** Long-running orchestration tools that legitimately wait on child agents. */
+const TOOL_TIMEOUT_OVERRIDES_MS: Record<string, number> = {
+    runSubagent: 0,
+};
+
 /**
  * Executes tools through a FunctionMiddleware pipeline.
  * This is the single point through which all tool calls flow,
@@ -206,10 +211,10 @@ export class ToolExecutor {
         };
 
         // Self-timed tools (run_terminal_command) get a generous wrapper;
-        // all others get the default timeout.
-        const timeoutMs = SELF_TIMED_TOOLS.has(name)
+        // orchestration tools can override the generic 60s tool budget.
+        const timeoutMs = TOOL_TIMEOUT_OVERRIDES_MS[name] ?? (SELF_TIMED_TOOLS.has(name)
             ? this.defaultTimeoutMs * 3
-            : this.defaultTimeoutMs;
+            : this.defaultTimeoutMs);
 
         return this.executeWithTimeout(
             () => MiddlewarePipeline.runFunction(
@@ -241,6 +246,27 @@ export class ToolExecutor {
         toolName: string,
         abortSignal?: AbortSignal
     ): Promise<ToolResult> {
+        if (timeoutMs <= 0) {
+            if (abortSignal?.aborted) {
+                return Promise.resolve({ success: false, result: 'Cancelled by user.' });
+            }
+            return new Promise<ToolResult>((resolve) => {
+                let settled = false;
+                const settle = (result: ToolResult) => {
+                    if (settled) { return; }
+                    settled = true;
+                    abortSignal?.removeEventListener('abort', onAbort);
+                    resolve(result);
+                };
+                const onAbort = () => settle({ success: false, result: 'Cancelled by user.' });
+                abortSignal?.addEventListener('abort', onAbort, { once: true });
+                fn().then(
+                    (result) => settle(result),
+                    (err) => settle({ success: false, result: `Tool "${toolName}" error: ${err instanceof Error ? err.message : String(err)}` })
+                );
+            });
+        }
+
         return new Promise<ToolResult>((resolve) => {
             let settled = false;
             const settle = (result: ToolResult) => {

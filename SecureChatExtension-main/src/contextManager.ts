@@ -16,6 +16,7 @@
 
 import { ChatMessage, ContentPart, ToolCall } from './types';
 import { getSetting } from './config';
+import { getContextWindow } from './modelContextWindow';
 
 /** Average characters per token — a conservative heuristic for English + code. */
 const CHARS_PER_TOKEN = 3.5;
@@ -68,11 +69,11 @@ export class ContextManager {
     }
 
     /**
-     * Return the configured context-window size (tokens).
-     * Defaults to 128 000 which covers GPT-4o / GPT-4.1 deployments.
+     * Return the effective context-window size (tokens).
+     * Explicit settings win; otherwise this is inferred from the active model.
      */
     getContextWindow(): number {
-        return getSetting<number>('agent.contextWindow') ?? 128000;
+        return getContextWindow();
     }
 
     /**

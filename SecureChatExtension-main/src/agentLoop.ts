@@ -120,6 +120,7 @@ export class AgentLoop {
     private contextTrimMiddleware: ContextTrimMiddleware;
     private memoryMiddleware: MemoryMiddleware;
     private contextProviders: IContextProvider[];
+    private childAgentLoops = new Set<AgentLoop>();
 
     constructor(
         private aoaiClient: AzureOpenAIClient,
@@ -250,6 +251,9 @@ export class AgentLoop {
 
     cancel() {
         this.cancelled = true;
+        for (const child of this.childAgentLoops) {
+            child.cancel();
+        }
         if (this.activeAgentContext) {
             this.activeAgentContext.cancelled = true;
         }
@@ -846,12 +850,147 @@ export class AgentLoop {
         this.persona = { systemPrompt: persona.systemPrompt, toolNames };
     }
 
+    createSubagentTool(): ToolEntry {
+        return {
+            definition: {
+                type: 'function',
+                function: {
+                    name: 'runSubagent',
+                    description: 'Run an isolated teammate/subagent with its own prompt and context. Use this to delegate Squad member work. Multiple runSubagent calls in one turn may run concurrently.',
+                    parameters: {
+                        type: 'object',
+                        properties: {
+                            prompt: { type: 'string', description: 'Full prompt for the subagent, including role, task, context, success criteria, and escalation path.' },
+                            description: { type: 'string', description: 'Short UI description of what the subagent is doing.' },
+                            agentName: { type: 'string', description: 'Display name of the subagent or Squad member.' },
+                            name: { type: 'string', description: 'Alternative display name for clients that pass name instead of agentName.' },
+                            model: { type: 'string', description: 'Optional model preference. Junior may ignore this if the configured provider does not support per-subagent model routing.' },
+                        },
+                        required: ['prompt'],
+                    },
+                },
+            },
+            handler: async (args) => this.runSubagentTool(args),
+        };
+    }
+
     private getModeMaxIterations(mode: ChatMode): number {
         switch (mode) {
             case 'ask': return Math.min(this.defaultMaxIterations, 8);
             case 'plan': return Math.min(this.defaultMaxIterations, 10);
             default: return this.defaultMaxIterations;
         }
+    }
+
+    private async runSubagentTool(args: Record<string, unknown>): Promise<ToolResult> {
+        const prompt = typeof args.prompt === 'string' ? args.prompt.trim() : '';
+        if (!prompt) {
+            return { success: false, result: 'runSubagent requires a non-empty prompt.' };
+        }
+
+        const agentName = this.extractSubagentName(args);
+        const agentLabel = this.extractSubagentLabel(args, agentName);
+        const description = typeof args.description === 'string' && args.description.trim()
+            ? args.description.trim()
+            : `${agentName}: working`;
+        const prefix = `${agentLabel} — `;
+        let assistantText = '';
+        let assistantOpen = false;
+
+        const child = new AgentLoop(
+            this.aoaiClient,
+            this.builtinTools,
+            this.mcpClient,
+            this.retrievalRanker,
+            this.repoPatternStore,
+            {
+                sendToWebview: (msg) => {
+                    switch (msg.type) {
+                        case 'agentStarted':
+                        case 'agentDone':
+                        case 'agentPlan':
+                        case 'setStatus':
+                        case 'continueIteration':
+                        case 'toolCall':
+                        case 'toolResult':
+                            return;
+                        case 'startAssistantMessage':
+                            assistantOpen = true;
+                            assistantText = '';
+                            return;
+                        case 'appendAssistantText':
+                            if (assistantOpen) { assistantText += msg.text; }
+                            return;
+                        case 'endAssistantMessage':
+                            assistantOpen = false;
+                            return;
+                        case 'narrationText':
+                            this.callbacks.sendToWebview({ type: 'narrationText', text: `${agentLabel} — ${msg.text}` });
+                            return;
+                        case 'workingBlockStarted': {
+                            this.callbacks.sendToWebview({
+                                type: 'workingBlockStarted',
+                                block: { ...msg.block, title: `${prefix}${msg.block.title || description}` },
+                            });
+                            return;
+                        }
+                        default:
+                            this.callbacks.sendToWebview(msg);
+                    }
+                },
+            },
+            undefined,
+            (msg) => this.log?.(`[subagent:${agentName}] ${msg}`),
+        );
+
+        this.childAgentLoops.add(child);
+        try {
+            child.setPersona({
+                systemPrompt: `${prompt}\n\n## Junior subagent rules\nYou are running as ${agentLabel}, an isolated delegated teammate. Do the assigned work directly with tools as needed. Do not call set_plan or update_plan_step; report concise outcomes and any files changed. If you need to persist Squad learnings, update only your own .squad/agents/{name}/history.md and shared .squad/decisions/inbox files as instructed by the coordinator. Ignore any requested per-agent model label in the prompt; Junior runs you with the currently selected Junior model.`,
+                extraTools: [],
+            });
+            this.callbacks.sendToWebview({ type: 'narrationText', text: `Spawned ${agentLabel} — ${this.stripSubagentLabelFromDescription(description, agentName)}` });
+            await child.run('agent', prompt, undefined, undefined, description);
+            const finalText = assistantText.trim() || this.lastAssistantText(child.getMessages()) || `${agentLabel} completed without a final text response.`;
+            return { success: true, result: `${agentLabel} completed.\n\n${finalText}` };
+        } finally {
+            this.childAgentLoops.delete(child);
+        }
+    }
+
+    private extractSubagentName(args: Record<string, unknown>): string {
+        const rawName = typeof args.agentName === 'string' && args.agentName.trim()
+            ? args.agentName.trim()
+            : typeof args.name === 'string' && args.name.trim()
+                ? args.name.trim()
+                : typeof args.description === 'string' && args.description.trim()
+                    ? args.description.trim().split(/[:—-]/, 1)[0].trim()
+                    : 'Subagent';
+        return rawName || 'Subagent';
+    }
+
+    private extractSubagentLabel(args: Record<string, unknown>, fallbackName: string): string {
+        const description = typeof args.description === 'string' ? args.description.trim() : '';
+        const displayMatch = description.match(/^([^\w\s]{1,4}\s+)?([A-Za-z][\w-]*)\s*[:—-]/u);
+        const icon = displayMatch?.[1]?.trim();
+        const displayName = displayMatch?.[2] || fallbackName;
+        const titleName = displayName.includes(' ') ? displayName : displayName.charAt(0).toUpperCase() + displayName.slice(1);
+        return icon ? `${icon} ${titleName}` : titleName;
+    }
+
+    private stripSubagentLabelFromDescription(description: string, agentName: string): string {
+        const escaped = agentName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const pattern = new RegExp(`^([^\\w\\s]{1,4}\\s+)?${escaped}\\s*[:—-]\\s*`, 'i');
+        return description.replace(pattern, '').trim() || description;
+    }
+
+    private lastAssistantText(messages: ChatMessage[]): string {
+        for (let i = messages.length - 1; i >= 0; i--) {
+            const msg = messages[i];
+            if (msg.role !== 'assistant') { continue; }
+            if (typeof msg.content === 'string' && msg.content.trim()) { return msg.content.trim(); }
+        }
+        return '';
     }
 
     private isToolAllowed(name: string, mode: ChatMode = this.currentMode): boolean {
@@ -1030,6 +1169,7 @@ export class AgentLoop {
             case 'delete_file': return { icon: 'edit', label: `Deleting ${this.shortPath(args.path)}`, doneLabel: `Deleted ${this.shortPath(args.path)}`, failLabel: `Failed to delete ${this.shortPath(args.path)}`, filePath: typeof args.path === 'string' ? args.path : undefined, actionType: 'edit', progressGroup: 'edit', progressText: 'Updating the implementation for this phase.' };
             case 'apply_code_action': return { icon: 'edit', label: `Applying code action at ${this.shortPath(args.path)}`, doneLabel: `Applied code action at ${this.shortPath(args.path)}`, failLabel: `Failed code action at ${this.shortPath(args.path)}`, filePath: typeof args.path === 'string' ? args.path : undefined, actionType: 'edit', progressGroup: 'edit', progressText: 'Updating the implementation for this phase.' };
             case 'run_terminal_command': return { icon: 'run', label: `Running: ${this.truncateStr(String(args.command || ''), 60)}`, doneLabel: `Ran: ${this.truncateStr(String(args.command || ''), 60)}`, failLabel: `Command failed: ${this.truncateStr(String(args.command || ''), 60)}`, actionType: 'run', progressGroup: 'run', progressText: 'Running commands to validate the current changes.' };
+            case 'runSubagent': { const agent = this.extractSubagentName(args); const label = this.extractSubagentLabel(args, agent); const desc = typeof args.description === 'string' ? this.stripSubagentLabelFromDescription(args.description, agent) : ''; return { icon: 'loading', label: `Spawning ${label}`, doneLabel: `${label} completed`, failLabel: `${label} failed`, detail: desc || undefined, actionType: 'other', progressGroup: 'other', progressText: 'Dispatching Squad teammates to work in parallel.' }; }
             case 'set_plan': return { icon: 'loading', label: 'Setting plan', doneLabel: 'Set plan', actionType: 'todo', progressGroup: 'todo' };
             case 'update_plan_step': return { icon: 'loading', label: 'Updating plan step', doneLabel: 'Updated plan step', actionType: 'todo', progressGroup: 'todo' };
             default:

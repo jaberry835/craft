@@ -16,6 +16,7 @@ import { RepoPatternStore } from './repoPatternStore';
 import { getCopilotCliBearerAuthSessionConfig, COPILOT_CLI_API_KEY_SECRET_KEY, setCopilotCliApiKeySecretCache } from './copilotCliSupport';
 import { CustomAgentStore } from './customAgents';
 import { CustomAgentEditor } from './customAgentEditor';
+import { DevTeamStore } from './devTeams';
 import { setNetworkLogger, setNetworkStorageUri } from './network';
 
 let chatViewProvider: ChatViewProvider;
@@ -105,6 +106,9 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 
+    const customAgentStore = CustomAgentStore.fromContext(context);
+    const devTeamStore = DevTeamStore.fromContext(context);
+
     chatViewProvider = new ChatViewProvider(
         context.extensionUri,
         aoaiClient,
@@ -117,7 +121,8 @@ export function activate(context: vscode.ExtensionContext) {
         tokenTracker,
         inlineDiffDecorator,
         context.globalState,
-        CustomAgentStore.fromContext(context),
+        customAgentStore,
+        devTeamStore,
         context,
     );
 
@@ -150,10 +155,15 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push({ dispose: () => tokenTracker.dispose() });
 
     // ── Custom Agents: command palette entry to open the editor ──
-    const customAgentStore = CustomAgentStore.fromContext(context);
     context.subscriptions.push(
         vscode.commands.registerCommand('junior.createCustomAgent', () => {
             void CustomAgentEditor.open(context, customAgentStore);
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('junior.createDevTeam', () => {
+            chatViewProvider.createDevTeam();
         })
     );
 

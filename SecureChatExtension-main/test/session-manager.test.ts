@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { SessionManager } from '../src/sessionManager';
-import { ChatMessage } from '../src/types';
+import { ChatMessage, ExtensionMessage } from '../src/types';
 
 let tmpDir: string;
 
@@ -63,6 +63,31 @@ describe('SessionManager — auto-titling', () => {
             { role: 'user', content: 'second message' },
         ]);
         expect(sm.getCurrentSession().title).toBe('first message');
+    });
+
+    it('uses visible transcript user text before Dev Team internal worker prompts', () => {
+        const sm = new SessionManager(tmpDir);
+        sm.recordTranscriptMessage({
+            type: 'addUserMessage',
+            text: 'Can you create a new website showing HR information for Contoso?',
+        } as ExtensionMessage);
+
+        sm.updateMessages([
+            { role: 'user', content: 'Junior Dev Team member execution pass.\n\nTeam: Balanced Dev Team\nMember: Lead Engineer' },
+            { role: 'assistant', content: 'Done.' },
+        ]);
+
+        expect(sm.getCurrentSession().title).toBe('Can you create a new website showing HR information for Cont...');
+    });
+
+    it('ignores internal Dev Team worker prompts when auto-titling from messages', () => {
+        const sm = new SessionManager(tmpDir);
+        sm.updateMessages([
+            { role: 'user', content: 'Junior Dev Team member execution pass.\n\nTeam: Balanced Dev Team\nMember: Lead Engineer' },
+            { role: 'user', content: 'Build the customer support portal from the KB.' },
+        ]);
+
+        expect(sm.getCurrentSession().title).toBe('Build the customer support portal from the KB.');
     });
 });
 

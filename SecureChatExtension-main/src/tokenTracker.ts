@@ -5,7 +5,7 @@
  */
 import * as vscode from 'vscode';
 import { TokenUsage, ExtensionMessage } from './types';
-import { getSetting } from './config';
+import { resolveContextWindow } from './modelContextWindow';
 
 type UsageSource = 'chat' | 'inline';
 
@@ -117,7 +117,7 @@ export class TokenTracker {
     private updateStatusBar() {
         const total = this.totalTokens();
         const requests = this.usage.chat.requests + this.usage.inline.requests;
-        const contextWindow = this.currentContextWindowOverride ?? (getSetting<number>('agent.contextWindow', 128000) ?? 128000);
+        const contextWindow = this.currentContextWindowOverride ?? resolveContextWindow().tokens;
         // Ring shows current context burden, not cumulative total
         const contextTokens = this.currentContextTokens || total;
         const windowPct = Math.min(100, Math.round(contextTokens / contextWindow * 100));
@@ -169,7 +169,7 @@ export class TokenTracker {
         const chatTotal = chat.promptTokens + chat.completionTokens;
         const inlineTotal = inline.promptTokens + inline.completionTokens;
         const total = chatTotal + inlineTotal;
-        const contextWindow = this.currentContextWindowOverride ?? (getSetting<number>('agent.contextWindow', 128000) ?? 128000);
+        const contextWindow = this.currentContextWindowOverride ?? resolveContextWindow().tokens;
         const pct = (n: number) => total > 0 ? `${Math.round(n / total * 100)}%` : '0%';
 
         this.webviewSender({

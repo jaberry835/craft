@@ -30,6 +30,7 @@ export function shouldPersistTranscriptMessage(message: ExtensionMessage): boole
         case 'appendAssistantText':
         case 'endAssistantMessage':
         case 'narrationText':
+        case 'devTeamRoomEvent':
         case 'reasoningStart':
         case 'reasoningAppend':
         case 'reasoningEnd':
@@ -73,6 +74,7 @@ export function applyTranscriptMessage(
                 kind: 'assistant',
                 text: '',
                 provider: options?.provider || 'local',
+                team: message.team,
             };
             current.items.push(assistant);
             current.activeAssistantMessageId = assistant.id;
@@ -92,6 +94,14 @@ export function applyTranscriptMessage(
                 id: nextId('narration'),
                 kind: 'narration',
                 text: message.text,
+            });
+            return current;
+        }
+        case 'devTeamRoomEvent': {
+            current.items.push({
+                id: nextId('dev-team-room-event'),
+                kind: 'dev-team-room-event',
+                event: { ...message.event },
             });
             return current;
         }

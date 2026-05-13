@@ -161,6 +161,11 @@
         "command": "junior.createCustomAgent",
         "title": "Junior: Create Custom Agent...",
         "icon": "$(add)"
+      },
+      {
+        "command": "junior.createDevTeam",
+        "title": "Junior: Create Dev Team...",
+        "icon": "$(organization)"
       }
     ],
     "menus": {
@@ -265,6 +270,10 @@
                 "supportsReasoning": {
                   "type": "boolean",
                   "description": "Optional override for showing reasoning controls in the chat model selector. If omitted, Junior infers support for GPT-5 and o-series model names."
+                },
+                "contextWindow": {
+                  "type": "number",
+                  "description": "Optional context window size in tokens for this model/deployment. If omitted, Junior infers common model windows from the model name."
                 }
               }
             },
@@ -476,7 +485,7 @@
           "junior.agent.contextWindow": {
             "type": "number",
             "default": 128000,
-            "description": "Model context window size in tokens. Older messages are summarized when approaching this limit. Common values: 128000 (GPT-4o/4.1), 200000 (Claude)."
+            "description": "Optional global override for model context window size in tokens. When unset, Junior uses per-model contextWindow values or infers common model windows from the active model name. Older messages are summarized when approaching this limit."
           },
           "junior.agent.contextThreshold": {
             "type": "number",
@@ -712,6 +721,10 @@
                 "id": {
                   "type": "string",
                   "description": "Exact Copilot CLI model id"
+                },
+                "contextWindow": {
+                  "type": "number",
+                  "description": "Optional context window size in tokens for this Copilot CLI model. If omitted, Junior infers common model windows from the model id."
                 }
               }
             },
