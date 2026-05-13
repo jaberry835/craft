@@ -1,3 +1,0 @@
-*.csv
-*.jsonl
-!src/magentic_marketplace/marketplace/database/queries/logs
