@@ -16,9 +16,10 @@ $repos = @(
     @{ Url = "https://github.com/adamruderman/McpServer"; Branch = "main" }
     @{ Url = "https://github.com/adamruderman/SecureChatExtension"; Branch = "main" }
     #@{Url = "https://github.com/adamruderman/SecureChatExtension"; Branch = "msal-config" },
-    @{Url = "https://github.com/adamruderman/SecureChatExtension"; Branch = "experiment/responses-api" },
+   # @{Url = "https://github.com/adamruderman/SecureChatExtension"; Branch = "experiment/responses-api" },
    #@{ Url = "https://github.com/adamruderman/SecureChatExtension"; Branch = "squad-integration" },
-    @{ Url = "https://github.com/adamruderman/SecureChatExtension"; Branch = "feature/junior-dev-team" }
+   #@{ Url = "https://github.com/adamruderman/SecureChatExtension"; Branch = "feature/junior-dev-team" },
+    @{ Url = "https://github.com/adamruderman/junior-studio"; Branch = "main"}
     
      
 )
