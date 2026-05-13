@@ -1,0 +1,157 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="15.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <MinimumVisualStudioVersion>17.0</MinimumVisualStudioVersion>
+    <VSToolsPath Condition="'$(VSToolsPath)' == ''">$(MSBuildExtensionsPath32)\Microsoft\VisualStudio\v$(VisualStudioVersion)</VSToolsPath>
+  </PropertyGroup>
+  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <SchemaVersion>2.0</SchemaVersion>
+    <ProjectTypeGuids>{82b43b9b-a64c-4715-b499-d71e9ca2bd60};{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}</ProjectTypeGuids>
+    <ProjectGuid>{C3E27C43-7A31-4CC9-B2F0-012EC49235A1}</ProjectGuid>
+    <OutputType>Library</OutputType>
+    <AppDesignerFolder>Properties</AppDesignerFolder>
+    <RootNamespace>JuniorStudio.VisualStudio</RootNamespace>
+    <AssemblyName>JuniorStudio.VisualStudio</AssemblyName>
+    <TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>
+    <GeneratePkgDefFile>true</GeneratePkgDefFile>
+    <UseCodebase>true</UseCodebase>
+    <IncludeAssemblyInVSIXContainer>true</IncludeAssemblyInVSIXContainer>
+    <IncludeDebugSymbolsInVSIXContainer>false</IncludeDebugSymbolsInVSIXContainer>
+    <IncludeDebugSymbolsInLocalVSIXDeployment>false</IncludeDebugSymbolsInLocalVSIXDeployment>
+    <CopyBuildOutputToOutputDirectory>true</CopyBuildOutputToOutputDirectory>
+    <CopyOutputSymbolsToOutputDirectory>true</CopyOutputSymbolsToOutputDirectory>
+    <StartAction>Program</StartAction>
+    <StartProgram Condition="'$(DevEnvDir)' != ''">$(DevEnvDir)devenv.exe</StartProgram>
+    <StartArguments>/rootsuffix Exp</StartArguments>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>full</DebugType>
+    <Optimize>false</Optimize>
+    <OutputPath>bin\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
+    <DebugType>pdbonly</DebugType>
+    <Optimize>true</Optimize>
+    <OutputPath>bin\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Commands\OpenJuniorChatCommand.cs" />
+    <Compile Include="JuniorStudioPackage.cs" />
+    <Compile Include="Options\JuniorOptionsPage.cs" />
+    <Compile Include="Properties\AssemblyInfo.cs" />
+    <Compile Include="Services\JuniorAgentSidecar.cs" />
+    <Compile Include="Services\JuniorSessionStore.cs" />
+    <Compile Include="Services\JuniorWebViewBridge.cs" />
+    <Compile Include="WebView\JuniorChatHtmlBuilder.cs" />
+    <Compile Include="ToolWindows\JuniorChatToolWindow.cs" />
+    <Compile Include="ToolWindows\JuniorChatToolWindowControl.xaml.cs">
+      <DependentUpon>JuniorChatToolWindowControl.xaml</DependentUpon>
+    </Compile>
+  </ItemGroup>
+  <ItemGroup>
+    <Page Include="ToolWindows\JuniorChatToolWindowControl.xaml">
+      <Generator>MSBuild:Compile</Generator>
+      <SubType>Designer</SubType>
+    </Page>
+  </ItemGroup>
+  <ItemGroup>
+    <VSCTCompile Include="JuniorStudioPackage.vsct">
+      <ResourceName>Menus.ctmenu</ResourceName>
+    </VSCTCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="source.extension.vsixmanifest">
+      <SubType>Designer</SubType>
+    </None>
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="Assets\chat.js">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <IncludeInVSIX>true</IncludeInVSIX>
+    </Content>
+    <Content Include="Assets\codicon.ttf">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <IncludeInVSIX>true</IncludeInVSIX>
+    </Content>
+    <Content Include="Assets\icon.svg">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <IncludeInVSIX>true</IncludeInVSIX>
+    </Content>
+  </ItemGroup>
+  <ItemGroup>
+    <Reference Include="PresentationCore" />
+    <Reference Include="PresentationFramework" />
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Design" />
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.Web.Extensions" />
+    <Reference Include="System.Xaml" />
+    <Reference Include="WindowsBase" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3405.78" />
+    <PackageReference Include="Microsoft.VisualStudio.SDK" Version="17.0.32112.339" ExcludeAssets="runtime" NoWarn="NU1604" />
+    <PackageReference Include="Microsoft.VSSDK.BuildTools" Version="17.14.2094" NoWarn="NU1604" />
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+  <Import Project="$(VSToolsPath)\VSSDK\Microsoft.VsSDK.targets" Condition="'$(VSToolsPath)' != ''" />
+
+  <!--
+    Publish the .NET 8 sidecar (JuniorStudio.Agent) into Assets\Agent\ before the VSIX is packaged,
+    then mark its contents as VSIX-included content. Sidecar is framework-dependent (uses installed .NET 8 runtime).
+  -->
+  <PropertyGroup>
+    <AgentProjectDir>$(MSBuildProjectDirectory)\..\JuniorStudio.Agent</AgentProjectDir>
+    <AgentPublishDir>$(MSBuildProjectDirectory)\Assets\Agent</AgentPublishDir>
+  </PropertyGroup>
+
+  <Target Name="PublishJuniorAgent" BeforeTargets="ResolveAssemblyReferences;BeforeBuild" Inputs="$(AgentProjectDir)\JuniorStudio.Agent.csproj;$(AgentProjectDir)\Program.cs;$(AgentProjectDir)\AgentHost.cs;$(AgentProjectDir)\Protocol.cs" Outputs="$(AgentPublishDir)\JuniorStudio.Agent.exe">
+    <Message Text="Publishing JuniorStudio.Agent sidecar to $(AgentPublishDir)" Importance="high" />
+    <RemoveDir Directories="$(AgentPublishDir)" Condition="Exists('$(AgentPublishDir)')" />
+    <Exec Command="dotnet publish &quot;$(AgentProjectDir)\JuniorStudio.Agent.csproj&quot; -c $(Configuration) -r win-x64 --no-self-contained -o &quot;$(AgentPublishDir)&quot; -v minimal" />
+  </Target>
+
+  <Target Name="IncludeAgentInVsix" AfterTargets="PublishJuniorAgent" BeforeTargets="GetVsixSourceItems">
+    <ItemGroup>
+      <_AgentFiles Include="$(AgentPublishDir)\**\*" />
+      <Content Include="@(_AgentFiles)">
+        <Link>Assets\Agent\%(RecursiveDir)%(FileName)%(Extension)</Link>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        <IncludeInVSIX>true</IncludeInVSIX>
+      </Content>
+    </ItemGroup>
+  </Target>
+
+  <!--
+    Copy native WebView2Loader.dll into the VSIX. NuGet's runtimes\win-x64\native is not auto-deployed
+    for .NET Framework projects, and missing it causes WebView2 BuildWindowCore to throw
+    FileNotFoundException whenever the WPF host re-parents the control (e.g. when VS opens a project),
+    crashing devenv.exe.
+  -->
+  <Target Name="IncludeWebView2NativeLoader" BeforeTargets="GetVsixSourceItems;CopyFilesToOutputDirectory">
+    <PropertyGroup>
+      <_NuGetRoot Condition="'$(NuGetPackageRoot)' != ''">$(NuGetPackageRoot)</_NuGetRoot>
+      <_NuGetRoot Condition="'$(_NuGetRoot)' == ''">$(USERPROFILE)\.nuget\packages\</_NuGetRoot>
+      <WebView2LoaderSource>$(_NuGetRoot)microsoft.web.webview2\1.0.3405.78\runtimes\win-x64\native\WebView2Loader.dll</WebView2LoaderSource>
+    </PropertyGroup>
+    <Message Text="WebView2Loader source: $(WebView2LoaderSource) (exists=$([System.IO.File]::Exists('$(WebView2LoaderSource)')))" Importance="high" />
+    <ItemGroup Condition="Exists('$(WebView2LoaderSource)')">
+      <Content Include="$(WebView2LoaderSource)">
+        <Link>WebView2Loader.dll</Link>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        <IncludeInVSIX>true</IncludeInVSIX>
+      </Content>
+    </ItemGroup>
+  </Target>
+</Project>

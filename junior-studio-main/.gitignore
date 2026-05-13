@@ -1,0 +1,7 @@
+probe-apim.ps1
+dumpbin_output.txt
+src/JuniorStudio.Agent/bin/*
+src/JuniorStudio.Agent/obj/*
+src/JuniorStudio.VisualStudio/bin/*
+src/JuniorStudio.VisualStudio/obj/*
+src/JuniorStudio.VisualStudio/Assets/Agent/

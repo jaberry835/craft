@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CommandTable xmlns="http://schemas.microsoft.com/VisualStudio/2005-10-18/CommandTable" xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <Extern href="stdidcmd.h" />
+  <Extern href="vsshlids.h" />
+
+  <Commands package="guidJuniorStudioPackage">
+    <Groups>
+      <Group guid="guidJuniorStudioPackageCmdSet" id="JuniorStudioToolsMenuGroup" priority="0x0600">
+        <Parent guid="guidSHLMainMenu" id="IDM_VS_MENU_TOOLS" />
+      </Group>
+      <Group guid="guidJuniorStudioPackageCmdSet" id="JuniorStudioViewMenuGroup" priority="0x0700">
+        <Parent guid="guidSHLMainMenu" id="IDM_VS_MENU_VIEW" />
+      </Group>
+    </Groups>
+
+    <Buttons>
+      <Button guid="guidJuniorStudioPackageCmdSet" id="OpenJuniorChatCommand" priority="0x0100" type="Button">
+        <Parent guid="guidJuniorStudioPackageCmdSet" id="JuniorStudioToolsMenuGroup" />
+        <Strings>
+          <ButtonText>Junior Chat</ButtonText>
+          <CommandName>JuniorStudio.OpenJuniorChat</CommandName>
+        </Strings>
+      </Button>
+    </Buttons>
+  </Commands>
+
+  <CommandPlacements>
+    <CommandPlacement guid="guidJuniorStudioPackageCmdSet" id="OpenJuniorChatCommand" priority="0x0600">
+      <Parent guid="guidSHLMainMenu" id="IDG_VS_WNDO_OTRWNDWS1" />
+    </CommandPlacement>
+    <CommandPlacement guid="guidJuniorStudioPackageCmdSet" id="OpenJuniorChatCommand" priority="0x0100">
+      <Parent guid="guidJuniorStudioPackageCmdSet" id="JuniorStudioViewMenuGroup" />
+    </CommandPlacement>
+  </CommandPlacements>
+
+  <Symbols>
+    <GuidSymbol name="guidJuniorStudioPackage" value="{c2c66f37-2bf9-4c64-9a87-a9eb3e937593}" />
+    <GuidSymbol name="guidJuniorStudioPackageCmdSet" value="{8c3bbdfc-302d-4c40-9f0c-c94f5b2f5868}">
+      <IDSymbol name="JuniorStudioToolsMenuGroup" value="0x1020" />
+      <IDSymbol name="JuniorStudioViewMenuGroup" value="0x1030" />
+      <IDSymbol name="OpenJuniorChatCommand" value="0x0100" />
+    </GuidSymbol>
+  </Symbols>
+</CommandTable>
