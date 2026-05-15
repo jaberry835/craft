@@ -5,3 +5,6 @@ src/JuniorStudio.Agent/obj/*
 src/JuniorStudio.VisualStudio/bin/*
 src/JuniorStudio.VisualStudio/obj/*
 src/JuniorStudio.VisualStudio/Assets/Agent/
+msbuild.log
+build_output_simple.txt
+build_output.txt

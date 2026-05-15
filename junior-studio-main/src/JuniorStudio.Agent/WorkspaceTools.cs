@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Text;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.AI;
 
 namespace JuniorStudio.Agent;
@@ -22,7 +23,18 @@ internal enum ApprovalMode
 /// </summary>
 internal sealed class WorkspaceTools
 {
+    private static readonly string[] RepoInstructionCandidates =
+    {
+        Path.Combine(".junior", "instructions.md"),
+        Path.Combine(".github", "copilot-instructions.md"),
+        "AGENTS.md"
+    };
+
     private string workspaceRoot = Directory.GetCurrentDirectory();
+    private readonly object mutationLock = new();
+    private readonly HashSet<string> mutatedFiles = new(StringComparer.OrdinalIgnoreCase);
+    private readonly object diagnosticsLock = new();
+    private List<DiagnosticSnapshotItem> diagnostics = new();
 
     public string WorkspaceRoot
     {
@@ -42,6 +54,12 @@ internal sealed class WorkspaceTools
 
     /// <summary>Roslyn-based symbol index over the workspace's C# files.</summary>
     public SymbolIndex Symbols { get; }
+
+    /// <summary>Monotonically increases whenever a workspace mutation tool succeeds.</summary>
+    public int MutationVersion { get; private set; }
+
+    /// <summary>Mutation version covered by the latest successful workspace validation.</summary>
+    public int LastSuccessfulValidationMutationVersion { get; private set; }
 
     public WorkspaceTools()
     {
@@ -112,6 +130,9 @@ internal sealed class WorkspaceTools
             AIFunctionFactory.Create(ListDir),
             AIFunctionFactory.Create(ReadFile),
             AIFunctionFactory.Create(SearchText),
+            AIFunctionFactory.Create(SearchRelevantFiles),
+            AIFunctionFactory.Create(GetDiagnostics),
+            AIFunctionFactory.Create(GetRepoInstructions),
             AIFunctionFactory.Create(ListWorkspaceFiles),
             AIFunctionFactory.Create(FindFiles),
             AIFunctionFactory.Create(GetWorkspaceTree),
@@ -126,10 +147,150 @@ internal sealed class WorkspaceTools
         {
             AIFunctionFactory.Create(WriteFile),
             AIFunctionFactory.Create(CreateFile),
+            AIFunctionFactory.Create(ApplyPatch),
+            AIFunctionFactory.Create(ReplaceText),
+            AIFunctionFactory.Create(ReplaceLines),
             AIFunctionFactory.Create(DeleteFile),
+            AIFunctionFactory.Create(ValidateWorkspace),
             AIFunctionFactory.Create(RunShell),
             AIFunctionFactory.Create(CreateWorkspaceFolder)
         };
+    }
+
+    public IReadOnlyList<string> GetMutatedFiles()
+    {
+        lock (mutationLock) return mutatedFiles.OrderBy(p => p, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    public bool HasUnvalidatedMutations => MutationVersion > LastSuccessfulValidationMutationVersion;
+
+    public string DetectDefaultValidationCommand() => DetectValidationCommand();
+
+    public void SetDiagnostics(IEnumerable<DiagnosticSnapshotItem>? items)
+    {
+        lock (diagnosticsLock)
+        {
+            diagnostics = (items ?? Array.Empty<DiagnosticSnapshotItem>())
+                .Where(d => d is not null)
+                .Take(200)
+                .ToList();
+        }
+    }
+
+    public string GetDiagnosticsSummary(int maxResults = 20) => FormatDiagnostics(null, maxResults, includeHeader: true);
+
+    [Description("Returns the active repository instruction file Junior is using, plus other detected instruction files. Use this when behavior depends on project guidance or coding conventions.")]
+    public string GetRepoInstructions()
+    {
+        var info = GetRepoInstructionInfo();
+        if (string.IsNullOrWhiteSpace(info.Source)) return "(no repository instruction files found)";
+        var sb = new StringBuilder();
+        sb.Append("# Active repository instructions: ").AppendLine(info.Source);
+        if (info.Candidates.Count > 1)
+            sb.Append("# Detected instruction files, in precedence order: ").AppendLine(string.Join(", ", info.Candidates));
+        if (info.Truncated) sb.AppendLine("# Content was truncated for context budget.");
+        sb.AppendLine("```markdown");
+        sb.AppendLine(info.Text);
+        sb.AppendLine("```");
+        return sb.ToString();
+    }
+
+    public RepoInstructionInfo GetRepoInstructionInfo(int maxChars = 4000)
+    {
+        var candidates = new List<string>();
+        if (string.IsNullOrWhiteSpace(WorkspaceRoot) || !Directory.Exists(WorkspaceRoot))
+            return new RepoInstructionInfo(string.Empty, string.Empty, false, candidates);
+
+        string activeSource = string.Empty;
+        string activeText = string.Empty;
+        var truncated = false;
+        foreach (var rel in RepoInstructionCandidates)
+        {
+            try
+            {
+                var path = Path.Combine(WorkspaceRoot, rel);
+                if (!File.Exists(path)) continue;
+                var text = File.ReadAllText(path).Trim();
+                if (text.Length == 0) continue;
+                var normalized = rel.Replace('\\', '/');
+                candidates.Add(normalized);
+                if (activeSource.Length > 0) continue;
+                activeSource = normalized;
+                if (maxChars > 0 && text.Length > maxChars)
+                {
+                    activeText = text.Substring(0, maxChars) + "\n(truncated)";
+                    truncated = true;
+                }
+                else
+                {
+                    activeText = text;
+                }
+            }
+            catch { }
+        }
+        return new RepoInstructionInfo(activeSource, activeText, truncated, candidates);
+    }
+
+    public string BuildRepairTargetSummary(string validationResult, int maxResults = 12)
+    {
+        if (maxResults <= 0) maxResults = 12;
+        if (maxResults > 50) maxResults = 50;
+        var targets = new List<RepairTarget>();
+        lock (diagnosticsLock)
+        {
+            foreach (var item in diagnostics)
+            {
+                var file = NormalizeTargetPath(item.File);
+                if (string.IsNullOrWhiteSpace(file)) continue;
+                targets.Add(new RepairTarget(
+                    Source: "Visual Studio",
+                    Severity: string.IsNullOrWhiteSpace(item.Severity) ? "Diagnostic" : item.Severity!.Trim(),
+                    File: file,
+                    Line: item.Line.GetValueOrDefault(),
+                    Column: item.Column.GetValueOrDefault(),
+                    Code: item.Code ?? string.Empty,
+                    Message: item.Message ?? string.Empty));
+            }
+        }
+
+        ExtractValidationTargets(validationResult, targets);
+        var ordered = targets
+            .Where(t => !string.IsNullOrWhiteSpace(t.File))
+            .GroupBy(t => t.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First())
+            .OrderBy(t => SeverityRank(t.Severity))
+            .ThenBy(t => t.File, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(t => t.Line)
+            .ThenBy(t => t.Column)
+            .Take(maxResults)
+            .ToList();
+
+        if (ordered.Count == 0) return "(no file/line repair targets were detected)";
+        var sb = new StringBuilder();
+        sb.Append("# Repair targets: ").Append(ordered.Count).AppendLine();
+        foreach (var target in ordered)
+        {
+            sb.Append("- ").Append(target.Source).Append(' ')
+              .Append(string.IsNullOrWhiteSpace(target.Severity) ? "Diagnostic" : target.Severity.Trim());
+            if (!string.IsNullOrWhiteSpace(target.Code)) sb.Append(' ').Append(target.Code.Trim());
+            sb.Append("  ").Append(target.File);
+            if (target.Line > 0) sb.Append(':').Append(target.Line);
+            if (target.Column > 0) sb.Append(':').Append(target.Column);
+            if (!string.IsNullOrWhiteSpace(target.Message)) sb.Append("  ").Append(target.Message.Trim());
+            sb.AppendLine();
+        }
+        if (targets.Count > ordered.Count) sb.AppendLine($"(truncated; {targets.Count} candidate target(s) detected)");
+        return sb.ToString();
+    }
+
+    private void NoteMutation(string path)
+    {
+        var normalized = (path ?? string.Empty).Replace('\\', '/').TrimStart('/');
+        lock (mutationLock)
+        {
+            MutationVersion++;
+            if (normalized.Length > 0) mutatedFiles.Add(normalized);
+        }
     }
 
     [Description("Returns the absolute path of the current workspace root that the agent is allowed to read and write.")]
@@ -242,11 +403,14 @@ internal sealed class WorkspaceTools
         [Description("Full new contents of the file.")] string content,
         CancellationToken ct = default)
     {
-        var refusal = await RequireApprovalAsync("write", $"Write {content?.Length ?? 0} chars to {path}", ct).ConfigureAwait(false);
-        if (refusal is not null) return refusal;
         var full = ResolveInsideWorkspace(path);
         Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+        var original = File.Exists(full) ? File.ReadAllText(full) : string.Empty;
+        var updated = content ?? string.Empty;
+        var refusal = await RequireApprovalAsync("write", BuildChangeApprovalDescription(File.Exists(full) ? "Overwrite file" : "Write new file", path, original, updated), ct).ConfigureAwait(false);
+        if (refusal is not null) return refusal;
         File.WriteAllText(full, content ?? string.Empty);
+        NoteMutation(path);
         return $"Wrote {content?.Length ?? 0} chars to {path}";
     }
 
@@ -256,13 +420,127 @@ internal sealed class WorkspaceTools
         [Description("Full contents of the new file.")] string content,
         CancellationToken ct = default)
     {
-        var refusal = await RequireApprovalAsync("write", $"Create {path} ({content?.Length ?? 0} chars)", ct).ConfigureAwait(false);
-        if (refusal is not null) return refusal;
         var full = ResolveInsideWorkspace(path);
         if (File.Exists(full)) return $"ERROR: file already exists: {path}. Use write_file to overwrite.";
         Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+        var refusal = await RequireApprovalAsync("write", BuildChangeApprovalDescription("Create file", path, string.Empty, content ?? string.Empty), ct).ConfigureAwait(false);
+        if (refusal is not null) return refusal;
         File.WriteAllText(full, content ?? string.Empty);
+        NoteMutation(path);
         return $"Created {path} ({content?.Length ?? 0} chars)";
+    }
+
+    [Description("Applies multiple exact-text replacements to one file atomically. Every hunk is checked before the file is written; if any hunk is missing or ambiguous, no changes are made. Prefer this for multi-location edits in the same file.")]
+    public async Task<string> ApplyPatch(
+        [Description("Workspace-relative file path.")] string path,
+        [Description("Patch hunks. Each hunk has oldText and newText. oldText must match exactly and uniquely at the point it is applied.")] List<PatchHunk> hunks,
+        CancellationToken ct = default)
+    {
+        if (hunks == null || hunks.Count == 0) return "ERROR: no patch hunks supplied";
+        if (hunks.Count > 50) return "ERROR: too many patch hunks (max 50)";
+        for (var i = 0; i < hunks.Count; i++)
+        {
+            if (hunks[i] == null) return $"ERROR: hunk {i + 1} is null";
+            if (string.IsNullOrEmpty(hunks[i].OldText)) return $"ERROR: hunk {i + 1} oldText is empty";
+        }
+
+        var full = ResolveInsideWorkspace(path);
+        if (!File.Exists(full)) return $"ERROR: file not found: {path}";
+        var info = new FileInfo(full);
+        if (info.Length > 1024 * 1024) return $"ERROR: file is too large for patching ({info.Length} bytes)";
+
+        var original = File.ReadAllText(full);
+        var patched = original;
+        var totalRemoved = 0;
+        var totalAdded = 0;
+
+        for (var i = 0; i < hunks.Count; i++)
+        {
+            var hunk = hunks[i];
+            var oldText = hunk.OldText ?? string.Empty;
+            var newText = hunk.NewText ?? string.Empty;
+            var count = CountOccurrences(patched, oldText);
+            if (count == 0)
+                return $"ERROR: hunk {i + 1} oldText was not found. No changes were made. Read the current file and retry with exact context.";
+            if (count != 1)
+                return $"ERROR: hunk {i + 1} oldText appeared {count} times. No changes were made. Provide more surrounding context.";
+
+            patched = ReplaceFirst(patched, oldText, newText);
+            totalRemoved += CountLogicalLines(oldText);
+            totalAdded += CountLogicalLines(newText);
+        }
+
+        if (string.Equals(original, patched, StringComparison.Ordinal))
+            return $"Patch made no changes to {path}";
+
+        var refusal = await RequireApprovalAsync("write", BuildChangeApprovalDescription($"Apply {hunks.Count} patch hunk(s)", path, original, patched), ct).ConfigureAwait(false);
+        if (refusal is not null) return refusal;
+
+        File.WriteAllText(full, patched);
+        NoteMutation(path);
+        return $"Applied {hunks.Count} patch hunk(s) to {path}; removed {totalRemoved} line(s), added {totalAdded} line(s).";
+    }
+
+    [Description("Replaces an exact text span inside a workspace file. Safer than WriteFile for focused edits because it fails when the old text is missing or appears an unexpected number of times.")]
+    public async Task<string> ReplaceText(
+        [Description("Workspace-relative file path.")] string path,
+        [Description("Exact existing text to replace. Include enough surrounding context to make it unique.")] string oldText,
+        [Description("Replacement text.")] string newText,
+        [Description("Expected number of replacements. Default 1. Use a higher value only when intentionally replacing repeated identical text.")] int expectedReplacements = 1,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrEmpty(oldText)) return "ERROR: oldText is empty";
+        if (expectedReplacements <= 0) expectedReplacements = 1;
+
+        var full = ResolveInsideWorkspace(path);
+        if (!File.Exists(full)) return $"ERROR: file not found: {path}";
+        var info = new FileInfo(full);
+        if (info.Length > 1024 * 1024) return $"ERROR: file is too large for exact replacement ({info.Length} bytes)";
+
+        var text = File.ReadAllText(full);
+        var count = CountOccurrences(text, oldText);
+        if (count == 0) return "ERROR: oldText was not found. Read the current file and try again with exact context.";
+        if (count != expectedReplacements) return $"ERROR: oldText appeared {count} times, expected {expectedReplacements}. Provide more context or adjust expectedReplacements.";
+
+        var updated = text.Replace(oldText, newText ?? string.Empty);
+        var refusal = await RequireApprovalAsync("write", BuildChangeApprovalDescription($"Replace {count} exact text span(s)", path, text, updated), ct).ConfigureAwait(false);
+        if (refusal is not null) return refusal;
+        File.WriteAllText(full, updated);
+        NoteMutation(path);
+        return $"Replaced {count} exact text span(s) in {path}";
+    }
+
+    [Description("Replaces a 1-based inclusive line range in a workspace file. Use this for surgical patches after reading the surrounding lines.")]
+    public async Task<string> ReplaceLines(
+        [Description("Workspace-relative file path.")] string path,
+        [Description("1-based start line to replace.")] int startLine,
+        [Description("1-based inclusive end line to replace.")] int endLine,
+        [Description("Replacement text for the line range. May contain multiple lines.")] string newText,
+        CancellationToken ct = default)
+    {
+        if (startLine <= 0 || endLine < startLine) return "ERROR: invalid line range";
+
+        var full = ResolveInsideWorkspace(path);
+        if (!File.Exists(full)) return $"ERROR: file not found: {path}";
+        var text = File.ReadAllText(full);
+        var newline = text.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+        var hadTrailingNewline = text.EndsWith("\n", StringComparison.Ordinal);
+        var normalized = text.Replace("\r\n", "\n");
+        var lines = normalized.Split('\n').ToList();
+        if (hadTrailingNewline && lines.Count > 0 && lines[^1].Length == 0) lines.RemoveAt(lines.Count - 1);
+        if (startLine > lines.Count || endLine > lines.Count) return $"ERROR: line range {startLine}-{endLine} exceeds file length {lines.Count}";
+
+        var replacement = (newText ?? string.Empty).Replace("\r\n", "\n").Split('\n').ToList();
+        if (replacement.Count == 1 && replacement[0].Length == 0) replacement.Clear();
+        lines.RemoveRange(startLine - 1, endLine - startLine + 1);
+        lines.InsertRange(startLine - 1, replacement);
+        var updated = string.Join(newline, lines);
+        if (hadTrailingNewline) updated += newline;
+        var refusal = await RequireApprovalAsync("write", BuildChangeApprovalDescription($"Replace lines {startLine}-{endLine}", path, text, updated), ct).ConfigureAwait(false);
+        if (refusal is not null) return refusal;
+        File.WriteAllText(full, updated);
+        NoteMutation(path);
+        return $"Replaced lines {startLine}-{endLine} in {path}";
     }
 
     [Description("Deletes a file from the workspace.")]
@@ -270,11 +548,14 @@ internal sealed class WorkspaceTools
         [Description("Workspace-relative file path.")] string path,
         CancellationToken ct = default)
     {
-        var refusal = await RequireApprovalAsync("delete", $"Delete {path}", ct).ConfigureAwait(false);
-        if (refusal is not null) return refusal;
         var full = ResolveInsideWorkspace(path);
         if (!File.Exists(full)) return $"ERROR: file not found: {path}";
+        var info = new FileInfo(full);
+        var original = info.Length <= 1024 * 1024 && LooksTextual(path) ? File.ReadAllText(full) : string.Empty;
+        var refusal = await RequireApprovalAsync("delete", BuildChangeApprovalDescription("Delete file", path, original, string.Empty), ct).ConfigureAwait(false);
+        if (refusal is not null) return refusal;
         File.Delete(full);
+        NoteMutation(path);
         return $"Deleted {path}";
     }
 
@@ -320,6 +601,120 @@ internal sealed class WorkspaceTools
             catch { }
         }
         return hits == 0 ? "(no matches)" : sb.ToString();
+    }
+
+    [Description("Returns the latest Visual Studio Error List diagnostics snapshot for this workspace. Use this before fixing compile errors or red squiggles.")]
+    public string GetDiagnostics(
+        [Description("Optional workspace-relative file path filter. Empty = all diagnostics.")] string? path = null,
+        [Description("Maximum diagnostics to return. Default 50, max 200.")] int maxResults = 50)
+    {
+        return FormatDiagnostics(path, maxResults, includeHeader: true);
+    }
+
+    [Description("Finds files likely relevant to a natural-language task using filename/content scoring plus boosts for active diagnostics, files changed this session, and C# symbol matches. Returns reasons for each match. Use this before broad reading when the user asks for a feature, bug fix, or architectural question.")]
+    public string SearchRelevantFiles(
+        [Description("Natural language query describing the task or concept to locate.")] string query,
+        [Description("Maximum files to return. Default 8, max 20.")] int maxResults = 8)
+    {
+        if (string.IsNullOrWhiteSpace(query)) return "ERROR: query is empty";
+        if (string.IsNullOrWhiteSpace(WorkspaceRoot) || !Directory.Exists(WorkspaceRoot))
+            return "ERROR: no workspace open";
+        if (maxResults <= 0) maxResults = 8;
+        if (maxResults > 20) maxResults = 20;
+        if (Index.Count == 0) Index.WaitForInitialScan(2000);
+
+        var terms = ExtractTerms(query).ToArray();
+        if (terms.Length == 0) return "ERROR: query has no searchable terms";
+        var diagnosticFiles = GetDiagnosticFiles();
+        var changedFiles = GetMutatedFiles().ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var symbolHits = GetSymbolHitSummary(terms);
+        var scored = new List<RelevantFileScore>();
+        foreach (var entry in Index.GetAll())
+        {
+            var path = entry.RelativePath;
+            if (!LooksTextual(path)) continue;
+            var score = 0;
+            var reasons = new List<string>();
+            foreach (var term in terms)
+            {
+                if (path.IndexOf(term, StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    score += 8;
+                    AddReason(reasons, "path matches '" + term + "'");
+                }
+            }
+            if (diagnosticFiles.Contains(path))
+            {
+                score += 30;
+                AddReason(reasons, "has active diagnostics");
+            }
+            if (changedFiles.Contains(path))
+            {
+                score += 18;
+                AddReason(reasons, "changed this session");
+            }
+            if (symbolHits.TryGetValue(path, out var symbols))
+            {
+                score += Math.Min(24, symbols.Count * 6);
+                AddReason(reasons, "symbol match: " + string.Join(", ", symbols.Take(3)));
+            }
+
+            var sampleLines = new List<string>();
+            var full = Path.Combine(WorkspaceRoot, path.Replace('/', Path.DirectorySeparatorChar));
+            try
+            {
+                var lines = File.ReadLines(full).Take(400).ToList();
+                for (var i = 0; i < lines.Count; i++)
+                {
+                    var lineScore = 0;
+                    foreach (var term in terms)
+                    {
+                        if (lines[i].IndexOf(term, StringComparison.OrdinalIgnoreCase) >= 0) lineScore++;
+                    }
+                    if (lineScore <= 0) continue;
+                    score += lineScore;
+                    AddReason(reasons, "content mentions query terms");
+                    if (sampleLines.Count < 3)
+                        sampleLines.Add($"{i + 1}: {lines[i].Trim()}");
+                }
+            }
+            catch { }
+
+            if (score > 0) scored.Add(new RelevantFileScore(entry, score, reasons, sampleLines));
+        }
+
+        var top = scored
+            .OrderByDescending(x => x.Score)
+            .ThenBy(x => x.Entry.RelativePath, StringComparer.OrdinalIgnoreCase)
+            .Take(maxResults)
+            .ToList();
+        if (top.Count == 0) return "(no relevant files found)";
+
+        var sb = new StringBuilder();
+        sb.Append("# relevant files for: ").AppendLine(query.Trim());
+        foreach (var item in top)
+        {
+            sb.Append(item.Score.ToString().PadLeft(3)).Append("  ").AppendLine(item.Entry.RelativePath);
+            if (item.Reasons.Count > 0)
+                sb.Append("     why: ").AppendLine(string.Join("; ", item.Reasons.Take(4)));
+            foreach (var line in item.Lines) sb.Append("     ").AppendLine(line);
+        }
+        return sb.ToString();
+    }
+
+    [Description("Runs a build/test/validation command in the workspace and returns diagnostics. If command is empty, chooses a reasonable default such as dotnet build for .NET workspaces.")]
+    public async Task<string> ValidateWorkspace(
+        [Description("Optional validation command. Examples: 'dotnet build', 'dotnet test', 'npm test'. Empty = auto-detect.")] string? command = null,
+        CancellationToken ct = default)
+    {
+        var actual = string.IsNullOrWhiteSpace(command) ? DetectValidationCommand() : command!.Trim();
+        if (string.IsNullOrWhiteSpace(actual)) return "ERROR: could not detect a validation command. Provide one explicitly.";
+        var result = await RunShell(actual, ct).ConfigureAwait(false);
+        if (ValidationSucceeded(result))
+        {
+            LastSuccessfulValidationMutationVersion = MutationVersion;
+        }
+        return result;
     }
 
     [Description("Runs a short shell command via cmd.exe in the workspace root and returns combined stdout/stderr. 5-minute timeout.")]
@@ -491,6 +886,317 @@ internal sealed class WorkspaceTools
 
     private static bool IsIdentChar(char c) => char.IsLetterOrDigit(c) || c == '_';
 
+    private string FormatDiagnostics(string? path, int maxResults, bool includeHeader)
+    {
+        if (maxResults <= 0) maxResults = 50;
+        if (maxResults > 200) maxResults = 200;
+        var filter = string.IsNullOrWhiteSpace(path) ? null : path!.Replace('\\', '/').TrimStart('/');
+        List<DiagnosticSnapshotItem> snapshot;
+        lock (diagnosticsLock) snapshot = diagnostics.ToList();
+        if (filter is not null)
+        {
+            snapshot = snapshot
+                .Where(d => (d.File ?? string.Empty).Replace('\\', '/').TrimStart('/').Equals(filter, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+        }
+
+        if (snapshot.Count == 0)
+            return filter is null ? "(no Visual Studio diagnostics reported)" : $"(no Visual Studio diagnostics reported for {filter})";
+
+        var ordered = snapshot
+            .OrderBy(d => SeverityRank(d.Severity))
+            .ThenBy(d => d.File ?? string.Empty, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(d => d.Line ?? 0)
+            .ThenBy(d => d.Column ?? 0)
+            .Take(maxResults)
+            .ToList();
+
+        var sb = new StringBuilder();
+        if (includeHeader)
+        {
+            sb.Append("# Visual Studio diagnostics: ").Append(ordered.Count);
+            if (snapshot.Count > ordered.Count) sb.Append(" of ").Append(snapshot.Count);
+            sb.AppendLine();
+        }
+        foreach (var d in ordered)
+        {
+            var file = string.IsNullOrWhiteSpace(d.File) ? "(no file)" : d.File!.Replace('\\', '/');
+            var line = d.Line.GetValueOrDefault() > 0 ? d.Line.GetValueOrDefault().ToString() : "?";
+            var col = d.Column.GetValueOrDefault() > 0 ? d.Column.GetValueOrDefault().ToString() : "?";
+            var code = string.IsNullOrWhiteSpace(d.Code) ? string.Empty : " " + d.Code!.Trim();
+            sb.Append((d.Severity ?? "Message").Trim()).Append(code).Append("  ")
+              .Append(file).Append(':').Append(line).Append(':').Append(col).Append("  ")
+              .AppendLine((d.Message ?? string.Empty).Trim());
+        }
+        return sb.ToString();
+    }
+
+    private HashSet<string> GetDiagnosticFiles()
+    {
+        List<DiagnosticSnapshotItem> snapshot;
+        lock (diagnosticsLock) snapshot = diagnostics.ToList();
+        var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in snapshot)
+        {
+            var file = NormalizeTargetPath(item.File);
+            if (!string.IsNullOrWhiteSpace(file)) files.Add(file);
+        }
+        return files;
+    }
+
+    private Dictionary<string, List<string>> GetSymbolHitSummary(IEnumerable<string> terms)
+    {
+        var result = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        if (Symbols.Count == 0) Symbols.WaitForInitialScan(1500);
+        foreach (var term in terms)
+        {
+            if (term.Length < 3) continue;
+            foreach (var symbol in Symbols.Find(term, max: 40))
+            {
+                if (!result.TryGetValue(symbol.FilePath, out var list))
+                {
+                    list = new List<string>();
+                    result[symbol.FilePath] = list;
+                }
+                var label = symbol.Kind + " " + symbol.Name;
+                if (!list.Contains(label, StringComparer.OrdinalIgnoreCase)) list.Add(label);
+            }
+        }
+        return result;
+    }
+
+    private static void AddReason(List<string> reasons, string reason)
+    {
+        if (string.IsNullOrWhiteSpace(reason)) return;
+        if (!reasons.Contains(reason, StringComparer.OrdinalIgnoreCase)) reasons.Add(reason);
+    }
+
+    private static int SeverityRank(string? severity)
+    {
+        if (string.Equals(severity, "Error", StringComparison.OrdinalIgnoreCase)) return 0;
+        if (string.Equals(severity, "Warning", StringComparison.OrdinalIgnoreCase)) return 1;
+        return 2;
+    }
+
+    private void ExtractValidationTargets(string? validationResult, List<RepairTarget> targets)
+    {
+        if (string.IsNullOrWhiteSpace(validationResult)) return;
+        var patterns = new[]
+        {
+            @"(?<file>(?:[A-Za-z]:)?[^\r\n:]+?\.(?:cs|xaml|csproj|props|targets|json|xml|js|ts|css|md))\((?<line>\d+)(?:,(?<col>\d+))?\):\s*(?<severity>error|warning)\s*(?<code>[A-Z]+\d+)?\s*:\s*(?<message>.*)",
+            @"(?<file>(?:[A-Za-z]:)?[^\r\n:]+?\.(?:cs|xaml|csproj|props|targets|json|xml|js|ts|css|md)):(?<line>\d+):(?<col>\d+):\s*(?<severity>error|warning)\s*(?<code>[A-Z]+\d+)?\s*:?\s*(?<message>.*)"
+        };
+        foreach (var pattern in patterns)
+        {
+            foreach (Match match in Regex.Matches(validationResult, pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+            {
+                var file = NormalizeTargetPath(match.Groups["file"].Value);
+                if (string.IsNullOrWhiteSpace(file)) continue;
+                targets.Add(new RepairTarget(
+                    Source: "Validation",
+                    Severity: match.Groups["severity"].Value,
+                    File: file,
+                    Line: ParsePositiveInt(match.Groups["line"].Value),
+                    Column: ParsePositiveInt(match.Groups["col"].Value),
+                    Code: match.Groups["code"].Value,
+                    Message: StripProjectSuffix(match.Groups["message"].Value)));
+            }
+        }
+    }
+
+    private static int ParsePositiveInt(string value)
+    {
+        return int.TryParse(value, out var parsed) && parsed > 0 ? parsed : 0;
+    }
+
+    private string NormalizeTargetPath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return string.Empty;
+        var cleaned = path.Trim().Trim('"').Replace('\\', '/');
+        if (Path.IsPathRooted(cleaned) && !string.IsNullOrWhiteSpace(WorkspaceRoot))
+        {
+            try
+            {
+                var root = Path.GetFullPath(WorkspaceRoot);
+                var full = Path.GetFullPath(cleaned);
+                if (full.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+                    cleaned = Path.GetRelativePath(root, full).Replace('\\', '/');
+            }
+            catch { }
+        }
+        return cleaned.TrimStart('/');
+    }
+
+    private static string StripProjectSuffix(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+        var trimmed = value.Trim();
+        var projectStart = trimmed.LastIndexOf(" [", StringComparison.Ordinal);
+        return projectStart > 0 ? trimmed.Substring(0, projectStart).Trim() : trimmed;
+    }
+
+    public static bool ValidationSucceeded(string result)
+    {
+        if (string.IsNullOrWhiteSpace(result)) return false;
+        return result.StartsWith("exit 0", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static int CountOccurrences(string text, string needle)
+    {
+        var count = 0;
+        var index = 0;
+        while (true)
+        {
+            index = text.IndexOf(needle, index, StringComparison.Ordinal);
+            if (index < 0) return count;
+            count++;
+            index += needle.Length;
+        }
+    }
+
+    private static string ReplaceFirst(string text, string oldText, string newText)
+    {
+        var index = text.IndexOf(oldText, StringComparison.Ordinal);
+        if (index < 0) return text;
+        return text.Substring(0, index) + newText + text.Substring(index + oldText.Length);
+    }
+
+    private static int CountLogicalLines(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return 0;
+        var normalized = text.Replace("\r\n", "\n");
+        var count = normalized.Count(c => c == '\n') + 1;
+        if (normalized.EndsWith("\n", StringComparison.Ordinal)) count--;
+        return Math.Max(0, count);
+    }
+
+    private static string BuildChangeApprovalDescription(string action, string path, string oldText, string newText)
+    {
+        oldText ??= string.Empty;
+        newText ??= string.Empty;
+        var removed = CountLogicalLines(oldText);
+        var added = CountLogicalLines(newText);
+        var sb = new StringBuilder();
+        sb.AppendLine(action + ": " + path);
+        sb.Append("Changed lines: -").Append(removed).Append(" +").Append(added).AppendLine();
+        sb.AppendLine();
+        sb.Append(BuildUnifiedDiffPreview(path, oldText, newText, 160));
+        return sb.ToString();
+    }
+
+    private static string BuildUnifiedDiffPreview(string path, string oldText, string newText, int maxLines)
+    {
+        if (string.Equals(oldText, newText, StringComparison.Ordinal)) return "(no textual changes)";
+
+        var oldLines = SplitDiffLines(oldText);
+        var newLines = SplitDiffLines(newText);
+        var prefix = 0;
+        while (prefix < oldLines.Count && prefix < newLines.Count && string.Equals(oldLines[prefix], newLines[prefix], StringComparison.Ordinal)) prefix++;
+
+        var suffix = 0;
+        while (suffix < oldLines.Count - prefix
+               && suffix < newLines.Count - prefix
+               && string.Equals(oldLines[oldLines.Count - 1 - suffix], newLines[newLines.Count - 1 - suffix], StringComparison.Ordinal))
+        {
+            suffix++;
+        }
+
+        const int context = 3;
+        var oldStart = Math.Max(0, prefix - context);
+        var newStart = Math.Max(0, prefix - context);
+        var oldChangeEnd = oldLines.Count - suffix;
+        var newChangeEnd = newLines.Count - suffix;
+        var oldEnd = Math.Min(oldLines.Count, oldChangeEnd + context);
+        var newEnd = Math.Min(newLines.Count, newChangeEnd + context);
+
+        var sb = new StringBuilder();
+        sb.Append("--- ").AppendLine(path);
+        sb.Append("+++ ").AppendLine(path);
+        sb.Append("@@ -").Append(oldStart + 1).Append(',').Append(Math.Max(0, oldEnd - oldStart))
+          .Append(" +").Append(newStart + 1).Append(',').Append(Math.Max(0, newEnd - newStart)).AppendLine(" @@");
+
+        var emitted = 0;
+        void AddLine(char prefixChar, string line)
+        {
+            if (emitted >= maxLines) return;
+            sb.Append(prefixChar).AppendLine(line);
+            emitted++;
+        }
+
+        for (var i = oldStart; i < prefix && i < oldEnd; i++) AddLine(' ', oldLines[i]);
+        for (var i = prefix; i < oldChangeEnd && i < oldEnd; i++) AddLine('-', oldLines[i]);
+        for (var i = prefix; i < newChangeEnd && i < newEnd; i++) AddLine('+', newLines[i]);
+        for (var i = oldChangeEnd; i < oldEnd; i++) AddLine(' ', oldLines[i]);
+
+        var totalPreviewLines = (prefix - oldStart) + (oldChangeEnd - prefix) + (newChangeEnd - prefix) + (oldEnd - oldChangeEnd);
+        if (totalPreviewLines > maxLines) sb.AppendLine("... (diff preview truncated)");
+        return sb.ToString();
+    }
+
+    private static List<string> SplitDiffLines(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return new List<string>();
+        var normalized = text.Replace("\r\n", "\n").Replace('\r', '\n');
+        var parts = normalized.Split('\n').ToList();
+        if (parts.Count > 0 && parts[^1].Length == 0) parts.RemoveAt(parts.Count - 1);
+        return parts;
+    }
+
+    private static IEnumerable<string> ExtractTerms(string query)
+    {
+        var terms = new List<string>();
+        var current = new StringBuilder();
+        foreach (var ch in query.ToLowerInvariant())
+        {
+            if (char.IsLetterOrDigit(ch) || ch == '_') current.Append(ch);
+            else FlushTerm(current, terms);
+        }
+        FlushTerm(current, terms);
+        return terms.Distinct(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static void FlushTerm(StringBuilder current, List<string> terms)
+    {
+        if (current.Length < 3) { current.Clear(); return; }
+        var term = current.ToString();
+        current.Clear();
+        if (term is "the" or "and" or "for" or "with" or "that" or "this" or "from" or "into" or "have" or "will") return;
+        terms.Add(term);
+    }
+
+    private static bool LooksTextual(string path)
+    {
+        var ext = Path.GetExtension(path);
+        if (string.IsNullOrEmpty(ext)) return true;
+        return ext.Equals(".cs", StringComparison.OrdinalIgnoreCase)
+            || ext.Equals(".csproj", StringComparison.OrdinalIgnoreCase)
+            || ext.Equals(".sln", StringComparison.OrdinalIgnoreCase)
+            || ext.Equals(".xaml", StringComparison.OrdinalIgnoreCase)
+            || ext.Equals(".json", StringComparison.OrdinalIgnoreCase)
+            || ext.Equals(".xml", StringComparison.OrdinalIgnoreCase)
+            || ext.Equals(".md", StringComparison.OrdinalIgnoreCase)
+            || ext.Equals(".js", StringComparison.OrdinalIgnoreCase)
+            || ext.Equals(".ts", StringComparison.OrdinalIgnoreCase)
+            || ext.Equals(".css", StringComparison.OrdinalIgnoreCase)
+            || ext.Equals(".ps1", StringComparison.OrdinalIgnoreCase)
+            || ext.Equals(".yml", StringComparison.OrdinalIgnoreCase)
+            || ext.Equals(".yaml", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private string DetectValidationCommand()
+    {
+        if (string.IsNullOrWhiteSpace(WorkspaceRoot) || !Directory.Exists(WorkspaceRoot)) return string.Empty;
+        var sln = Directory.EnumerateFiles(WorkspaceRoot, "*.sln", SearchOption.TopDirectoryOnly).FirstOrDefault();
+        if (!string.IsNullOrEmpty(sln)) return "dotnet build \"" + Path.GetFileName(sln) + "\"";
+        var csproj = Directory.EnumerateFiles(WorkspaceRoot, "*.csproj", SearchOption.AllDirectories)
+            .Where(p => !p.Split(Path.DirectorySeparatorChar).Any(part => part.Equals("bin", StringComparison.OrdinalIgnoreCase) || part.Equals("obj", StringComparison.OrdinalIgnoreCase)))
+            .OrderBy(p => p.Length)
+            .FirstOrDefault();
+        if (!string.IsNullOrEmpty(csproj)) return "dotnet build \"" + Path.GetRelativePath(WorkspaceRoot, csproj) + "\"";
+        if (File.Exists(Path.Combine(WorkspaceRoot, "package.json"))) return "npm test";
+        return string.Empty;
+    }
+
     private string ResolveInsideWorkspace(string? rel)
     {
         rel ??= string.Empty;
@@ -504,3 +1210,32 @@ internal sealed class WorkspaceTools
         return combined;
     }
 }
+
+internal sealed class PatchHunk
+{
+    [Description("Exact current text to replace. Include enough surrounding context to make this hunk unique.")]
+    public string? OldText { get; set; }
+
+    [Description("Replacement text for this hunk.")]
+    public string? NewText { get; set; }
+}
+
+internal sealed record RepairTarget(
+    string Source,
+    string Severity,
+    string File,
+    int Line,
+    int Column,
+    string Code,
+    string Message)
+{
+    public string Key => string.Join("\u001f", File, Line.ToString(), Column.ToString(), Code ?? string.Empty, Message ?? string.Empty);
+}
+
+internal sealed record RepoInstructionInfo(string Source, string Text, bool Truncated, IReadOnlyList<string> Candidates);
+
+internal sealed record RelevantFileScore(
+    WorkspaceIndex.FileEntry Entry,
+    int Score,
+    IReadOnlyList<string> Reasons,
+    IReadOnlyList<string> Lines);

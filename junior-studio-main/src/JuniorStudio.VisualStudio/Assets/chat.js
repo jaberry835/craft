@@ -15,6 +15,9 @@ window.onerror = function(msg, src, line, col, err) {
     const messagesEl = document.getElementById('messages');
     const inputEl = document.getElementById('input');
     const statusEl = document.getElementById('status-bar');
+    const authBannerEl = document.getElementById('auth-banner');
+    const authCopyEl = document.getElementById('auth-copy');
+    const authActionEl = document.getElementById('auth-action');
     const planPanelEl = document.getElementById('plan-panel');
     const modelSelectEl = document.getElementById('model-select');
     const modelControlEl = document.getElementById('model-control');
@@ -162,6 +165,7 @@ window.onerror = function(msg, src, line, col, err) {
     }
     renderTokenMeter();
     let currentNarrationText = '';
+    let welcomeRainStop = null;
     // Reasoning panel ("Thinking..." details block) is opened when the
     // responses-API client streams reasoning/reasoningSummary chunks; closes
     // when the visible answer starts streaming or the iteration ends.
@@ -188,6 +192,7 @@ window.onerror = function(msg, src, line, col, err) {
     const workingBlocksById = new Map();
     const workingEntriesById = new Map();
     let activeWorkingBlockId = null;
+    let authState = 'unknown';
 
     const MODE_META = {
         agent: {
@@ -409,6 +414,52 @@ window.onerror = function(msg, src, line, col, err) {
     // MCP Tools button
     if (btnTools) {
         btnTools.addEventListener('click', () => vscode.postMessage({ type: 'manageMcpServers' }));
+    }
+
+    if (authActionEl) {
+        authActionEl.addEventListener('click', function () {
+            if (authState === 'signingIn') { return; }
+            setAuthBanner({ state: 'signingIn', message: 'Signing in with Microsoft Entra ID. A browser window may open; return here after authentication completes.' });
+            vscode.postMessage({ type: 'warmAuth' });
+        });
+    }
+
+    function setAuthBanner(msg) {
+        if (!authBannerEl || !authCopyEl || !authActionEl) { return; }
+        var state = msg && msg.state ? String(msg.state) : 'unknown';
+        authState = state;
+        authBannerEl.className = 'auth-banner ' + state;
+        if (state === 'notRequired') {
+            authBannerEl.classList.remove('visible');
+            authCopyEl.textContent = '';
+            return;
+        }
+
+        authBannerEl.classList.add('visible');
+        if (state === 'needsSignIn') {
+            authCopyEl.textContent = msg.message || 'Junior will sign in with Microsoft Entra ID before the first request.';
+            authActionEl.textContent = 'Sign in';
+            authActionEl.disabled = false;
+            authActionEl.style.display = '';
+        } else if (state === 'signingIn') {
+            authCopyEl.textContent = msg.message || 'Signing in with Microsoft Entra ID...';
+            authActionEl.textContent = 'Signing in';
+            authActionEl.disabled = true;
+            authActionEl.style.display = '';
+        } else if (state === 'signedIn' || state === 'ready') {
+            authCopyEl.textContent = msg.message || 'Junior is ready to use Microsoft Entra ID.';
+            authActionEl.textContent = 'Signed in';
+            authActionEl.disabled = true;
+            authActionEl.style.display = '';
+        } else if (state === 'error') {
+            authCopyEl.textContent = msg.message || 'Microsoft Entra ID sign-in failed.';
+            authActionEl.textContent = 'Retry';
+            authActionEl.disabled = false;
+            authActionEl.style.display = '';
+        } else {
+            authCopyEl.textContent = msg.message || '';
+            authActionEl.style.display = 'none';
+        }
     }
 
     function setAgentRunning(running) {
@@ -783,6 +834,7 @@ window.onerror = function(msg, src, line, col, err) {
     }
 
     function removeWelcomeScreen() {
+        if (welcomeRainStop) { welcomeRainStop(); welcomeRainStop = null; }
         var existing = document.getElementById('welcome-screen');
         if (existing && existing.parentNode) { existing.parentNode.removeChild(existing); }
     }
@@ -794,27 +846,53 @@ window.onerror = function(msg, src, line, col, err) {
         screen.id = 'welcome-screen';
         screen.className = 'welcome-screen';
 
+        var matrixCanvas = document.createElement('canvas');
+        matrixCanvas.className = 'welcome-matrix-canvas';
+        screen.appendChild(matrixCanvas);
+
+        var card = document.createElement('div');
+        card.className = 'welcome-card';
+        screen.appendChild(card);
+
         var logo = document.createElement('img');
         logo.className = 'welcome-logo';
         logo.src = 'https://junior.local/icon.svg';
         logo.alt = '';
-        screen.appendChild(logo);
+        card.appendChild(logo);
 
         var title = document.createElement('div');
         title.className = 'welcome-title';
-        title.textContent = msg.title || 'Welcome to Junior Studio';
-        screen.appendChild(title);
+        title.textContent = msg.title || 'Welcome to Junior';
+        card.appendChild(title);
 
         var subtitle = document.createElement('div');
         subtitle.className = 'welcome-subtitle';
         subtitle.textContent = msg.subtitle || "I'm your air-gapped AI coding assistant, powered by Microsoft Agent Framework.";
-        screen.appendChild(subtitle);
+        card.appendChild(subtitle);
 
         if (msg.workspacePath) {
             var ws = document.createElement('div');
             ws.className = 'welcome-workspace';
             ws.innerHTML = 'Workspace: <code>' + escapeHtml(msg.workspacePath) + '</code>';
-            screen.appendChild(ws);
+            card.appendChild(ws);
+        }
+
+        var setupActions = (msg.setupActions && msg.setupActions.length > 0) ? msg.setupActions : null;
+        if (setupActions) {
+            var actions = document.createElement('div');
+            actions.className = 'welcome-actions';
+            setupActions.forEach(function (a) {
+                var actionBtn = document.createElement('button');
+                actionBtn.type = 'button';
+                actionBtn.className = 'welcome-action';
+                var actionIcon = a.icon || 'gear';
+                actionBtn.innerHTML = '<i class="codicon codicon-' + escapeHtml(actionIcon) + '"></i><span>' + escapeHtml(a.text || '') + '</span>';
+                actionBtn.addEventListener('click', function () {
+                    if (a.action) { vscode.postMessage({ type: a.action }); }
+                });
+                actions.appendChild(actionBtn);
+            });
+            card.appendChild(actions);
         }
 
         var prompts = (msg.prompts && msg.prompts.length > 0) ? msg.prompts : null;
@@ -822,7 +900,7 @@ window.onerror = function(msg, src, line, col, err) {
             var label = document.createElement('div');
             label.className = 'welcome-section-label';
             label.textContent = msg.promptsLabel || 'Try one of these';
-            screen.appendChild(label);
+            card.appendChild(label);
 
             var list = document.createElement('div');
             list.className = 'welcome-prompts';
@@ -845,14 +923,14 @@ window.onerror = function(msg, src, line, col, err) {
                 });
                 list.appendChild(btn);
             });
-            screen.appendChild(list);
+            card.appendChild(list);
         }
 
         if (msg.hint) {
             var hint = document.createElement('div');
             hint.className = 'welcome-hint';
             hint.textContent = msg.hint;
-            screen.appendChild(hint);
+            card.appendChild(hint);
         }
 
         if (workingIndicator && workingIndicator.parentNode === messagesEl) {
@@ -860,6 +938,56 @@ window.onerror = function(msg, src, line, col, err) {
         } else {
             messagesEl.appendChild(screen);
         }
+        welcomeRainStop = startMatrixRain(matrixCanvas, screen);
+    }
+
+    function startMatrixRain(canvas, host) {
+        var ctx = canvas.getContext('2d');
+        if (!ctx) { return function () {}; }
+        var rainAnim = null;
+        var columns = [];
+        var msColors = ['#F25022', '#7FBA00', '#00A4EF', '#FFB900'];
+        var chars = '{}[]()<>=/;:.,!@#$%^&*0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef';
+        var fontSize = 14;
+
+        function resizeCanvas() {
+            canvas.width = host.clientWidth;
+            canvas.height = host.clientHeight;
+            var colCount = Math.max(1, Math.floor(canvas.width / fontSize));
+            columns = [];
+            for (var i = 0; i < colCount; i++) {
+                columns[i] = Math.random() * canvas.height / fontSize;
+            }
+        }
+
+        function drawRain() {
+            ctx.fillStyle = 'rgba(0, 10, 25, 0.06)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.font = fontSize + 'px monospace';
+
+            for (var i = 0; i < columns.length; i++) {
+                var ch = chars[Math.floor(Math.random() * chars.length)];
+                var color = msColors[Math.floor(Math.random() * msColors.length)];
+                ctx.fillStyle = color;
+                var x = i * fontSize;
+                var y = columns[i] * fontSize;
+                ctx.fillText(ch, x, y);
+
+                if (y > canvas.height && Math.random() > 0.975) {
+                    columns[i] = 0;
+                }
+                columns[i]++;
+            }
+            rainAnim = requestAnimationFrame(drawRain);
+        }
+
+        resizeCanvas();
+        window.addEventListener('resize', resizeCanvas);
+        rainAnim = requestAnimationFrame(drawRain);
+        return function () {
+            if (rainAnim) { cancelAnimationFrame(rainAnim); rainAnim = null; }
+            window.removeEventListener('resize', resizeCanvas);
+        };
     }
 
     function renderUserMessageItem(item) {
@@ -980,7 +1108,7 @@ window.onerror = function(msg, src, line, col, err) {
         if (!item || !item.text) { return; }
         closeLiveReasoning();
         var panel = createReasoningPanel(false);
-        panel.bodyEl.textContent = item.text;
+        panel.bodyEl.innerHTML = renderMarkdownLite(item.text);
         messagesEl.appendChild(panel.root);
     }
 
@@ -1015,7 +1143,7 @@ window.onerror = function(msg, src, line, col, err) {
             startLiveReasoning();
         }
         currentReasoningText += text;
-        currentReasoningBodyEl.textContent = currentReasoningText;
+        currentReasoningBodyEl.innerHTML = renderMarkdownLite(currentReasoningText);
     }
 
     function closeLiveReasoning() {
@@ -1089,6 +1217,15 @@ window.onerror = function(msg, src, line, col, err) {
                     break;
                 case 'working-block':
                     restoreWorkingBlockItem(item.block);
+                    break;
+                case 'turn-summary':
+                    renderTurnSummary(item);
+                    break;
+                case 'repo-instructions':
+                    renderRepoInstructionsNotice(item);
+                    break;
+                case 'repair-chain-summary':
+                    renderRepairChainSummary(item);
                     break;
                 case 'error':
                     renderErrorItem(item);
@@ -1774,6 +1911,17 @@ window.onerror = function(msg, src, line, col, err) {
         scrollToBottom();
     }
 
+    function showLocalInfo(text) {
+        const el = document.createElement('div');
+        el.className = 'msg assistant';
+        const content = document.createElement('div');
+        content.className = 'content';
+        content.textContent = text;
+        el.appendChild(content);
+        messagesEl.appendChild(el);
+        scrollToBottom();
+    }
+
     /** Render an inline approval prompt with Allow / Deny buttons. */
     function renderApprovalPrompt(id, category, description) {
         if (!id) { return; }
@@ -1794,7 +1942,7 @@ window.onerror = function(msg, src, line, col, err) {
         header.textContent = label;
         var body = document.createElement('div');
         body.className = 'approval-body';
-        body.textContent = safeDesc;
+        renderApprovalDescription(body, safeDesc);
         var actions = document.createElement('div');
         actions.className = 'approval-actions';
         var allowBtn = document.createElement('button');
@@ -1834,6 +1982,228 @@ window.onerror = function(msg, src, line, col, err) {
         wrap.appendChild(actions);
         messagesEl.appendChild(wrap);
         scrollToBottom();
+    }
+
+    function renderApprovalDescription(container, description) {
+        var text = (description || '').toString().replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        var lines = text.split('\n');
+        var diffStart = -1;
+        for (var i = 0; i < lines.length - 1; i++) {
+            if (lines[i].indexOf('--- ') === 0 && lines[i + 1].indexOf('+++ ') === 0) {
+                diffStart = i;
+                break;
+            }
+        }
+        if (diffStart < 0) {
+            container.textContent = description || '';
+            return;
+        }
+
+        var metaLines = lines.slice(0, diffStart).filter(function (line) { return line.trim().length > 0; });
+        if (metaLines.length > 0) {
+            var meta = document.createElement('div');
+            meta.className = 'approval-meta';
+            metaLines.forEach(function (line) {
+                var row = document.createElement('div');
+                row.textContent = line;
+                meta.appendChild(row);
+            });
+            container.appendChild(meta);
+        }
+
+        var diff = document.createElement('div');
+        diff.className = 'approval-diff';
+        lines.slice(diffStart).forEach(function (line) {
+            if (!line && diff.childNodes.length === 0) { return; }
+            var row = document.createElement('span');
+            row.className = 'approval-diff-line ' + approvalDiffLineClass(line);
+            row.textContent = line.length ? line : ' ';
+            diff.appendChild(row);
+        });
+        container.appendChild(diff);
+    }
+
+    function approvalDiffLineClass(line) {
+        if (line.indexOf('--- ') === 0 || line.indexOf('+++ ') === 0) return 'approval-diff-file';
+        if (line.indexOf('@@') === 0) return 'approval-diff-hunk';
+        if (line.indexOf('+') === 0) return 'approval-diff-add';
+        if (line.indexOf('-') === 0) return 'approval-diff-del';
+        if (line.indexOf('...') === 0) return 'approval-diff-truncated';
+        return 'approval-diff-context';
+    }
+
+    function renderTurnSummary(summary) {
+        summary = summary || {};
+        var wrap = document.createElement('details');
+        wrap.className = 'turn-summary';
+        var title = document.createElement('summary');
+        title.className = 'turn-summary-title';
+        title.textContent = buildTurnSummaryHeadline(summary);
+        var grid = document.createElement('div');
+        grid.className = 'turn-summary-grid';
+
+        function addRow(label, valueNodeOrText) {
+            var labelEl = document.createElement('div');
+            labelEl.className = 'turn-summary-label';
+            labelEl.textContent = label;
+            var valueEl = document.createElement('div');
+            valueEl.className = 'turn-summary-value';
+            if (valueNodeOrText && valueNodeOrText.nodeType) valueEl.appendChild(valueNodeOrText);
+            else valueEl.textContent = valueNodeOrText || 'None';
+            grid.appendChild(labelEl);
+            grid.appendChild(valueEl);
+        }
+
+        var files = Array.isArray(summary.changedFiles) ? summary.changedFiles : [];
+        if (files.length > 0) {
+            var fileWrap = document.createElement('div');
+            fileWrap.className = 'turn-summary-files';
+            files.forEach(function (filePath) {
+                var pill = document.createElement('button');
+                pill.className = 'turn-summary-file';
+                pill.textContent = filePath;
+                pill.title = filePath;
+                pill.addEventListener('click', function () { vscode.postMessage({ type: 'openFile', filePath: filePath }); });
+                fileWrap.appendChild(pill);
+            });
+            addRow('Changed', fileWrap);
+        } else {
+            addRow('Changed', 'No file changes');
+        }
+
+        var tools = Array.isArray(summary.tools) ? summary.tools : [];
+        addRow('Tools', tools.length ? tools.join(', ') : 'None');
+        var context = summary.context || {};
+        var contextBits = [];
+        if (context.workspaceOverview) contextBits.push('workspace overview');
+        if (typeof context.indexedFiles === 'number') contextBits.push(context.indexedFiles + ' indexed files');
+        if (context.diagnostics) contextBits.push('diagnostics');
+        if (context.relevantFiles) contextBits.push('relevant file hints');
+        if (context.repoInstructions) contextBits.push('instructions: ' + context.repoInstructions + (context.repoInstructionsTruncated ? ' (truncated)' : ''));
+        if (typeof context.historyTurns === 'number') contextBits.push(context.historyTurns + ' history turns');
+        if (context.historyTrimmed) contextBits.push('trimmed ' + (context.trimmedHistoryTurns || 0));
+        addRow('Context', contextBits.length ? contextBits.join(', ') : 'None');
+        var validation = summary.validation || {};
+        var validationText = validation.status || 'skipped';
+        if (validation.command) validationText += ' - ' + validation.command;
+        addRow('Validation', validationText);
+        var counts = (summary.toolCallCount || 0) + ' call(s)';
+        if (summary.failedToolCount) counts += ', ' + summary.failedToolCount + ' failed';
+        if (summary.autoRepair) counts += ', auto-repair turn';
+        addRow('Activity', counts);
+
+        wrap.appendChild(title);
+        wrap.appendChild(grid);
+        messagesEl.appendChild(wrap);
+        scrollToBottom();
+    }
+
+    function buildTurnSummaryHeadline(summary) {
+        var files = Array.isArray(summary.changedFiles) ? summary.changedFiles.length : 0;
+        var validation = summary.validation || {};
+        var status = validation.status || 'skipped';
+        var tools = Array.isArray(summary.tools) ? summary.tools.length : 0;
+        var parts = ['Turn summary'];
+        parts.push(files === 1 ? '1 file changed' : files + ' files changed');
+        parts.push('validation ' + status);
+        if (tools > 0) parts.push(tools === 1 ? '1 tool' : tools + ' tools');
+        return parts.join(' · ');
+    }
+
+    function renderRepoInstructionsNotice(info) {
+        info = info || {};
+        if (!info.source) { return; }
+        var wrap = document.createElement('div');
+        wrap.className = 'repo-instructions-card';
+        var title = document.createElement('div');
+        title.className = 'repo-instructions-title';
+        title.textContent = 'Repo instructions active';
+        var body = document.createElement('div');
+        body.className = 'repo-instructions-body';
+        var active = document.createElement('div');
+        active.appendChild(document.createTextNode('Using '));
+        var code = document.createElement('code');
+        code.textContent = info.source;
+        active.appendChild(code);
+        if (info.truncated) active.appendChild(document.createTextNode(' (truncated for context)'));
+        body.appendChild(active);
+        var candidates = Array.isArray(info.candidates) ? info.candidates : [];
+        if (candidates.length > 1) {
+            var precedence = document.createElement('div');
+            precedence.appendChild(document.createTextNode('Detected by precedence: '));
+            candidates.forEach(function (candidate, index) {
+                if (index > 0) precedence.appendChild(document.createTextNode(', '));
+                var candidateCode = document.createElement('code');
+                candidateCode.textContent = candidate;
+                precedence.appendChild(candidateCode);
+            });
+            body.appendChild(precedence);
+        }
+        wrap.appendChild(title);
+        wrap.appendChild(body);
+        messagesEl.appendChild(wrap);
+        scrollToBottom();
+    }
+
+    function renderRepairChainSummary(summary) {
+        summary = summary || {};
+        var wrap = document.createElement('details');
+        wrap.className = 'turn-summary repair-chain-summary';
+        var title = document.createElement('summary');
+        title.className = 'turn-summary-title';
+        title.textContent = buildRepairChainHeadline(summary);
+        var grid = document.createElement('div');
+        grid.className = 'turn-summary-grid';
+
+        function addRow(label, valueNodeOrText) {
+            var labelEl = document.createElement('div');
+            labelEl.className = 'turn-summary-label';
+            labelEl.textContent = label;
+            var valueEl = document.createElement('div');
+            valueEl.className = 'turn-summary-value';
+            if (valueNodeOrText && valueNodeOrText.nodeType) valueEl.appendChild(valueNodeOrText);
+            else valueEl.textContent = valueNodeOrText || 'None';
+            grid.appendChild(labelEl);
+            grid.appendChild(valueEl);
+        }
+
+        var files = Array.isArray(summary.changedFiles) ? summary.changedFiles : [];
+        if (files.length > 0) {
+            var fileWrap = document.createElement('div');
+            fileWrap.className = 'turn-summary-files';
+            files.forEach(function (filePath) {
+                var pill = document.createElement('button');
+                pill.className = 'turn-summary-file';
+                pill.textContent = filePath;
+                pill.title = filePath;
+                pill.addEventListener('click', function () { vscode.postMessage({ type: 'openFile', filePath: filePath }); });
+                fileWrap.appendChild(pill);
+            });
+            addRow('Changed', fileWrap);
+        } else {
+            addRow('Changed', 'No file changes');
+        }
+        addRow('Attempts', (summary.repairAttempts || 0) + ' automatic repair attempt(s), ' + (summary.turnCount || 0) + ' turn(s)');
+        var validationText = summary.finalValidationStatus || 'unknown';
+        if (summary.validationCommand) validationText += ' - ' + summary.validationCommand;
+        addRow('Validation', validationText);
+        addRow('Stopped', summary.stopReason || 'completed');
+
+        wrap.appendChild(title);
+        wrap.appendChild(grid);
+        messagesEl.appendChild(wrap);
+        scrollToBottom();
+    }
+
+    function buildRepairChainHeadline(summary) {
+        var files = Array.isArray(summary.changedFiles) ? summary.changedFiles.length : 0;
+        var turns = summary.turnCount || 0;
+        var status = summary.finalValidationStatus || 'unknown';
+        var parts = ['Repair chain summary'];
+        parts.push(files === 1 ? '1 file changed' : files + ' files changed');
+        parts.push(turns === 1 ? '1 turn' : turns + ' turns');
+        parts.push('validation ' + status);
+        return parts.join(' · ');
     }
 
     function renderPlan(steps) {
@@ -2309,6 +2679,107 @@ window.onerror = function(msg, src, line, col, err) {
         });
     });
 
+    function renderMcpToolsPanel(msg) {
+        removeWelcomeScreen();
+        closeLiveNarration();
+        closeLiveReasoning();
+
+        var existing = document.getElementById('mcp-tools-panel');
+        if (existing && existing.parentNode) {
+            existing.parentNode.removeChild(existing);
+        }
+
+        const wrapper = document.createElement('div');
+        wrapper.className = 'msg assistant';
+        wrapper.id = 'mcp-tools-panel';
+
+        const panel = document.createElement('div');
+        panel.className = 'mcp-panel';
+        wrapper.appendChild(panel);
+
+        const tools = Array.isArray(msg.tools) ? msg.tools : [];
+        const isLoading = msg.loading === true;
+        const checkedCount = tools.filter(t => t && t.enabled !== false).length;
+        panel.innerHTML =
+            '<div class="mcp-panel-title">' +
+                '<span>MCP Tools</span>' +
+                '<span class="mcp-panel-meta">' + (isLoading ? 'Loading...' : escapeHtml(String(checkedCount)) + ' / ' + escapeHtml(String(tools.length)) + ' enabled') + '</span>' +
+            '</div>';
+
+        if (isLoading) {
+            const loading = document.createElement('div');
+            loading.className = 'mcp-panel-loading';
+            loading.innerHTML = '<span class="mcp-panel-spinner"></span><span>Loading MCP tools...</span>';
+            panel.appendChild(loading);
+        } else if (msg.enabled === false || msg.configured === false) {
+            const empty = document.createElement('div');
+            empty.className = 'mcp-panel-empty';
+            empty.textContent = 'MCP is not configured yet. Open Tools > Options > Junior > MCP, enable MCP servers, and paste a server JSON object.';
+            panel.appendChild(empty);
+        } else if (tools.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'mcp-panel-empty';
+            empty.textContent = 'No MCP tools were discovered. Check the MCP server JSON and sidecar log, then reopen this picker.';
+            panel.appendChild(empty);
+        } else {
+            const list = document.createElement('div');
+            list.className = 'mcp-tool-list';
+            tools.forEach(tool => {
+                const row = document.createElement('label');
+                row.className = 'mcp-tool-row';
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.checked = tool.enabled !== false;
+                checkbox.dataset.functionName = tool.functionName || '';
+                const body = document.createElement('div');
+                const description = summarizeMcpToolDescription(tool.description || '');
+                body.innerHTML =
+                    '<div class="mcp-tool-name">' + escapeHtml(tool.name || tool.functionName || 'tool') + '</div>' +
+                    (description ? '<div class="mcp-tool-description">' + escapeHtml(description) + '</div>' : '');
+                row.appendChild(checkbox);
+                row.appendChild(body);
+                list.appendChild(row);
+            });
+            panel.appendChild(list);
+        }
+
+        panel.addEventListener('change', (event) => {
+            const input = event.target;
+            if (!input || input.type !== 'checkbox') { return; }
+            vscode.postMessage({ type: 'setMcpToolEnabled', functionName: input.dataset.functionName, enabled: input.checked });
+        });
+
+        messagesEl.appendChild(wrapper);
+        scrollToBottom();
+    }
+
+    function summarizeMcpToolDescription(description) {
+        if (!description) { return ''; }
+        let text = String(description).replace(/\r\n/g, '\n').trim();
+        if (!text) { return ''; }
+
+        const sectionIndex = text.search(/^\s*(Args?|Arguments?|Parameters?|Returns?|Environment Variables?|Examples?)\s*:/im);
+        if (sectionIndex > 0) {
+            text = text.slice(0, sectionIndex).trim();
+        }
+
+        const paragraphs = text.split(/\n\s*\n/).map(p => p.trim()).filter(Boolean);
+        if (paragraphs.length > 0) {
+            text = paragraphs[0];
+        }
+
+        text = text.replace(/\s+/g, ' ').trim();
+        const sentenceMatch = text.match(/^(.+?[.!?])\s+/);
+        if (sentenceMatch && sentenceMatch[1].length >= 24) {
+            text = sentenceMatch[1];
+        }
+
+        if (text.length > 180) {
+            text = text.slice(0, 177).trimEnd() + '...';
+        }
+        return text;
+    }
+
     window.addEventListener('message', (event) => {
         const msg = event.data;
         switch (msg.type) {
@@ -2326,6 +2797,14 @@ window.onerror = function(msg, src, line, col, err) {
                 removeWelcomeScreen();
                 restoreTranscript(msg.transcript);
                 scrollToBottom();
+                break;
+            }
+            case 'mcpToolsLoading': {
+                renderMcpToolsPanel({ enabled: true, configured: true, loading: true, tools: [] });
+                break;
+            }
+            case 'mcpTools': {
+                renderMcpToolsPanel(msg);
                 break;
             }
             case 'startAssistantMessage': {
@@ -2500,9 +2979,11 @@ window.onerror = function(msg, src, line, col, err) {
             case 'continueIteration': {
                 const dialog = document.createElement('div');
                 dialog.className = 'continue-iteration-dialog';
+                const title = msg.title || 'Continue to iterate?';
+                const subtitle = msg.message || ('Junior has been working on this problem for a while (' + msg.iterationCount + ' iterations). It can continue to iterate, or you can send a new message to refine your prompt.');
                 dialog.innerHTML =
-                    '<p>Continue to iterate?</p>' +
-                    '<div class="continue-subtitle">Junior has been working on this problem for a while (' + msg.iterationCount + ' iterations). It can continue to iterate, or you can send a new message to refine your prompt.</div>' +
+                    '<p>' + escapeHtml(title) + '</p>' +
+                    '<div class="continue-subtitle">' + escapeHtml(subtitle) + '</div>' +
                     '<div class="continue-actions">' +
                         '<button class="btn-continue">Continue</button>' +
                         '<button class="btn-pause">Pause</button>' +
@@ -2737,6 +3218,14 @@ window.onerror = function(msg, src, line, col, err) {
                 setPermissionLevel(msg.level || 'default');
                 break;
             }
+            case 'authState': {
+                setAuthBanner(msg);
+                break;
+            }
+            case 'secureSecretState': {
+                showLocalInfo(msg.message || 'Secret stored securely.');
+                break;
+            }
             case 'setChatMode': {
                 setChatMode(msg.mode || 'agent');
                 break;
@@ -2831,6 +3320,9 @@ window.onerror = function(msg, src, line, col, err) {
             }
             case 'setStatus': {
                 if (msg.status) {
+                    if (/signing in|microsoft entra id|browser window may open/i.test(msg.status)) {
+                        setAuthBanner({ state: 'signingIn', message: msg.status });
+                    }
                     var liveBlock = getActiveWorkingBlock();
                     // Only show status bar for important/unusual messages
                     // Routine statuses (Thinking, Reading, etc.) are handled by working blocks
@@ -2975,6 +3467,18 @@ window.onerror = function(msg, src, line, col, err) {
                 scrollToBottom();
                 break;
             }
+            case 'turnSummary': {
+                renderTurnSummary(msg);
+                break;
+            }
+            case 'repoInstructions': {
+                renderRepoInstructionsNotice(msg);
+                break;
+            }
+            case 'repairChainSummary': {
+                renderRepairChainSummary(msg);
+                break;
+            }
             case 'narrationText': {
                 appendNarrationText(msg.text || '');
                 pinWorkingIndicatorToBottom();
@@ -3070,6 +3574,7 @@ window.onerror = function(msg, src, line, col, err) {
             '</div>';
         overlay.appendChild(card);
         document.body.appendChild(overlay);
+        var stopRain = startMatrixRain(canvas, overlay);
 
         // Wire buttons
         document.getElementById('splash-settings').addEventListener('click', function () {
@@ -3088,54 +3593,11 @@ window.onerror = function(msg, src, line, col, err) {
                 type: 'splashDismissed',
                 showOnStartup: chk ? chk.checked : false
             });
-            if (rainAnim) { cancelAnimationFrame(rainAnim); rainAnim = null; }
+            if (stopRain) { stopRain(); stopRain = null; }
             overlay.style.opacity = '0';
             overlay.style.transition = 'opacity 0.4s';
             setTimeout(function () { overlay.remove(); }, 400);
         }
-
-        // ── Matrix Rain Animation ──
-        var ctx = canvas.getContext('2d');
-        var rainAnim = null;
-        var columns = [];
-        var msColors = ['#F25022', '#7FBA00', '#00A4EF', '#FFB900'];
-        var chars = '{}[]()<>=/;:.,!@#$%^&*0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef';
-        var fontSize = 14;
-
-        function resizeCanvas() {
-            canvas.width = overlay.clientWidth;
-            canvas.height = overlay.clientHeight;
-            var colCount = Math.floor(canvas.width / fontSize);
-            columns = [];
-            for (var i = 0; i < colCount; i++) {
-                columns[i] = Math.random() * canvas.height / fontSize;
-            }
-        }
-        resizeCanvas();
-        window.addEventListener('resize', resizeCanvas);
-
-        function drawRain() {
-            // Semi-transparent dark overlay for trail effect — blue-tinted
-            ctx.fillStyle = 'rgba(0, 10, 25, 0.06)';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
-            ctx.font = fontSize + 'px monospace';
-
-            for (var i = 0; i < columns.length; i++) {
-                var ch = chars[Math.floor(Math.random() * chars.length)];
-                var color = msColors[Math.floor(Math.random() * msColors.length)];
-                ctx.fillStyle = color;
-                var x = i * fontSize;
-                var y = columns[i] * fontSize;
-                ctx.fillText(ch, x, y);
-
-                if (y > canvas.height && Math.random() > 0.975) {
-                    columns[i] = 0;
-                }
-                columns[i]++;
-            }
-            rainAnim = requestAnimationFrame(drawRain);
-        }
-        rainAnim = requestAnimationFrame(drawRain);
     }
 
     function getActiveWorkingBlock() {

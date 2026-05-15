@@ -66,6 +66,7 @@ namespace JuniorStudio.VisualStudio.ToolWindows
                 // Listen for solution/folder open/close so we can re-announce the workspace.
                 try
                 {
+                    await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
                     solutionService = Package.GetGlobalService(typeof(SVsSolution)) as IVsSolution;
                     solutionService?.AdviseSolutionEvents(this, out solutionEventsCookie);
                 }
@@ -73,7 +74,7 @@ namespace JuniorStudio.VisualStudio.ToolWindows
             }
             catch (Exception ex)
             {
-                MessageBox.Show(ex.Message, "Junior Studio WebView initialization failed", MessageBoxButton.OK, MessageBoxImage.Error);
+                MessageBox.Show(ex.Message, "Junior WebView initialization failed", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
 
@@ -89,6 +90,7 @@ namespace JuniorStudio.VisualStudio.ToolWindows
         {
             try
             {
+                ThreadHelper.ThrowIfNotOnUIThread();
                 foreach (var message in bridge.HandleWebMessage(e.WebMessageAsJson))
                 {
                     PostToWebView(message);
@@ -105,10 +107,23 @@ namespace JuniorStudio.VisualStudio.ToolWindows
             // Intercept openWorkspaceFolder so VS opens the new folder. Don't forward to WebView.
             if (!string.IsNullOrEmpty(jsonLine) && jsonLine.IndexOf("\"openWorkspaceFolder\"", StringComparison.Ordinal) >= 0)
             {
-                Dispatcher.BeginInvoke(new Action(() => HandleOpenWorkspaceFolder(jsonLine)));
+                ThreadHelper.JoinableTaskFactory.Run(async delegate
+                {
+                    await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                    HandleOpenWorkspaceFolder(jsonLine);
+                });
                 return;
             }
-            Dispatcher.BeginInvoke(new Action(() => PostToWebView(jsonLine)));
+            RunOnMainThread(() => PostToWebView(jsonLine));
+        }
+
+        private static void RunOnMainThread(Action action)
+        {
+            ThreadHelper.JoinableTaskFactory.Run(async delegate
+            {
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                action();
+            });
         }
 
         private void HandleOpenWorkspaceFolder(string jsonLine)
@@ -135,7 +150,7 @@ namespace JuniorStudio.VisualStudio.ToolWindows
 
         private void OnSidecarFailed(string message)
         {
-            Dispatcher.BeginInvoke(new Action(() => PostToWebView(bridge.CreateErrorMessage(message))));
+            RunOnMainThread(() => PostToWebView(bridge.CreateErrorMessage(message)));
         }
 
         private void PostToWebView(string json)
@@ -151,13 +166,33 @@ namespace JuniorStudio.VisualStudio.ToolWindows
             }
         }
 
+        public void SubmitEditorSelectionPrompt(string prompt)
+        {
+            RunOnMainThread(() =>
+            {
+                if (string.IsNullOrWhiteSpace(prompt)) return;
+                var payload = new System.Collections.Generic.Dictionary<string, object>
+                {
+                    ["type"] = "sendMessage",
+                    ["text"] = prompt,
+                    ["mode"] = "agent"
+                };
+                var serializer = new System.Web.Script.Serialization.JavaScriptSerializer();
+                ThreadHelper.ThrowIfNotOnUIThread();
+                foreach (var message in bridge.HandleWebMessage(serializer.Serialize(payload)))
+                {
+                    PostToWebView(message);
+                }
+            });
+        }
+
         private void OnUnloaded(object sender, RoutedEventArgs e)
         {
             try
             {
+                ThreadHelper.ThrowIfNotOnUIThread();
                 if (solutionService != null && solutionEventsCookie != 0)
                 {
-                    ThreadHelper.ThrowIfNotOnUIThread();
                     solutionService.UnadviseSolutionEvents(solutionEventsCookie);
                     solutionEventsCookie = 0;
                 }
@@ -176,11 +211,11 @@ namespace JuniorStudio.VisualStudio.ToolWindows
 
         private void RepostWorkspaceBanner()
         {
-            Dispatcher.BeginInvoke(new Action(() =>
+            RunOnMainThread(() =>
             {
                 foreach (var m in bridge.BuildWorkspaceBannerMessages())
                     PostToWebView(m);
-            }));
+            });
         }
 
         int IVsSolutionEvents.OnAfterOpenProject(IVsHierarchy pHierarchy, int fAdded) { RepostWorkspaceBanner(); return VSConstants.S_OK; }
@@ -194,7 +229,7 @@ namespace JuniorStudio.VisualStudio.ToolWindows
         int IVsSolutionEvents.OnBeforeCloseSolution(object pUnkReserved) => VSConstants.S_OK;
         int IVsSolutionEvents.OnAfterCloseSolution(object pUnkReserved) { RepostWorkspaceBanner(); return VSConstants.S_OK; }
 
-        private static string GetWorkspaceRoot()
+        internal static string GetWorkspaceRoot()
         {
             try
             {

@@ -2,7 +2,7 @@
 <PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011" xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
   <Metadata>
     <Identity Id="JuniorStudio.VisualStudio.4f8ed4c9-2d7a-4e3a-98f5-42116270769f" Version="0.3.23" Language="en-US" Publisher="Microsoft" />
-    <DisplayName>Junior Studio</DisplayName>
+    <DisplayName>Junior</DisplayName>
     <Description xml:space="preserve">Visual Studio host for the Junior air-gapped AI coding assistant.</Description>
   </Metadata>
   <Installation>
@@ -18,5 +18,6 @@
   </Prerequisites>
   <Assets>
     <Asset Type="Microsoft.VisualStudio.VsPackage" d:Source="Project" d:ProjectName="JuniorStudio.VisualStudio" Path="|JuniorStudio.VisualStudio;PkgdefProjectOutputGroup|" />
+    <Asset Type="Microsoft.VisualStudio.MefComponent" d:Source="Project" d:ProjectName="JuniorStudio.VisualStudio" Path="|JuniorStudio.VisualStudio|" />
   </Assets>
 </PackageManifest>

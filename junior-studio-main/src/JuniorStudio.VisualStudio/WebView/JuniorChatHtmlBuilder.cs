@@ -51,6 +51,18 @@ body { display: flex; flex-direction: column; overflow: hidden; } button, select
 #chat-toolbar .ct-btn.active { background: rgba(255,255,255,.12); color: var(--fg); }
 #history-panel { position: absolute; right: 8px; top: 32px; width: 280px; max-height: 50vh; overflow-y: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 4px 14px rgba(0,0,0,.45); z-index: 50; padding: 4px; }
 #history-panel.open { display: block; }
+.auth-banner { display: none; align-items: center; gap: 8px; padding: 7px 10px; border-bottom: 1px solid var(--border); background: rgba(77,170,252,.08); color: var(--fg); font-size: 12px; flex-shrink: 0; }
+.auth-banner.visible { display: flex; }
+.auth-banner.signingIn { background: rgba(77,170,252,.10); }
+.auth-banner.signedIn, .auth-banner.ready { background: rgba(115,201,145,.08); }
+.auth-banner.error { background: rgba(244,135,113,.10); }
+.auth-icon { width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 16px; color: var(--vscode-textLink-foreground); }
+.auth-banner.signedIn .auth-icon, .auth-banner.ready .auth-icon { color: var(--success-fg); }
+.auth-banner.error .auth-icon { color: var(--error-fg); }
+.auth-copy { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.auth-action { display: inline-flex; align-items: center; justify-content: center; height: 22px; padding: 0 8px; border-radius: 4px; border: 1px solid var(--border); background: transparent; color: var(--fg); cursor: pointer; font-size: 12px; white-space: nowrap; }
+.auth-action:hover:not(:disabled) { background: rgba(255,255,255,.08); }
+.auth-action:disabled { opacity: .6; cursor: default; }
 .history-item { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-radius: 4px; cursor: pointer; }
 .history-item:hover { background: rgba(255,255,255,.06); }
 .history-item.active { background: rgba(77,170,252,.12); }
@@ -85,6 +97,15 @@ body { display: flex; flex-direction: column; overflow: hidden; } button, select
 .approval-block.resolved-allow .approval-title { color: rgba(140,210,140,1); }
 .approval-block.resolved-deny .approval-title { color: rgba(230,140,140,1); }
 .approval-body { font-size: 12.5px; color: var(--fg); white-space: pre-wrap; word-break: break-word; font-family: Consolas, monospace; background: var(--code-bg); padding: 4px 6px; border-radius: 3px; }
+.approval-meta { display: flex; flex-direction: column; gap: 2px; color: var(--fg); }
+.approval-diff { max-height: 280px; overflow: auto; border: 1px solid var(--border); border-radius: 4px; margin-top: 6px; background: rgba(0,0,0,.12); }
+.approval-diff-line { display: block; white-space: pre; min-width: max-content; padding: 0 8px; line-height: 1.45; }
+.approval-diff-file { color: var(--vscode-descriptionForeground); background: rgba(255,255,255,.035); }
+.approval-diff-hunk { color: rgba(150,195,240,1); background: rgba(110,170,230,.08); }
+.approval-diff-add { color: rgba(150,230,165,1); background: rgba(80,180,110,.12); }
+.approval-diff-del { color: rgba(245,150,150,1); background: rgba(210,80,80,.12); }
+.approval-diff-context { color: var(--fg); }
+.approval-diff-truncated { color: var(--vscode-descriptionForeground); font-style: italic; }
 .approval-actions { display: flex; align-items: center; gap: 6px; }
 .approval-btn { font-size: 12px; padding: 4px 10px; border-radius: 4px; border: 1px solid var(--border); background: transparent; color: var(--fg); cursor: pointer; }
 .approval-btn:hover:not(:disabled) { background: rgba(255,255,255,.08); }
@@ -93,6 +114,37 @@ body { display: flex; flex-direction: column; overflow: hidden; } button, select
 .approval-allow-session { border-color: rgba(110,170,230,.5); color: rgba(150,195,240,1); }
 .approval-deny { border-color: rgba(220,120,120,.5); color: rgba(230,140,140,1); }
 .approval-status { font-size: 11px; color: var(--vscode-descriptionForeground); margin-left: 4px; }
+.turn-summary { border: 1px solid rgba(255,255,255,.08); border-left: 2px solid rgba(77,170,252,.7); border-radius: 5px; background: rgba(255,255,255,.018); padding: 0; margin: 6px 0 2px; box-shadow: none; }
+.turn-summary[open] { border-color: rgba(255,255,255,.12); background: rgba(255,255,255,.032); }
+.turn-summary-title { cursor: pointer; list-style: none; font-size: 11px; font-weight: 600; color: var(--vscode-descriptionForeground); padding: 5px 8px; user-select: none; line-height: 1.35; }
+.turn-summary-title::-webkit-details-marker { display: none; }
+.turn-summary-title::before { content: ""\eab6""; font-family: codicon; font-size: 11px; display: inline-block; margin-right: 6px; transform: translateY(1px); opacity: .75; }
+.turn-summary[open] .turn-summary-title { color: var(--fg); border-bottom: 1px solid rgba(255,255,255,.07); }
+.turn-summary[open] .turn-summary-title::before { content: ""\eab4""; }
+.turn-summary-title:hover { color: var(--fg); background: rgba(255,255,255,.035); }
+.turn-summary-grid { display: grid; grid-template-columns: max-content minmax(0,1fr); gap: 6px 12px; font-size: 12px; line-height: 1.4; padding: 8px 10px 10px; }
+.turn-summary-label { color: var(--vscode-descriptionForeground); font-weight: 600; padding-top: 2px; }
+.turn-summary-value { color: var(--fg); word-break: break-word; min-width: 0; }
+.turn-summary-files { display: flex; flex-wrap: wrap; gap: 5px; }
+.turn-summary-file { border: 1px solid rgba(255,255,255,.14); border-radius: 4px; padding: 2px 6px; background: rgba(0,0,0,.20); color: var(--fg); font-family: Consolas, monospace; font-size: 11.5px; cursor: pointer; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.turn-summary-file:hover { border-color: var(--user-msg); background: rgba(77,170,252,.10); }
+.repair-chain-summary { border-left-color: rgba(140,210,140,1); }
+.repo-instructions-card { border: 1px solid var(--border); border-left: 3px solid rgba(150,195,240,1); border-radius: 6px; background: var(--tool-bg); padding: 8px 10px; margin: 6px 0; display: flex; flex-direction: column; gap: 4px; }
+.repo-instructions-title { font-size: 11px; font-weight: 600; color: var(--vscode-descriptionForeground); text-transform: uppercase; letter-spacing: .04em; }
+.repo-instructions-body { font-size: 12px; line-height: 1.35; color: var(--fg); word-break: break-word; }
+.repo-instructions-body code { font-family: Consolas, monospace; font-size: 11.5px; }
+.mcp-panel { border: 1px solid var(--border); border-radius: 6px; background: var(--tool-bg); padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+.mcp-panel-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-weight: 600; }
+.mcp-panel-meta { color: var(--vscode-descriptionForeground); font-size: 12px; font-weight: 400; }
+.mcp-panel-empty { color: var(--vscode-descriptionForeground); font-size: 12.5px; line-height: 1.45; }
+.mcp-panel-loading { display: inline-flex; align-items: center; gap: 8px; color: var(--vscode-descriptionForeground); font-size: 12.5px; line-height: 1.45; }
+.mcp-panel-spinner { width: 14px; height: 14px; border-radius: 50%; border: 2px solid rgba(255,255,255,.18); border-top-color: var(--vscode-progressBar-background, #0098ff); animation: junior-send-spin 0.9s linear infinite; flex: 0 0 14px; }
+.mcp-tool-list { display: flex; flex-direction: column; gap: 6px; }
+.mcp-tool-row { display: grid; grid-template-columns: 18px 1fr; gap: 8px; align-items: start; padding: 6px; border: 1px solid rgba(255,255,255,.06); border-radius: 4px; }
+.mcp-tool-row:hover { background: rgba(255,255,255,.04); }
+.mcp-tool-row input { margin-top: 2px; }
+.mcp-tool-name { font-weight: 600; font-size: 12.5px; }
+.mcp-tool-description { color: var(--vscode-descriptionForeground); font-size: 12px; margin-top: 3px; line-height: 1.35; white-space: normal; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .code-block-wrapper { margin: 6px 0; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: var(--code-bg); }
 .code-block-header { display: flex; align-items: center; justify-content: space-between; padding: 4px 8px; background: rgba(255,255,255,.04); border-bottom: 1px solid var(--border); font-size: 11px; }
 .code-block-header .code-lang { color: var(--vscode-descriptionForeground); text-transform: lowercase; font-family: Consolas, monospace; letter-spacing: .02em; }
@@ -130,19 +182,35 @@ select, .model-search { color: var(--input-fg); background: var(--input-bg); bor
 .mode-option:hover, .model-option:hover { background: rgba(255,255,255,.08); } .mode-option-check { margin-left: auto; visibility: hidden; } .mode-option.active .mode-option-check, .model-option.active .mode-option-check { visibility: visible; } #model-select { display: none; } #model-search { width: 100%; margin-bottom: 6px; }
 .footer-select-control { display: inline-flex; align-items: center; gap: 4px; } #context-meter { margin-left: auto; font-size: 11px; color: var(--vscode-descriptionForeground); }
 #slash-autocomplete { display: none; } #slash-autocomplete.open { display: block; position: absolute; bottom: 100%; left: 0; right: 0; background: var(--tool-bg); border: 1px solid var(--border); border-radius: 6px; }
+.reasoning-panel { margin: 6px 0 8px 0; border: 1px solid rgba(255,255,255,.10); border-left: 3px solid rgba(150,195,240,1); border-radius: 6px; background: rgba(255,255,255,.028); overflow: hidden; }
+.reasoning-summary { cursor: pointer; color: var(--fg); font-weight: 700; user-select: none; padding: 7px 10px; display: flex; align-items: center; gap: 6px; }
+.reasoning-summary:hover { background: rgba(255,255,255,.045); }
+.reasoning-icon { color: rgba(150,195,240,1); }
+.reasoning-label { font-size: 12px; }
+.reasoning-body { padding: 8px 10px 10px 10px; color: var(--fg); font-family: Segoe UI, system-ui, sans-serif; font-size: 12.5px; line-height: 1.55; overflow-wrap: anywhere; border-top: 1px solid rgba(255,255,255,.06); background: rgba(0,0,0,.10); }
+.reasoning-body p { margin: 0 0 7px 0; }
+.reasoning-body p:last-child { margin-bottom: 0; }
+.reasoning-body strong { color: var(--fg); font-weight: 700; }
+.reasoning-body code { background: var(--code-bg); padding: 1px 3px; border-radius: 3px; }
 .reasoning-block { margin: 4px 0 8px 0; padding: 4px 8px; background: rgba(255,255,255,.03); border-left: 2px solid #7e57c2; border-radius: 4px; font-size: 12px; }
 .reasoning-block summary { cursor: pointer; color: #b39ddb; font-weight: 600; user-select: none; padding: 2px 0; }
 .reasoning-block summary:hover { color: #d1c4e9; }
 .reasoning-block .reasoning-text { margin-top: 4px; padding: 4px 0; color: var(--vscode-descriptionForeground); font-family: Segoe UI, system-ui, sans-serif; white-space: pre-wrap; word-wrap: break-word; background: transparent; }
-.welcome-screen { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 32px 18px; text-align: center; gap: 14px; animation: welcome-fade .35s ease; }
+.welcome-screen { position: relative; flex: 1; min-height: 520px; overflow: hidden; display: flex; align-items: center; justify-content: center; padding: 28px 18px; text-align: center; animation: welcome-fade .35s ease; background: #000a19; border-radius: 6px; }
+.welcome-matrix-canvas { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 0; opacity: .95; }
+.welcome-card { position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; gap: 14px; width: min(100%, 440px); padding: 28px 26px; background: rgba(31,31,31,.94); border: 1px solid rgba(0,164,239,.42); border-radius: 8px; box-shadow: 0 18px 42px rgba(0,0,0,.46), 0 0 28px rgba(0,164,239,.12); backdrop-filter: blur(2px); }
 @keyframes welcome-fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
-.welcome-logo { width: 56px; height: 56px; opacity: .9; }
-.welcome-title { font-size: 20px; font-weight: 600; color: var(--fg); letter-spacing: -.01em; }
+.welcome-logo { width: 46px; height: 46px; opacity: .9; filter: drop-shadow(0 0 10px rgba(0,164,239,.28)); }
+.welcome-title { font-size: 22px; font-weight: 700; color: #7FBA00; letter-spacing: 0; }
 .welcome-subtitle { font-size: 13px; color: var(--vscode-descriptionForeground); max-width: 360px; line-height: 1.5; }
 .welcome-section-label { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--vscode-descriptionForeground); margin-top: 8px; opacity: .85; }
 .welcome-prompts { display: flex; flex-direction: column; gap: 6px; width: 100%; max-width: 380px; }
-.welcome-prompt { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; background: var(--tool-bg); border: 1px solid var(--border); border-radius: 8px; color: var(--fg); text-align: left; cursor: pointer; transition: background .15s, border-color .15s, transform .1s; font-size: 12.5px; line-height: 1.4; }
-.welcome-prompt:hover { background: rgba(255,255,255,.06); border-color: var(--vscode-textLink-foreground); }
+.welcome-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; width: 100%; max-width: 380px; }
+.welcome-action { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 34px; padding: 8px 10px; background: rgba(0,0,0,.16); border: 1px solid rgba(255,255,255,.16); border-radius: 6px; color: var(--fg); cursor: pointer; font-size: 12px; line-height: 1.3; }
+.welcome-action:hover { background: rgba(0,164,239,.14); border-color: #00A4EF; }
+.welcome-action .codicon { color: var(--vscode-textLink-foreground); }
+.welcome-prompt { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; background: rgba(255,255,255,.045); border: 1px solid rgba(255,255,255,.12); border-radius: 8px; color: var(--fg); text-align: left; cursor: pointer; transition: background .15s, border-color .15s, transform .1s; font-size: 12.5px; line-height: 1.4; }
+.welcome-prompt:hover { background: rgba(0,164,239,.12); border-color: #00A4EF; }
 .welcome-prompt:active { transform: scale(.99); }
 .welcome-prompt .codicon { color: var(--vscode-textLink-foreground); flex-shrink: 0; margin-top: 1px; }
 .welcome-prompt-text { flex: 1; }
@@ -199,12 +267,13 @@ select, .model-search { color: var(--input-fg); background: var(--input-bg); bor
 </head>
 <body>
 <div id=""chat-toolbar""><button id=""btn-new-chat"" class=""ct-btn"" title=""New chat""><i class=""codicon codicon-add""></i></button><button id=""btn-toggle-history"" class=""ct-btn"" title=""Show chat history""><i class=""codicon codicon-history""></i></button><div class=""ct-spacer""><span id=""ct-active-title"" class=""ct-title""></span></div></div>
+<div id=""auth-banner"" class=""auth-banner""><span id=""auth-icon"" class=""auth-icon""><i class=""codicon codicon-person""></i></span><span id=""auth-copy"" class=""auth-copy""></span><button id=""auth-action"" class=""auth-action"" type=""button"">Sign in</button></div>
 <div id=""history-panel""><div id=""history-list""></div></div>
 <div id=""messages""><div id=""working-indicator""><span id=""working-text"">Thinking</span></div></div>
 <div id=""file-change-dock"" class=""hidden""><div class=""dock-header""><span class=""dock-toggle""></span><span class=""dock-summary""></span><span class=""dock-counts""><span class=""dock-add"">+0</span> <span class=""dock-del"">-0</span></span><div class=""dock-actions""><button class=""btn-keep"">Keep All</button><button class=""btn-undo"">Undo All</button></div></div><div class=""dock-files""></div></div>
 <div id=""plan-panel"" class=""hidden""><div class=""plan-header""><span class=""plan-toggle"">&#9654;</span><span class=""plan-title"">Plan</span><span class=""plan-progress""></span></div><div class=""plan-steps""></div></div>
 <div id=""status-bar""></div>
-<div id=""input-area""><div id=""attach-preview""></div><div id=""plan-action-bar"" class=""hidden""><span class=""plan-action-label"">Proceed from Plan</span><button id=""btn-run-plan"">Start Implementation</button></div><div id=""composer-shell"" style=""position:relative;""><div id=""slash-autocomplete""></div><textarea id=""input"" rows=""1"" placeholder=""Ask Junior anything..."" autofocus></textarea><div id=""composer-toolbar""><button id=""btn-attach"" class=""composer-btn"" title=""Attach context""><i class=""codicon codicon-add""></i></button><div id=""mode-switch"" class=""mode-dropdown""><button id=""mode-trigger"" class=""mode-trigger"" type=""button""><span id=""mode-trigger-icon"" class=""mode-icon""></span><span id=""mode-trigger-label"">Agent</span></button><div id=""mode-menu"" class=""mode-menu hidden""><button class=""mode-option active"" data-mode=""agent"" type=""button""><span class=""mode-option-label"">Agent</span><span class=""mode-option-check""><i class=""codicon codicon-check""></i></span></button><button class=""mode-option"" data-mode=""ask"" type=""button""><span class=""mode-option-label"">Ask</span><span class=""mode-option-check""><i class=""codicon codicon-check""></i></span></button><button class=""mode-option"" data-mode=""plan"" type=""button""><span class=""mode-option-label"">Plan</span><span class=""mode-option-check""><i class=""codicon codicon-check""></i></span></button><div id=""custom-agent-list""></div><div id=""dev-team-list""></div><button class=""mode-option mode-option-action"" data-action=""create-custom-agent"" type=""button""><span class=""mode-option-label"">Create custom agent...</span></button><button class=""mode-option mode-option-action"" data-action=""create-dev-team"" type=""button""><span class=""mode-option-label"">Create Dev Team...</span></button></div></div><div id=""model-control"" class=""model-control""><select id=""model-select""><option value=""junior-stub"">Junior Studio Stub</option></select><button id=""model-trigger"" class=""model-trigger"" type=""button""><span id=""model-trigger-label"">Junior Studio Stub</span><span id=""model-trigger-meta""></span><span><i class=""codicon codicon-chevron-down""></i></span></button><div id=""model-menu"" class=""model-menu hidden""><input id=""model-search"" class=""model-search"" type=""text"" placeholder=""Search models"" /><div id=""model-list"" class=""model-list""></div><div id=""model-reasoning-submenu"" class=""model-reasoning-submenu hidden""><div class=""reasoning-option-group"" data-reasoning-group=""effort""></div><div class=""reasoning-option-group"" data-reasoning-group=""summary""></div><div id=""model-note"" class=""model-note""></div></div></div></div><button id=""btn-tools"" class=""composer-btn"" title=""MCP Tools""><i class=""codicon codicon-list-tree""></i></button><div class=""composer-spacer""></div><button id=""btn-send"" class=""composer-btn"" title=""Send message (Enter)""><i class=""codicon codicon-arrow-up""></i></button></div></div><div id=""provider-bar""><label class=""footer-select-control""><select id=""provider-select""><option value=""local"">Local</option></select></label><label class=""footer-select-control""><select id=""permission-select""><option value=""default"">Default Approvals</option><option value=""bypass"">Bypass Approvals</option></select></label><div id=""context-meter""><span class=""meter-label"">0 / 128.0K (0%)</span></div></div></div>
+<div id=""input-area""><div id=""attach-preview""></div><div id=""plan-action-bar"" class=""hidden""><span class=""plan-action-label"">Proceed from Plan</span><button id=""btn-run-plan"">Start Implementation</button></div><div id=""composer-shell"" style=""position:relative;""><div id=""slash-autocomplete""></div><textarea id=""input"" rows=""1"" placeholder=""Ask Junior anything..."" autofocus></textarea><div id=""composer-toolbar""><button id=""btn-attach"" class=""composer-btn"" title=""Attach context""><i class=""codicon codicon-add""></i></button><div id=""mode-switch"" class=""mode-dropdown""><button id=""mode-trigger"" class=""mode-trigger"" type=""button""><span id=""mode-trigger-icon"" class=""mode-icon""></span><span id=""mode-trigger-label"">Agent</span></button><div id=""mode-menu"" class=""mode-menu hidden""><button class=""mode-option active"" data-mode=""agent"" type=""button""><span class=""mode-option-label"">Agent</span><span class=""mode-option-check""><i class=""codicon codicon-check""></i></span></button><button class=""mode-option"" data-mode=""ask"" type=""button""><span class=""mode-option-label"">Ask</span><span class=""mode-option-check""><i class=""codicon codicon-check""></i></span></button><button class=""mode-option"" data-mode=""plan"" type=""button""><span class=""mode-option-label"">Plan</span><span class=""mode-option-check""><i class=""codicon codicon-check""></i></span></button><div id=""custom-agent-list""></div><div id=""dev-team-list""></div><button class=""mode-option mode-option-action"" data-action=""create-custom-agent"" type=""button""><span class=""mode-option-label"">Create custom agent...</span></button><button class=""mode-option mode-option-action"" data-action=""create-dev-team"" type=""button""><span class=""mode-option-label"">Create Dev Team...</span></button></div></div><div id=""model-control"" class=""model-control""><select id=""model-select""><option value=""junior-stub"">Junior Stub</option></select><button id=""model-trigger"" class=""model-trigger"" type=""button""><span id=""model-trigger-label"">Junior Stub</span><span id=""model-trigger-meta""></span><span><i class=""codicon codicon-chevron-down""></i></span></button><div id=""model-menu"" class=""model-menu hidden""><input id=""model-search"" class=""model-search"" type=""text"" placeholder=""Search models"" /><div id=""model-list"" class=""model-list""></div><div id=""model-reasoning-submenu"" class=""model-reasoning-submenu hidden""><div class=""reasoning-option-group"" data-reasoning-group=""effort""></div><div class=""reasoning-option-group"" data-reasoning-group=""summary""></div><div id=""model-note"" class=""model-note""></div></div></div></div><button id=""btn-tools"" class=""composer-btn"" title=""MCP Tools""><i class=""codicon codicon-list-tree""></i></button><div class=""composer-spacer""></div><button id=""btn-send"" class=""composer-btn"" title=""Send message (Enter)""><i class=""codicon codicon-arrow-up""></i></button></div></div><div id=""provider-bar""><label class=""footer-select-control""><select id=""provider-select""><option value=""local"">Local</option></select></label><label class=""footer-select-control""><select id=""permission-select""><option value=""default"">Default Approvals</option><option value=""bypass"">Bypass Approvals</option></select></label><div id=""context-meter""><span class=""meter-label"">0 / 128.0K (0%)</span></div></div></div>
 <script>
 (function () {
   var state = {};

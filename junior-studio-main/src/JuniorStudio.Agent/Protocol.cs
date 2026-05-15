@@ -22,6 +22,13 @@ internal sealed class InboundMessage
     [JsonPropertyName("openAICompatibleBaseUrl")] public string? OpenAICompatibleBaseUrl { get; set; }
     [JsonPropertyName("provider")] public string? Provider { get; set; }
     [JsonPropertyName("apiKey")] public string? ApiKey { get; set; }
+    [JsonPropertyName("authMode")] public string? AuthMode { get; set; }
+    [JsonPropertyName("bearerToken")] public string? BearerToken { get; set; }
+    [JsonPropertyName("authScopes")] public List<string>? AuthScopes { get; set; }
+    [JsonPropertyName("authTenantId")] public string? AuthTenantId { get; set; }
+    [JsonPropertyName("authClientId")] public string? AuthClientId { get; set; }
+    [JsonPropertyName("authorityHost")] public string? AuthorityHost { get; set; }
+    [JsonPropertyName("directAudience")] public string? DirectAudience { get; set; }
     [JsonPropertyName("apiVersion")] public string? ApiVersion { get; set; }
     [JsonPropertyName("deployment")] public string? Deployment { get; set; }
     [JsonPropertyName("systemPrompt")] public string? SystemPrompt { get; set; }
@@ -33,9 +40,15 @@ internal sealed class InboundMessage
     [JsonPropertyName("approvalDelete")] public string? ApprovalDelete { get; set; }
     /// <summary>Approval policy for shell tool: "auto" | "confirm" | "deny" (default: "confirm").</summary>
     [JsonPropertyName("approvalShell")] public string? ApprovalShell { get; set; }
+    [JsonPropertyName("mcpEnabled")] public bool? McpEnabled { get; set; }
+    [JsonPropertyName("mcpServersJson")] public string? McpServersJson { get; set; }
+    [JsonPropertyName("diagnostics")] public List<DiagnosticSnapshotItem>? Diagnostics { get; set; }
 
     // sendMessage
     [JsonPropertyName("text")] public string? Text { get; set; }
+    [JsonPropertyName("requestId")] public string? RequestId { get; set; }
+    [JsonPropertyName("prompt")] public string? Prompt { get; set; }
+    [JsonPropertyName("allowInteractiveAuth")] public bool? AllowInteractiveAuth { get; set; }
     /// <summary>Chat mode for this turn: "agent" (default), "plan", or "ask".</summary>
     [JsonPropertyName("mode")] public string? Mode { get; set; }
     /// <summary>Image attachments as data URIs (e.g. data:image/png;base64,...).</summary>
@@ -54,6 +67,10 @@ internal sealed class InboundMessage
     /// <summary>Tool category for scope=session updates ("write" | "delete" | "shell").</summary>
     [JsonPropertyName("category")] public string? Category { get; set; }
 
+    // MCP tool picker
+    [JsonPropertyName("functionName")] public string? FunctionName { get; set; }
+    [JsonPropertyName("enabled")] public bool? Enabled { get; set; }
+
     // seedHistory
     /// <summary>Prior conversation turns to seed the agent's in-memory history with so a
     /// restored session can continue. Each turn carries a role ("user"|"assistant") + text.</summary>
@@ -70,4 +87,15 @@ internal sealed class AttachedFile
 {
     [JsonPropertyName("name")] public string? Name { get; set; }
     [JsonPropertyName("content")] public string? Content { get; set; }
+}
+
+internal sealed class DiagnosticSnapshotItem
+{
+    [JsonPropertyName("severity")] public string? Severity { get; set; }
+    [JsonPropertyName("file")] public string? File { get; set; }
+    [JsonPropertyName("line")] public int? Line { get; set; }
+    [JsonPropertyName("column")] public int? Column { get; set; }
+    [JsonPropertyName("code")] public string? Code { get; set; }
+    [JsonPropertyName("message")] public string? Message { get; set; }
+    [JsonPropertyName("project")] public string? Project { get; set; }
 }

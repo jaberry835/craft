@@ -79,6 +79,11 @@ while ((line = await Console.In.ReadLineAsync()) is not null)
                 Write(new { type = "configured" });
                 break;
 
+            case "updateDiagnostics":
+                host.UpdateDiagnostics(msg.Diagnostics);
+                Write(new { type = "diagnosticsUpdated", count = msg.Diagnostics?.Count ?? 0 });
+                break;
+
             case "sendMessage":
                 var text = msg.Text ?? string.Empty;
                 var images = msg.Images;
@@ -133,6 +138,48 @@ while ((line = await Console.In.ReadLineAsync()) is not null)
                         host.SetApprovalMode(msg.Category!, ApprovalMode.Auto);
                     }
                     pending.TrySetResult(allow);
+                }
+                break;
+
+            case "listMcpTools":
+                Write(await host.GetMcpToolsMessageAsync());
+                break;
+
+            case "setMcpToolEnabled":
+                if (!string.IsNullOrWhiteSpace(msg.FunctionName))
+                {
+                    host.SetMcpToolEnabled(msg.FunctionName!, msg.Enabled != false);
+                    Write(await host.GetMcpToolsMessageAsync());
+                }
+                break;
+
+            case "generateText":
+                {
+                    var requestId = msg.RequestId ?? Guid.NewGuid().ToString("n");
+                    try
+                    {
+                        var generatedText = await host.GenerateTextAsync(msg.SystemPrompt, msg.Prompt ?? msg.Text, msg.AllowInteractiveAuth != false, CancellationToken.None);
+                        Write(new { type = "textResponse", requestId, text = generatedText });
+                    }
+                    catch (Exception ex)
+                    {
+                        LogErr(ex.ToString());
+                        Write(new { type = "textError", requestId, message = ex.Message });
+                    }
+                }
+                break;
+
+            case "warmAuth":
+                try
+                {
+                    host.Configure(msg);
+                    await host.WarmAuthAsync(msg, CancellationToken.None);
+                    Write(new { type = "authState", state = "signedIn", message = "Signed in with Microsoft Entra ID." });
+                }
+                catch (Exception ex)
+                {
+                    LogErr(ex.ToString());
+                    Write(new { type = "authState", state = "error", message = ex.Message });
                 }
                 break;
 

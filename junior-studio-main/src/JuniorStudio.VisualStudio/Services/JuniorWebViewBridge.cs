@@ -1,21 +1,38 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Web.Script.Serialization;
+using System.Windows;
+using System.Windows.Controls;
 using JuniorStudio.VisualStudio.Options;
+using Microsoft.VisualStudio.Shell;
 
 namespace JuniorStudio.VisualStudio.Services
 {
     internal sealed class JuniorWebViewBridge : IDisposable
     {
         private readonly JavaScriptSerializer serializer = new JavaScriptSerializer();
-        private readonly JuniorAgentSidecar sidecar = new JuniorAgentSidecar();
+        private readonly JuniorAgentSidecar sidecar = JuniorSidecarService.Shared;
         private readonly JuniorSessionStore sessionStore = new JuniorSessionStore();
         private string selectedDeployment = null;
         private JuniorSession activeSession;
         private System.Text.StringBuilder assistantBuffer;
         private string activeAssistantProvider;
+        private string permissionLevel = "default";
         private readonly Dictionary<string, Dictionary<string, object>> liveWorkingBlocks = new Dictionary<string, Dictionary<string, object>>(StringComparer.Ordinal);
         private List<KeyValuePair<string, string>> pendingSeedTurns;
+        private readonly System.Windows.Threading.DispatcherTimer diagnosticsTimer;
+        private int automaticRepairRemaining;
+        private bool pendingAutomaticRepair;
+        private string pendingAutomaticRepairFingerprint;
+        private string lastAutomaticRepairFingerprint;
+        private bool repairChainActive;
+        private string repairChainId;
+        private readonly HashSet<string> repairChainChangedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private int repairChainTurnCount;
+        private int repairChainAttemptsUsed;
+        private string repairChainLastValidationStatus;
+        private string repairChainLastValidationCommand;
 
         public Func<JuniorOptionsPage> OptionsProvider { get; set; }
         public Func<string> WorkspaceRootProvider { get; set; }
@@ -31,10 +48,168 @@ namespace JuniorStudio.VisualStudio.Services
         public JuniorWebViewBridge()
         {
             sidecar.MessageReceived += OnSidecarMessage;
+            diagnosticsTimer = new System.Windows.Threading.DispatcherTimer
+            {
+                Interval = TimeSpan.FromSeconds(5)
+            };
+            diagnosticsTimer.Tick += OnDiagnosticsTimerTick;
+            diagnosticsTimer.Start();
         }
 
+        [System.Diagnostics.CodeAnalysis.SuppressMessage("Usage", "VSTHRD010:Invoke single-threaded types on Main thread", Justification = "DispatcherTimer.Tick runs on the WPF UI dispatcher, and RefreshDiagnosticsSnapshot asserts the UI thread.")]
+        private void OnDiagnosticsTimerTick(object sender, EventArgs e)
+        {
+            RefreshDiagnosticsSnapshot();
+        }
+
+        [System.Diagnostics.CodeAnalysis.SuppressMessage("Usage", "VSTHRD010:Invoke single-threaded types on Main thread", Justification = "Sidecar callbacks may arrive on a background stream reader; this handler only schedules VS service access back onto the UI thread.")]
         private void OnSidecarMessage(string json)
         {
+            if (TryHandleAutomaticRepairMessage(json)) return;
+            TryRecordAssistantMessage(json);
+            var handler = SidecarMessage;
+            if (handler != null) handler(json);
+            foreach (var followup in ProcessRepairChainMessage(json))
+                EmitSidecarMessage(followup);
+        }
+
+        [System.Diagnostics.CodeAnalysis.SuppressMessage("Usage", "VSTHRD001:Avoid legacy thread switching APIs", Justification = "The sidecar callback is not awaitable; this queues the repair turn onto the WPF UI dispatcher owned by the bridge.")]
+        [System.Diagnostics.CodeAnalysis.SuppressMessage("Usage", "VSTHRD110:Observe result of async calls", Justification = "BeginInvoke is intentionally fire-and-forget because the next repair turn is scheduled after the sidecar completes the current turn.")]
+        private bool TryHandleAutomaticRepairMessage(string json)
+        {
+            if (string.IsNullOrEmpty(json)) return false;
+            Dictionary<string, object> msg;
+            try { msg = serializer.Deserialize<Dictionary<string, object>>(json); }
+            catch { return false; }
+            if (msg == null || !msg.TryGetValue("type", out var tv)) return false;
+            var type = Convert.ToString(tv);
+
+            if (type == "continueIteration"
+                && string.Equals(GetString(msg, "reason"), "validationFailed", StringComparison.OrdinalIgnoreCase))
+            {
+                var fingerprint = GetString(msg, "validationFingerprint") ?? string.Empty;
+                if (automaticRepairRemaining > 0
+                    && !string.IsNullOrEmpty(fingerprint)
+                    && !string.Equals(fingerprint, lastAutomaticRepairFingerprint, StringComparison.Ordinal))
+                {
+                    automaticRepairRemaining--;
+                    pendingAutomaticRepair = true;
+                    pendingAutomaticRepairFingerprint = fingerprint;
+                    TryRecordAssistantMessage(ToJson(new Dictionary<string, object> { ["type"] = "startAssistantMessage", ["provider"] = "local" }));
+                    TryRecordAssistantMessage(ToJson(new Dictionary<string, object>
+                    {
+                        ["type"] = "appendAssistantText",
+                        ["text"] = "\n\nAutomatic validation failed. Junior will use one automatic repair attempt to continue fixing it."
+                    }));
+                    TryRecordAssistantMessage(ToJson(new Dictionary<string, object> { ["type"] = "endAssistantMessage" }));
+                    var handler = SidecarMessage;
+                    if (handler != null)
+                    {
+                        handler(ToJson(new Dictionary<string, object> { ["type"] = "startAssistantMessage", ["provider"] = "local" }));
+                        handler(ToJson(new Dictionary<string, object>
+                        {
+                            ["type"] = "appendAssistantText",
+                            ["text"] = "\n\nAutomatic validation failed. Junior will use one automatic repair attempt to continue fixing it."
+                        }));
+                        handler(ToJson(new Dictionary<string, object> { ["type"] = "endAssistantMessage" }));
+                    }
+                    return true;
+                }
+                var summary = CompleteRepairChain("stopped for user confirmation");
+                if (summary != null) EmitSidecarMessage(summary);
+                return false;
+            }
+
+            if (type == "agentDone" && pendingAutomaticRepair)
+            {
+                pendingAutomaticRepair = false;
+                lastAutomaticRepairFingerprint = pendingAutomaticRepairFingerprint;
+                pendingAutomaticRepairFingerprint = null;
+                diagnosticsTimer.Dispatcher.BeginInvoke(new Action(StartAutomaticRepairTurn));
+                return true;
+            }
+
+            return false;
+        }
+
+        private IEnumerable<string> ProcessRepairChainMessage(string json)
+        {
+            if (string.IsNullOrEmpty(json)) yield break;
+            Dictionary<string, object> msg;
+            try { msg = serializer.Deserialize<Dictionary<string, object>>(json); }
+            catch { yield break; }
+            if (msg == null || !msg.TryGetValue("type", out var tv)) yield break;
+            if (!string.Equals(Convert.ToString(tv), "turnSummary", StringComparison.Ordinal)) yield break;
+
+            var validation = GetDictionary(msg, "validation");
+            var status = GetString(validation, "status") ?? "skipped";
+            var autoRepair = GetBool(msg, "autoRepair");
+            var validationFailed = string.Equals(status, "failed", StringComparison.OrdinalIgnoreCase);
+            var validationPassed = string.Equals(status, "passed", StringComparison.OrdinalIgnoreCase);
+
+            if (validationFailed || autoRepair) StartRepairChain();
+            if (!repairChainActive) yield break;
+
+            repairChainTurnCount++;
+            if (autoRepair) repairChainAttemptsUsed++;
+            repairChainLastValidationStatus = status;
+            repairChainLastValidationCommand = GetString(validation, "command") ?? repairChainLastValidationCommand;
+            foreach (var file in GetStringList(msg, "changedFiles") ?? new List<string>())
+            {
+                if (!string.IsNullOrWhiteSpace(file)) repairChainChangedFiles.Add(file);
+            }
+
+            if (validationPassed)
+            {
+                var summary = CompleteRepairChain("validation passed");
+                if (summary != null) yield return summary;
+            }
+        }
+
+        private void StartRepairChain()
+        {
+            if (repairChainActive) return;
+            repairChainActive = true;
+            repairChainId = "repair-" + Guid.NewGuid().ToString("N");
+            repairChainChangedFiles.Clear();
+            repairChainTurnCount = 0;
+            repairChainAttemptsUsed = 0;
+            repairChainLastValidationStatus = null;
+            repairChainLastValidationCommand = null;
+        }
+
+        private string CompleteRepairChain(string stopReason)
+        {
+            if (!repairChainActive) return null;
+            var payload = new Dictionary<string, object>
+            {
+                ["type"] = "repairChainSummary",
+                ["chainId"] = repairChainId,
+                ["changedFiles"] = new List<string>(repairChainChangedFiles),
+                ["turnCount"] = repairChainTurnCount,
+                ["repairAttempts"] = repairChainAttemptsUsed,
+                ["finalValidationStatus"] = repairChainLastValidationStatus ?? "unknown",
+                ["stopReason"] = stopReason ?? string.Empty
+            };
+            if (!string.IsNullOrWhiteSpace(repairChainLastValidationCommand)) payload["validationCommand"] = repairChainLastValidationCommand;
+            ResetRepairChain();
+            return ToJson(payload);
+        }
+
+        private void ResetRepairChain()
+        {
+            repairChainActive = false;
+            repairChainId = null;
+            repairChainChangedFiles.Clear();
+            repairChainTurnCount = 0;
+            repairChainAttemptsUsed = 0;
+            repairChainLastValidationStatus = null;
+            repairChainLastValidationCommand = null;
+        }
+
+        private void EmitSidecarMessage(string json)
+        {
+            if (string.IsNullOrEmpty(json)) return;
             TryRecordAssistantMessage(json);
             var handler = SidecarMessage;
             if (handler != null) handler(json);
@@ -84,9 +259,34 @@ namespace JuniorStudio.VisualStudio.Services
                 ["level"] = "default"
             });
 
+            yield return BuildAuthStateMessage(options);
+
             // Announce workspace as a fake assistant message so the user can verify the root.
             foreach (var m in BuildWorkspaceBannerMessages())
                 yield return m;
+        }
+
+        private string BuildAuthStateMessage(JuniorOptionsPage options)
+        {
+            if (options == null || options.AuthMode != JuniorAuthMode.EntraId)
+            {
+                return ToJson(new Dictionary<string, object>
+                {
+                    ["type"] = "authState",
+                    ["state"] = "notRequired",
+                    ["message"] = string.Empty
+                });
+            }
+
+            return ToJson(new Dictionary<string, object>
+            {
+                ["type"] = "authState",
+                ["state"] = JuniorSidecarService.Shared.IsAuthSignedIn ? "signedIn" : "needsSignIn",
+                ["provider"] = options.Provider.ToString(),
+                ["message"] = JuniorSidecarService.Shared.IsAuthSignedIn
+                    ? "Signed in with Microsoft Entra ID."
+                    : "Junior will sign in with Microsoft Entra ID before the first request."
+            });
         }
 
         public IEnumerable<string> BuildWorkspaceBannerMessages()
@@ -97,8 +297,13 @@ namespace JuniorStudio.VisualStudio.Services
             var payload = new Dictionary<string, object>
             {
                 ["type"] = "showWelcome",
-                ["title"] = "Welcome to Junior Studio",
-                ["subtitle"] = "Your air-gapped AI coding assistant, powered by Microsoft Agent Framework."
+                ["title"] = "Welcome to Junior",
+                ["subtitle"] = "Your air-gapped AI coding assistant, powered by Microsoft Agent Framework.",
+                ["setupActions"] = new List<object>
+                {
+                    new Dictionary<string, object> { ["icon"] = "gear", ["text"] = "Open Junior options", ["action"] = "splashOpenSettings" },
+                    new Dictionary<string, object> { ["icon"] = "key", ["text"] = "Set API key securely", ["action"] = "splashSetApiKey" }
+                }
             };
 
             if (hasWorkspace)
@@ -163,7 +368,7 @@ namespace JuniorStudio.VisualStudio.Services
             {
                 list.Add(new Dictionary<string, object>
                 {
-                    ["name"] = "Junior Studio (configure deployment in Tools > Options)",
+                    ["name"] = "Junior (configure deployment in Tools > Options)",
                     ["deploymentId"] = "junior-active",
                     ["supportsReasoning"] = false
                 });
@@ -174,6 +379,7 @@ namespace JuniorStudio.VisualStudio.Services
 
         public IReadOnlyList<string> HandleWebMessage(string json)
         {
+            ThreadHelper.ThrowIfNotOnUIThread();
             var responses = new List<string>();
             var message = Deserialize(json);
             if (!message.TryGetValue("type", out var typeValue))
@@ -223,13 +429,21 @@ namespace JuniorStudio.VisualStudio.Services
                     responses.Add(ToJson(new Dictionary<string, object>
                     {
                         ["type"] = "appendAssistantText",
-                        ["text"] = "Junior Studio is not configured yet. Open **Tools > Options > Junior Studio** and set:\n\n- **Provider** = Apim\n- **APIM Base URL**\n- **API Key** (APIM subscription key)\n- **Active Deployment** (Foundry deployment name)\n- **Available Models** (optional comma-separated list for the picker)\n\nThen try again."
+                        ["text"] = "Junior is not configured yet. Open **Tools > Options > Junior** and set:\n\n- **Provider** = Apim or Direct\n- **APIM Base URL** or **Endpoint**\n- **Authentication Mode** plus API key, bearer token, or Entra ID scopes\n- **Active Deployment** (Foundry deployment name)\n- **Available Models** (optional comma-separated list for the picker)\n\nThen try again."
                     }));
                     responses.Add(ToJson(new Dictionary<string, object> { ["type"] = "endAssistantMessage" }));
                     return responses;
                 }
 
-                sidecar.Configure(options, deployment, WorkspaceRootProvider?.Invoke());
+                var workspaceRoot = WorkspaceRootProvider?.Invoke();
+                var diagnostics = CollectDiagnosticsSnapshot(workspaceRoot);
+                ConfigureSidecar(options, deployment, workspaceRoot, diagnostics);
+                sidecar.UpdateDiagnostics(diagnostics);
+                automaticRepairRemaining = ClampAutomaticRepairAttempts(options.AutomaticRepairAttempts);
+                pendingAutomaticRepair = false;
+                pendingAutomaticRepairFingerprint = null;
+                lastAutomaticRepairFingerprint = null;
+                ResetRepairChain();
                 // Sidecar will stream startAssistantMessage / appendAssistantText / endAssistantMessage back.
                 EnsureActiveSession(text);
                 if (pendingSeedTurns != null && pendingSeedTurns.Count > 0)
@@ -252,9 +466,74 @@ namespace JuniorStudio.VisualStudio.Services
                 return responses;
             }
 
+            if (type == "warmAuth")
+            {
+                var options = OptionsProvider != null ? OptionsProvider() : null;
+                if (options == null || options.AuthMode != JuniorAuthMode.EntraId)
+                {
+                    responses.Add(BuildAuthStateMessage(options));
+                    return responses;
+                }
+
+                var deployment = !string.IsNullOrWhiteSpace(selectedDeployment)
+                    ? selectedDeployment
+                    : options?.ActiveDeployment;
+                if (string.IsNullOrWhiteSpace(deployment) || string.Equals(deployment, "junior-active", StringComparison.OrdinalIgnoreCase))
+                {
+                    responses.Add(ToJson(new Dictionary<string, object>
+                    {
+                        ["type"] = "authState",
+                        ["state"] = "error",
+                        ["message"] = "Junior is not configured yet. Open Tools > Options > Junior and set the provider and active deployment."
+                    }));
+                    return responses;
+                }
+
+                responses.Add(ToJson(new Dictionary<string, object>
+                {
+                    ["type"] = "authState",
+                    ["state"] = "signingIn",
+                    ["message"] = "Signing in with Microsoft Entra ID. A browser window may open; return here after authentication completes."
+                }));
+                sidecar.WarmAuth(options, deployment, WorkspaceRootProvider?.Invoke());
+                return responses;
+            }
+
+            if (type == "splashSetApiKey")
+            {
+                SetApiKeyFromSplash(responses);
+                return responses;
+            }
+
+            if (type == "splashOpenSettings")
+            {
+                OpenJuniorOptionsPage();
+                responses.Add(BuildAuthStateMessage(OptionsProvider != null ? OptionsProvider() : null));
+                return responses;
+            }
+
+            if (type == "splashDismissed")
+            {
+                return responses;
+            }
+
             if (type == "selectModelById")
             {
                 selectedDeployment = GetString(message, "deploymentId");
+                return responses;
+            }
+
+            if (type == "selectPermissionLevel")
+            {
+                var requested = GetString(message, "level");
+                permissionLevel = string.Equals(requested, "bypass", StringComparison.OrdinalIgnoreCase)
+                    ? "bypass"
+                    : "default";
+                responses.Add(ToJson(new Dictionary<string, object>
+                {
+                    ["type"] = "setPermissionLevel",
+                    ["level"] = permissionLevel
+                }));
                 return responses;
             }
 
@@ -294,7 +573,10 @@ namespace JuniorStudio.VisualStudio.Services
                         : options?.ActiveDeployment;
                     if (options != null && !string.IsNullOrWhiteSpace(deployment))
                     {
-                        sidecar.Configure(options, deployment, WorkspaceRootProvider?.Invoke());
+                        var workspaceRoot = WorkspaceRootProvider?.Invoke();
+                        var diagnostics = CollectDiagnosticsSnapshot(workspaceRoot);
+                        ConfigureSidecar(options, deployment, workspaceRoot, diagnostics);
+                        sidecar.UpdateDiagnostics(diagnostics);
                         sidecar.SendMessage("Continue working on the previous task. Pick up exactly where you left off and finish it.");
                     }
                 }
@@ -392,7 +674,164 @@ namespace JuniorStudio.VisualStudio.Services
                 return responses;
             }
 
+            if (type == "manageMcpServers")
+            {
+                var options = OptionsProvider != null ? OptionsProvider() : null;
+                var deployment = !string.IsNullOrWhiteSpace(selectedDeployment)
+                    ? selectedDeployment
+                    : options?.ActiveDeployment;
+                if (options == null || string.IsNullOrWhiteSpace(deployment) || string.Equals(deployment, "junior-active", StringComparison.OrdinalIgnoreCase))
+                {
+                    responses.Add(ToJson(new Dictionary<string, object>
+                    {
+                        ["type"] = "mcpTools",
+                        ["enabled"] = false,
+                        ["configured"] = false,
+                        ["connectedServerCount"] = 0,
+                        ["toolCount"] = 0,
+                        ["tools"] = new object[0]
+                    }));
+                    return responses;
+                }
+
+                responses.Add(ToJson(new Dictionary<string, object> { ["type"] = "mcpToolsLoading" }));
+                var workspaceRoot = WorkspaceRootProvider?.Invoke();
+                var diagnostics = CollectDiagnosticsSnapshot(workspaceRoot);
+                ConfigureSidecar(options, deployment, workspaceRoot, diagnostics);
+                sidecar.UpdateDiagnostics(diagnostics);
+                sidecar.RequestMcpTools();
+                return responses;
+            }
+
+            if (type == "setMcpToolEnabled")
+            {
+                var functionName = GetString(message, "functionName");
+                var enabled = true;
+                if (message.TryGetValue("enabled", out var enabledValue))
+                {
+                    if (enabledValue is bool boolValue) enabled = boolValue;
+                    else if (enabledValue != null && bool.TryParse(Convert.ToString(enabledValue), out var parsed)) enabled = parsed;
+                }
+                sidecar.SetMcpToolEnabled(functionName, enabled);
+                return responses;
+            }
+
             return responses;
+        }
+
+        private void SetApiKeyFromSplash(List<string> responses)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var options = OptionsProvider != null ? OptionsProvider() : null;
+            if (options == null)
+            {
+                responses.Add(CreateErrorMessage("Junior options are not available yet."));
+                return;
+            }
+
+            var deployment = !string.IsNullOrWhiteSpace(selectedDeployment)
+                ? selectedDeployment
+                : options.ActiveDeployment;
+            var target = JuniorCredentialStore.CreateApiKeyTarget(options.Provider.ToString(), deployment);
+            var title = "Set Junior API Key";
+            var prompt = "Store the API key in Windows Credential Manager for " + options.Provider + " / " + (string.IsNullOrWhiteSpace(deployment) ? "default" : deployment) + ".";
+            var apiKey = PromptForSecret(title, prompt);
+            if (apiKey == null) return;
+            if (string.IsNullOrWhiteSpace(apiKey))
+            {
+                responses.Add(CreateErrorMessage("API key was empty; nothing was stored."));
+                return;
+            }
+
+            JuniorCredentialStore.WriteSecret(target, apiKey);
+            options.ApiKey = JuniorCredentialStore.ToReference(target);
+            options.AuthMode = JuniorAuthMode.ApiKey;
+            options.SaveSettingsToStorage();
+            JuniorSidecarService.Shared.ResetHistory();
+
+            responses.Add(ToJson(new Dictionary<string, object>
+            {
+                ["type"] = "secureSecretState",
+                ["state"] = "stored",
+                ["message"] = "API key stored securely."
+            }));
+            responses.Add(BuildAuthStateMessage(options));
+        }
+
+        private static string PromptForSecret(string title, string prompt)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var window = new System.Windows.Window
+            {
+                Title = title,
+                Width = 430,
+                Height = 190,
+                ResizeMode = ResizeMode.NoResize,
+                WindowStartupLocation = WindowStartupLocation.CenterScreen,
+                ShowInTaskbar = false
+            };
+
+            var root = new Grid { Margin = new Thickness(14) };
+            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+            var label = new TextBlock
+            {
+                Text = prompt,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 0, 0, 10)
+            };
+            Grid.SetRow(label, 0);
+            root.Children.Add(label);
+
+            var passwordBox = new PasswordBox
+            {
+                MinWidth = 360,
+                Margin = new Thickness(0, 0, 0, 8)
+            };
+            Grid.SetRow(passwordBox, 1);
+            root.Children.Add(passwordBox);
+
+            var hint = new TextBlock
+            {
+                Text = "The key is saved as a Windows Generic Credential; VS settings store only a cred: reference.",
+                TextWrapping = TextWrapping.Wrap,
+                FontSize = 11,
+                Opacity = 0.75,
+                Margin = new Thickness(0, 0, 0, 12)
+            };
+            Grid.SetRow(hint, 2);
+            root.Children.Add(hint);
+
+            var buttons = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Right
+            };
+            var okButton = new Button { Content = "Store", Width = 80, IsDefault = true, Margin = new Thickness(0, 0, 8, 0) };
+            var cancelButton = new Button { Content = "Cancel", Width = 80, IsCancel = true };
+            okButton.Click += (s, e) => { window.DialogResult = true; window.Close(); };
+            cancelButton.Click += (s, e) => { window.DialogResult = false; window.Close(); };
+            buttons.Children.Add(okButton);
+            buttons.Children.Add(cancelButton);
+            Grid.SetRow(buttons, 3);
+            root.Children.Add(buttons);
+
+            window.Content = root;
+            passwordBox.Focus();
+            return window.ShowDialog() == true ? passwordBox.Password : null;
+        }
+
+        private static void OpenJuniorOptionsPage()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            try
+            {
+                JuniorStudioPackage.Instance?.ShowOptionPage(typeof(JuniorOptionsPage));
+            }
+            catch { }
         }
 
         /// <summary>
@@ -480,6 +919,126 @@ namespace JuniorStudio.VisualStudio.Services
         public string CreateErrorMessage(string text)
         {
             return ToJson(new Dictionary<string, object> { ["type"] = "error", ["message"] = text });
+        }
+
+        private void RefreshDiagnosticsSnapshot()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (!sidecar.IsRunning) return;
+            sidecar.UpdateDiagnostics(CollectDiagnosticsSnapshot(WorkspaceRootProvider?.Invoke()));
+        }
+
+        private void StartAutomaticRepairTurn()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var options = OptionsProvider != null ? OptionsProvider() : null;
+            var deployment = !string.IsNullOrWhiteSpace(selectedDeployment)
+                ? selectedDeployment
+                : options?.ActiveDeployment;
+            if (options == null || string.IsNullOrWhiteSpace(deployment)) return;
+
+            var workspaceRoot = WorkspaceRootProvider?.Invoke();
+            var diagnostics = CollectDiagnosticsSnapshot(workspaceRoot);
+            ConfigureSidecar(options, deployment, workspaceRoot, diagnostics);
+            sidecar.UpdateDiagnostics(diagnostics);
+            sidecar.SendMessage("Continue fixing the validation errors from the previous attempt. Start with the captured Repair targets list, then use GetDiagnostics and the validation output as needed. Make the smallest safe changes, then validate again.", mode: "agent");
+        }
+
+        private void ConfigureSidecar(JuniorOptionsPage options, string deployment, string workspaceRoot, IList<IDictionary<string, object>> diagnostics)
+        {
+            sidecar.Configure(options, deployment, workspaceRoot, diagnostics, permissionLevel);
+        }
+
+        private static int ClampAutomaticRepairAttempts(int value)
+        {
+            if (value < 0) return 0;
+            if (value > 3) return 3;
+            return value;
+        }
+
+        private static List<IDictionary<string, object>> CollectDiagnosticsSnapshot(string workspaceRoot)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var result = new List<IDictionary<string, object>>();
+            try
+            {
+                var dte = Package.GetGlobalService(typeof(EnvDTE.DTE));
+                var toolWindows = GetProperty(dte, "ToolWindows");
+                var errorList = GetProperty(toolWindows, "ErrorList");
+                var items = GetProperty(errorList, "ErrorItems");
+                if (items == null) return result;
+
+                var root = string.IsNullOrWhiteSpace(workspaceRoot) ? null : Path.GetFullPath(workspaceRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar);
+                var count = Math.Min(ToInt(GetProperty(items, "Count")), 200);
+                for (var i = 1; i <= count; i++)
+                {
+                    object item = null;
+                    try { item = InvokeMethod(items, "Item", i); }
+                    catch { continue; }
+                    if (item == null) continue;
+
+                    var message = Convert.ToString(GetProperty(item, "Description")) ?? string.Empty;
+                    if (string.IsNullOrWhiteSpace(message)) continue;
+                    var file = NormalizeDiagnosticPath(Convert.ToString(GetProperty(item, "FileName")) ?? string.Empty, root);
+                    var severity = MapDiagnosticSeverity(Convert.ToString(GetProperty(item, "ErrorLevel")) ?? string.Empty);
+
+                    result.Add(new Dictionary<string, object>
+                    {
+                        ["severity"] = severity,
+                        ["file"] = file,
+                        ["line"] = ToInt(GetProperty(item, "Line")),
+                        ["column"] = ToInt(GetProperty(item, "Column")),
+                        ["code"] = string.Empty,
+                        ["message"] = message,
+                        ["project"] = Convert.ToString(GetProperty(item, "Project")) ?? string.Empty
+                    });
+                }
+            }
+            catch { }
+            return result;
+        }
+
+        private static string NormalizeDiagnosticPath(string fileName, string root)
+        {
+            if (string.IsNullOrWhiteSpace(fileName)) return string.Empty;
+            try
+            {
+                var full = Path.IsPathRooted(fileName) ? Path.GetFullPath(fileName) : fileName;
+                if (!string.IsNullOrWhiteSpace(root) && Path.IsPathRooted(full) && full.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+                {
+                    return full.Substring(root.Length).Replace('\\', '/');
+                }
+                return full.Replace('\\', '/');
+            }
+            catch { return fileName.Replace('\\', '/'); }
+        }
+
+        private static string MapDiagnosticSeverity(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return "Message";
+            if (raw.IndexOf("High", StringComparison.OrdinalIgnoreCase) >= 0 || raw.IndexOf("Error", StringComparison.OrdinalIgnoreCase) >= 0) return "Error";
+            if (raw.IndexOf("Medium", StringComparison.OrdinalIgnoreCase) >= 0 || raw.IndexOf("Warning", StringComparison.OrdinalIgnoreCase) >= 0) return "Warning";
+            return "Message";
+        }
+
+        private static object GetProperty(object value, string propertyName)
+        {
+            if (value == null || string.IsNullOrEmpty(propertyName)) return null;
+            try { return value.GetType().InvokeMember(propertyName, System.Reflection.BindingFlags.GetProperty, null, value, null); }
+            catch { return null; }
+        }
+
+        private static object InvokeMethod(object value, string methodName, params object[] args)
+        {
+            if (value == null || string.IsNullOrEmpty(methodName)) return null;
+            try { return value.GetType().InvokeMember(methodName, System.Reflection.BindingFlags.InvokeMethod, null, value, args); }
+            catch { return null; }
+        }
+
+        private static int ToInt(object value)
+        {
+            try { return value == null ? 0 : Convert.ToInt32(value); }
+            catch { return 0; }
         }
 
         // ── Session lifecycle ───────────────────────────────────────────────
@@ -677,6 +1236,27 @@ namespace JuniorStudio.VisualStudio.Services
                             }
                         }
                         break;
+                    case "turnSummary":
+                        {
+                            var payload = CloneDict(msg);
+                            payload.Remove("type");
+                            AppendItem("turn-summary", payload);
+                        }
+                        break;
+                    case "repoInstructions":
+                        {
+                            var payload = CloneDict(msg);
+                            payload.Remove("type");
+                            AppendItem("repo-instructions", payload);
+                        }
+                        break;
+                    case "repairChainSummary":
+                        {
+                            var payload = CloneDict(msg);
+                            payload.Remove("type");
+                            AppendItem("repair-chain-summary", payload);
+                        }
+                        break;
                 }
             }
             catch { /* swallow */ }
@@ -691,7 +1271,8 @@ namespace JuniorStudio.VisualStudio.Services
 
         public void Dispose()
         {
-            sidecar.Dispose();
+            diagnosticsTimer.Stop();
+            sidecar.MessageReceived -= OnSidecarMessage;
         }
 
         private Dictionary<string, object> Deserialize(string json)
@@ -713,7 +1294,21 @@ namespace JuniorStudio.VisualStudio.Services
 
         private static string GetString(Dictionary<string, object> message, string key)
         {
+            if (message == null) return null;
             return message.TryGetValue(key, out var value) ? Convert.ToString(value) : null;
+        }
+
+        private static Dictionary<string, object> GetDictionary(Dictionary<string, object> message, string key)
+        {
+            if (message == null || !message.TryGetValue(key, out var value) || value == null) return null;
+            return value as Dictionary<string, object>;
+        }
+
+        private static bool GetBool(Dictionary<string, object> message, string key)
+        {
+            if (message == null || !message.TryGetValue(key, out var value) || value == null) return false;
+            if (value is bool b) return b;
+            return bool.TryParse(Convert.ToString(value), out var parsed) && parsed;
         }
 
         private static List<string> GetStringList(Dictionary<string, object> message, string key)

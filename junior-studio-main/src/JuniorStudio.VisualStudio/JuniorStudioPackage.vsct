@@ -11,6 +11,9 @@
       <Group guid="guidJuniorStudioPackageCmdSet" id="JuniorStudioViewMenuGroup" priority="0x0700">
         <Parent guid="guidSHLMainMenu" id="IDM_VS_MENU_VIEW" />
       </Group>
+      <Group guid="guidJuniorStudioPackageCmdSet" id="JuniorStudioEditorContextMenuGroup" priority="0x0600">
+        <Parent guid="guidSHLMainMenu" id="IDM_VS_CTXT_CODEWIN" />
+      </Group>
     </Groups>
 
     <Buttons>
@@ -19,6 +22,48 @@
         <Strings>
           <ButtonText>Junior Chat</ButtonText>
           <CommandName>JuniorStudio.OpenJuniorChat</CommandName>
+        </Strings>
+      </Button>
+      <Button guid="guidJuniorStudioPackageCmdSet" id="ExplainSelectionCommand" priority="0x0110" type="Button">
+        <Parent guid="guidJuniorStudioPackageCmdSet" id="JuniorStudioToolsMenuGroup" />
+        <Strings>
+          <ButtonText>Junior: Explain Selection</ButtonText>
+          <CommandName>JuniorStudio.ExplainSelection</CommandName>
+        </Strings>
+      </Button>
+      <Button guid="guidJuniorStudioPackageCmdSet" id="ReviewSelectionCommand" priority="0x0111" type="Button">
+        <Parent guid="guidJuniorStudioPackageCmdSet" id="JuniorStudioToolsMenuGroup" />
+        <Strings>
+          <ButtonText>Junior: Review Selection</ButtonText>
+          <CommandName>JuniorStudio.ReviewSelection</CommandName>
+        </Strings>
+      </Button>
+      <Button guid="guidJuniorStudioPackageCmdSet" id="FixSelectionCommand" priority="0x0112" type="Button">
+        <Parent guid="guidJuniorStudioPackageCmdSet" id="JuniorStudioToolsMenuGroup" />
+        <Strings>
+          <ButtonText>Junior: Fix Selection</ButtonText>
+          <CommandName>JuniorStudio.FixSelection</CommandName>
+        </Strings>
+      </Button>
+      <Button guid="guidJuniorStudioPackageCmdSet" id="DiffReviewSelectionCommand" priority="0x0113" type="Button">
+        <Parent guid="guidJuniorStudioPackageCmdSet" id="JuniorStudioToolsMenuGroup" />
+        <Strings>
+          <ButtonText>Junior: Preview Fix as Diff</ButtonText>
+          <CommandName>JuniorStudio.PreviewFixAsDiff</CommandName>
+        </Strings>
+      </Button>
+      <Button guid="guidJuniorStudioPackageCmdSet" id="InlineCompletionCommand" priority="0x0114" type="Button">
+        <Parent guid="guidJuniorStudioPackageCmdSet" id="JuniorStudioToolsMenuGroup" />
+        <Strings>
+          <ButtonText>Junior: Complete Inline</ButtonText>
+          <CommandName>JuniorStudio.CompleteInline</CommandName>
+        </Strings>
+      </Button>
+      <Button guid="guidJuniorStudioPackageCmdSet" id="AcceptGhostTextCommand" priority="0x0115" type="Button">
+        <Parent guid="guidJuniorStudioPackageCmdSet" id="JuniorStudioToolsMenuGroup" />
+        <Strings>
+          <ButtonText>Junior: Accept Inline Suggestion</ButtonText>
+          <CommandName>JuniorStudio.AcceptInlineSuggestion</CommandName>
         </Strings>
       </Button>
     </Buttons>
@@ -31,6 +76,24 @@
     <CommandPlacement guid="guidJuniorStudioPackageCmdSet" id="OpenJuniorChatCommand" priority="0x0100">
       <Parent guid="guidJuniorStudioPackageCmdSet" id="JuniorStudioViewMenuGroup" />
     </CommandPlacement>
+    <CommandPlacement guid="guidJuniorStudioPackageCmdSet" id="ExplainSelectionCommand" priority="0x0110">
+      <Parent guid="guidJuniorStudioPackageCmdSet" id="JuniorStudioEditorContextMenuGroup" />
+    </CommandPlacement>
+    <CommandPlacement guid="guidJuniorStudioPackageCmdSet" id="ReviewSelectionCommand" priority="0x0111">
+      <Parent guid="guidJuniorStudioPackageCmdSet" id="JuniorStudioEditorContextMenuGroup" />
+    </CommandPlacement>
+    <CommandPlacement guid="guidJuniorStudioPackageCmdSet" id="FixSelectionCommand" priority="0x0112">
+      <Parent guid="guidJuniorStudioPackageCmdSet" id="JuniorStudioEditorContextMenuGroup" />
+    </CommandPlacement>
+    <CommandPlacement guid="guidJuniorStudioPackageCmdSet" id="DiffReviewSelectionCommand" priority="0x0113">
+      <Parent guid="guidJuniorStudioPackageCmdSet" id="JuniorStudioEditorContextMenuGroup" />
+    </CommandPlacement>
+    <CommandPlacement guid="guidJuniorStudioPackageCmdSet" id="InlineCompletionCommand" priority="0x0114">
+      <Parent guid="guidJuniorStudioPackageCmdSet" id="JuniorStudioEditorContextMenuGroup" />
+    </CommandPlacement>
+    <CommandPlacement guid="guidJuniorStudioPackageCmdSet" id="AcceptGhostTextCommand" priority="0x0115">
+      <Parent guid="guidJuniorStudioPackageCmdSet" id="JuniorStudioEditorContextMenuGroup" />
+    </CommandPlacement>
   </CommandPlacements>
 
   <Symbols>
@@ -38,7 +101,14 @@
     <GuidSymbol name="guidJuniorStudioPackageCmdSet" value="{8c3bbdfc-302d-4c40-9f0c-c94f5b2f5868}">
       <IDSymbol name="JuniorStudioToolsMenuGroup" value="0x1020" />
       <IDSymbol name="JuniorStudioViewMenuGroup" value="0x1030" />
+      <IDSymbol name="JuniorStudioEditorContextMenuGroup" value="0x1040" />
       <IDSymbol name="OpenJuniorChatCommand" value="0x0100" />
+      <IDSymbol name="ExplainSelectionCommand" value="0x0110" />
+      <IDSymbol name="ReviewSelectionCommand" value="0x0111" />
+      <IDSymbol name="FixSelectionCommand" value="0x0112" />
+      <IDSymbol name="DiffReviewSelectionCommand" value="0x0113" />
+      <IDSymbol name="InlineCompletionCommand" value="0x0114" />
+      <IDSymbol name="AcceptGhostTextCommand" value="0x0115" />
     </GuidSymbol>
   </Symbols>
 </CommandTable>
