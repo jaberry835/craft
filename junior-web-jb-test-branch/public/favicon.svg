@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none">
+	<defs>
+		<linearGradient id="panel" x1="8" y1="6" x2="56" y2="58" gradientUnits="userSpaceOnUse">
+			<stop offset="0" stop-color="#2e397f"/>
+			<stop offset="1" stop-color="#161c47"/>
+		</linearGradient>
+		<linearGradient id="edge" x1="10" y1="8" x2="54" y2="58" gradientUnits="userSpaceOnUse">
+			<stop offset="0" stop-color="#667fff"/>
+			<stop offset="1" stop-color="#4655c2"/>
+		</linearGradient>
+		<linearGradient id="accent" x1="14" y1="10" x2="52" y2="48" gradientUnits="userSpaceOnUse">
+			<stop offset="0" stop-color="#84ecff"/>
+			<stop offset="1" stop-color="#8d74ff"/>
+		</linearGradient>
+		<linearGradient id="accentAlt" x1="12" y1="8" x2="52" y2="54" gradientUnits="userSpaceOnUse">
+			<stop offset="0" stop-color="#eef2ff"/>
+			<stop offset="1" stop-color="#8ca1ff"/>
+		</linearGradient>
+		<linearGradient id="chrome" x1="12" y1="12" x2="50" y2="44" gradientUnits="userSpaceOnUse">
+			<stop offset="0" stop-color="#fdfcff"/>
+			<stop offset="1" stop-color="#a6b7ff"/>
+		</linearGradient>
+		<radialGradient id="glowSoft" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(24 18) rotate(90) scale(12)">
+			<stop offset="0" stop-color="#75efff" stop-opacity="0.34"/>
+			<stop offset="1" stop-color="#75efff" stop-opacity="0"/>
+		</radialGradient>
+		<radialGradient id="glowStrong" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(39 20) rotate(90) scale(10)">
+			<stop offset="0" stop-color="#a080ff" stop-opacity="0.3"/>
+			<stop offset="1" stop-color="#a080ff" stop-opacity="0"/>
+		</radialGradient>
+		<filter id="shadow" x="2" y="2" width="60" height="60" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+			<feDropShadow dx="0" dy="5" stdDeviation="4" flood-color="#060a1e" flood-opacity="0.28"/>
+		</filter>
+	</defs>
+	<rect x="9" y="8" width="46" height="46" rx="12" fill="url(#panel)" stroke="url(#edge)" stroke-width="1.75" filter="url(#shadow)"/>
+	<circle cx="24" cy="18" r="12" fill="url(#glowSoft)"/>
+	<circle cx="39" cy="20" r="10" fill="url(#glowStrong)"/>
+	<path d="M18 45H46" stroke="url(#chrome)" stroke-width="2.2" stroke-linecap="round" opacity="0.55"/>
+	<path d="M15 42H49" stroke="url(#accentAlt)" stroke-width="2.4" stroke-linecap="round" opacity="0.85"/>
+	<path d="M20 42L18 49" stroke="url(#accentAlt)" stroke-width="3" stroke-linecap="round"/>
+	<path d="M44 42L46 49" stroke="url(#accentAlt)" stroke-width="3" stroke-linecap="round"/>
+	<path d="M20 49H44" stroke="url(#accentAlt)" stroke-width="2.8" stroke-linecap="round"/>
+	<rect x="21" y="21" width="22" height="16" rx="2.6" fill="#151c42" stroke="url(#accentAlt)" stroke-width="1.8"/>
+	<path d="M27 26L31 29L27 32" stroke="url(#chrome)" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/>
+	<path d="M34 32H38" stroke="url(#chrome)" stroke-width="2.3" stroke-linecap="round"/>
+	<path d="M14 37V29" stroke="url(#edge)" stroke-width="4" stroke-linecap="round" opacity="0.85"/>
+	<path d="M50 37V29" stroke="url(#edge)" stroke-width="4" stroke-linecap="round" opacity="0.85"/>
+	<path d="M23 16L29 20L35 17L40 21" stroke="url(#accent)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+	<path d="M35 17L39 15L45 18" stroke="url(#chrome)" stroke-width="1.7" stroke-linecap="round"/>
+	<circle cx="24" cy="18" r="1.8" fill="url(#chrome)"/>
+	<circle cx="31" cy="20" r="1.6" fill="url(#accent)"/>
+	<circle cx="39" cy="15" r="1.7" fill="url(#accentAlt)"/>
+	<circle cx="45" cy="18" r="1.6" fill="url(#chrome)"/>
+	<circle cx="32" cy="11" r="1.5" fill="url(#chrome)"/>
+	<path d="M32 12.5V14.2" stroke="url(#chrome)" stroke-width="1.4" stroke-linecap="round"/>
+</svg>

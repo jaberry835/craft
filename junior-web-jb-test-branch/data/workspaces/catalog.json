@@ -1,0 +1,12 @@
+{
+  "defaultWorkspaceId": "default",
+  "items": [
+    {
+      "id": "default",
+      "name": "Default Workspace",
+      "description": "Local development workspace",
+      "ownerId": "admin",
+      "rootPath": "/workspaces/junior-web/data/workspaces/default"
+    }
+  ]
+}
