@@ -23,15 +23,23 @@ fi
 repos=(
  # "https://github.com/adamruderman/UserAccessCheckerApi main"
   "https://github.com/adamruderman/AgentChatV2 main"
+  "https://github.com/adamruderman/AgentChatV2 experiment/response-api"
   "https://github.com/adamruderman/Rude-MCPServer main"
   #"https://github.com/adamruderman/UserAccessChecker-Python main"
   #"https://github.com/jaberry835/snapseek main"
   #"https://github.com/microsoft/simplechat main"
+  #"https://github.com/jaberry835/snapseek deepface-embeddings"
   #"https://github.com/adamruderman/WebScrapeAndIndex main"
-  #"https://github.com/adamruderman/SecureAPI main"
-  "https://github.com/adamruderman/SecureChatExtension main",
-  "https://github.com/adamruderman/SecureChatExtension msal-config",
-  #"https://github.com/adamruderman/SecureChatExtension agent-framework-cli"
+  "https://github.com/adamruderman/SecureAPI main"
+  "https://github.com/adamruderman/McpServer main"
+  "https://github.com/adamruderman/SecureChatExtension main"
+  #"https://github.com/adamruderman/SecureChatExtension msal-config"
+  #"https://github.com/adamruderman/SecureChatExtension experiment/responses-api"
+  #"https://github.com/adamruderman/SecureChatExtension squad-integration"
+  #"https://github.com/adamruderman/SecureChatExtension feature/junior-dev-team"
+  "https://github.com/adamruderman/junior-studio main"
+  "https://github.com/adamruderman/junior-web main"
+  "https://github.com/adamruderman/junior-web jb-test-branch"
 )
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

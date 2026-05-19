@@ -20,6 +20,8 @@ $repos = @(
    #@{ Url = "https://github.com/adamruderman/SecureChatExtension"; Branch = "squad-integration" },
    #@{ Url = "https://github.com/adamruderman/SecureChatExtension"; Branch = "feature/junior-dev-team" },
     @{ Url = "https://github.com/adamruderman/junior-studio"; Branch = "main"}
+    @{ Url = "https://github.com/adamruderman/junior-web"; Branch = "main"}
+    @{ Url = "https://github.com/adamruderman/junior-web"; Branch = "jb-test-branch"}
     
      
 )
