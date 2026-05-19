@@ -4,15 +4,17 @@
 set -u
 
 # PAT setup for private GitHub repos used by add_repo.py.
-# Priority: existing ADD_REPO_GITHUB_TOKEN -> GITHUB_TOKEN -> secure prompt.
+# Priority: existing ADD_REPO_GITHUB_TOKEN -> GITHUB_TOKEN -> GH_TOKEN -> secure prompt.
 if [[ -z "${ADD_REPO_GITHUB_TOKEN:-}" ]]; then
   if [[ -n "${GITHUB_TOKEN:-}" ]]; then
     export ADD_REPO_GITHUB_TOKEN="$GITHUB_TOKEN"
+  elif [[ -n "${GH_TOKEN:-}" ]]; then
+    export ADD_REPO_GITHUB_TOKEN="$GH_TOKEN"
   else
     read -rsp "GitHub PAT (repo read access): " pat
     echo
     if [[ -z "$pat" ]]; then
-      echo "ERROR: No PAT provided. Set ADD_REPO_GITHUB_TOKEN or GITHUB_TOKEN."
+      echo "ERROR: No PAT provided. Set ADD_REPO_GITHUB_TOKEN, GITHUB_TOKEN, or GH_TOKEN."
       exit 1
     fi
     export ADD_REPO_GITHUB_TOKEN="$pat"
