@@ -16,3 +16,4 @@ Curated Demo Code
 | 2026-05-13 23:33 UTC | SecureChatExtension | main | +7, ~18 |
 | 2026-05-13 23:33 UTC | junior-studio | main | +30 |
 | 2026-05-15 21:35 UTC | junior-studio | main | +9, ~17 |
+| 2026-05-19 14:27 UTC | junior-web | main | +40 |
