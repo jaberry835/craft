@@ -18,6 +18,7 @@ const localDevIdentityStorageKey = 'jr-workbench-local-dev-identity';
 let activeAuthConfig: AuthConfig | null = null;
 let msalRuntimePromise: Promise<PublicClientApplication> | null = null;
 let msalRuntimeKey = '';
+const authRetryStatuses = new Set([401, 403, 502]);
 
 export class RequestError extends Error {
   readonly status: number;
@@ -86,16 +87,10 @@ function requestIdentityHeaders(): HeadersInit {
 }
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const authHeaders = await resolveAuthHeaders(path);
-  const response = await fetch(path, {
-    ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      ...requestIdentityHeaders(),
-      ...authHeaders,
-      ...init?.headers
-    }
-  });
+  let response = await fetchWithResolvedAuth(path, init);
+  if (!response.ok && shouldRetryWithFreshAuth(path, response.status)) {
+    response = await fetchWithResolvedAuth(path, init, true);
+  }
 
   if (!response.ok) {
     const payload = await response.json().catch(() => ({ error: response.statusText }));
@@ -110,16 +105,10 @@ async function requestStream(
   init: RequestInit,
   onEvent: (event: AgentMessageStreamEvent) => void | Promise<void>
 ): Promise<void> {
-  const authHeaders = await resolveAuthHeaders(path);
-  const response = await fetch(path, {
-    ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      ...requestIdentityHeaders(),
-      ...authHeaders,
-      ...init.headers
-    }
-  });
+  let response = await fetchWithResolvedAuth(path, init);
+  if (!response.ok && shouldRetryWithFreshAuth(path, response.status)) {
+    response = await fetchWithResolvedAuth(path, init, true);
+  }
 
   if (!response.ok) {
     const payload = await response.json().catch(() => ({ error: response.statusText }));
@@ -156,6 +145,25 @@ async function requestStream(
       break;
     }
   }
+}
+
+function shouldRetryWithFreshAuth(path: string, status: number): boolean {
+  return path !== '/api/auth/config'
+    && activeAuthConfig?.identityMode === 'entra-msal'
+    && authRetryStatuses.has(status);
+}
+
+async function fetchWithResolvedAuth(path: string, init?: RequestInit, forceRefresh = false): Promise<Response> {
+  const authHeaders = await resolveAuthHeaders(path, forceRefresh);
+  return fetch(path, {
+    ...init,
+    headers: {
+      'Content-Type': 'application/json',
+      ...requestIdentityHeaders(),
+      ...authHeaders,
+      ...init?.headers
+    }
+  });
 }
 
 function msalConfigKey(config: AuthConfig): string {
@@ -436,8 +444,9 @@ export const workbenchApi = {
     method: 'POST',
     body: JSON.stringify({ content, agentId, sessionId, ...options })
   }),
-  sendAgentMessageStream: (content: string, agentId: string | undefined, options: AgentRunOptions | undefined, workspaceId: string | undefined, sessionId: string | undefined, onEvent: (event: AgentMessageStreamEvent) => void | Promise<void>) => requestStream(`${workspaceBasePath(workspaceId)}/agent/messages/stream`, {
+  sendAgentMessageStream: (content: string, agentId: string | undefined, options: AgentRunOptions | undefined, workspaceId: string | undefined, sessionId: string | undefined, onEvent: (event: AgentMessageStreamEvent) => void | Promise<void>, signal?: AbortSignal) => requestStream(`${workspaceBasePath(workspaceId)}/agent/messages/stream`, {
     method: 'POST',
+    signal,
     body: JSON.stringify({ content, agentId, sessionId, ...options })
   }, onEvent),
   getMessages: (workspaceId?: string, sessionId?: string) => requestJson<ChatMessage[]>(`${workspaceBasePath(workspaceId)}/agent/messages${sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : ''}`),

@@ -24,6 +24,7 @@ import {
   PanelRightClose,
   PanelRightOpen,
   Sparkles,
+  Square,
   Sun,
   Trash2,
   X
@@ -380,13 +381,33 @@ function renderMessageDisplayPart(
   );
 }
 
+function LiveReasoningBody({ reasoning }: { reasoning: string }) {
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const node = bodyRef.current;
+    if (!node) {
+      return;
+    }
+    node.scrollTop = node.scrollHeight;
+  }, [reasoning]);
+
+  return (
+    <div ref={bodyRef} className="message-reasoning-body live-scroll">
+      {reasoning.trim()
+        ? renderStreamingText(reasoning, 'message-stream-text reasoning-stream-text')
+        : <p className="muted">No reasoning emitted yet.</p>}
+    </div>
+  );
+}
+
 function renderLiveReasoning(
   reasoning: string,
   messageId: string,
   onToggleDetail: (event: SyntheticEvent<HTMLDetailsElement>) => void
 ) {
   return (
-    <details key={`${messageId}-live-reasoning`} className="message-detail message-reasoning live" onToggle={onToggleDetail}>
+    <details key={`${messageId}-live-reasoning`} className="message-detail message-reasoning live" onToggle={onToggleDetail} open>
       <summary className="message-detail-toggle message-reasoning-summary" aria-label="Live reasoning">
         <Sparkles size={12} />
         <span>Reasoning</span>
@@ -398,11 +419,7 @@ function renderLiveReasoning(
           <Sparkles size={13} />
           <strong>Live reasoning</strong>
         </div>
-        <div className="message-reasoning-body live-scroll">
-          {reasoning.trim()
-            ? renderStreamingText(reasoning, 'message-stream-text reasoning-stream-text')
-            : <p className="muted">No reasoning emitted yet.</p>}
-        </div>
+        <LiveReasoningBody reasoning={reasoning} />
       </div>
     </details>
   );
@@ -651,6 +668,7 @@ function App() {
   const [devIdentityTenantIdDraft, setDevIdentityTenantIdDraft] = useState(() => workbenchApi.getStoredLocalDevIdentity()?.tenantId ?? '');
   const [devIdentityRolesDraft, setDevIdentityRolesDraft] = useState(() => (workbenchApi.getStoredLocalDevIdentity()?.roles ?? []).join(', '));
   const [liveAssistantTurn, setLiveAssistantTurn] = useState<LiveAssistantTurn | null>(null);
+  const activeStreamAbortRef = useRef<AbortController | null>(null);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const workbenchGridRef = useRef<HTMLElement | null>(null);
   const markdownViewMenuRef = useRef<HTMLDivElement | null>(null);
@@ -660,6 +678,8 @@ function App() {
   const hasInitializedChatPaneWidth = useRef(false);
   const previousChatSessionKeyRef = useRef('');
   const previousSessionHadMessagesRef = useRef(false);
+  const pendingScrollMessageIdRef = useRef<string | null>(null);
+  const [chatTailSpacerHeight, setChatTailSpacerHeight] = useState(0);
   const isAdminIdentity = hasAdminRole(currentIdentity);
   const canAccessWorkbench = hasWorkbenchRole(currentIdentity);
   const showDevIdentityTools = isLocalDevHost() && authConfig?.identityMode === 'trusted-header';
@@ -1196,13 +1216,72 @@ function App() {
   }, [workspaceCreateMenuOpen]);
 
   useEffect(() => {
-    const node = messagesRef.current;
-    if (!node) {
+    const container = messagesRef.current;
+    if (!container) {
       return;
     }
 
-    node.scrollTop = node.scrollHeight;
-  }, [messages, busy]);
+    const measure = () => {
+      const lastUserMessage = [...messages].reverse().find((m) => m.role === 'user');
+      const anchorId = lastUserMessage?.id ?? messages[messages.length - 1]?.id ?? null;
+      if (!anchorId) {
+        setChatTailSpacerHeight(0);
+        return;
+      }
+
+      const anchor = container.querySelector<HTMLElement>(`[data-message-id="${anchorId}"]`);
+      if (!anchor) {
+        setChatTailSpacerHeight(0);
+        return;
+      }
+
+      const containerRect = container.getBoundingClientRect();
+      const anchorRect = anchor.getBoundingClientRect();
+      const anchorTopInContent = anchorRect.top - containerRect.top + container.scrollTop;
+
+      const tailSpacer = container.querySelector<HTMLElement>('.messages-tail-spacer');
+      const tailSpacerHeight = tailSpacer?.offsetHeight ?? 0;
+      const turnHeight = container.scrollHeight - tailSpacerHeight - anchorTopInContent;
+      const desired = Math.max(0, container.clientHeight - turnHeight);
+      setChatTailSpacerHeight((current) => (Math.abs(current - desired) > 1 ? desired : current));
+    };
+
+    measure();
+
+    const observer = new ResizeObserver(measure);
+    observer.observe(container);
+    Array.from(container.children).forEach((child) => observer.observe(child));
+    return () => observer.disconnect();
+  }, [messages, liveAssistantTurn]);
+
+  useEffect(() => {
+    const container = messagesRef.current;
+    if (!container) {
+      return;
+    }
+
+    const lastUserMessage = [...messages].reverse().find((m) => m.role === 'user');
+    const anchorId = lastUserMessage?.id ?? null;
+
+    requestAnimationFrame(() => {
+      if (anchorId) {
+        const anchor = container.querySelector<HTMLElement>(`[data-message-id="${anchorId}"]`);
+        if (anchor) {
+          const containerRect = container.getBoundingClientRect();
+          const anchorRect = anchor.getBoundingClientRect();
+          const anchorTopInContent = anchorRect.top - containerRect.top + container.scrollTop;
+          const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+          container.scrollTop = Math.min(anchorTopInContent, maxScroll);
+          return;
+        }
+      }
+      container.scrollTop = container.scrollHeight;
+    });
+
+    if (!busy && !liveAssistantTurn) {
+      pendingScrollMessageIdRef.current = null;
+    }
+  }, [messages, liveAssistantTurn, busy, chatTailSpacerHeight]);
 
   useEffect(() => {
     const chatSessionKey = `${activeWorkspaceId}:${selectedSessionId || 'latest'}`;
@@ -1434,6 +1513,10 @@ function App() {
   }
 
   async function sendPrompt() {
+    if (busy) {
+      return;
+    }
+
     if (!prompt.trim()) {
       return;
     }
@@ -1445,11 +1528,15 @@ function App() {
       createdAt: new Date().toISOString()
     };
 
+    pendingScrollMessageIdRef.current = userMessage.id;
     setMessages((current) => [...current, userMessage]);
     setPrompt('');
     setBusy(true);
     const liveAssistantId = crypto.randomUUID();
     let streamedReasoning = '';
+    let streamedContent = '';
+    const abortController = new AbortController();
+    activeStreamAbortRef.current = abortController;
     setLiveAssistantTurn({ id: liveAssistantId, content: '', reasoning: '' });
     setStatus('Junior is working over the package files...');
 
@@ -1463,6 +1550,7 @@ function App() {
         selectedSessionId || undefined,
         (event) => {
           if (event.type === 'assistant_text') {
+            streamedContent = `${streamedContent}${event.text}`;
             setLiveAssistantTurn((current) => current && current.id === liveAssistantId
               ? { ...current, content: `${current.content}${event.text}` }
               : current);
@@ -1484,7 +1572,8 @@ function App() {
           }
 
           throw new Error(event.message);
-        }
+        },
+        abortController.signal
       );
 
       if (!finalResponse) {
@@ -1503,6 +1592,19 @@ function App() {
         setStatus('Junior finished without new file edits');
       }
     } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        setLiveAssistantTurn(null);
+        const partialMessage = mergeStreamedReasoning({
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          content: streamedContent.trim() || 'Stopped.',
+          createdAt: new Date().toISOString()
+        }, streamedReasoning);
+        setMessages((current) => [...current, partialMessage]);
+        setStatus('Stopped');
+        return;
+      }
+
       setLiveAssistantTurn(null);
       const message = error instanceof Error ? error.message : 'Agent request failed';
       setMessages((current) => [...current, {
@@ -1513,8 +1615,13 @@ function App() {
       }]);
       setStatus(message);
     } finally {
+      activeStreamAbortRef.current = null;
       setBusy(false);
     }
+  }
+
+  function stopPrompt() {
+    activeStreamAbortRef.current?.abort();
   }
 
   async function createNewSession() {
@@ -3686,8 +3793,13 @@ function App() {
                   </div>
                 )}
                 {messages.map((message) => (
-                  <article key={message.id} className={`message ${message.role}`}>
-                    <span>{message.role}</span>
+                  <article key={message.id} className={`message ${message.role}`} data-message-id={message.id}>
+                    {message.role !== 'user' && (
+                      <div className="message-role-badge">
+                        {message.role === 'assistant' && <Bot size={14} />}
+                        <span>{message.role === 'assistant' ? 'Assistant' : message.role}</span>
+                      </div>
+                    )}
                     <div className="message-body">{renderPlainText(message.content)}</div>
                     {message.display && message.display.length > 0 && (
                       <div className="message-meta">
@@ -3697,8 +3809,11 @@ function App() {
                   </article>
                 ))}
                 {liveAssistantTurn && (
-                  <article key={liveAssistantTurn.id} className="message assistant live-assistant">
-                    <span>assistant</span>
+                  <article key={liveAssistantTurn.id} className="message assistant live-assistant" data-message-id={liveAssistantTurn.id}>
+                    <div className="message-role-badge">
+                      <Bot size={14} />
+                      <span>Assistant</span>
+                    </div>
                     <div className="message-body">
                       {liveAssistantTurn.content.trim()
                         ? renderStreamingText(liveAssistantTurn.content)
@@ -3709,6 +3824,13 @@ function App() {
                     </div>
                   </article>
                 )}
+                {messages.length > 0 && (
+                  <div
+                    className="messages-tail-spacer"
+                    aria-hidden="true"
+                    style={{ minHeight: chatTailSpacerHeight }}
+                  />
+                )}
               </div>
               <div className="prompt-box">
                 <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} onKeyDown={(event) => {
@@ -3717,9 +3839,15 @@ function App() {
                     void sendPrompt();
                   }
                 }} />
-                <button type="button" className="primary icon-only" onClick={sendPrompt} disabled={busy || !prompt.trim()} title="Send to Junior">
-                  <Send size={17} />
-                </button>
+                {liveAssistantTurn ? (
+                  <button type="button" className="danger icon-only" onClick={stopPrompt} title="Stop response">
+                    <Square size={17} />
+                  </button>
+                ) : (
+                  <button type="button" className="primary icon-only" onClick={sendPrompt} disabled={busy || !prompt.trim()} title="Send to Junior">
+                    <Send size={17} />
+                  </button>
+                )}
               </div>
             </>
           )}
