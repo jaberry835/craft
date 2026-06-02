@@ -138,6 +138,52 @@ test('azure chat client requests reasoning effort for responses endpoints when c
   assert.equal(Object.hasOwn(parsed, 'temperature'), false);
 });
 
+test('azure chat client uses responses API for v1 endpoints when reasoning is enabled', async () => {
+  const client = new AzureOpenAiChatClient(() => 'test-key');
+  const originalFetch = globalThis.fetch;
+  let requestUrl = '';
+  let requestBody = '';
+
+  globalThis.fetch = async (input, init) => {
+    requestUrl = String(input);
+    requestBody = String(init?.body ?? '');
+    return new Response(JSON.stringify({
+      output: [
+        {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: 'ok' }]
+        },
+        {
+          type: 'reasoning_summary',
+          content: [{ type: 'summary_text', text: 'Reasoning summary here.' }]
+        }
+      ]
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  };
+
+  try {
+    await client.complete(
+      createConnection('https://example.openai.azure.com/openai/v1'),
+      [{ role: 'user', content: 'hello' }],
+      { reasoningEffort: 'medium' }
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(requestUrl, 'https://example.openai.azure.com/openai/v1/responses');
+  const parsed = JSON.parse(requestBody);
+  assert.equal(parsed.model, 'gpt-4.1');
+  assert.equal(Array.isArray(parsed.input), true);
+  assert.equal(parsed.max_output_tokens, 1200);
+  assert.deepEqual(parsed.reasoning, { effort: 'medium', summary: 'auto' });
+  assert.equal(Object.hasOwn(parsed, 'messages'), false);
+});
+
 test('azure chat client prefers explicit temperature and max token overrides', async () => {
   const client = new AzureOpenAiChatClient(() => 'test-key');
   const originalFetch = globalThis.fetch;
@@ -167,7 +213,39 @@ test('azure chat client prefers explicit temperature and max token overrides', a
 
   const parsed = JSON.parse(requestBody);
   assert.equal(parsed.temperature, 1.1);
+  assert.equal(parsed.max_completion_tokens, 321);
+  assert.equal(Object.hasOwn(parsed, 'max_tokens'), false);
+});
+
+test('azure chat client keeps legacy max_tokens for non-v1 endpoints', async () => {
+  const client = new AzureOpenAiChatClient(() => 'test-key');
+  const originalFetch = globalThis.fetch;
+  let requestBody = '';
+
+  globalThis.fetch = async (_input, init) => {
+    requestBody = String(init?.body ?? '');
+    return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  };
+
+  try {
+    await client.complete(
+      {
+        ...createConnection('https://example.openai.azure.com'),
+        maxTokens: 600
+      },
+      [{ role: 'user', content: 'hello' }],
+      { maxTokens: 321 }
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const parsed = JSON.parse(requestBody);
   assert.equal(parsed.max_tokens, 321);
+  assert.equal(Object.hasOwn(parsed, 'max_completion_tokens'), false);
 });
 
 test('azure chat client concatenates assistant text fragments from responses payloads', async () => {

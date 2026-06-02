@@ -189,7 +189,9 @@ export class AzureOpenAiChatClient {
       return;
     }
 
-    if (!/\/responses$/i.test(endpoint)) {
+    const request = this.buildRequest(endpoint, deployment, apiVersion, messages, tools, options, connection, true);
+
+    if (!/\/responses$/i.test(request.url)) {
       const result = await this.completeWithTools(connection, messages, tools, options);
       if (result.reasoning) {
         yield { type: 'reasoning', text: result.reasoning };
@@ -214,7 +216,6 @@ export class AzureOpenAiChatClient {
       throw new Error(`Azure OpenAI Entra authentication failed: ${this.describeError(error)}`, { cause: error });
     }
 
-    const request = this.buildRequest(endpoint, deployment, apiVersion, messages, tools, options, connection, true);
     const response = await fetch(request.url, {
       method: 'POST',
       headers: {
@@ -374,19 +375,21 @@ export class AzureOpenAiChatClient {
     const isV1Endpoint = endpointKind === 'openai-v1' || isResponsesEndpoint;
     const normalizedV1Endpoint = endpoint.replace(/\/chat\/completions$/i, '').replace(/\/responses$/i, '');
     const useReasoning = options?.reasoningMode || (options?.reasoningEffort && options.reasoningEffort !== 'none');
+    const shouldUseResponsesApi = endpointKind === 'foundry-project' || isResponsesEndpoint || (endpointKind === 'openai-v1' && useReasoning);
     const temperature = options?.temperature ?? connection.temperature ?? 0.2;
     const maxTokens = options?.maxTokens ?? connection.maxTokens ?? 1200;
     const body: Record<string, unknown> = {
       messages,
       ...(tools && tools.length > 0 ? { tools, tool_choice: 'auto' } : {}),
-      ...(!useReasoning ? { temperature } : {}),
-      max_tokens: maxTokens
+      ...(!useReasoning ? { temperature } : {})
     };
 
-    if (endpointKind === 'foundry-project' || isResponsesEndpoint) {
+    if (shouldUseResponsesApi) {
       const normalizedResponsesEndpoint = endpointKind === 'foundry-project' && !isResponsesEndpoint
         ? `${endpoint.replace(/\/+$/, '')}/responses`
-        : endpoint;
+        : isResponsesEndpoint
+          ? endpoint
+          : `${normalizedV1Endpoint}/responses`;
       const reasoning = options?.reasoningEffort && options.reasoningEffort !== 'none'
         ? { effort: options.reasoningEffort, summary: 'auto' }
         : undefined;
@@ -422,14 +425,18 @@ export class AzureOpenAiChatClient {
           : `${normalizedV1Endpoint}/chat/completions`,
         body: {
           ...body,
-          model: deployment
+          model: deployment,
+          max_completion_tokens: maxTokens
         }
       };
     }
 
     return {
       url: `${endpoint}/openai/deployments/${encodeURIComponent(deployment)}/chat/completions?api-version=${encodeURIComponent(apiVersion)}`,
-      body
+      body: {
+        ...body,
+        max_tokens: maxTokens
+      }
     };
   }
 

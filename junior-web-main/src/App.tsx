@@ -1,4 +1,4 @@
-import type { ChangeEvent } from 'react';
+import type { ChangeEvent, SyntheticEvent } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Editor from '@monaco-editor/react';
 import ReactMarkdown from 'react-markdown';
@@ -76,7 +76,7 @@ const splitterWidth = 10;
 const minEditorPaneWidth = 360;
 const minSidebarPaneWidth = 190;
 const minChatPaneWidth = 280;
-const defaultChatPaneRatio = 0.35;
+const defaultChatPaneRatio = 0.5;
 const maxChatPaneRatio = 0.5;
 
 function getInitialTheme(): ThemeMode {
@@ -235,8 +235,23 @@ function normalizeReasoningStreamText(text: string) {
   return text.replace(/\r\n/g, '\n').replace(/\r/g, '');
 }
 
-function compactActivityLabel(title: string): string {
-  return title;
+function mergeStreamedReasoning(message: ChatMessage, streamedReasoning: string): ChatMessage {
+  const normalizedReasoning = streamedReasoning.trim();
+
+  if (!normalizedReasoning || message.display?.some((part) => part.kind === 'reasoning')) {
+    return message;
+  }
+
+  return {
+    ...message,
+    display: [
+      ...(message.display ?? []),
+      {
+        kind: 'reasoning',
+        text: normalizedReasoning
+      }
+    ]
+  };
 }
 
 function hasAdminRole(identity: RequestIdentitySummary | null): boolean {
@@ -309,52 +324,87 @@ function buildAuthActionUrl(path: string | null | undefined, redirectParam: 'pos
   return url.toString();
 }
 
-function renderMessageDisplayPart(part: ChatMessageDisplayPart, messageId: string) {
+function renderMessageDisplayPart(
+  part: ChatMessageDisplayPart,
+  messageId: string,
+  onToggleDetail: (event: SyntheticEvent<HTMLDetailsElement>) => void
+) {
   if (part.kind === 'reasoning') {
     return (
-      <details key={`${messageId}-reasoning`} className="message-reasoning">
-        <summary>Reasoning</summary>
-        <div className="message-reasoning-body">
-          {renderPlainText(part.text)}
+      <details key={`${messageId}-reasoning`} className="message-detail message-reasoning" onToggle={onToggleDetail}>
+        <summary className="message-detail-toggle" title="Reasoning">
+          <Sparkles size={12} />
+          <span>Reasoning</span>
+          <ChevronDown size={12} className="message-detail-chevron" />
+        </summary>
+        <div className="message-detail-panel message-reasoning-panel">
+          <div className="message-reasoning-panel-header">
+            <Sparkles size={13} />
+            <strong>Reasoning</strong>
+          </div>
+          <div className="message-reasoning-body">
+            {renderPlainText(part.text)}
+          </div>
         </div>
       </details>
     );
   }
 
   return (
-    <details key={`${messageId}-working`} className="message-working">
-      <summary title={part.title}>
-        <span>{compactActivityLabel(part.title)}</span>
-        <small>{part.events.length} step{part.events.length === 1 ? '' : 's'}</small>
+    <details key={`${messageId}-working`} className="message-detail message-working" onToggle={onToggleDetail}>
+      <summary className="message-detail-toggle" title={part.title}>
+        <Sparkles size={12} />
+        <span>Steps</span>
+        <small>{part.events.length}</small>
+        <ChevronDown size={12} className="message-detail-chevron" />
       </summary>
-      <div className="message-working-events">
-        {part.events.map((event) => (
-          <div key={event.id} className="message-working-event">
-            <Sparkles size={14} />
-            <div>
-              <span>{event.label}</span>
-              {event.detail && <small>{event.detail}</small>}
+      <div className="message-detail-panel message-working-panel">
+        <div className="message-working-panel-header">
+          <Sparkles size={13} />
+          <strong>{part.title}</strong>
+          <small>{part.events.length} step{part.events.length === 1 ? '' : 's'}</small>
+        </div>
+        <div className="message-working-events">
+          {part.events.map((event) => (
+            <div key={event.id} className="message-working-event">
+              <Sparkles size={14} />
+              <div>
+                <span>{event.label}</span>
+                {event.detail && <small>{event.detail}</small>}
+              </div>
             </div>
-          </div>
-        ))}
+          ))}
+        </div>
       </div>
     </details>
   );
 }
 
-function renderLiveReasoning(reasoning: string, messageId: string) {
+function renderLiveReasoning(
+  reasoning: string,
+  messageId: string,
+  onToggleDetail: (event: SyntheticEvent<HTMLDetailsElement>) => void
+) {
   return (
-    <section key={`${messageId}-live-reasoning`} className="message-reasoning live" aria-label="Live reasoning">
-      <div className="message-reasoning-summary">
+    <details key={`${messageId}-live-reasoning`} className="message-detail message-reasoning live" onToggle={onToggleDetail}>
+      <summary className="message-detail-toggle message-reasoning-summary" aria-label="Live reasoning">
+        <Sparkles size={12} />
         <span>Reasoning</span>
-        <small>live</small>
+        <small>Live</small>
+        <ChevronDown size={12} className="message-detail-chevron" />
+      </summary>
+      <div className="message-detail-panel message-reasoning-panel">
+        <div className="message-reasoning-panel-header live">
+          <Sparkles size={13} />
+          <strong>Live reasoning</strong>
+        </div>
+        <div className="message-reasoning-body live-scroll">
+          {reasoning.trim()
+            ? renderStreamingText(reasoning, 'message-stream-text reasoning-stream-text')
+            : <p className="muted">No reasoning emitted yet.</p>}
+        </div>
       </div>
-      <div className="message-reasoning-body live-scroll">
-        {reasoning.trim()
-          ? renderStreamingText(reasoning, 'message-stream-text reasoning-stream-text')
-          : <p className="muted">No reasoning emitted yet.</p>}
-      </div>
-    </section>
+    </details>
   );
 }
 
@@ -572,7 +622,18 @@ function App() {
   const [markdownViewMode, setMarkdownViewMode] = useState<MarkdownViewMode>('edit');
   const [markdownViewMenuOpen, setMarkdownViewMenuOpen] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(240);
-  const [chatPaneWidth, setChatPaneWidth] = useState(360);
+  const [chatPaneWidth, setChatPaneWidth] = useState(() => {
+    if (typeof window === 'undefined') {
+      return 360;
+    }
+
+    const estimatedRightPaneWidth = Math.max(
+      minChatPaneWidth,
+      window.innerWidth - 240 - splitterWidth - splitterWidth
+    );
+
+    return Math.max(minChatPaneWidth, Math.round(estimatedRightPaneWidth * defaultChatPaneRatio));
+  });
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isChatPaneCollapsed, setIsChatPaneCollapsed] = useState(false);
   const [isChatDetailsExpanded, setIsChatDetailsExpanded] = useState(true);
@@ -631,6 +692,17 @@ function App() {
       window.location.assign(signOutUrl);
     }
   }, [authConfig?.identityMode, signOutUrl]);
+
+  const scrollDetailIntoView = useCallback((event: SyntheticEvent<HTMLDetailsElement>) => {
+    const detail = event.currentTarget;
+    if (!detail.open) {
+      return;
+    }
+
+    requestAnimationFrame(() => {
+      detail.scrollIntoView({ block: 'end', behavior: 'smooth' });
+    });
+  }, []);
 
   useEffect(() => {
     if (!isIdentityMenuOpen) {
@@ -1377,6 +1449,7 @@ function App() {
     setPrompt('');
     setBusy(true);
     const liveAssistantId = crypto.randomUUID();
+    let streamedReasoning = '';
     setLiveAssistantTurn({ id: liveAssistantId, content: '', reasoning: '' });
     setStatus('Junior is working over the package files...');
 
@@ -1398,6 +1471,7 @@ function App() {
 
           if (event.type === 'reasoning') {
             const delta = normalizeReasoningStreamText(event.text);
+            streamedReasoning = `${streamedReasoning}${delta}`;
             setLiveAssistantTurn((current) => current && current.id === liveAssistantId
               ? { ...current, reasoning: `${current.reasoning}${delta}` }
               : current);
@@ -1419,7 +1493,7 @@ function App() {
 
       const response = finalResponse as AgentResponse;
       setLiveAssistantTurn(null);
-      setMessages((current) => [...current, response.message]);
+  setMessages((current) => [...current, mergeStreamedReasoning(response.message, streamedReasoning)]);
       await refreshChatSessions(response.sessionId);
 
       if (response.appliedChangeCount > 0) {
@@ -3615,7 +3689,11 @@ function App() {
                   <article key={message.id} className={`message ${message.role}`}>
                     <span>{message.role}</span>
                     <div className="message-body">{renderPlainText(message.content)}</div>
-                    {message.display?.map((part) => renderMessageDisplayPart(part, message.id))}
+                    {message.display && message.display.length > 0 && (
+                      <div className="message-meta">
+                        {message.display.map((part) => renderMessageDisplayPart(part, message.id, scrollDetailIntoView))}
+                      </div>
+                    )}
                   </article>
                 ))}
                 {liveAssistantTurn && (
@@ -3626,7 +3704,9 @@ function App() {
                         ? renderStreamingText(liveAssistantTurn.content)
                         : <p>Thinking through the request...</p>}
                     </div>
-                    {renderLiveReasoning(liveAssistantTurn.reasoning, liveAssistantTurn.id)}
+                    <div className="message-meta">
+                      {renderLiveReasoning(liveAssistantTurn.reasoning, liveAssistantTurn.id, scrollDetailIntoView)}
+                    </div>
                   </article>
                 )}
               </div>
