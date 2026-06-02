@@ -1,0 +1,28 @@
+<%= "=".repeat(92) %>
+<%= report.title.toUpperCase() %>
+<%= "=".repeat(92) %>
+
+Author       <%= author.fullName %>, <%= author.title %>
+Organization <%= organization.name %>
+Country      <%= country.name %>
+Issued       <%= createdAtDisplay %>
+Tags         <%= tagDisplay %>
+
+EXECUTIVE SUMMARY
+-----------------
+<%= summaryDisplay %>
+
+FINDINGS
+--------
+<% for (const paragraph of bodyDisplay) { %>
+<%= paragraph %>
+
+<% } %>
+REFERENCED ENTITIES
+-------------------
+<% for (const label of relatedEntityLabels) { %>
+- <%= label %>
+<% } %>
+
+<%= "-".repeat(92) %>
+End of report

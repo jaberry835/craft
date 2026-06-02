@@ -21,3 +21,4 @@ Curated Demo Code
 | 2026-06-02 11:48 UTC | AgentChatV2 | experiment/response-api | +18, ~7 |
 | 2026-06-02 11:48 UTC | SecureChatExtension | main | ~2 |
 | 2026-06-02 11:49 UTC | junior-web | main | +116, ~27, -1 |
+| 2026-06-02 11:49 UTC | GenerateRichDocs | main | +41 |

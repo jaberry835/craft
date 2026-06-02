@@ -1,0 +1,33 @@
+{
+  "name": "generate-rich-docs",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "CLI-first fictional document generation demo with seeded scenarios and locale-ready rendering.",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --import tsx --test tests/**/*.test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "generate": "tsx src/cli/index.ts generate",
+    "validate": "tsx src/cli/index.ts validate",
+    "start": "tsx src/cli/index.ts generate --scenario correspondence-dossier"
+  },
+  "dependencies": {
+    "@faker-js/faker": "^9.8.0",
+    "commander": "^13.1.0",
+    "docx": "^9.5.1",
+    "dotenv": "^16.6.1",
+    "ejs": "^3.1.10",
+    "exceljs": "^4.4.0",
+    "mailcomposer": "^4.0.2",
+    "openai": "^4.104.0",
+    "pdfkit": "^0.15.2"
+  },
+  "devDependencies": {
+    "@types/ejs": "^3.1.5",
+    "@types/node": "^22.15.19",
+    "@types/pdfkit": "^0.17.3",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
+}

@@ -1,0 +1,13 @@
+SUBJECT: <%= email.subject %>
+FROM: <%= fromPerson.fullName %> <<%= fromPerson.email %>>
+TO: <%= toPeople.map((person) => `${person.fullName} <${person.email}>`).join(", ") %>
+CC: <%= ccPeople.length ? ccPeople.map((person) => `${person.fullName} <${person.email}>`).join(", ") : "None" %>
+SENT: <%= email.sentAt %>
+ATTACHMENTS: <%= attachmentLabels.join(", ") %>
+
+<%= email.plainTextBody %>
+
+RELATED REPORTS
+<% for (const report of relatedReports) { %>
+- <%= report.title %>
+<% } %>

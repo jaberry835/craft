@@ -1,0 +1,14 @@
+
+build a generator of csvs, I want lots of records that will import ready for Azure Data Explorer
+
+Build me lists of people and fictional addresses in our fictional country, use the tools we already have.  We want to be able to find people mentioned within the records we've created in this dataset as well.   
+
+I want a list of vehicles in another table for each fo these users.  It should include real make and models, and fake tag and registration numbers.  
+
+I want a list of toll transactions that were captured for each of the tags.  The tolls transactions will be at different toll booths in fictional locations in our fictional country.
+
+Feel free to use the LLM to help, but faker may enough for much of this.   
+
+Remember we need to support lanaguage in all of this, ie, we need to support these records in multiple languages.  
+
+I would also like records of airport border crossing .   These can be from our fake country to other real countries, and vice versa.  It should look like rich records with passport information, travel informatino, flight manifests.  Feel free to create multiple csvs. 

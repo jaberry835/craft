@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title><%= email.subject %></title>
+    <style>
+      body {
+        margin: 0;
+        padding: 24px;
+        background: #eef3f7;
+        color: #193044;
+        font-family: Cambria, Georgia, serif;
+      }
+      article {
+        max-width: 860px;
+        margin: 0 auto;
+        background: white;
+        border: 1px solid rgba(25, 48, 68, 0.15);
+        box-shadow: 0 16px 40px rgba(25, 48, 68, 0.08);
+      }
+      header {
+        padding: 24px 28px;
+        border-bottom: 1px solid rgba(25, 48, 68, 0.1);
+        background: linear-gradient(135deg, rgba(230, 238, 245, 0.95), rgba(250, 246, 236, 0.9));
+      }
+      h1 {
+        margin: 0 0 14px;
+        font-size: 28px;
+      }
+      dl {
+        display: grid;
+        grid-template-columns: 92px 1fr;
+        gap: 8px 16px;
+        margin: 0;
+      }
+      dt {
+        font-weight: 700;
+      }
+      dd {
+        margin: 0;
+      }
+      section {
+        padding: 28px;
+      }
+      .attachments,
+      .reports {
+        background: #f7fafc;
+        border-top: 1px solid rgba(25, 48, 68, 0.08);
+      }
+    </style>
+  </head>
+  <body>
+    <article>
+      <header>
+        <h1><%= email.subject %></h1>
+        <dl>
+          <dt>From</dt>
+          <dd><%= fromPerson.fullName %> &lt;<%= fromPerson.email %>&gt;</dd>
+          <dt>To</dt>
+          <dd><%= toPeople.map((person) => `${person.fullName} <${person.email}>`).join(", ") %></dd>
+          <dt>CC</dt>
+          <dd><%= ccPeople.length ? ccPeople.map((person) => `${person.fullName} <${person.email}>`).join(", ") : "None" %></dd>
+          <dt>Sent</dt>
+          <dd><%= email.sentAt %></dd>
+        </dl>
+      </header>
+      <section>
+        <%- email.htmlBody %>
+      </section>
+      <section class="attachments">
+        <h2>Attachments</h2>
+        <ul>
+          <% for (const label of attachmentLabels) { %>
+            <li><%= label %></li>
+          <% } %>
+        </ul>
+      </section>
+      <section class="reports">
+        <h2>Referenced Reports</h2>
+        <ul>
+          <% for (const report of relatedReports) { %>
+            <li><strong><%= report.title %></strong> - <%= report.summary %></li>
+          <% } %>
+        </ul>
+      </section>
+    </article>
+  </body>
+</html>
