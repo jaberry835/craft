@@ -19,3 +19,4 @@ Curated Demo Code
 | 2026-05-19 14:27 UTC | junior-web | main | +40 |
 | 2026-05-19 14:27 UTC | junior-web | jb-test-branch | +136 |
 | 2026-06-02 11:48 UTC | AgentChatV2 | experiment/response-api | +18, ~7 |
+| 2026-06-02 11:48 UTC | SecureChatExtension | main | ~2 |

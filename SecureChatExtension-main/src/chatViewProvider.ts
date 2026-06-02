@@ -4036,18 +4036,20 @@ body { display: flex; flex-direction: column; }
 #provider-bar {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 7px 4px 2px;
+    gap: 5px;
+    padding: 6px 3px 1px;
+    min-width: 0;
 }
 .footer-select-control {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
-    min-height: 24px;
+    gap: 4px;
+    min-height: 22px;
+    min-width: 0;
     box-sizing: border-box;
     color: var(--fg);
     opacity: 0.65;
-    padding: 2px 6px;
+    padding: 2px 4px;
     border-radius: 4px;
     transition: opacity 0.12s, background 0.12s;
 }
@@ -4082,12 +4084,14 @@ body { display: flex; flex-direction: column; }
     padding: 0;
     outline: none;
     vertical-align: middle;
+    min-width: 0;
+    text-overflow: ellipsis;
 }
 #provider-select {
-    min-width: 88px;
+    width: 54px;
 }
 #permission-select {
-    min-width: 134px;
+    width: 112px;
 }
 #provider-select option,
 #permission-select option {
@@ -4336,16 +4340,26 @@ body { display: flex; flex-direction: column; }
     display: flex;
     align-items: center;
     gap: 4px;
+    min-width: 0;
+    opacity: 0.65;
     cursor: pointer;
+    transition: opacity 0.12s, background 0.12s;
+    padding: 2px 4px;
+    border-radius: 4px;
+}
+#context-meter:hover {
+    opacity: 1;
+    background: rgba(255,255,255,0.08);
 }
 #context-meter .meter-ring {
-    width: 18px;
-    height: 18px;
+    width: 16px;
+    height: 16px;
+    flex: 0 0 16px;
     position: relative;
 }
 #context-meter .meter-ring svg {
-    width: 18px;
-    height: 18px;
+    width: 16px;
+    height: 16px;
     transform: rotate(-90deg);
 }
 #context-meter .meter-ring .meter-bg {
@@ -4362,14 +4376,12 @@ body { display: flex; flex-direction: column; }
 }
 #context-meter .meter-label {
     white-space: nowrap;
-    max-width: 0;
+    width: 34px;
     overflow: hidden;
-    opacity: 0;
-    transition: max-width 0.3s ease, opacity 0.3s ease;
-}
-#context-meter:hover .meter-label {
-    max-width: 200px;
-    opacity: 1;
+    text-overflow: ellipsis;
+    font-size: 11.5px;
+    line-height: 1.2;
+    color: var(--vscode-descriptionForeground, #b2b8bf);
 }
 
 /* Slash command autocomplete */
@@ -4546,7 +4558,7 @@ body { display: flex; flex-direction: column; }
                 <option value="bypass">Bypass Approvals</option>
             </select>
         </label>
-        <div id="context-meter"><div class="meter-ring"><svg viewBox="0 0 20 20"><circle class="meter-bg" cx="10" cy="10" r="8" /><circle class="meter-fill" cx="10" cy="10" r="8" stroke-dasharray="50.27" stroke-dashoffset="50.27" /></svg></div><span class="meter-label">0 / 128.0K (0%)</span></div>
+        <div id="context-meter" title="Session Token Usage"><div class="meter-ring"><svg viewBox="0 0 20 20"><circle class="meter-bg" cx="10" cy="10" r="8" /><circle class="meter-fill" cx="10" cy="10" r="8" stroke-dasharray="50.27" stroke-dashoffset="50.27" /></svg></div><span class="meter-label">0%</span></div>
     </div>
 </div>
 

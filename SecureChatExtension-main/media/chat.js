@@ -2753,7 +2753,7 @@ window.onerror = function(msg, src, line, col, err) {
                     var pctVal = msg.windowPct || 0;
                     var offset = circumference * (1 - pctVal / 100);
                     meterFill.setAttribute('stroke-dashoffset', String(offset));
-                    meterLabel.textContent = msg.totalTokens + ' / ' + msg.contextWindow + ' (' + pctVal + '%)';
+                    meterLabel.textContent = pctVal + '%';
                     // Set tooltip on the meter
                     var meterEl = document.getElementById('context-meter');
                     if (meterEl) {
