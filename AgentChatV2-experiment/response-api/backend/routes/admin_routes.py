@@ -697,8 +697,36 @@ async def refresh_mcp_server(
 
 @router.get("/aoai-endpoints", response_model=AOAIEndpointListResponse)
 async def list_aoai_endpoints(request: Request, admin=Depends(require_admin)):
-    """List all registered Azure OpenAI endpoints."""
-    endpoints = await cosmos_service.list_aoai_endpoints()
+    """List all registered Azure OpenAI endpoints.
+
+    Endpoints whose stored shape can't be validated against the current
+    AOAIEndpointConfig schema (e.g. records written by a feature branch with
+    an unknown `endpoint_type`) are skipped with a warning rather than
+    failing the whole request, so the admin page stays usable.
+    """
+    raw_endpoints = await cosmos_service.list_aoai_endpoints()
+    endpoints: list[AOAIEndpointConfig] = []
+    skipped: list[dict] = []
+    for row in raw_endpoints:
+        try:
+            endpoints.append(AOAIEndpointConfig(**row))
+        except Exception as e:
+            skipped.append({
+                "id": row.get("id"),
+                "name": row.get("name"),
+                "endpoint_type": row.get("endpoint_type"),
+                "error": str(e),
+            })
+            logger.warning(
+                "Skipping AOAI endpoint %s (%s): unsupported on this build "
+                "(endpoint_type=%r): %s",
+                row.get("name"), row.get("id"), row.get("endpoint_type"), e,
+            )
+    if skipped:
+        logger.warning(
+            "list_aoai_endpoints: returned %d, skipped %d unsupported entr%s",
+            len(endpoints), len(skipped), "y" if len(skipped) == 1 else "ies",
+        )
     return AOAIEndpointListResponse(endpoints=endpoints, count=len(endpoints))
 
 

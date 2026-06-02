@@ -12,7 +12,7 @@ from config import get_settings
 from observability import setup_telemetry, get_logger
 from auth.middleware import AuthMiddleware
 from rate_limit import limiter
-from routes import chat_router, admin_router, settings_router, document_router, health_router, a2a_router, a2a_server, preferences_router
+from routes import chat_router, admin_router, settings_router, document_router, health_router, a2a_router, a2a_server, preferences_router, assist_router
 
 settings = get_settings()
 logger = get_logger(__name__)
@@ -82,6 +82,7 @@ app.include_router(settings_router)  # Public UI settings endpoint
 app.include_router(document_router)
 app.include_router(a2a_router)  # A2A protocol endpoints for agent discovery and messaging
 app.include_router(preferences_router)  # User preferences (theme, etc.)
+app.include_router(assist_router)  # Browser-extension assist endpoints (additive)
 
 
 @app.get("/")
