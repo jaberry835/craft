@@ -16,15 +16,16 @@ export class MockCreativeProvider implements CreativeProvider {
   public readonly name = "mock";
 
   public async createDossierPlan(context: CreativeProviderContext): Promise<DossierPlan> {
-    const reportPlans = context.topics.slice(0, context.reportIds.length).map((topic, index) =>
-      this.createReportPlan(context, topic, context.reportIds[index] ?? `report-${index + 1}`, index)
+    const reportPlans = context.topicDetails.slice(0, context.reportIds.length).map((topicDetail, index) =>
+      this.createReportPlan(context, topicDetail, context.reportIds[index] ?? `report-${index + 1}`, index)
     );
     const emailPlans = context.emailIds.map((emailId, index) =>
       this.createEmailPlan(context, emailId, reportPlans[index % reportPlans.length], index)
     );
+    const topFamilies = Array.from(new Set(context.topicDetails.map((detail) => detail.familyLabel))).slice(0, 3);
 
     return {
-      overview: `${context.country.name} agencies and industry partners are exchanging internal reporting on ${context.topics.slice(0, Math.min(5, context.topics.length)).join(", ")}.`,
+      overview: `${context.country.name} agencies and industry partners are exchanging internal reporting across ${topFamilies.join(", ")} on ${context.topics.slice(0, Math.min(5, context.topics.length)).join(", ")}.`,
       anchorFacts: [
         `${context.country.name} officials are tracking operational bottlenecks affecting trade administration and industrial planning.`,
         "A ministry-led circulation note triggered follow-up analysis from research and commercial stakeholders.",
@@ -88,7 +89,7 @@ export class MockCreativeProvider implements CreativeProvider {
 
   private createReportPlan(
     context: CreativeProviderContext,
-    topic: string,
+    topicDetail: CreativeProviderContext["topicDetails"][number],
     reportId: string,
     index: number
   ): DossierReportPlan {
@@ -108,6 +109,7 @@ export class MockCreativeProvider implements CreativeProvider {
     const organization = organizationPool[index % organizationPool.length] ?? context.organizations[index % context.organizations.length] ?? context.organizations[0];
     const organizationPeople = context.people.filter((person) => person.organizationId === organization.id);
     const author = organizationPeople[index % organizationPeople.length] ?? context.people[index % context.people.length] ?? context.people[0];
+    const topic = topicDetail.topic;
 
     return {
       reportId,
@@ -121,8 +123,8 @@ export class MockCreativeProvider implements CreativeProvider {
       title: `${context.country.name} ${topic.replace(/\b\w/g, (value) => value.toUpperCase())} Memorandum ${index + 1}`,
       organizationId: organization.id,
       authorPersonId: author.id,
-      subjectTags: [topic, context.country.name, organization.kind],
-      summaryFocus: `${topic} and the resulting coordination burden across reporting teams in ${context.country.name}`,
+      subjectTags: [topic, topicDetail.familyLabel, context.country.name, organization.kind],
+      summaryFocus: `${topic} and the resulting coordination burden across the ${topicDetail.familyLabel.toLowerCase()} workstream in ${context.country.name}`,
       outline: [
         `${topic} is affecting internal reporting cadence and operational decision-making.`,
         "Several offices have requested reconciled figures, attachment indexes, and follow-up clarifications.",

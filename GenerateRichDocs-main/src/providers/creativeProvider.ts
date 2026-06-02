@@ -9,7 +9,8 @@ import type {
   Person,
   ReportDocument,
   ReportDraft,
-  ScenarioBrief
+  ScenarioBrief,
+  ScenarioTopicDetail
 } from "../core/types.js";
 
 export interface CreativeProviderContext {
@@ -18,6 +19,7 @@ export interface CreativeProviderContext {
   directive: CreativeDirective;
   organizations: Organization[];
   people: Person[];
+  topicDetails: ScenarioTopicDetail[];
   topics: string[];
   reportIds: string[];
   reportFormats: ReportDocument["outputFormat"][];

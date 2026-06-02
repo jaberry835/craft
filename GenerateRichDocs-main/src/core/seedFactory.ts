@@ -11,9 +11,11 @@ import type {
   Person,
   ReportDocument,
   ScenarioBrief,
-  ScenarioPack
+  ScenarioPack,
+  ScenarioTopicDetail
 } from "./types.js";
 import type { CreativeProvider } from "../providers/creativeProvider.js";
+import { getScenarioTopicDetails, getScenarioTopics } from "../scenarios/catalog.js";
 
 const reportOutputFormats: Array<ReportDocument["outputFormat"]> = ["pdf", "html", "docx", "txt"];
 
@@ -40,13 +42,6 @@ const countries: FictionalCountry[] = [
     region: "Eastern Maritime Arc"
   }
 ];
-
-const reportTopics: Record<ScenarioBrief["scenarioId"], string[]> = {
-  "government-economy": ["inflation monitoring", "port activity", "industrial output", "household purchasing power"],
-  "government-mining-trade": ["chemical extraction", "rail corridor throughput", "refined mineral exports", "trade licensing"],
-  "company-market-report": ["ore processing margins", "plant utilization", "cross-border shipping", "procurement exposure"],
-  "correspondence-dossier": ["brief circulation", "compliance follow-up", "research exchange", "joint review meeting"]
-};
 
 const governmentNames = [
   "Ministry of Economic Coordination",
@@ -110,11 +105,15 @@ function selectCountry(brief: ScenarioBrief): FictionalCountry {
   return countries[brief.seed % countries.length]!;
 }
 
-function createTopicSequence(scenarioId: ScenarioBrief["scenarioId"], reportCount: number): string[] {
-  const baseTopics = reportTopics[scenarioId];
+function createTopicSequence(scenarioId: ScenarioBrief["scenarioId"], reportCount: number): ScenarioTopicDetail[] {
+  const baseTopics = getScenarioTopicDetails(scenarioId);
 
   return Array.from({ length: reportCount }, (_, index) => {
-    const rootTopic = baseTopics[index % baseTopics.length] ?? baseTopics[0] ?? "coordination review";
+    const rootTopic = baseTopics[index % baseTopics.length] ?? {
+      familyId: "general",
+      familyLabel: "General Coordination",
+      topic: "coordination review"
+    };
     const cycle = Math.floor(index / baseTopics.length);
 
     if (cycle === 0) {
@@ -122,7 +121,10 @@ function createTopicSequence(scenarioId: ScenarioBrief["scenarioId"], reportCoun
     }
 
     const suffix = topicExpansionSuffixes[(cycle - 1) % topicExpansionSuffixes.length] ?? topicExpansionSuffixes[0];
-    return `${rootTopic} ${suffix}`;
+    return {
+      ...rootTopic,
+      topic: `${rootTopic.topic} ${suffix}`
+    };
   });
 }
 
@@ -203,10 +205,12 @@ function buildPeople(organizations: Organization[], faker: Faker, peoplePerOrgan
 }
 
 function createDirective(brief: ScenarioBrief, country: FictionalCountry): CreativeDirective {
+  const scenarioTopics = getScenarioTopics(brief.scenarioId);
+
   return {
     tone: "formal, analytical, and institutionally credible",
     audience: "policy analysts, ministerial staff, and company research teams",
-    narrativeFocus: `Create a plausible dossier centered on ${country.name} involving ${reportTopics[brief.scenarioId].join(", ")}.`,
+    narrativeFocus: `Create a plausible dossier centered on ${country.name} involving ${scenarioTopics.join(", ")}.`,
     writingConstraints: [
       "Use invented institutions, people, domains, and seals, but do not mention that constraint in the document text.",
       "Keep the style comparable to real government or corporate technical reporting.",
@@ -224,15 +228,16 @@ function createCreativeContext(
   people: Person[],
   generationProfile: GenerationProfile
 ) {
-  const topics = createTopicSequence(brief.scenarioId, generationProfile.reportCount);
-  const reportIds = topics.map((_, index) => `report-${brief.scenarioId}-${index + 1}`);
+  const topicDetails = createTopicSequence(brief.scenarioId, generationProfile.reportCount);
+  const reportIds = topicDetails.map((_, index) => `report-${brief.scenarioId}-${index + 1}`);
   return {
     brief,
     country,
     directive,
     organizations,
     people,
-    topics,
+    topicDetails,
+    topics: topicDetails.map((detail) => detail.topic),
     reportIds,
     reportFormats: selectReportOutputFormats(brief, reportIds.length),
     emailIds: Array.from({ length: generationProfile.emailCount }, (_, index) => `email-${brief.scenarioId}-${index + 1}`)
@@ -273,10 +278,11 @@ function createDefaultDossierPlan(
 ): DossierPlan {
   const plannedFormats = getReportOutputFormats(context);
 
-  const reportPlans: DossierReportPlan[] = context.topics.map((topic, index) => {
+  const reportPlans: DossierReportPlan[] = context.topicDetails.map((topicDetail, index) => {
     const organization = pickOrganizationForReport(context.organizations, index);
     const author = pickAuthorForOrganization(context.people, organization.id, index);
     const kind = organization.kind === "company" ? "company-report" : organization.kind === "research" ? "briefing-note" : "government-report";
+    const topic = topicDetail.topic;
 
     return {
       reportId: context.reportIds[index] ?? `report-${context.brief.scenarioId}-${index + 1}`,
@@ -286,8 +292,8 @@ function createDefaultDossierPlan(
       title: `${context.country.name} ${topic.replace(/\b\w/g, (value) => value.toUpperCase())} Memorandum ${index + 1}`,
       organizationId: organization.id,
       authorPersonId: author.id,
-      subjectTags: [topic, context.country.name, organization.kind],
-      summaryFocus: `${topic} and the corresponding reporting actions under review in ${context.country.name}`,
+      subjectTags: [topic, topicDetail.familyLabel, context.country.name, organization.kind],
+      summaryFocus: `${topic} within the ${topicDetail.familyLabel.toLowerCase()} workstream under review in ${context.country.name}`,
       outline: [
         `${topic} is affecting internal reporting and review cadence.`,
         "Stakeholders are reconciling figures, annex references, and distribution lists across offices.",
@@ -297,6 +303,8 @@ function createDefaultDossierPlan(
       referenceDocumentIds: index > 0 ? [context.reportIds[index - 1] ?? context.reportIds[0]] : []
     };
   });
+
+  const topFamilies = Array.from(new Set(context.topicDetails.map((detail) => detail.familyLabel))).slice(0, 3);
 
   const emailPlans: DossierEmailPlan[] = context.emailIds.map((emailId, index) => {
     const sender = context.people[index % context.people.length] ?? context.people[0];
@@ -324,7 +332,7 @@ function createDefaultDossierPlan(
   });
 
   return {
-    overview: `${context.country.name} agencies, researchers, and commercial stakeholders are coordinating on ${context.topics.slice(0, Math.min(6, context.topics.length)).join(", ")} through linked reports and follow-up email traffic.`,
+    overview: `${context.country.name} agencies, researchers, and commercial stakeholders are coordinating across ${topFamilies.join(", ")} while tracking ${context.topics.slice(0, Math.min(6, context.topics.length)).join(", ")} through linked reports and follow-up email traffic.`,
     anchorFacts: [
       `${context.country.name} has active reporting pressure across trade administration, industrial planning, and review workflows.`,
       "The first memorandum establishes a shared record that later documents should cite or answer.",

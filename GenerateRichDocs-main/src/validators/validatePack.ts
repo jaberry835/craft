@@ -96,6 +96,8 @@ function validateExpectedArtifacts(manifest: RunManifest, entities: ScenarioEnti
     "exports/toll-transactions.csv",
     "exports/border-crossings.csv",
     "exports/flight-manifests.csv",
+    "exports/travel-bookings.csv",
+    "exports/hotel-stays.csv",
     "exports/person-mentions.csv"
   ]) {
     if (!findArtifact(manifest.artifacts, csvPath)) {

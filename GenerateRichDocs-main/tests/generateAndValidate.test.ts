@@ -27,7 +27,7 @@ test("runGenerateCommand writes a complete pack that validates successfully", as
 
     assert.equal(manifest.provider, "mock");
     assert.equal(manifest.dataLanguage, "ru");
-    assert.equal(manifest.artifacts.length, 32);
+    assert.equal(manifest.artifacts.length, 34);
     const reportArtifacts = manifest.artifacts.filter((artifact) => artifact.relativePath.startsWith("reports/"));
     assert.equal(reportArtifacts.length, 3);
     assert.ok(manifest.artifacts.some((artifact) => artifact.relativePath === "emails/email-government-mining-trade-1.eml"));
@@ -36,6 +36,8 @@ test("runGenerateCommand writes a complete pack that validates successfully", as
     assert.ok(manifest.artifacts.some((artifact) => artifact.relativePath === "exports/vehicles.csv"));
     assert.ok(manifest.artifacts.some((artifact) => artifact.relativePath === "exports/toll-transactions.csv"));
     assert.ok(manifest.artifacts.some((artifact) => artifact.relativePath === "exports/border-crossings.csv"));
+    assert.ok(manifest.artifacts.some((artifact) => artifact.relativePath === "exports/travel-bookings.csv"));
+    assert.ok(manifest.artifacts.some((artifact) => artifact.relativePath === "exports/hotel-stays.csv"));
     assert.ok(manifest.artifacts.some((artifact) => artifact.relativePath === "exports/adx-create-tables.kql"));
     assert.ok(manifest.artifacts.some((artifact) => artifact.relativePath === "exports/adx-create-mappings.kql"));
     assert.ok(manifest.artifacts.some((artifact) => artifact.relativePath === "exports/adx-ingest-commands.kql"));
@@ -54,8 +56,29 @@ test("runGenerateCommand writes a complete pack that validates successfully", as
     assert.match(mentionsCsv, /source_table/);
     assert.match(mentionsCsv, /reports|emails|vehicles|toll_transactions|border_crossings/);
 
+    const borderCrossingsCsv = await readFile(path.join(outputDir, "exports", "border-crossings.csv"), "utf8");
+    assert.match(borderCrossingsCsv, /origin_country_name/);
+    assert.match(borderCrossingsCsv, /destination_country_name/);
+    assert.match(borderCrossingsCsv, /Canada|Japan|Germany|Brazil|Kenya|Spain|Australia/);
+
+    const flightManifestsCsv = await readFile(path.join(outputDir, "exports", "flight-manifests.csv"), "utf8");
+    assert.match(flightManifestsCsv, /origin_country_name/);
+    assert.match(flightManifestsCsv, /destination_country_name/);
+
+    const travelBookingsCsv = await readFile(path.join(outputDir, "exports", "travel-bookings.csv"), "utf8");
+    assert.match(travelBookingsCsv, /booking_reference/);
+    assert.match(travelBookingsCsv, /trip_purpose/);
+
+    const hotelStaysCsv = await readFile(path.join(outputDir, "exports", "hotel-stays.csv"), "utf8");
+    assert.match(hotelStaysCsv, /hotel_name/);
+    assert.match(hotelStaysCsv, /nightly_rate_local/);
+
     const tablesKql = await readFile(path.join(outputDir, "exports", "adx-create-tables.kql"), "utf8");
     assert.match(tablesKql, /\.create-merge table PeopleDirectory/);
+    assert.match(tablesKql, /origin_country_name:string/);
+    assert.match(tablesKql, /destination_country_name:string/);
+    assert.match(tablesKql, /\.create-merge table TravelBookings/);
+    assert.match(tablesKql, /\.create-merge table HotelStays/);
 
     const mappingsKql = await readFile(path.join(outputDir, "exports", "adx-create-mappings.kql"), "utf8");
     assert.match(mappingsKql, /ingestion csv mapping/);
@@ -89,7 +112,7 @@ test("runGenerateCommand removes stale generated artifacts on rerun", async () =
     const manifestContent = await readFile(path.join(outputDir, "manifest.json"), "utf8");
     const manifest = JSON.parse(manifestContent) as RunManifest;
 
-    assert.equal(manifest.artifacts.length, 32);
+    assert.equal(manifest.artifacts.length, 34);
     await assert.rejects(readFile(path.join(outputDir, "reports", "stale-report.pdf"), "utf8"));
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
@@ -127,6 +150,7 @@ test("runGenerateCommand supports larger dataset tuning from the CLI options", a
     assert.equal(manifest.generationProfile.reportCount, 12);
     assert.equal(manifest.generationProfile.emailCount, 10);
     assert.equal(manifest.generationProfile.csvScale, 3);
+    assert.equal(manifest.artifacts.length, 75);
     assert.equal(reportArtifacts.length, 12);
     assert.equal(emailArtifacts.length, 40);
     assert.equal(entities.people.length, 28);

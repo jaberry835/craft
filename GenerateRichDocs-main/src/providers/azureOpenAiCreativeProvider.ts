@@ -37,6 +37,7 @@ export class AzureOpenAiCreativeProvider implements CreativeProvider {
         `Constraints: ${context.directive.writingConstraints.join(" | ")}`,
         `Available organizations: ${context.organizations.map((organization) => `${organization.id}: ${organization.name} (${organization.kind})`).join("; ")}`,
         `Available people: ${context.people.map((person) => `${person.id}: ${person.fullName}, ${person.title}, organization=${context.organizations.find((organization) => organization.id === person.organizationId)?.name ?? person.organizationId}`).join("; ")}`,
+        `Topic families: ${context.topicDetails.map((detail) => `${detail.familyLabel} => ${detail.topic}`).join("; ")}`,
         `Topics: ${context.topics.join(", ")}`,
         `Report IDs: ${context.reportIds.join(", ")}`,
         `Required report output formats: ${context.reportIds.map((reportId, index) => `${reportId}=${context.reportFormats[index]}`).join("; ")}`,

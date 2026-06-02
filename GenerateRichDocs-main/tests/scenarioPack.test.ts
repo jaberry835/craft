@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createScenarioPack } from "../src/core/seedFactory.js";
 import type { ScenarioBrief } from "../src/core/types.js";
 import { MockCreativeProvider } from "../src/providers/mockCreativeProvider.js";
+import { getScenarioTopics, scenarioCatalog } from "../src/scenarios/catalog.js";
 
 const provider = new MockCreativeProvider();
 
@@ -94,4 +95,50 @@ test("createScenarioPack honors generation profile overrides", async () => {
   assert.equal(pack.people.length, pack.organizations.length * 3);
   assert.equal(pack.reports.length, 8);
   assert.equal(pack.emails.length, 6);
+});
+
+test("scenario catalog exposes topics for every registered preset", () => {
+  for (const scenarioId of Object.keys(scenarioCatalog) as Array<keyof typeof scenarioCatalog>) {
+    assert.ok(getScenarioTopics(scenarioId).length > 0, `${scenarioId} should expose at least one topic`);
+  }
+});
+
+test("createScenarioPack supports the talent-mobility scenario", async () => {
+  const pack = await createScenarioPack(
+    createBrief({
+      scenarioId: "talent-mobility",
+      generationProfile: {
+        peoplePerOrganization: 2,
+        reportCount: 5,
+        emailCount: 4,
+        csvScale: 1
+      }
+    }),
+    provider
+  );
+
+  assert.equal(pack.scenarioId, "talent-mobility");
+  assert.equal(pack.reports.length, 5);
+  assert.equal(pack.emails.length, 4);
+  assert.match(pack.directive.narrativeFocus, /resume|travel|interview|approval/i);
+});
+
+test("createScenarioPack supports the permits-procurement scenario", async () => {
+  const pack = await createScenarioPack(
+    createBrief({
+      scenarioId: "permits-procurement",
+      generationProfile: {
+        peoplePerOrganization: 2,
+        reportCount: 6,
+        emailCount: 5,
+        csvScale: 1
+      }
+    }),
+    provider
+  );
+
+  assert.equal(pack.scenarioId, "permits-procurement");
+  assert.equal(pack.reports.length, 6);
+  assert.equal(pack.emails.length, 5);
+  assert.match(pack.directive.narrativeFocus, /permit|procurement|vendor|clearance/i);
 });

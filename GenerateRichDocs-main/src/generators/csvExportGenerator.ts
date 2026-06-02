@@ -101,7 +101,9 @@ interface BorderCrossingRecord {
   flightNumber: string;
   carrierName: string;
   originCountryCode: string;
+  originCountryName: string;
   destinationCountryCode: string;
+  destinationCountryName: string;
   scheduledDepartureAt: string;
   scheduledArrivalAt: string;
   recordedAt: string;
@@ -124,7 +126,9 @@ interface FlightManifestRecord {
   travelDirection: string;
   airportCode: string;
   originCountryCode: string;
+  originCountryName: string;
   destinationCountryCode: string;
+  destinationCountryName: string;
   departureAt: string;
   arrivalAt: string;
   travelerPersonId: string;
@@ -135,6 +139,48 @@ interface FlightManifestRecord {
   checkedBagCount: number;
   boardingZone: string;
   manifestNote: string;
+}
+
+interface TravelBookingRecord {
+  bookingId: string;
+  manifestId: string;
+  travelerPersonId: string;
+  dataLanguage: SupportedLocale;
+  travelerName: string;
+  bookingReference: string;
+  bookingChannel: string;
+  bookingStatus: string;
+  bookedAt: string;
+  flightNumber: string;
+  carrierName: string;
+  originCountryCode: string;
+  originCountryName: string;
+  destinationCountryCode: string;
+  destinationCountryName: string;
+  departureAt: string;
+  arrivalAt: string;
+  fareClass: string;
+  tripPurpose: string;
+}
+
+interface HotelStayRecord {
+  stayId: string;
+  manifestId: string;
+  travelerPersonId: string;
+  dataLanguage: SupportedLocale;
+  travelerName: string;
+  hotelName: string;
+  city: string;
+  countryCode: string;
+  countryName: string;
+  checkInAt: string;
+  checkOutAt: string;
+  roomType: string;
+  bookingStatus: string;
+  paymentStatus: string;
+  nightlyRateLocal: string;
+  currency: string;
+  stayPurpose: string;
 }
 
 interface PersonMentionRecord {
@@ -156,7 +202,9 @@ interface ManifestTrip {
   flightNumber: string;
   carrierName: string;
   originCountryCode: string;
+  originCountryName: string;
   destinationCountryCode: string;
+  destinationCountryName: string;
   departureAt: string;
   arrivalAt: string;
   terminal: string;
@@ -216,6 +264,11 @@ const vehicleCatalog = [
 
 const operationalColors = ["silver", "white", "black", "blue", "graphite", "green"];
 const supportedDataLanguages: SupportedLocale[] = ["en", "ru", "zh", "ar", "es"];
+const bookingChannels = ["portal", "agency", "desk", "direct"] as const;
+const bookingStatuses = ["confirmed", "ticketed", "amended"] as const;
+const fareClasses = ["economy", "premium-economy", "business"] as const;
+const hotelRoomTypes = ["standard", "executive", "suite"] as const;
+const hotelPaymentStatuses = ["paid", "pending", "company-billed"] as const;
 
 function scaleMinimum(value: number, scale: number): number {
   return Math.max(1, Math.round(value * scale));
@@ -809,11 +862,20 @@ function createBorderDatasets(
   capitalsByLanguage: Map<SupportedLocale, string>,
   demonymsByLanguage: Map<SupportedLocale, string>
 ): { borderCrossings: BorderCrossingRecord[]; manifests: FlightManifestRecord[] } {
-  const realCountries = [{ code: "CA" }, { code: "JP" }, { code: "DE" }, { code: "BR" }, { code: "KE" }, { code: "ES" }, { code: "AU" }];
+  const realCountries = [
+    { code: "CA", name: "Canada" },
+    { code: "JP", name: "Japan" },
+    { code: "DE", name: "Germany" },
+    { code: "BR", name: "Brazil" },
+    { code: "KE", name: "Kenya" },
+    { code: "ES", name: "Spain" },
+    { code: "AU", name: "Australia" }
+  ];
   const borderCrossings: BorderCrossingRecord[] = [];
   const manifests: FlightManifestRecord[] = [];
   let manifestSequence = 1;
   const scale = pack.generationProfile.csvScale;
+  const fictionalCountryCode = pack.country.name.slice(0, 2).toUpperCase();
 
   for (const person of pack.people) {
     const tripCount = scaledCount(faker, 2, 4, scale);
@@ -834,8 +896,10 @@ function createBorderDatasets(
         airportName: `${localizedCapital} ${profile.airportWord}`,
         flightNumber: `VA${faker.string.numeric({ length: 3, allowLeadingZeros: true })}`,
         carrierName: selectByKey(profile.carrierRoots, `${person.id}:carrier:${tripIndex}`),
-        originCountryCode: direction === profile.outbound ? pack.country.name.slice(0, 2).toUpperCase() : foreignCountry.code,
-        destinationCountryCode: direction === profile.outbound ? foreignCountry.code : pack.country.name.slice(0, 2).toUpperCase(),
+        originCountryCode: direction === profile.outbound ? fictionalCountryCode : foreignCountry.code,
+        originCountryName: direction === profile.outbound ? pack.country.name : foreignCountry.name,
+        destinationCountryCode: direction === profile.outbound ? foreignCountry.code : fictionalCountryCode,
+        destinationCountryName: direction === profile.outbound ? foreignCountry.name : pack.country.name,
         departureAt: departureAt.toISOString(),
         arrivalAt: arrivalAt.toISOString(),
         terminal: `${profile.terminalWord} ${faker.number.int({ min: 1, max: 3 })}`,
@@ -867,7 +931,9 @@ function createBorderDatasets(
           travelDirection: trip.travelDirection,
           airportCode: trip.airportCode,
           originCountryCode: trip.originCountryCode,
+          originCountryName: trip.originCountryName,
           destinationCountryCode: trip.destinationCountryCode,
+          destinationCountryName: trip.destinationCountryName,
           departureAt: trip.departureAt,
           arrivalAt: trip.arrivalAt,
           travelerPersonId: traveler.id,
@@ -895,7 +961,9 @@ function createBorderDatasets(
           flightNumber: trip.flightNumber,
           carrierName: trip.carrierName,
           originCountryCode: trip.originCountryCode,
+          originCountryName: trip.originCountryName,
           destinationCountryCode: trip.destinationCountryCode,
+          destinationCountryName: trip.destinationCountryName,
           scheduledDepartureAt: trip.departureAt,
           scheduledArrivalAt: trip.arrivalAt,
           recordedAt: new Date(arrivalAt.getTime() + faker.number.int({ min: 5, max: 90 }) * 60 * 1000).toISOString(),
@@ -915,6 +983,79 @@ function createBorderDatasets(
   }
 
   return { borderCrossings, manifests };
+}
+
+function createTravelBookings(
+  faker: Faker,
+  manifests: FlightManifestRecord[],
+  profilesByLanguage: Map<SupportedLocale, DataLanguageProfile>
+): TravelBookingRecord[] {
+  return manifests.map((manifest, index) => {
+    const profile = profilesByLanguage.get(manifest.dataLanguage) ?? profilesByLanguage.values().next().value;
+    const departureAt = new Date(manifest.departureAt);
+    const bookedAt = new Date(departureAt.getTime() - faker.number.int({ min: 2, max: 28 }) * 24 * 60 * 60 * 1000);
+
+    return {
+      bookingId: `booking-${manifest.manifestId}-${manifest.travelerPersonId}`,
+      manifestId: manifest.manifestId,
+      travelerPersonId: manifest.travelerPersonId,
+      dataLanguage: manifest.dataLanguage,
+      travelerName: manifest.travelerName,
+      bookingReference: `${faker.string.alpha({ casing: "upper", length: 3 })}${faker.string.alphanumeric({ casing: "upper", length: 5 })}`,
+      bookingChannel: faker.helpers.arrayElement(bookingChannels),
+      bookingStatus: faker.helpers.arrayElement(bookingStatuses),
+      bookedAt: bookedAt.toISOString(),
+      flightNumber: manifest.flightNumber,
+      carrierName: manifest.carrierName,
+      originCountryCode: manifest.originCountryCode,
+      originCountryName: manifest.originCountryName,
+      destinationCountryCode: manifest.destinationCountryCode,
+      destinationCountryName: manifest.destinationCountryName,
+      departureAt: manifest.departureAt,
+      arrivalAt: manifest.arrivalAt,
+      fareClass: fareClasses[index % fareClasses.length] ?? fareClasses[0],
+      tripPurpose: faker.helpers.arrayElement(profile?.purposes ?? ["business review"])
+    };
+  });
+}
+
+function createHotelStays(
+  faker: Faker,
+  manifests: FlightManifestRecord[],
+  profilesByLanguage: Map<SupportedLocale, DataLanguageProfile>
+): HotelStayRecord[] {
+  return manifests.flatMap((manifest, index) => {
+    const profile = profilesByLanguage.get(manifest.dataLanguage) ?? profilesByLanguage.values().next().value;
+    if (manifest.travelDirection !== profile?.outbound) {
+      return [];
+    }
+
+    const arrivalAt = new Date(manifest.arrivalAt);
+    const checkInAt = new Date(arrivalAt.getTime() + faker.number.int({ min: 1, max: 4 }) * 60 * 60 * 1000);
+    const stayLengthDays = faker.number.int({ min: 2, max: 8 });
+    const checkOutAt = new Date(checkInAt.getTime() + stayLengthDays * 24 * 60 * 60 * 1000);
+    const city = `${manifest.destinationCountryName} ${index % 2 === 0 ? "Central" : "Harbor"}`;
+
+    return [{
+      stayId: `stay-${manifest.manifestId}-${manifest.travelerPersonId}`,
+      manifestId: manifest.manifestId,
+      travelerPersonId: manifest.travelerPersonId,
+      dataLanguage: manifest.dataLanguage,
+      travelerName: manifest.travelerName,
+      hotelName: `${city} ${index % 3 === 0 ? "Grand Hotel" : index % 3 === 1 ? "Business Lodge" : "Civic Suites"}`,
+      city,
+      countryCode: manifest.destinationCountryCode,
+      countryName: manifest.destinationCountryName,
+      checkInAt: checkInAt.toISOString(),
+      checkOutAt: checkOutAt.toISOString(),
+      roomType: hotelRoomTypes[index % hotelRoomTypes.length] ?? hotelRoomTypes[0],
+      bookingStatus: "confirmed",
+      paymentStatus: hotelPaymentStatuses[index % hotelPaymentStatuses.length] ?? hotelPaymentStatuses[0],
+      nightlyRateLocal: faker.number.float({ min: 95, max: 310, fractionDigits: 2 }).toFixed(2),
+      currency: "USD",
+      stayPurpose: faker.helpers.arrayElement(profile?.purposes ?? ["business review"])
+    }];
+  });
 }
 
 function createPersonMentions(
@@ -1148,6 +1289,8 @@ function buildOperationalCsvDatasets(pack: ScenarioPack): CsvDataset[] {
   );
   const tollTransactions = createTollTransactions(pack, faker, defaultProfile, vehicles, tollBooths);
   const { borderCrossings, manifests } = createBorderDatasets(pack, faker, profilesByLanguage, organizationLanguages, localizedPersonNames, capitalsByLanguage, demonymsByLanguage);
+  const travelBookings = createTravelBookings(faker, manifests, profilesByLanguage);
+  const hotelStays = createHotelStays(faker, manifests, profilesByLanguage);
   const mentions = createPersonMentions(pack, localizedPersonNames, vehicles, tollTransactions, borderCrossings);
   const peopleDirectoryRows = createPeopleDirectoryRows(pack, profilesByLanguage, organizationLanguages, localizedPersonNames, localizedOrganizationNames, addresses, mentions, countriesByLanguage);
   const sharedSourceEntityIds = [pack.country.id, ...pack.people.map((person) => person.id)];
@@ -1432,7 +1575,9 @@ function buildOperationalCsvDatasets(pack: ScenarioPack): CsvDataset[] {
         { name: "flight_number", type: "string" },
         { name: "carrier_name", type: "string" },
         { name: "origin_country_code", type: "string" },
+        { name: "origin_country_name", type: "string" },
         { name: "destination_country_code", type: "string" },
+        { name: "destination_country_name", type: "string" },
         { name: "scheduled_departure_at", type: "datetime" },
         { name: "scheduled_arrival_at", type: "datetime" },
         { name: "recorded_at", type: "datetime" },
@@ -1460,7 +1605,9 @@ function buildOperationalCsvDatasets(pack: ScenarioPack): CsvDataset[] {
         "flight_number",
         "carrier_name",
         "origin_country_code",
+        "origin_country_name",
         "destination_country_code",
+        "destination_country_name",
         "scheduled_departure_at",
         "scheduled_arrival_at",
         "recorded_at",
@@ -1488,7 +1635,9 @@ function buildOperationalCsvDatasets(pack: ScenarioPack): CsvDataset[] {
         crossing.flightNumber,
         crossing.carrierName,
         crossing.originCountryCode,
+        crossing.originCountryName,
         crossing.destinationCountryCode,
+        crossing.destinationCountryName,
         crossing.scheduledDepartureAt,
         crossing.scheduledArrivalAt,
         crossing.recordedAt,
@@ -1516,7 +1665,9 @@ function buildOperationalCsvDatasets(pack: ScenarioPack): CsvDataset[] {
         { name: "travel_direction", type: "string" },
         { name: "airport_code", type: "string" },
         { name: "origin_country_code", type: "string" },
+        { name: "origin_country_name", type: "string" },
         { name: "destination_country_code", type: "string" },
+        { name: "destination_country_name", type: "string" },
         { name: "departure_at", type: "datetime" },
         { name: "arrival_at", type: "datetime" },
         { name: "traveler_person_id", type: "string" },
@@ -1537,7 +1688,9 @@ function buildOperationalCsvDatasets(pack: ScenarioPack): CsvDataset[] {
         "travel_direction",
         "airport_code",
         "origin_country_code",
+        "origin_country_name",
         "destination_country_code",
+        "destination_country_name",
         "departure_at",
         "arrival_at",
         "traveler_person_id",
@@ -1558,7 +1711,9 @@ function buildOperationalCsvDatasets(pack: ScenarioPack): CsvDataset[] {
         manifest.travelDirection,
         manifest.airportCode,
         manifest.originCountryCode,
+        manifest.originCountryName,
         manifest.destinationCountryCode,
+        manifest.destinationCountryName,
         manifest.departureAt,
         manifest.arrivalAt,
         manifest.travelerPersonId,
@@ -1569,6 +1724,138 @@ function buildOperationalCsvDatasets(pack: ScenarioPack): CsvDataset[] {
         manifest.checkedBagCount,
         manifest.boardingZone,
         manifest.manifestNote
+      ])
+    },
+    {
+      relativePath: "exports/travel-bookings.csv",
+      description: "Travel booking export aligned to generated air travel records",
+      sourceEntityIds: sharedSourceEntityIds,
+      adxTableName: "TravelBookings",
+      adxColumns: [
+        { name: "booking_id", type: "string" },
+        { name: "manifest_id", type: "string" },
+        { name: "traveler_person_id", type: "string" },
+        { name: "data_language", type: "string" },
+        { name: "traveler_name", type: "string" },
+        { name: "booking_reference", type: "string" },
+        { name: "booking_channel", type: "string" },
+        { name: "booking_status", type: "string" },
+        { name: "booked_at", type: "datetime" },
+        { name: "flight_number", type: "string" },
+        { name: "carrier_name", type: "string" },
+        { name: "origin_country_code", type: "string" },
+        { name: "origin_country_name", type: "string" },
+        { name: "destination_country_code", type: "string" },
+        { name: "destination_country_name", type: "string" },
+        { name: "departure_at", type: "datetime" },
+        { name: "arrival_at", type: "datetime" },
+        { name: "fare_class", type: "string" },
+        { name: "trip_purpose", type: "string" }
+      ],
+      header: [
+        "booking_id",
+        "manifest_id",
+        "traveler_person_id",
+        "data_language",
+        "traveler_name",
+        "booking_reference",
+        "booking_channel",
+        "booking_status",
+        "booked_at",
+        "flight_number",
+        "carrier_name",
+        "origin_country_code",
+        "origin_country_name",
+        "destination_country_code",
+        "destination_country_name",
+        "departure_at",
+        "arrival_at",
+        "fare_class",
+        "trip_purpose"
+      ],
+      rows: travelBookings.map((booking) => [
+        booking.bookingId,
+        booking.manifestId,
+        booking.travelerPersonId,
+        booking.dataLanguage,
+        booking.travelerName,
+        booking.bookingReference,
+        booking.bookingChannel,
+        booking.bookingStatus,
+        booking.bookedAt,
+        booking.flightNumber,
+        booking.carrierName,
+        booking.originCountryCode,
+        booking.originCountryName,
+        booking.destinationCountryCode,
+        booking.destinationCountryName,
+        booking.departureAt,
+        booking.arrivalAt,
+        booking.fareClass,
+        booking.tripPurpose
+      ])
+    },
+    {
+      relativePath: "exports/hotel-stays.csv",
+      description: "Hotel stay export derived from outbound travel itineraries",
+      sourceEntityIds: sharedSourceEntityIds,
+      adxTableName: "HotelStays",
+      adxColumns: [
+        { name: "stay_id", type: "string" },
+        { name: "manifest_id", type: "string" },
+        { name: "traveler_person_id", type: "string" },
+        { name: "data_language", type: "string" },
+        { name: "traveler_name", type: "string" },
+        { name: "hotel_name", type: "string" },
+        { name: "city", type: "string" },
+        { name: "country_code", type: "string" },
+        { name: "country_name", type: "string" },
+        { name: "check_in_at", type: "datetime" },
+        { name: "check_out_at", type: "datetime" },
+        { name: "room_type", type: "string" },
+        { name: "booking_status", type: "string" },
+        { name: "payment_status", type: "string" },
+        { name: "nightly_rate_local", type: "real" },
+        { name: "currency", type: "string" },
+        { name: "stay_purpose", type: "string" }
+      ],
+      header: [
+        "stay_id",
+        "manifest_id",
+        "traveler_person_id",
+        "data_language",
+        "traveler_name",
+        "hotel_name",
+        "city",
+        "country_code",
+        "country_name",
+        "check_in_at",
+        "check_out_at",
+        "room_type",
+        "booking_status",
+        "payment_status",
+        "nightly_rate_local",
+        "currency",
+        "stay_purpose"
+      ],
+      rows: hotelStays.map((stay) => [
+        stay.stayId,
+        stay.manifestId,
+        stay.travelerPersonId,
+        stay.dataLanguage,
+        stay.travelerName,
+        stay.hotelName,
+        stay.city,
+        stay.countryCode,
+        stay.countryName,
+        stay.checkInAt,
+        stay.checkOutAt,
+        stay.roomType,
+        stay.bookingStatus,
+        stay.paymentStatus,
+        stay.nightlyRateLocal,
+        stay.currency,
+        stay.stayPurpose
       ])
     },
     {

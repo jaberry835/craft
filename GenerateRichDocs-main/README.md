@@ -7,11 +7,13 @@ The current implementation is English-first, but the code is structured for late
 ## Current capabilities
 
 - Seeded scenario generation for repeatable output packs
-- Four scenario presets:
+- Six scenario presets:
   - `government-economy`
   - `government-mining-trade`
   - `company-market-report`
   - `correspondence-dossier`
+  - `talent-mobility`
+  - `permits-procurement`
 - Output formats:
   - Varied report formats selected per document from TXT, HTML, DOCX, and PDF
   - CSV exports, including ADX-friendly operational datasets for people, addresses, vehicles, toll traffic, airport border crossings, flight manifests, and person mention linkages
@@ -55,6 +57,11 @@ If you pin a country with `--country`, the default output folder becomes `genera
 
 Use `--data-language` when you want operational CSV names, place labels, and border-travel labels rendered in a different supported language from the document locale. Operational datasets can now mix organization-native languages within the same pack.
 
+The scenario registry now groups each preset into topic families. The two new presets are aimed at the first expansion wave:
+
+- `talent-mobility` for resumes, candidate screening, interview scheduling, relocation, and work-travel correspondence
+- `permits-procurement` for permit workflows, vendor due diligence, procurement review, shipment clearance, and travel-permit escalation
+
 ### Generation options for larger datasets
 
 The generate command now supports dataset sizing controls directly from the CLI:
@@ -83,6 +90,12 @@ For very large runs, leave Azure OpenAI environment variables unset so the mock 
 
 Because each pack is still organized around one primary fictional country, the simplest way to build a broader corpus is to generate multiple packs and ingest them together.
 
+You can now batch that pattern directly from the CLI and get a root `corpus-manifest.json` that inventories every generated pack.
+
+```bash
+tsx src/cli/index.ts generate-corpus --scenarios correspondence-dossier,talent-mobility --countries country-veloria,country-astriv --seed 500 --people-per-organization 4 --report-count 12 --email-count 20 --csv-scale 2 --output-dir generated/demo-corpus --validate
+```
+
 PowerShell example for one scenario across all fictional countries:
 
 ```powershell
@@ -99,7 +112,7 @@ PowerShell example for a mixed multi-pack corpus:
 
 ```powershell
 $countries = @("country-veloria", "country-astriv", "country-demeris")
-$scenarios = @("correspondence-dossier", "government-mining-trade", "company-market-report")
+$scenarios = @("correspondence-dossier", "government-mining-trade", "talent-mobility", "permits-procurement")
 $seed = 500
 
 foreach ($scenario in $scenarios) {
@@ -125,6 +138,8 @@ Validation writes `validation-report.json` into the generated pack directory.
 ```bash
 tsx src/cli/index.ts list-scenarios
 ```
+
+This now prints each scenario description plus its configured topic families.
 
 ## Project layout
 

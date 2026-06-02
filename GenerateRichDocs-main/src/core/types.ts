@@ -6,7 +6,27 @@ export type ScenarioId =
   | "government-economy"
   | "government-mining-trade"
   | "company-market-report"
-  | "correspondence-dossier";
+  | "correspondence-dossier"
+  | "talent-mobility"
+  | "permits-procurement";
+
+export interface ScenarioTopicFamily {
+  id: string;
+  label: string;
+  topics: string[];
+}
+
+export interface ScenarioTopicDetail {
+  familyId: string;
+  familyLabel: string;
+  topic: string;
+}
+
+export interface ScenarioDefinition {
+  title: string;
+  description: string;
+  topicFamilies: ScenarioTopicFamily[];
+}
 
 export interface Person {
   id: string;
