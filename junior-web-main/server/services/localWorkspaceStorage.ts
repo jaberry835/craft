@@ -1,54 +1,10 @@
-import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { WorkspaceFile, WorkspaceTreeNode } from '../types.js';
+import type { WorkspaceStorage } from './workspaceStorage.js';
+import { seedFiles } from './workspaceSeed.js';
 
-const seedFiles: Record<string, string> = {
-  'package/index.md': `# Contoso Payments Security Approval Package
-
-## Executive Summary
-
-This package is a working draft. Use Junior Workbench to collect evidence, draft controls, and publish the approval package.
-
-## Current Approval Status
-
-- Owner: Unassigned
-- System criticality: Medium
-- Data classification: Confidential
-- Review state: Draft
-`,
-  'package/system-overview.md': `# System Overview
-
-## Business Purpose
-
-Describe what the system does, who uses it, and what approval is being requested.
-
-## Architecture
-
-Document the Azure services, identities, data stores, and external integrations involved.
-`,
-  'package/security-controls.md': `# Security Controls
-
-## Identity And Access
-
-- Define managed identities and human access paths.
-- Record least-privilege role assignments.
-
-## Data Protection
-
-- Identify sensitive data stores.
-- Document encryption, retention, and backup expectations.
-`,
-  'package/approval-checklist.md': `# Approval Checklist
-
-- [ ] Business owner identified
-- [ ] Data classification confirmed
-- [ ] Threat model reviewed
-- [ ] Required Azure RBAC assignments listed
-- [ ] Monitoring and incident response documented
-`
-};
-
-export class LocalWorkspaceStorage {
+export class LocalWorkspaceStorage implements WorkspaceStorage {
   constructor(private readonly rootPath: string) {}
 
   async ensureSeedWorkspace(): Promise<void> {
@@ -87,6 +43,30 @@ export class LocalWorkspaceStorage {
     await mkdir(path.dirname(absolutePath), { recursive: true });
     await writeFile(absolutePath, content, 'utf8');
     return this.readTextFile(normalizedPath);
+  }
+
+  async createDirectory(relativePath: string): Promise<WorkspaceTreeNode> {
+    const normalizedPath = this.normalizeRelativePath(relativePath);
+    const absolutePath = this.resolvePath(normalizedPath);
+    await mkdir(absolutePath, { recursive: true });
+
+    return {
+      name: path.posix.basename(normalizedPath),
+      path: normalizedPath,
+      type: 'directory'
+    };
+  }
+
+  async deletePath(relativePath: string): Promise<{ path: string; type: 'file' | 'directory' }> {
+    const normalizedPath = this.normalizeRelativePath(relativePath);
+    const absolutePath = this.resolvePath(normalizedPath);
+    const stats = await stat(absolutePath);
+    await rm(absolutePath, { recursive: stats.isDirectory(), force: false });
+
+    return {
+      path: normalizedPath,
+      type: stats.isDirectory() ? 'directory' : 'file'
+    };
   }
 
   async readMarkdownPackageFiles(): Promise<WorkspaceFile[]> {

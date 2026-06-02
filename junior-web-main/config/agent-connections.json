@@ -4,13 +4,14 @@
     "name": "Default Azure OpenAI",
     "type": "azure-openai",
     "authMode": "entra",
+    "cloud": "public",
     "endpointEnv": "AZURE_OPENAI_ENDPOINT",
     "apiKeyEnv": "AZURE_OPENAI_API_KEY",
+    "deployment": "gpt-5.4",
     "deploymentEnv": "AZURE_OPENAI_DEPLOYMENT",
+    "apiVersion": "2025-01-01-preview",
     "apiVersionEnv": "AZURE_OPENAI_API_VERSION",
-    "defaultApiVersion": "2025-01-01-preview",
-    "temperature": 0.2,
-    "maxTokens": 1200
+    "defaultApiVersion": "2025-01-01-preview"
   },
   {
     "id": "default-azure-ai-search",

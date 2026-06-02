@@ -1,0 +1,14 @@
+
+look at future requirements, in governamce and marking , lets expand this some to include microsoft agent governance framework 
+https://microsoft.github.io/agent-governance-toolkit/
+
+We may need a service that runs in python that will take care of this?  CAn we do it in node, and have it node native?
+
+<<<<<<< HEAD
+I'd like to be aware that when we create this feature, it's purpose it to be able to demo mutliple governance scenarios within this app, particularly as it relates to showing the full feature of the governance package... 
+
+
+
+=======
+I'd like it to be in the context of the
+>>>>>>> 4579dd3f4ad772f642693a7c2de64ee9c3d698a1

@@ -12,4 +12,4 @@
 - [ ] Attach architecture evidence and data-flow notes
 - [ ] Confirm managed identity and RBAC plan
 - [ ] Confirm logging, alerting, and incident routing
-- [ ] Review final static preview before publishing
+- [ ] Review the resulting workspace files with the domain owner

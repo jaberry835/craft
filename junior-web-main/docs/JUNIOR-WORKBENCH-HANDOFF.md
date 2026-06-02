@@ -10,6 +10,8 @@ Preserve Junior's agent-working-over-files loop. This is not just a chatbot. The
 
 Files are the source of truth. Chat is the coordination layer.
 
+For the current implementation details of the server-side loop, see [AGENT-LOOP.md](./AGENT-LOOP.md).
+
 ## Recommended Architecture
 
 - Web app UI with chat panel, file tree, Monaco editor, markdown preview, package preview, and publish flow.

@@ -7,25 +7,27 @@ The app preserves Junior's core working loop: an agent operates over workspace f
 ## First Slice
 
 - React + Vite web app with a dense workbench layout.
-- File tree backed by a local filesystem workspace.
+- File tree backed by pluggable workspace storage: local in development, blob plus local cache in deployed mode.
 - Monaco markdown editor and live markdown preview.
 - Chat panel with a simple server-side Junior agent loop.
 - Pending change review with approve and undo actions.
-- Static package publisher that emits local HTML.
+- Workspace-scoped settings layered on top of shared admin templates and connectors.
+- Chat sessions and pending changes persisted behind explicit storage seams.
 
 ## Architecture
 
+Architecture diagram: [docs/junior-workbench-architecture.svg](docs/junior-workbench-architecture.svg)
+
 - `src/` contains the browser client.
 - `server/` contains the server-side agent service and APIs.
-- `server/services/localWorkspaceStorage.ts` is the development storage adapter.
-- `server/services/workspaceIndexer.ts` builds the first workspace manifest and text index so agent turns are grounded in files.
-- `server/services/agentConfigStore.ts` loads custom-agent style definitions and Azure OpenAI connection metadata.
-- `server/services/azureOpenAiChatClient.ts` calls Azure OpenAI chat completions for configured agents.
-- `server/services/groundingService.ts` resolves local workspace and optional Azure AI Search grounding snippets.
-- `server/services/changeManager.ts` tracks staged file edits before approval.
-- `server/services/simpleJuniorAgent.ts` is the temporary tool loop shaped to be replaced by Junior's real `AgentLoop` from `C:\Users\SystemAdministrator\source\repos\SecureChatExtension`.
+- `server/services/workspaceStorageFactory.ts` selects local or blob-backed workspace file storage.
+- `server/services/cachedBlobWorkspaceStorage.ts` keeps blob-backed workspaces compatible with file-oriented runtime code by maintaining a local cache.
+- `server/services/persistenceFactories.ts` selects the persistence backend for workspace metadata, workspace config, chat sessions, pending changes, and workspace secrets.
+- `server/services/workspaceConfigStore.ts` manages workspace-local agents, connectors, MCP servers, and imported templates.
+- `server/services/keyVaultWorkspaceSecretStore.ts` stores workspace connector and MCP secret values in Azure Key Vault when configured.
+- `server/services/localWorkspaceManager.ts` and `server/services/workspaceRegistry.ts` enforce owner-scoped workspace resolution behind a request identity middleware with local fallback, Microsoft Entra MSAL bearer-token validation, and optional trusted-header modes.
+- `server/services/simpleJuniorAgent.ts` and `server/services/juniorAgentLoop.ts` run the current server-side agent loop.
 - `data/workspaces/default` is created at runtime with seed approval-package markdown.
-- `data/published/default/index.html` is created by the publish flow.
 
 ## Run Locally
 
@@ -36,41 +38,40 @@ npm run dev
 
 Open the Vite URL shown in the terminal. The API listens on `http://localhost:8787`, and Vite proxies `/api` plus `/published` to it.
 
-## Configure Agents
+## Configuration
 
-Agents are configured like custom agents: definitions describe behavior, tools, model connection, and grounding sources while secrets stay in environment variables or ignored local secret files.
+Use [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for local configuration, environment variables, shared admin config, workspace config, workspace secrets, and storage backend selection.
 
-- `config/agents.json` defines available agents, instructions, tools, and grounding sources.
-- `config/agent-connections.json` seeds Azure OpenAI and Azure AI Search connectors.
-- `.env.example` lists the environment variables needed for Azure OpenAI and optional Azure AI Search grounding.
-- The gear menu in the web UI opens configuration for Connectors and Custom Agents.
+Use [docs/README-identity.md](docs/README-identity.md) for identity modes, Entra app registration setup, role mapping, and deployment guidance.
 
-By default, the server reads and writes local JSON files under `config/`. To use Azure Cosmos DB for these JSON configuration items, set:
+Use [docs/FOUNDRY-VS-OPENAI.md](docs/FOUNDRY-VS-OPENAI.md) for the connection model differences between Microsoft Foundry, Azure OpenAI resource endpoints, and the public OpenAI API.
 
-```bash
-COSMOS_DB_ENDPOINT=https://your-account.documents.azure.com:443/
-COSMOS_DB_DATABASE=JuniorWeb
-COSMOS_DB_CONFIG_CONTAINER=Agents
-COSMOS_DB_AUTH_MODE=entra
-```
+Use [docs/AZURE-PERSISTENCE-DEPLOYMENT.md](docs/AZURE-PERSISTENCE-DEPLOYMENT.md) for Azure App Service, Blob Storage, Cosmos DB, and Key Vault setup.
 
-The `Agents` container should use partition key `/id`. On first run, the server writes two documents, `agents` and `connections`, seeded from the local JSON files. Entra ID is the default Cosmos auth mode through `DefaultAzureCredential`; set `COSMOS_DB_AUTH_MODE=api-key` and `COSMOS_DB_KEY` only when key auth is required.
+## What Exists Now
 
-Default Azure OpenAI variables for Entra auth:
+- Microsoft Entra sign-in is handled in the web app through MSAL, with server-side bearer-token validation for API calls.
+- Local development can still bypass Entra by switching to explicit local fallback identity mode.
+- Shared admin catalogs and templates can be seeded from `config/*.json` or persisted in Cosmos DB.
+- Workspace-local config is separated from workspace secret values.
+- Workspace secret values can stay local in development or move to Key Vault in deployed mode.
+- Workspace metadata, workspace config, chat sessions, and pending changes each have separate persistence seams.
+- Blob-backed workspace files can run with a local cache so deployment does not depend on repo-local writable storage.
+- Blob-backed workspace files can authenticate with either a storage connection string or Entra identity via the blob service URL.
 
-```bash
-AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com
-AZURE_OPENAI_DEPLOYMENT=your-chat-deployment
-AZURE_OPENAI_API_VERSION=2025-01-01-preview
-```
+## Identity And Data Access
 
-The default Azure OpenAI connection uses `authMode: "entra"` and `DefaultAzureCredential`, so local development can use Azure CLI sign-in and Azure hosting can use managed identity. The identity needs access to call the Azure OpenAI resource, for example the Cognitive Services OpenAI User role.
+- The browser authenticates users with Microsoft Entra when `JUNIOR_IDENTITY_MODE=entra-msal`.
+- The API validates bearer tokens and derives the current caller from Entra claims such as `oid`, `tid`, and `roles`.
+- Workspace APIs are owner-scoped in the application layer: users only receive workspaces whose `ownerId` matches their resolved identity.
+- Workspace-backed Cosmos documents for chat sessions, pending changes, and workspace state are partitioned by `ownerId:workspaceId`, and the API only queries the current owner's partition for those flows.
+- Shared admin configuration stored in Cosmos is intentionally tenant-global and remains restricted to admin-only APIs.
+- Cosmos DB access is currently mediated by the server's configured credential, not by direct end-user Cosmos credentials from the browser. The security boundary is the app's authorization layer.
 
-API-key auth is still available as a fallback by setting a connection to `authMode: "api-key"` in `config/agent-connections.json` and providing `AZURE_OPENAI_API_KEY`.
+## Current Limitations
 
-Azure AI Search grounding is configured by creating an Azure AI Search connector, then choosing that connector and index on a custom agent. The server uses Entra ID by default through `DefaultAzureCredential`; API keys entered in the UI are stored in `config/connector-secrets.local.json`, which is ignored by git.
-
-The current server supports Entra ID and optional API-key Azure OpenAI, Azure AI Search, and Cosmos DB connections behind configuration boundaries.
+- `SimpleJuniorAgent` remains the current bridge implementation while the full Junior agent loop is being ported.
+- Workspace metadata is still stored in a shared catalog document. Access to it is filtered server-side by `ownerId`, but the metadata container itself is not yet partitioned by end user.
 
 ## Next Porting Steps
 
@@ -78,7 +79,8 @@ The current server supports Entra ID and optional API-key Azure OpenAI, Azure AI
 2. Replace VS Code filesystem, SecretStorage, webview messaging, diagnostics, inline diff, terminal, auth, and settings usage with server adapters.
 3. Add semantic indexing with document chunking and embeddings over the package workspace.
 4. Add production workspace storage: Blob Storage or Git-backed storage first, Azure Files only when filesystem semantics are required.
-5. Add identity, session permissions, audit records, and model access on the server.
+5. Extend identity, audit, and session attribution further on the server, and harden persistence boundaries where owner metadata still lives in shared documents.
 6. Publish static output to Azure Static Web Apps, Blob static hosting, or App Service.
 
 See `docs/JUNIOR-WORKBENCH-HANDOFF.md` for the portable product handoff and indexing requirements.
+See `docs/AGENT-LOOP.md` for the current server-side agent loop design and request lifecycle.

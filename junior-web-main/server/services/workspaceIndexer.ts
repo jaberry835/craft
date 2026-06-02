@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import type { WorkspaceFile, WorkspaceIndex, WorkspaceIndexEntry, WorkspaceSearchResult, WorkspaceTreeNode } from '../types.js';
-import { LocalWorkspaceStorage } from './localWorkspaceStorage.js';
+import type { WorkspaceStorage } from './workspaceStorage.js';
 
 const indexableExtensions = new Set(['.md', '.markdown', '.txt', '.json', '.yaml', '.yml', '.csv']);
 const packageSectionNames = [
@@ -34,7 +34,7 @@ export class WorkspaceIndexer {
     packageSections: []
   };
 
-  constructor(private readonly storage: LocalWorkspaceStorage) {}
+  constructor(private readonly storage: WorkspaceStorage) {}
 
   async refresh(): Promise<WorkspaceIndex> {
     const tree = await this.storage.listTree();

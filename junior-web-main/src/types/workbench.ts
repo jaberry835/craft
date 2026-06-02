@@ -38,7 +38,179 @@ export interface WorkspaceSearchResult {
   matchedTerms: string[];
 }
 
+export interface WorkspaceSummary {
+  id: string;
+  name: string;
+  description?: string;
+  ownerId: string;
+  rootPath: string;
+  templateId?: string;
+  templateName?: string;
+}
+
+export interface RequestIdentitySummary {
+  userId: string;
+  displayName: string;
+  tenantId?: string;
+  roles: string[];
+  authSource: 'local-fallback' | 'trusted-header' | 'token';
+  isAuthenticated: boolean;
+}
+
+export interface AuthConfig {
+  identityMode: 'local-fallback' | 'trusted-header' | 'entra-msal';
+  authRequired: boolean;
+  providerName: string | null;
+  signInPath: string | null;
+  signOutPath: string | null;
+  clientId: string | null;
+  tenantId: string | null;
+  authority: string | null;
+  scopes: string[];
+  redirectUri: string | null;
+  postLogoutRedirectUri: string | null;
+}
+
+export interface AuthDiagnostics {
+  identity: RequestIdentitySummary | null;
+  tokenClaims: {
+    aud?: string;
+    iss?: string;
+    oid?: string;
+    tid?: string;
+    name?: string;
+    preferred_username?: string;
+    scp?: string;
+    roles?: string[];
+  } | null;
+}
+
+export type ConnectivityState = 'ok' | 'error' | 'disabled';
+
+export interface ConnectivityCheck {
+  id: string;
+  label: string;
+  status: ConnectivityState;
+  message: string;
+  detail?: string;
+}
+
+export interface ConnectivitySection {
+  id: 'cosmos' | 'storage' | 'secrets' | 'ai';
+  label: string;
+  status: ConnectivityState;
+  message: string;
+  checks: ConnectivityCheck[];
+}
+
+export interface AdminConnectivityReport {
+  generatedAt: string;
+  sections: ConnectivitySection[];
+}
+
+export interface AdminConnectivityTestResult {
+  target: 'cosmos' | 'storage';
+  startedAt: string;
+  completedAt: string;
+  status: ConnectivityState;
+  message: string;
+  checks: ConnectivityCheck[];
+}
+
+export interface ClassificationBarSettings {
+  text: string;
+  color: string;
+}
+
+export interface ClassificationBarSettingsSaveRequest {
+  text: string;
+  color: string;
+}
+
+export interface WorkspaceCreateRequest {
+  name: string;
+  description?: string;
+  templateId?: string;
+  templateName?: string;
+}
+
+export interface WorkspaceUpdateRequest {
+  name?: string;
+  description?: string;
+  templateId?: string;
+  templateName?: string;
+}
+
+export interface WorkspaceTemplateImportRequest {
+  templateId: string;
+  agentTemplateIds?: string[];
+  mcpCatalogIds?: string[];
+  connectorIds?: string[];
+}
+
+export interface WorkspaceTemplateImportResult {
+  importedAgents: string[];
+  importedConnections: string[];
+  importedMcpServers: string[];
+}
+
+export interface WorkspaceTemplateDefinition {
+  id: string;
+  name: string;
+  description: string;
+  agentTemplateIds?: string[];
+  mcpCatalogIds?: string[];
+  connectorIds?: string[];
+}
+
+export interface AgentTemplateDefinition {
+  id: string;
+  name: string;
+  description: string;
+  instructions: string;
+  suggestedModelConnectionId?: string;
+  groundingSources?: AgentGroundingSource[];
+  mcpServerIds?: string[];
+}
+
+export interface McpCatalogEntry {
+  id: string;
+  name: string;
+  description: string;
+  transport: McpServerTransport;
+  endpoint?: string;
+  authMode: McpServerAuthMode;
+  audience?: string;
+  customHeaders?: McpCustomHeader[];
+}
+
 export type AgentGroundingSourceType = 'workspace-index' | 'azure-ai-search';
+export type SourceReferenceType = 'workspace-file' | 'search-indexed-chunk' | 'repository-file' | 'external-record';
+export type SourceReferenceRetrievalKind = AgentGroundingSourceType | 'mcp';
+export type SourceAttributionStrength = 'strong' | 'weak';
+
+export interface SourceReference {
+  label: string;
+  sourceType: SourceReferenceType;
+  retrievalKind: SourceReferenceRetrievalKind;
+  attribution: SourceAttributionStrength;
+  sourceSystem?: string;
+  documentId?: string;
+  chunkId?: string;
+  repositoryId?: string;
+  path?: string;
+  workspacePath?: string;
+  previewPath?: string;
+  canonicalUrl?: string;
+  externalUrl?: string;
+  versionId?: string;
+  sourceVersion?: string;
+  mediaType?: string;
+  sectionLabel?: string;
+  pageNumber?: number;
+  chunkOrdinal?: number;
+  lastIndexedAt?: string;
+}
 
 export interface AgentGroundingSourceBase {
   id: string;
@@ -66,6 +238,17 @@ export interface AzureAiSearchGroundingSource extends AgentGroundingSourceBase {
   titleField?: string;
   contentFields?: string[];
   pathField?: string;
+  canonicalUrlField?: string;
+  sourceSystemField?: string;
+  documentIdField?: string;
+  chunkIdField?: string;
+  repositoryIdField?: string;
+  mediaTypeField?: string;
+  sectionField?: string;
+  pageNumberField?: string;
+  chunkOrdinalField?: string;
+  lastIndexedAtField?: string;
+  sourceVersionField?: string;
   filter?: string;
 }
 
@@ -73,7 +256,62 @@ export type AgentGroundingSource = WorkspaceIndexGroundingSource | AzureAiSearch
 
 export type AzureAuthMode = 'entra' | 'api-key';
 export type AzureCloud = 'public' | 'usgovernment' | 'china' | 'custom';
+export type AzureOpenAiEndpointKind = 'auto' | 'foundry-project' | 'openai-v1' | 'azure-openai-legacy';
 export type AgentConnectionType = 'azure-openai' | 'azure-ai-search';
+export type McpServerTransport = 'http';
+export type McpServerAuthMode = 'none' | 'bearer-token' | 'api-key' | 'entra' | 'custom-headers';
+export type ReasoningEffort = 'none' | 'low' | 'medium' | 'high' | 'xhigh';
+
+export interface McpCustomHeader {
+  name: string;
+  value?: string;
+  valueEnv?: string;
+}
+
+export interface McpServerDefinition {
+  id: string;
+  name: string;
+  transport: McpServerTransport;
+  endpoint?: string;
+  endpointEnv?: string;
+  authMode: McpServerAuthMode;
+  bearerTokenEnv?: string;
+  apiKeyEnv?: string;
+  audience?: string;
+  customHeaders?: McpCustomHeader[];
+}
+
+export interface McpServerStatus {
+  id: string;
+  name: string;
+  transport: McpServerTransport;
+  authMode: McpServerAuthMode;
+  configured: boolean;
+  missing: string[];
+  endpoint?: string;
+  endpointEnv?: string;
+  hasBearerToken: boolean;
+  bearerTokenEnv?: string;
+  hasApiKey: boolean;
+  apiKeyEnv?: string;
+  audience?: string;
+  customHeaders?: Array<{ name: string; configured: boolean; valueEnv?: string }>;
+}
+
+export interface McpServerSaveRequest {
+  id?: string;
+  name: string;
+  transport: McpServerTransport;
+  endpoint?: string;
+  endpointEnv?: string;
+  authMode: McpServerAuthMode;
+  bearerToken?: string;
+  bearerTokenEnv?: string;
+  apiKey?: string;
+  apiKeyEnv?: string;
+  audience?: string;
+  customHeaders?: McpCustomHeader[];
+}
 
 export interface AzureOpenAiConnectionDefinition {
   id: string;
@@ -81,6 +319,7 @@ export interface AzureOpenAiConnectionDefinition {
   type: 'azure-openai';
   authMode?: AzureAuthMode;
   cloud?: AzureCloud;
+  endpointKind?: AzureOpenAiEndpointKind;
   endpoint?: string;
   endpointEnv?: string;
   apiKeyEnv?: string;
@@ -120,6 +359,7 @@ export interface AgentConnectionStatus {
   type: AgentConnectionType;
   authMode: AzureAuthMode;
   cloud: AzureCloud;
+  endpointKind?: AzureOpenAiEndpointKind;
   configured: boolean;
   missing: string[];
   endpoint?: string;
@@ -148,6 +388,7 @@ export interface AgentConnectionSaveRequest {
   type: AgentConnectionType;
   authMode?: AzureAuthMode;
   cloud?: AzureCloud;
+  endpointKind?: AzureOpenAiEndpointKind;
   endpoint?: string;
   endpointEnv?: string;
   apiKey?: string;
@@ -167,22 +408,34 @@ export interface AgentConnectionSaveRequest {
   top?: number;
 }
 
+export interface AgentAiSettings {
+  temperature?: number;
+  maxTokens?: number;
+  reasoningEffort?: ReasoningEffort;
+}
+
 export interface AgentDefinition {
   id: string;
   name: string;
   description: string;
   instructions: string;
   modelConnectionId: string;
+  reasoningEffort?: ReasoningEffort;
+  aiSettings?: AgentAiSettings;
   tools: string[];
   groundingSources: AgentGroundingSource[];
+  mcpServerIds?: string[];
 }
 
 export interface AgentUpdateRequest {
   name?: string;
   description?: string;
   modelConnectionId?: string;
+  reasoningEffort?: ReasoningEffort;
+  aiSettings?: AgentAiSettings;
   instructions?: string;
   groundingSources?: AgentGroundingSource[];
+  mcpServerIds?: string[];
 }
 
 export interface AgentCreateRequest {
@@ -190,7 +443,10 @@ export interface AgentCreateRequest {
   description?: string;
   instructions: string;
   modelConnectionId: string;
+  reasoningEffort?: ReasoningEffort;
+  aiSettings?: AgentAiSettings;
   groundingSources?: AgentGroundingSource[];
+  mcpServerIds?: string[];
 }
 
 export interface GroundingSnippet {
@@ -198,6 +454,7 @@ export interface GroundingSnippet {
   sourceId: string;
   sourceLabel: string;
   sourceType: AgentGroundingSourceType;
+  sourceReference: SourceReference;
   title: string;
   content: string;
   path?: string;
@@ -206,14 +463,41 @@ export interface GroundingSnippet {
 
 export type ChatRole = 'user' | 'assistant' | 'tool';
 
+export interface ChatMessageReasoningPart {
+  kind: 'reasoning';
+  text: string;
+}
+
+export interface ChatMessageWorkingPart {
+  kind: 'working';
+  title: string;
+  events: ToolEvent[];
+}
+
+export type ChatMessageDisplayPart = ChatMessageReasoningPart | ChatMessageWorkingPart;
+
 export interface ChatMessage {
   id: string;
   role: ChatRole;
   content: string;
   createdAt: string;
+  display?: ChatMessageDisplayPart[];
 }
 
-export type ToolEventType = 'read' | 'search' | 'create' | 'edit' | 'publish' | 'ask';
+export interface ChatSessionSummary {
+  id: string;
+  title: string;
+  agentId?: string;
+  createdAt: string;
+  updatedAt: string;
+  messageCount: number;
+}
+
+export interface AgentRunOptions {
+  autoApproveChanges?: boolean;
+}
+
+export type ToolEventType = 'read' | 'search' | 'create' | 'edit' | 'ask';
 
 export interface ToolEvent {
   id: string;
@@ -236,15 +520,13 @@ export interface PendingChange {
 
 export interface AgentResponse {
   message: ChatMessage;
+  sessionId: string;
   toolEvents: ToolEvent[];
   pendingChanges: PendingChange[];
   activeAgent: AgentDefinition;
   modelConnection: AgentModelConnectionStatus;
   grounding: GroundingSnippet[];
+  changeHandling: 'review' | 'auto-apply';
+  appliedChangeCount: number;
 }
 
-export interface PublishResult {
-  url: string;
-  outputPath: string;
-  publishedAt: string;
-}

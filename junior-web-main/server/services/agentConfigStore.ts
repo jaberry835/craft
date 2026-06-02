@@ -2,9 +2,15 @@ import { CosmosClient, type Container } from '@azure/cosmos';
 import { DefaultAzureCredential } from '@azure/identity';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { AgentConnection, AgentConnectionSaveRequest, AgentConnectionStatus, AgentCreateRequest, AgentDefinition, AgentModelConnection, AgentModelConnectionStatus, AgentUpdateRequest, AzureAiSearchConnectionDefinition } from '../types.js';
+import { updatePersistenceMode } from './persistenceModeTracker.js';
+import type { AgentAiSettings, AgentConnection, AgentConnectionSaveRequest, AgentConnectionStatus, AgentCreateRequest, AgentDefinition, AgentModelConnection, AgentModelConnectionStatus, AgentTemplateDefinition, AgentUpdateRequest, AzureAiSearchConnectionDefinition, ClassificationBarSettings, ClassificationBarSettingsSaveRequest, McpCatalogEntry, McpCustomHeader, McpServerDefinition, McpServerSaveRequest, McpServerStatus, ResolvedMcpServerDefinition, WorkspaceSummary, WorkspaceTemplateDefinition } from '../types.js';
+
+export type RuntimeAgentConfigStore = Pick<AgentConfigStore, 'getConnection' | 'getSearchConnection' | 'resolveApiKey' | 'getConnectionStatus' | 'getResolvedMcpServer'> & {
+  getAgent(agentId?: string): AgentDefinition | Promise<AgentDefinition>;
+};
 
 type ConnectorSecrets = Record<string, { apiKey?: string }>;
+type McpServerSecrets = Record<string, { apiKey?: string; bearerToken?: string; customHeaders?: Record<string, string> }>;
 type ConfigDocument<T> = { id: string; items: T[] };
 type CosmosAuthMode = 'entra' | 'api-key';
 type CosmosStoreSettings = {
@@ -15,37 +21,183 @@ type CosmosStoreSettings = {
   keyConfigured: boolean;
 };
 
+const defaultClassificationBarSettings: ClassificationBarSettings = {
+  text: '',
+  color: '#7f1d1d'
+};
+
+function normalizeAgentAiSettings(aiSettings: AgentAiSettings | undefined, fallbackReasoningEffort?: AgentAiSettings['reasoningEffort']): AgentAiSettings | undefined {
+  const temperature = aiSettings?.temperature;
+  if (temperature !== undefined && (Number.isNaN(temperature) || temperature < 0 || temperature > 2)) {
+    throw new Error('Agent temperature must be between 0.0 and 2.0.');
+  }
+
+  const maxTokens = aiSettings?.maxTokens;
+  if (maxTokens !== undefined && (!Number.isInteger(maxTokens) || maxTokens <= 0)) {
+    throw new Error('Agent max output tokens must be a positive integer.');
+  }
+
+  const reasoningEffort = aiSettings?.reasoningEffort ?? fallbackReasoningEffort;
+  if (temperature === undefined && maxTokens === undefined && reasoningEffort === undefined) {
+    return undefined;
+  }
+
+  return {
+    ...(temperature !== undefined ? { temperature } : {}),
+    ...(maxTokens !== undefined ? { maxTokens } : {}),
+    ...(reasoningEffort !== undefined ? { reasoningEffort } : {})
+  };
+}
+
 export class AgentConfigStore {
   private agents: AgentDefinition[] = [];
+  private agentTemplates: AgentTemplateDefinition[] = [];
   private connections: AgentConnection[] = [];
   private secrets: ConnectorSecrets = {};
+  private mcpServers: McpServerDefinition[] = [];
+  private mcpCatalog: McpCatalogEntry[] = [];
+  private workspaceTemplates: WorkspaceTemplateDefinition[] = [];
+  private classificationBarSettings: ClassificationBarSettings = defaultClassificationBarSettings;
+  private mcpSecrets: McpServerSecrets = {};
   private cosmosContainer?: Container;
   private cosmosSettings?: CosmosStoreSettings;
 
   constructor(private readonly configRoot: string) {}
 
   async load(): Promise<void> {
-    const [agentsJson, connectionsJson] = await Promise.all([
+    const [agentsJson, connectionsJson, mcpServersJson, agentTemplatesJson, mcpCatalogJson, workspaceTemplatesJson, adminSettingsJson] = await Promise.all([
       readFile(path.join(this.configRoot, 'agents.json'), 'utf8'),
-      readFile(path.join(this.configRoot, 'agent-connections.json'), 'utf8')
+      readFile(path.join(this.configRoot, 'agent-connections.json'), 'utf8'),
+      readFile(path.join(this.configRoot, 'mcp-servers.json'), 'utf8'),
+      this.readOptionalConfig('agent-templates.json', '[]'),
+      this.readOptionalConfig('mcp-catalog.json', '[]'),
+      this.readOptionalConfig('workspace-templates.json', '[]'),
+      this.readOptionalConfig('admin-settings.json', '{}')
     ]);
 
     const seedAgents = JSON.parse(agentsJson) as AgentDefinition[];
     const seedConnections = JSON.parse(connectionsJson) as AgentConnection[];
+    const seedMcpServers = JSON.parse(mcpServersJson) as McpServerDefinition[];
+    const seedAgentTemplates = JSON.parse(agentTemplatesJson) as AgentTemplateDefinition[];
+    const seedMcpCatalog = JSON.parse(mcpCatalogJson) as McpCatalogEntry[];
+    const seedWorkspaceTemplates = JSON.parse(workspaceTemplatesJson) as WorkspaceTemplateDefinition[];
+    const seedAdminSettings = JSON.parse(adminSettingsJson) as { classificationBar?: ClassificationBarSettings };
     this.cosmosContainer = this.createCosmosContainer();
-    const cosmosConfig = this.cosmosContainer ? await this.loadFromCosmos(seedAgents, seedConnections) : undefined;
+    const cosmosConfig = this.cosmosContainer ? await this.loadFromCosmos(seedAgents, seedConnections, seedMcpServers) : undefined;
 
     this.agents = cosmosConfig?.agents ?? seedAgents;
     this.connections = cosmosConfig?.connections ?? seedConnections;
+    this.mcpServers = cosmosConfig?.mcpServers ?? seedMcpServers;
+    this.agentTemplates = seedAgentTemplates;
+    this.mcpCatalog = seedMcpCatalog;
+    this.workspaceTemplates = seedWorkspaceTemplates;
+    this.classificationBarSettings = this.normalizeClassificationBarSettings(seedAdminSettings.classificationBar);
     this.secrets = await this.loadSecrets();
+    this.mcpSecrets = await this.loadMcpSecrets();
+  }
+
+  getClassificationBarSettings(): ClassificationBarSettings {
+    return { ...this.classificationBarSettings };
+  }
+
+  async saveClassificationBarSettings(request: ClassificationBarSettingsSaveRequest): Promise<ClassificationBarSettings> {
+    this.classificationBarSettings = this.normalizeClassificationBarSettings(request);
+    await this.saveAdminSettings();
+    return this.getClassificationBarSettings();
   }
 
   listAgents(): AgentDefinition[] {
     return this.agents;
   }
 
+  listAgentsForWorkspace(workspace?: WorkspaceSummary): AgentDefinition[] {
+    return [...this.agents, ...this.workspaceTemplateAgentsFor(workspace)];
+  }
+
+  listAgentTemplates(): AgentTemplateDefinition[] {
+    return this.agentTemplates;
+  }
+
+  getAgentTemplate(templateId: string): AgentTemplateDefinition | undefined {
+    return this.agentTemplates.find((candidate) => candidate.id === templateId);
+  }
+
+  listMcpCatalog(): McpCatalogEntry[] {
+    return this.mcpCatalog;
+  }
+
+  getMcpCatalogEntry(entryId: string): McpCatalogEntry | undefined {
+    return this.mcpCatalog.find((candidate) => candidate.id === entryId);
+  }
+
+  listWorkspaceTemplates(): WorkspaceTemplateDefinition[] {
+    return this.workspaceTemplates;
+  }
+
+  getWorkspaceTemplate(templateId: string): WorkspaceTemplateDefinition | undefined {
+    return this.workspaceTemplates.find((candidate) => candidate.id === templateId);
+  }
+
+  getConnectionDefinition(connectionId: string): AgentConnection | undefined {
+    return this.connections.find((candidate) => candidate.id === connectionId);
+  }
+
+  listSharedAgentTemplatesForWorkspace(workspace?: WorkspaceSummary): AgentTemplateDefinition[] {
+    const workspaceTemplate = workspace?.templateId
+      ? this.workspaceTemplates.find((candidate) => candidate.id === workspace.templateId)
+      : undefined;
+
+    if (!workspaceTemplate?.agentTemplateIds?.length) {
+      return [];
+    }
+
+    return workspaceTemplate.agentTemplateIds
+      .map((templateId) => this.agentTemplates.find((candidate) => candidate.id === templateId))
+      .filter((template): template is AgentTemplateDefinition => Boolean(template));
+  }
+
+  listSharedConnectionsForWorkspace(workspace?: WorkspaceSummary): AgentConnectionStatus[] {
+    const workspaceTemplate = workspace?.templateId
+      ? this.workspaceTemplates.find((candidate) => candidate.id === workspace.templateId)
+      : undefined;
+
+    if (!workspaceTemplate?.connectorIds?.length) {
+      return [];
+    }
+
+    return workspaceTemplate.connectorIds
+      .map((connectionId) => this.connections.find((candidate) => candidate.id === connectionId))
+      .filter((connection): connection is AgentConnection => Boolean(connection))
+      .map((connection) => this.toStatus(connection));
+  }
+
+  listSharedMcpCatalogForWorkspace(workspace?: WorkspaceSummary): McpCatalogEntry[] {
+    const workspaceTemplate = workspace?.templateId
+      ? this.workspaceTemplates.find((candidate) => candidate.id === workspace.templateId)
+      : undefined;
+
+    if (!workspaceTemplate?.mcpCatalogIds?.length) {
+      return [];
+    }
+
+    return workspaceTemplate.mcpCatalogIds
+      .map((catalogId) => this.mcpCatalog.find((candidate) => candidate.id === catalogId))
+      .filter((entry): entry is McpCatalogEntry => Boolean(entry));
+  }
+
   getAgent(agentId?: string): AgentDefinition {
     const agent = this.agents.find((candidate) => candidate.id === agentId) ?? this.agents[0];
+
+    if (!agent) {
+      throw new Error('No agents are configured.');
+    }
+
+    return agent;
+  }
+
+  getAgentForWorkspace(workspace: WorkspaceSummary | undefined, agentId?: string): AgentDefinition {
+    const agents = this.listAgentsForWorkspace(workspace);
+    const agent = agents.find((candidate) => candidate.id === agentId) ?? agents[0];
 
     if (!agent) {
       throw new Error('No agents are configured.');
@@ -62,13 +214,20 @@ export class AgentConfigStore {
     }
 
     const current = this.agents[index];
+    const reasoningEffort = update.reasoningEffort ?? current.reasoningEffort ?? current.aiSettings?.reasoningEffort ?? 'medium';
+    const aiSettings = Object.hasOwn(update, 'aiSettings')
+      ? normalizeAgentAiSettings(update.aiSettings, reasoningEffort)
+      : normalizeAgentAiSettings(current.aiSettings, reasoningEffort);
     const next: AgentDefinition = {
       ...current,
       name: update.name?.trim() || current.name,
       description: update.description ?? current.description,
       modelConnectionId: update.modelConnectionId ?? current.modelConnectionId,
+      reasoningEffort,
+      aiSettings,
       instructions: update.instructions ?? current.instructions,
-      groundingSources: update.groundingSources ?? current.groundingSources
+      groundingSources: update.groundingSources ?? current.groundingSources,
+      mcpServerIds: this.cleanMcpServerIds(update.mcpServerIds ?? current.mcpServerIds)
     };
 
     this.agents[index] = next;
@@ -83,13 +242,17 @@ export class AgentConfigStore {
       throw new Error('Agent name is required.');
     }
 
+    const reasoningEffort = request.reasoningEffort ?? request.aiSettings?.reasoningEffort ?? 'medium';
+
     const agent: AgentDefinition = {
       id: this.uniqueId(this.slugify(name), this.agents.map((candidate) => candidate.id)),
       name,
       description: request.description?.trim() ?? '',
       instructions: request.instructions,
       modelConnectionId: request.modelConnectionId,
-      tools: ['read_file', 'search_files', 'grep_search', 'semantic_search', 'write_file', 'edit_file', 'publish_package'],
+      reasoningEffort,
+      aiSettings: normalizeAgentAiSettings(request.aiSettings, reasoningEffort),
+      tools: ['read_file', 'search_files', 'grep_search', 'semantic_search', 'write_file', 'edit_file'],
       groundingSources: request.groundingSources ?? [
         {
           id: 'workspace',
@@ -98,10 +261,27 @@ export class AgentConfigStore {
           enabled: true,
           top: 5
         }
-      ]
+      ],
+      mcpServerIds: this.cleanMcpServerIds(request.mcpServerIds)
     };
 
     this.agents = [...this.agents, agent];
+    await this.saveAgents();
+    return agent;
+  }
+
+  async deleteAgent(agentId: string): Promise<AgentDefinition> {
+    const agent = this.agents.find((candidate) => candidate.id === agentId);
+
+    if (!agent) {
+      throw new Error(`Agent not found: ${agentId}`);
+    }
+
+    if (this.agents.length <= 1) {
+      throw new Error('At least one agent must remain configured.');
+    }
+
+    this.agents = this.agents.filter((candidate) => candidate.id !== agentId);
     await this.saveAgents();
     return agent;
   }
@@ -112,6 +292,51 @@ export class AgentConfigStore {
 
   listConnections(): AgentConnectionStatus[] {
     return this.connections.map((connection) => this.toStatus(connection));
+  }
+
+  listMcpServers(): McpServerStatus[] {
+    return this.mcpServers.map((server) => this.toMcpStatus(server));
+  }
+
+  getResolvedMcpServer(serverId: string): ResolvedMcpServerDefinition {
+    const server = this.mcpServers.find((candidate) => candidate.id === serverId);
+    if (!server) {
+      throw new Error(`MCP server not found: ${serverId}`);
+    }
+
+    const endpoint = server.endpoint ?? (server.endpointEnv ? process.env[server.endpointEnv] : undefined);
+    const bearerToken = this.resolveMcpBearerToken(server);
+    const apiKey = this.resolveMcpApiKey(server);
+    const customHeaders = Object.fromEntries(
+      (server.customHeaders ?? []).flatMap((header) => {
+        const value = this.resolveMcpCustomHeaderValue(server.id, header);
+        return value ? [[header.name, value]] : [];
+      })
+    );
+    const resolvedEndpoint = endpoint;
+    const missing = [
+      resolvedEndpoint ? undefined : server.endpointEnv ?? 'endpoint',
+      server.authMode === 'bearer-token' && !bearerToken ? server.bearerTokenEnv ?? 'bearer token' : undefined,
+      server.authMode === 'api-key' && !apiKey ? server.apiKeyEnv ?? 'api key' : undefined,
+      server.authMode === 'entra' && !server.audience ? 'audience' : undefined,
+      server.authMode === 'custom-headers' && (server.customHeaders ?? []).some((header) => !this.resolveMcpCustomHeaderValue(server.id, header)) ? 'custom headers' : undefined
+    ].filter((value): value is string => Boolean(value));
+
+    if (missing.length > 0) {
+      throw new Error(`MCP server ${server.name} is not fully configured. Missing: ${missing.join(', ')}.`);
+    }
+
+    return {
+      id: server.id,
+      name: server.name,
+      transport: server.transport,
+      endpoint: resolvedEndpoint as string,
+      authMode: server.authMode,
+      bearerToken,
+      apiKey,
+      audience: server.audience,
+      customHeaders: Object.keys(customHeaders).length > 0 ? customHeaders : undefined
+    };
   }
 
   getConnection(connectionId: string): AgentModelConnection {
@@ -142,6 +367,88 @@ export class AgentConfigStore {
     return this.toStatus(this.getConnection(connectionId));
   }
 
+  async saveMcpServer(request: McpServerSaveRequest): Promise<McpServerStatus> {
+    const name = request.name.trim();
+
+    if (!name) {
+      throw new Error('MCP server name is required.');
+    }
+
+    const id = request.id?.trim() || this.uniqueId(this.slugify(name), this.mcpServers.map((server) => server.id));
+    const current = this.mcpServers.find((server) => server.id === id);
+    const authMode = request.authMode ?? current?.authMode ?? 'none';
+    const next: McpServerDefinition = {
+      id,
+      name,
+      transport: request.transport,
+      endpoint: request.endpoint?.trim() || undefined,
+      endpointEnv: request.endpointEnv?.trim() || current?.endpointEnv || this.defaultMcpEndpointEnv(id),
+      authMode,
+      bearerTokenEnv: request.bearerTokenEnv?.trim() || current?.bearerTokenEnv || this.defaultMcpBearerTokenEnv(id),
+      apiKeyEnv: request.apiKeyEnv?.trim() || current?.apiKeyEnv || this.defaultMcpApiKeyEnv(id),
+      audience: request.audience?.trim() || undefined,
+      customHeaders: this.cleanMcpHeaders(request.customHeaders)
+    };
+
+    const index = this.mcpServers.findIndex((server) => server.id === id);
+    this.mcpServers = index === -1
+      ? [...this.mcpServers, next]
+      : this.mcpServers.map((server) => server.id === id ? next : server);
+
+    const currentSecrets = this.mcpSecrets[id] ?? {};
+    const nextSecrets: McpServerSecrets[string] = {
+      ...currentSecrets,
+      apiKey: request.apiKey?.trim() ? request.apiKey.trim() : currentSecrets.apiKey,
+      bearerToken: request.bearerToken?.trim() ? request.bearerToken.trim() : currentSecrets.bearerToken,
+      customHeaders: this.mergeMcpCustomHeaderSecrets(currentSecrets.customHeaders, request.customHeaders)
+    };
+
+    if (authMode === 'none' || authMode === 'entra') {
+      delete nextSecrets.apiKey;
+      delete nextSecrets.bearerToken;
+    }
+    if (authMode !== 'custom-headers') {
+      delete nextSecrets.customHeaders;
+    }
+
+    if (Object.keys(nextSecrets).length > 0) {
+      this.mcpSecrets[id] = nextSecrets;
+      await this.saveMcpSecrets();
+    } else if (this.mcpSecrets[id]) {
+      delete this.mcpSecrets[id];
+      await this.saveMcpSecrets();
+    }
+
+    await this.saveMcpServers();
+    return this.toMcpStatus(next);
+  }
+
+  async deleteMcpServer(serverId: string): Promise<McpServerStatus> {
+    const server = this.mcpServers.find((candidate) => candidate.id === serverId);
+
+    if (!server) {
+      throw new Error(`MCP server not found: ${serverId}`);
+    }
+
+    const usedByAgents = this.agents
+      .filter((agent) => agent.mcpServerIds?.includes(serverId))
+      .map((agent) => agent.name);
+
+    if (usedByAgents.length > 0) {
+      throw new Error(`MCP server ${server.name} is still attached to ${usedByAgents.join(', ')}.`);
+    }
+
+    this.mcpServers = this.mcpServers.filter((candidate) => candidate.id !== serverId);
+
+    if (this.mcpSecrets[serverId]) {
+      delete this.mcpSecrets[serverId];
+      await this.saveMcpSecrets();
+    }
+
+    await this.saveMcpServers();
+    return this.toMcpStatus(server);
+  }
+
   async saveConnection(request: AgentConnectionSaveRequest): Promise<AgentConnectionStatus> {
     const name = request.name.trim();
 
@@ -161,6 +468,9 @@ export class AgentConfigStore {
       type: request.type,
       authMode,
       cloud,
+      endpointKind: request.type === 'azure-openai'
+        ? (request.endpointKind ?? (current?.type === 'azure-openai' ? current.endpointKind : undefined) ?? 'auto')
+        : undefined,
       endpoint,
       endpointEnv,
       apiKeyEnv: request.apiKeyEnv?.trim() || current?.apiKeyEnv || this.defaultApiKeyEnv(request.type, id),
@@ -205,14 +515,48 @@ export class AgentConfigStore {
     return this.toStatus(next);
   }
 
+  async deleteConnection(connectionId: string): Promise<AgentConnectionStatus> {
+    const connection = this.connections.find((candidate) => candidate.id === connectionId);
+
+    if (!connection) {
+      throw new Error(`Connector not found: ${connectionId}`);
+    }
+
+    const modelUsers = this.agents
+      .filter((agent) => agent.modelConnectionId === connectionId)
+      .map((agent) => agent.name);
+    const groundingUsers = this.agents
+      .filter((agent) => agent.groundingSources.some((source) => source.type === 'azure-ai-search' && source.connectorId === connectionId))
+      .map((agent) => agent.name);
+
+    if (modelUsers.length > 0 || groundingUsers.length > 0) {
+      const usages = [
+        modelUsers.length > 0 ? `model for ${modelUsers.join(', ')}` : undefined,
+        groundingUsers.length > 0 ? `grounding for ${groundingUsers.join(', ')}` : undefined
+      ].filter((value): value is string => Boolean(value));
+      throw new Error(`Connector ${connection.name} is still in use as ${usages.join(' and ')}.`);
+    }
+
+    this.connections = this.connections.filter((candidate) => candidate.id !== connectionId);
+
+    if (this.secrets[connectionId]) {
+      delete this.secrets[connectionId];
+      await this.saveSecrets();
+    }
+
+    await this.saveConnections();
+    return this.toStatus(connection);
+  }
+
   private toStatus(connection: AgentConnection): AgentConnectionStatus {
     const endpoint = connection.endpoint ?? (connection.endpointEnv ? process.env[connection.endpointEnv] : undefined);
     const authMode = connection.authMode ?? 'entra';
     const apiKey = this.resolveApiKey(connection);
+    const requiresApiKey = authMode === 'api-key' && connection.type !== 'azure-openai';
     const missing = [
       endpoint ? undefined : connection.endpointEnv ?? 'endpoint',
       connection.type === 'azure-openai' && !(connection.deployment ?? (connection.deploymentEnv ? process.env[connection.deploymentEnv] : undefined)) ? connection.deploymentEnv ?? 'deployment' : undefined,
-      authMode === 'api-key' && !apiKey ? connection.apiKeyEnv ?? 'api key' : undefined
+      requiresApiKey && !apiKey ? connection.apiKeyEnv ?? 'api key' : undefined
     ].filter((value): value is string => Boolean(value));
     const deployment = connection.type === 'azure-openai'
       ? connection.deployment ?? (connection.deploymentEnv ? process.env[connection.deploymentEnv] : undefined)
@@ -227,6 +571,7 @@ export class AgentConfigStore {
       type: connection.type,
       authMode,
       cloud: connection.cloud ?? 'public',
+      endpointKind: connection.type === 'azure-openai' ? connection.endpointKind ?? 'auto' : undefined,
       configured: missing.length === 0,
       missing,
       endpoint,
@@ -248,6 +593,40 @@ export class AgentConfigStore {
     };
   }
 
+  private toMcpStatus(server: McpServerDefinition): McpServerStatus {
+    const endpoint = server.endpoint ?? (server.endpointEnv ? process.env[server.endpointEnv] : undefined);
+    const bearerToken = this.resolveMcpBearerToken(server);
+    const apiKey = this.resolveMcpApiKey(server);
+    const customHeaders = server.customHeaders?.map((header) => ({
+      name: header.name,
+      configured: Boolean(this.resolveMcpCustomHeaderValue(server.id, header)),
+      valueEnv: header.valueEnv
+    }));
+    const missing = [
+      endpoint ? undefined : server.endpointEnv ?? 'endpoint',
+      server.authMode === 'bearer-token' && !bearerToken ? server.bearerTokenEnv ?? 'bearer token' : undefined,
+      server.authMode === 'api-key' && !apiKey ? server.apiKeyEnv ?? 'api key' : undefined,
+      server.authMode === 'custom-headers' && customHeaders?.some((header) => !header.configured) ? 'custom headers' : undefined
+    ].filter((value): value is string => Boolean(value));
+
+    return {
+      id: server.id,
+      name: server.name,
+      transport: server.transport,
+      authMode: server.authMode,
+      configured: missing.length === 0,
+      missing,
+      endpoint,
+      endpointEnv: server.endpointEnv,
+      hasBearerToken: Boolean(bearerToken),
+      bearerTokenEnv: server.bearerTokenEnv,
+      hasApiKey: Boolean(apiKey),
+      apiKeyEnv: server.apiKeyEnv,
+      audience: server.audience,
+      customHeaders
+    };
+  }
+
   private async saveAgents(): Promise<void> {
     if (this.cosmosContainer) {
       await this.upsertConfigDocument('agents', this.agents);
@@ -266,11 +645,33 @@ export class AgentConfigStore {
     await writeFile(path.join(this.configRoot, 'agent-connections.json'), `${JSON.stringify(this.connections, null, 2)}\n`, 'utf8');
   }
 
+  private async saveMcpServers(): Promise<void> {
+    if (this.cosmosContainer) {
+      await this.upsertConfigDocument('mcpServers', this.mcpServers);
+      return;
+    }
+
+    await writeFile(path.join(this.configRoot, 'mcp-servers.json'), `${JSON.stringify(this.mcpServers, null, 2)}\n`, 'utf8');
+  }
+
+  private async saveAdminSettings(): Promise<void> {
+    await writeFile(path.join(this.configRoot, 'admin-settings.json'), `${JSON.stringify({ classificationBar: this.classificationBarSettings }, null, 2)}\n`, 'utf8');
+  }
+
+  private async readOptionalConfig(fileName: string, fallback: string): Promise<string> {
+    try {
+      return await readFile(path.join(this.configRoot, fileName), 'utf8');
+    } catch {
+      return fallback;
+    }
+  }
+
   private createCosmosContainer(): Container | undefined {
     const endpoint = process.env.COSMOS_DB_ENDPOINT;
 
     if (!endpoint) {
       console.info('[config-store] Cosmos DB config storage is disabled; using local JSON files.');
+      updatePersistenceMode({ scope: 'config-store', configured: 'local', effective: 'local', fallbackActive: false });
       return undefined;
     }
 
@@ -297,6 +698,7 @@ export class AgentConfigStore {
     };
 
     console.info(`[config-store] Cosmos DB config storage enabled: endpointHost=${this.cosmosSettings.endpointHost}, database=${databaseId}, container=${containerId}, authMode=${authMode}, keyConfigured=${keyConfigured}.`);
+    updatePersistenceMode({ scope: 'config-store', configured: 'cosmos', effective: 'cosmos', fallbackActive: false });
 
     const client = authMode === 'api-key'
       ? new CosmosClient({ endpoint, key: process.env.COSMOS_DB_KEY })
@@ -305,18 +707,26 @@ export class AgentConfigStore {
     return client.database(databaseId).container(containerId);
   }
 
-  private async loadFromCosmos(seedAgents: AgentDefinition[], seedConnections: AgentConnection[]): Promise<{ agents: AgentDefinition[]; connections: AgentConnection[] }> {
+  private async loadFromCosmos(seedAgents: AgentDefinition[], seedConnections: AgentConnection[], seedMcpServers: McpServerDefinition[]): Promise<{ agents: AgentDefinition[]; connections: AgentConnection[]; mcpServers: McpServerDefinition[] }> {
     try {
-      const [agents, connections] = await Promise.all([
+      const [agents, connections, mcpServers] = await Promise.all([
         this.readConfigDocument('agents', seedAgents),
-        this.readConfigDocument('connections', seedConnections)
+        this.readConfigDocument('connections', seedConnections),
+        this.readConfigDocument('mcpServers', seedMcpServers)
       ]);
 
       console.info('[config-store] Loaded agent and connector configuration from Cosmos DB.');
-      return { agents, connections };
+      return { agents, connections, mcpServers };
     } catch (error) {
       this.logCosmosError('load configuration from Cosmos DB', error);
-      throw error;
+      console.warn('[config-store] Falling back to local JSON config because Cosmos DB is unavailable.');
+      this.cosmosContainer = undefined;
+      updatePersistenceMode({ scope: 'config-store', configured: 'cosmos', effective: 'local', fallbackActive: true, reason: error instanceof Error ? error.message : String(error) });
+      return {
+        agents: seedAgents,
+        connections: seedConnections,
+        mcpServers: seedMcpServers
+      };
     }
   }
 
@@ -353,6 +763,18 @@ export class AgentConfigStore {
       this.logCosmosError(`save "${id}" configuration document to Cosmos DB`, error);
       throw error;
     }
+  }
+
+  private normalizeClassificationBarSettings(settings?: Partial<ClassificationBarSettings>): ClassificationBarSettings {
+    const text = settings?.text?.trim() ?? '';
+    const color = settings?.color?.trim();
+
+    return {
+      text,
+      color: color && /^#[0-9a-fA-F]{6}$/.test(color)
+        ? color
+        : defaultClassificationBarSettings.color
+    };
   }
 
   private logCosmosError(operation: string, error: unknown): void {
@@ -395,8 +817,28 @@ export class AgentConfigStore {
     await writeFile(this.secretsPath(), `${JSON.stringify(this.secrets, null, 2)}\n`, 'utf8');
   }
 
+  private async loadMcpSecrets(): Promise<McpServerSecrets> {
+    try {
+      return JSON.parse(await readFile(this.mcpSecretsPath(), 'utf8')) as McpServerSecrets;
+    } catch (error) {
+      if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') {
+        return {};
+      }
+
+      throw error;
+    }
+  }
+
+  private async saveMcpSecrets(): Promise<void> {
+    await writeFile(this.mcpSecretsPath(), `${JSON.stringify(this.mcpSecrets, null, 2)}\n`, 'utf8');
+  }
+
   private secretsPath(): string {
     return path.join(this.configRoot, 'connector-secrets.local.json');
+  }
+
+  private mcpSecretsPath(): string {
+    return path.join(this.configRoot, 'mcp-secrets.local.json');
   }
 
   private defaultEndpointEnv(type: AgentConnection['type'], id: string): string {
@@ -407,13 +849,143 @@ export class AgentConfigStore {
     return `${this.envPrefix(type, id)}_API_KEY`;
   }
 
+  private defaultMcpEndpointEnv(id: string): string {
+    return `${this.mcpEnvPrefix(id)}_ENDPOINT`;
+  }
+
+  private defaultMcpBearerTokenEnv(id: string): string {
+    return `${this.mcpEnvPrefix(id)}_BEARER_TOKEN`;
+  }
+
+  private defaultMcpApiKeyEnv(id: string): string {
+    return `${this.mcpEnvPrefix(id)}_API_KEY`;
+  }
+
   private envPrefix(type: AgentConnection['type'], id: string): string {
     return `${type === 'azure-openai' ? 'AZURE_OPENAI' : 'AZURE_AI_SEARCH'}_${id.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}`;
+  }
+
+  private mcpEnvPrefix(id: string): string {
+    return `MCP_${id.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}`;
   }
 
   private cleanList(values?: string[]): string[] | undefined {
     const next = values?.map((value) => value.trim()).filter(Boolean) ?? [];
     return next.length > 0 ? next : undefined;
+  }
+
+  private cleanMcpHeaders(headers?: McpCustomHeader[]): McpCustomHeader[] | undefined {
+    const next = headers?.map((header) => ({
+      name: header.name.trim(),
+      valueEnv: header.valueEnv?.trim() || undefined
+    })).filter((header) => header.name) ?? [];
+    return next.length > 0 ? next : undefined;
+  }
+
+  private cleanMcpServerIds(ids?: string[]): string[] | undefined {
+    const next = Array.from(new Set(ids?.map((id) => id.trim()).filter(Boolean) ?? []));
+    const invalid = next.filter((id) => !this.mcpServers.some((server) => server.id === id));
+
+    if (invalid.length > 0) {
+      throw new Error(`Unknown MCP server selection: ${invalid.join(', ')}`);
+    }
+
+    return next.length > 0 ? next : undefined;
+  }
+
+  private resolveMcpApiKey(server: McpServerDefinition): string | undefined {
+    return this.mcpSecrets[server.id]?.apiKey ?? (server.apiKeyEnv ? process.env[server.apiKeyEnv] : undefined);
+  }
+
+  private resolveMcpBearerToken(server: McpServerDefinition): string | undefined {
+    return this.mcpSecrets[server.id]?.bearerToken ?? (server.bearerTokenEnv ? process.env[server.bearerTokenEnv] : undefined);
+  }
+
+  private resolveMcpCustomHeaderValue(serverId: string, header: McpCustomHeader): string | undefined {
+    return this.mcpSecrets[serverId]?.customHeaders?.[header.name] ?? (header.valueEnv ? process.env[header.valueEnv] : undefined);
+  }
+
+  private mergeMcpCustomHeaderSecrets(current: Record<string, string> | undefined, headers: McpCustomHeader[] | undefined): Record<string, string> | undefined {
+    if (!headers || headers.length === 0) {
+      return current;
+    }
+
+    const next: Record<string, string> = { ...(current ?? {}) };
+    let changed = false;
+
+    for (const header of headers) {
+      const name = header.name.trim();
+      const value = header.value?.trim();
+
+      if (!name || !value) {
+        continue;
+      }
+
+      next[name] = value;
+      changed = true;
+    }
+
+    return changed ? next : current;
+  }
+
+  private workspaceTemplateAgentsFor(workspace?: WorkspaceSummary): AgentDefinition[] {
+    const workspaceTemplate = workspace?.templateId
+      ? this.workspaceTemplates.find((candidate) => candidate.id === workspace.templateId)
+      : undefined;
+
+    if (!workspaceTemplate?.agentTemplateIds?.length) {
+      return [];
+    }
+
+    return workspaceTemplate.agentTemplateIds
+      .map((templateId) => this.agentTemplates.find((candidate) => candidate.id === templateId))
+      .filter((template): template is AgentTemplateDefinition => Boolean(template))
+      .map((template) => this.materializeAgentTemplate(template, workspaceTemplate));
+  }
+
+  materializeAgentTemplate(template: AgentTemplateDefinition, workspaceTemplate: WorkspaceTemplateDefinition): AgentDefinition {
+    const fallbackModelConnectionId = workspaceTemplate.connectorIds?.find((connectionId) => {
+      const connection = this.connections.find((candidate) => candidate.id === connectionId);
+      return connection?.type === 'azure-openai';
+    }) ?? this.connections.find((connection) => connection.type === 'azure-openai')?.id;
+
+    return {
+      id: this.workspaceTemplateAgentId(template.id),
+      name: template.name,
+      description: template.description,
+      instructions: template.instructions,
+      modelConnectionId: template.suggestedModelConnectionId ?? fallbackModelConnectionId ?? this.agents[0]?.modelConnectionId ?? '',
+      tools: ['read_file', 'search_files', 'grep_search', 'semantic_search', 'write_file', 'edit_file'],
+      groundingSources: template.groundingSources ?? [
+        {
+          id: 'workspace',
+          type: 'workspace-index',
+          label: 'Workspace index',
+          enabled: true,
+          top: 5
+        }
+      ],
+      mcpServerIds: template.mcpServerIds
+    };
+  }
+
+  materializeMcpCatalogEntry(entry: McpCatalogEntry): McpServerDefinition {
+    return {
+      id: entry.id,
+      name: entry.name,
+      transport: entry.transport,
+      endpoint: entry.endpoint,
+      endpointEnv: this.defaultMcpEndpointEnv(entry.id),
+      authMode: entry.authMode,
+      bearerTokenEnv: this.defaultMcpBearerTokenEnv(entry.id),
+      apiKeyEnv: this.defaultMcpApiKeyEnv(entry.id),
+      audience: entry.audience,
+      customHeaders: this.cleanMcpHeaders(entry.customHeaders)
+    };
+  }
+
+  private workspaceTemplateAgentId(templateId: string): string {
+    return `workspace-template:${templateId}`;
   }
 
   private slugify(value: string): string {

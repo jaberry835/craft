@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Junior Security Approval Package</title>
+  <style>
+    body { margin: 0; font: 16px/1.55 system-ui, Segoe UI, sans-serif; color: #172033; background: #f6f8fb; }
+    main { max-width: 920px; margin: 0 auto; padding: 40px 24px 72px; }
+    header { border-bottom: 1px solid #d9e0ea; margin-bottom: 28px; padding-bottom: 16px; }
+    section { background: #fff; border: 1px solid #d9e0ea; border-radius: 8px; padding: 24px; margin: 16px 0; }
+    h1, h2, h3 { color: #0f172a; line-height: 1.2; }
+    .source { color: #526070; font-size: 13px; margin: 0 0 16px; }
+    li { margin: 6px 0; }
+    .task::before { content: '☐ '; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Junior Security Approval Package</h1>
+      <p>Published from Junior Workbench on 5/14/2026, 12:44:08 AM.</p>
+    </header>
+    <section><p class="source">package/approval-checklist.md</p><h1>Approval Checklist</h1>
+
+<li class="task">Business owner identified</li>
+<li class="task">Data classification confirmed</li>
+<li class="task">Threat model reviewed</li>
+<li class="task">Required Azure RBAC assignments listed</li>
+<li class="task">Monitoring and incident response documented</li>
+
+<h2>Agent Follow-up Checklist</h2>
+
+<li class="task">Confirm package owner and approver group</li>
+<li class="task">Attach architecture evidence and data-flow notes</li>
+<li class="task">Confirm managed identity and RBAC plan</li>
+<li class="task">Confirm logging, alerting, and incident routing</li>
+<li>[x] Review final static preview before publishing</li>
+</section>
+<section><p class="source">package/index.md</p><h1>Contoso Payments Security Approval Package</h1>
+
+<h2>Executive Summary</h2>
+
+<p>This package is a working draft. Use Junior Workbench to collect evidence, draft controls, and publish the approval package.</p>
+
+<h2>Current Approval Status</h2>
+
+<li>Owner: Unassigned</li>
+<li>System criticality: Medium</li>
+<li>Data classification: Confidential</li>
+<li>Review state: Draft</li>
+</section>
+<section><p class="source">package/security-controls.md</p><h1>Security Controls</h1>
+
+<h2>Identity And Access</h2>
+
+<li>Define managed identities and human access paths.</li>
+<li>Record least-privilege role assignments.</li>
+
+<h2>Data Protection</h2>
+
+<li>Identify sensitive data stores.</li>
+<li>Document encryption, retention, and backup expectations.</li>
+</section>
+<section><p class="source">package/system-overview.md</p><h1>System Overview</h1>
+
+<h2>Business Purpose</h2>
+
+<p>Describe what the system does, who uses it, and what approval is being requested.</p>
+
+<h2>Architecture</h2>
+
+<p>Document the Azure services, identities, data stores, and external integrations involved.</p>
+
+<h2>Junior Workbench Draft Notes</h2>
+
+<p>Requested update: Draft the next security approval package updates for an Azure-hosted workload.</p>
+<p>Agent: Security Package Drafter</p>
+<p>Model connection: Default Azure OpenAI</p>
+<p>Grounding context considered:</p>
+<li>Workspace index / package/index.md: Contoso Payments Security Approval Package ## Executive Summary This package is a working draft. Use Junior Workbench to collect evidence, draft controls, and publish the approval package. ## Current Approval Status - Owner: Unassigned - Sy</li>
+<li>Workspace index / package/approval-checklist.md: # Approval Checklist - [ ] Business owner identified - [ ] Data classification confirmed - [ ] Threat model reviewed - [ ] Required Azure RBAC assignments listed - [ ] Monitoring and incident response documented</li>
+<li>Workspace index / package/security-controls.md: # Security Controls ## Identity And Access - Define managed identities and human access paths. - Record least-privilege role assignments. ## Data Protection - Identify sensitive data stores. - Document encryption, retention, and backup expe</li>
+<li>Workspace index / package/system-overview.md: # System Overview ## Business Purpose Describe what the system does, who uses it, and what approval is being requested. ## Architecture Document the Azure services, identities, data stores, and external integrations involved.</li>
+<p>Azure OpenAI draft:</p>
+<p>Azure OpenAI draft failed, so Junior used a deterministic local draft. Diagnostic: Azure OpenAI request failed: 400 {&quot;error&quot;:{&quot;code&quot;:&quot;Request is badly formated&quot;,&quot;message&quot;:&quot;CheckAccess request is invalid because: Unable to access tenant for permission info.&quot;}}</p>
+<p>The package should capture Azure resources, identities, data flows, threat model status, monitoring, and approval owners.</p>
+<p>This draft was staged by the server-side Junior agent service and requires human approval before it is written to the workspace.</p>
+</section>
+  </main>
+</body>
+</html>

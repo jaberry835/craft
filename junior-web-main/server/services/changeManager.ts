@@ -1,14 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import type { PendingChange } from '../types.js';
-import { LocalWorkspaceStorage } from './localWorkspaceStorage.js';
+import type { PendingChangeStore } from './pendingChangeStore.js';
+import type { WorkspaceStorage } from './workspaceStorage.js';
 
 export class ChangeManager {
-  private readonly changes = new Map<string, PendingChange>();
+  constructor(
+    private readonly storage: WorkspaceStorage,
+    private readonly store: PendingChangeStore
+  ) {}
 
-  constructor(private readonly storage: LocalWorkspaceStorage) {}
-
-  list(): PendingChange[] {
-    return Array.from(this.changes.values()).sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  async list(): Promise<PendingChange[]> {
+    return this.store.list();
   }
 
   async stageFileChange(path: string, proposedContent: string, summary: string): Promise<PendingChange> {
@@ -21,7 +23,7 @@ export class ChangeManager {
       action = 'create';
     }
 
-    const existing = this.list().find((change) => change.path === path);
+    const existing = await this.store.findByPath(path);
     const change: PendingChange = {
       id: existing?.id ?? randomUUID(),
       path,
@@ -32,39 +34,39 @@ export class ChangeManager {
       createdAt: existing?.createdAt ?? new Date().toISOString()
     };
 
-    this.changes.set(change.id, change);
+    await this.store.save(change);
     return change;
   }
 
   async approve(changeId: string): Promise<PendingChange> {
-    const change = this.get(changeId);
+    const change = await this.get(changeId);
     await this.storage.writeTextFile(change.path, change.proposedContent);
-    this.changes.delete(change.id);
+    await this.store.delete(change.id);
     return change;
   }
 
-  undo(changeId: string): PendingChange {
-    const change = this.get(changeId);
-    this.changes.delete(change.id);
+  async undo(changeId: string): Promise<PendingChange> {
+    const change = await this.get(changeId);
+    await this.store.delete(change.id);
     return change;
   }
 
   async approveAll(): Promise<PendingChange[]> {
-    const changes = this.list();
+    const changes = await this.list();
     for (const change of changes) {
       await this.approve(change.id);
     }
     return changes;
   }
 
-  undoAll(): PendingChange[] {
-    const changes = this.list();
-    this.changes.clear();
+  async undoAll(): Promise<PendingChange[]> {
+    const changes = await this.list();
+    await this.store.clear();
     return changes;
   }
 
-  private get(changeId: string): PendingChange {
-    const change = this.changes.get(changeId);
+  private async get(changeId: string): Promise<PendingChange> {
+    const change = await this.store.get(changeId);
 
     if (!change) {
       throw new Error(`Pending change not found: ${changeId}`);

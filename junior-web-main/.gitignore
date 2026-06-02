@@ -24,3 +24,6 @@ dist-ssr
 *.sw?
 .env
 config/connector-secrets.local.json
+data/workspaces/*/.junior/
+
+SecureChatExtension/
