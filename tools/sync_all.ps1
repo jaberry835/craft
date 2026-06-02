@@ -13,17 +13,7 @@ $repos = @(
     @{ Url = "https://github.com/adamruderman/junior-studio"; Branch = "main"}
     @{ Url = "https://github.com/adamruderman/junior-web"; Branch = "main"}
       @{ Url = "https://github.com/jaberry835/GenerateRichDocs"; Branch = "main"}
-     
-     #@{ Url = "https://github.com/adamruderman/UserAccessCheckerApi"; Branch = "main" }
-    #@{ Url = "https://github.com/adamruderman/UserAccessChecker-Python"; Branch = "main" }
-    #@{ Url = "https://github.com/jaberry835/snapseek"; Branch = "main" }
-    #@{ Url = "https://github.com/microsoft/simplechat"; Branch = "main" }
-    #@{ Url = "https://github.com/jaberry835/snapseek"; Branch = "deepface-embeddings" }
-    #@{ Url = "https://github.com/adamruderman/WebScrapeAndIndex"; Branch = "main" }
-    #@{Url = "https://github.com/adamruderman/SecureChatExtension"; Branch = "msal-config" },
-   # @{Url = "https://github.com/adamruderman/SecureChatExtension"; Branch = "experiment/responses-api" },
-   #@{ Url = "https://github.com/adamruderman/SecureChatExtension"; Branch = "squad-integration" },
-   #@{ Url = "https://github.com/adamruderman/SecureChatExtension"; Branch = "feature/junior-dev-team" },
+  
 )
 
 $scriptDir = $PSScriptRoot
