@@ -17,7 +17,7 @@ from functools import partial
 
 from agent_framework import Agent, AgentSession, Message, Content
 
-from agent_framework.openai import OpenAIChatCompletionClient
+from agent_framework.openai import OpenAIChatCompletionClient, OpenAIChatClient
 
 from config import get_settings, get_azure_credential
 from observability import (
@@ -221,11 +221,18 @@ class AgentManager:
 
         return get_token
 
-    def _create_chat_client(self, agent_config: dict) -> OpenAIChatCompletionClient:
+    def _create_chat_client(self, agent_config: dict):
         """Create Azure OpenAI chat client for an agent.
 
         Uses the agent's configured AOAI endpoint if specified, otherwise falls back
         to the global settings from environment variables.
+
+        The endpoint's ``endpoint_type`` selects the client class:
+          - ``azure_openai`` / ``apim`` -> ``OpenAIChatCompletionClient`` (chat/completions)
+          - ``azure_openai_responses`` / ``apim_responses`` -> ``OpenAIChatClient`` (Responses API)
+
+        Returns:
+            ``OpenAIChatCompletionClient`` or ``OpenAIChatClient`` instance.
 
         Raises:
             ValueError: If the agent does not have a model/deployment configured.
@@ -245,6 +252,7 @@ class AgentManager:
         endpoint_url = settings.azure_openai_endpoint
         api_key = settings.azure_openai_key
         api_version = settings.azure_openai_api_version
+        endpoint_type = "azure_openai"  # default when falling back to global env settings
 
         if aoai_endpoint_id:
             cached_endpoint = agent_config.get("_aoai_endpoint_config")
@@ -277,26 +285,102 @@ class AgentManager:
         logger.info(f"[AOAI-CONFIG] Creating chat client for agent '{agent_name}': "
                     f"endpoint={endpoint_url}, deployment={deployment_name}, "
                     f"api_version={api_version}, auth={auth_method}, "
+                    f"endpoint_type={endpoint_type}, "
                     f"has_api_key={bool(api_key)}, token_scope={scope}")
+
+        # Choose client class based on endpoint type:
+        #   *_responses -> OpenAIChatClient (Responses API surface)
+        #   otherwise   -> OpenAIChatCompletionClient (chat/completions surface)
+        use_responses = endpoint_type in ("azure_openai_responses", "apim_responses")
+        client_cls = OpenAIChatClient if use_responses else OpenAIChatCompletionClient
+
+        # The SDK auto-appends '/openai/v1' to azure_endpoint for Responses
+        # clients (and '/openai/deployments/...' for chat-completions clients).
+        # When the configured URL already contains '/openai/v1' (typical for
+        # APIM-fronted Responses endpoints) we must pass it via base_url
+        # instead, otherwise we get '/openai/v1/openai/v1/responses' -> 404.
+        normalized_url = (endpoint_url or "").rstrip("/")
+        url_has_openai_v1 = "/openai/v1" in normalized_url.lower()
+        endpoint_kwargs: dict = {}
+        extra_headers: dict[str, str] = {}
+        if use_responses and url_has_openai_v1:
+            # Use base_url; SDK won't append anything further.
+            endpoint_kwargs["base_url"] = normalized_url + "/"
+            # When base_url is used the SDK constructs a plain AsyncOpenAI
+            # client which sends the key as 'Authorization: Bearer ...'. APIM
+            # (and Azure OpenAI key auth) expects the 'api-key' header, so
+            # add it explicitly when an api_key is configured.
+            if api_key:
+                extra_headers["api-key"] = api_key
+        else:
+            endpoint_kwargs["azure_endpoint"] = endpoint_url
 
         # Use API key if available, otherwise use token provider
         if api_key:
-            logger.info(f"[AOAI-CONFIG] Agent '{agent_name}': authenticating with API key")
-            return OpenAIChatCompletionClient(
-                azure_endpoint=endpoint_url,
+            logger.info(f"[AOAI-CONFIG] Agent '{agent_name}': authenticating with API key "
+                        f"(client={client_cls.__name__}, "
+                        f"url_kwarg={'base_url' if 'base_url' in endpoint_kwargs else 'azure_endpoint'}, "
+                        f"extra_api_key_header={bool(extra_headers)})")
+            return client_cls(
                 model=deployment_name,
                 api_key=api_key,
                 api_version=api_version,
+                default_headers=extra_headers or None,
+                **endpoint_kwargs,
             )
         else:
             logger.info(f"[AOAI-CONFIG] Agent '{agent_name}': authenticating with credential "
-                        f"(scope={settings.azure_cognitive_services_scope})")
-            return OpenAIChatCompletionClient(
-                azure_endpoint=endpoint_url,
+                        f"(scope={settings.azure_cognitive_services_scope}, client={client_cls.__name__}, "
+                        f"url_kwarg={'base_url' if 'base_url' in endpoint_kwargs else 'azure_endpoint'})")
+            return client_cls(
                 model=deployment_name,
                 credential=self._get_token_provider(),
                 api_version=api_version,
+                **endpoint_kwargs,
             )
+
+    @staticmethod
+    def _is_reasoning_model(deployment_name: str) -> bool:
+        """Return True for deployment names that map to reasoning-capable
+        OpenAI models (gpt-5*, o-series like o1/o3/o4)."""
+        if not deployment_name:
+            return False
+        name = deployment_name.lower()
+        if name.startswith("gpt-5"):
+            return True
+        # o1, o1-mini, o3, o3-mini, o4-mini, etc. (avoid matching 'omni'-style names)
+        return bool(re.match(r"^o\d+(-|$)", name))
+
+    @staticmethod
+    def default_options_for_agent(agent_config: dict) -> Optional[dict]:
+        """Build per-agent default chat options.
+
+        Currently used to opt-in to streaming reasoning summaries on the
+        Responses API for reasoning-capable models (gpt-5*, o-series). The
+        returned dict is suitable for passing to ``Agent(default_options=...)``
+        and is forwarded verbatim to ``client.responses.create(...)``.
+        Returns None when no special options apply.
+        """
+        # Schema matches what _create_chat_client reads:
+        #   - deployment is at agent_config["model"]
+        #   - endpoint_type is at agent_config["_aoai_endpoint_config"]["endpoint_type"]
+        endpoint_cfg = agent_config.get("_aoai_endpoint_config") or {}
+        endpoint_type = (endpoint_cfg.get("endpoint_type") or "").lower()
+        deployment = agent_config.get("model") or ""
+        use_responses = endpoint_type in ("azure_openai_responses", "apim_responses")
+        if not use_responses:
+            return None
+        if not AgentManager._is_reasoning_model(deployment):
+            return None
+        # Reasoning effort is configurable per-agent in Cosmos:
+        #   "reasoning_effort": "low" | "medium" | "high"
+        # Defaults to "medium" if not set.
+        effort = (agent_config.get("reasoning_effort") or "medium").lower()
+        if effort not in ("low", "medium", "high"):
+            effort = "medium"
+        return {
+            "reasoning": {"effort": effort, "summary": "auto"},
+        }
 
     # =====================================================================
     # Agent creation
@@ -388,6 +472,10 @@ Checking the available options before I make a recommendation.
         enhanced_instructions += action_suffix
 
         # Build the agent
+        default_options = self.default_options_for_agent(agent_config)
+        if default_options:
+            logger.info(f"[AOAI-CONFIG] Agent '{sanitized_name}': enabling reasoning "
+                        f"summary stream (default_options={default_options})")
         agent = Agent(
             name=sanitized_name,
             description=agent_config.get("description", ""),
@@ -395,6 +483,7 @@ Checking the available options before I make a recommendation.
             client=chat_client,
             tools=tools if tools else None,
             context_providers=context_providers,
+            default_options=default_options,
         )
 
         return agent
@@ -1077,7 +1166,8 @@ Checking the available options before I make a recommendation.
             friendly_message="Determining how to handle your request"
         )
 
-        decision = await run_orchestrator_for_analysis(
+        decision_chatter_queue: asyncio.Queue = asyncio.Queue()
+        decision_task = asyncio.create_task(run_orchestrator_for_analysis(
             orchestrator_config,
             specialist_configs,
             user_message,
@@ -1088,7 +1178,18 @@ Checking the available options before I make a recommendation.
             cosmos_service=cosmos_service,
             embedding_service=embedding_service,
             search_service=search_service,
-        )
+            chatter_emitter=lambda ev: decision_chatter_queue.put_nowait(ev),
+        ))
+        # Drain queued chatter events while the analyzer streams. Use a short
+        # poll so we don't block the task; loop exits once task is done AND
+        # queue is empty.
+        while not decision_task.done() or not decision_chatter_queue.empty():
+            try:
+                ev = await asyncio.wait_for(decision_chatter_queue.get(), timeout=0.05)
+                yield ev
+            except asyncio.TimeoutError:
+                continue
+        decision = await decision_task
 
         if should_log_agent():
             ctx_query = decision.get('contextualized_query', '')
@@ -1183,8 +1284,12 @@ Checking the available options before I make a recommendation.
         # specialists — especially external A2A agents with no access to chat
         # history — receive a fully self-contained, disambiguated message.
         specialist_message = decision.get("contextualized_query") or user_message
+        specialist_queries = decision.get("specialist_queries") or {}
         if specialist_message != user_message and should_log_agent():
             logger.info(f"Using contextualized query for specialists: {specialist_message[:200]}")
+        if specialist_queries and should_log_agent():
+            for sid, sq in specialist_queries.items():
+                logger.info(f"Per-specialist query [{sid[:20]}]: {sq[:120]}")
 
         specialist_names: list[str] = []
         for sid in specialist_ids:
@@ -1253,6 +1358,7 @@ Checking the available options before I make a recommendation.
                 embedding_service=embedding_service,
                 search_service=search_service,
                 run_evaluation_fn=run_eval,
+                specialist_queries=specialist_queries,
             )
         )
 
@@ -1318,12 +1424,21 @@ Checking the available options before I make a recommendation.
             friendly_message="Combining results into final answer"
         )
 
-        synthesis_result = await run_orchestrator_for_synthesis(
+        synth_chatter_queue: asyncio.Queue = asyncio.Queue()
+        synth_task = asyncio.create_task(run_orchestrator_for_synthesis(
             orchestrator_config,
             specialist_results,
             user_message,
             create_chat_client_fn=self._create_chat_client,
-        )
+            chatter_emitter=lambda ev: synth_chatter_queue.put_nowait(ev),
+        ))
+        while not synth_task.done() or not synth_chatter_queue.empty():
+            try:
+                ev = await asyncio.wait_for(synth_chatter_queue.get(), timeout=0.05)
+                yield ev
+            except asyncio.TimeoutError:
+                continue
+        synthesis_result = await synth_task
 
         yield ChatterEvent(
             type=ChatterEventType.CONTENT,

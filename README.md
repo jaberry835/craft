@@ -24,3 +24,4 @@ Curated Demo Code
 | 2026-06-02 11:49 UTC | GenerateRichDocs | main | +41 |
 | 2026-06-02 17:34 UTC | junior-web | main | ~4 |
 | 2026-06-02 17:35 UTC | GenerateRichDocs | main | +2, ~12 |
+| 2026-06-02 20:17 UTC | AgentChatV2 | main | ~15 |

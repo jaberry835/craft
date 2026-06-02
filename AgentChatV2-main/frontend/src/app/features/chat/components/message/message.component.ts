@@ -44,6 +44,8 @@ interface TimelineStep {
   delegationContent?: string;
   liveNarration?: string;
   narration?: string;
+  /** Streaming chain-of-thought / reasoning text from a Responses-API model. */
+  reasoningText?: string;
   expanded: boolean;
 }
 
@@ -53,6 +55,10 @@ interface AgentTimelineGroup {
   role: 'specialist' | 'orchestrator' | 'assistant';
   steps: TimelineStep[];
   hasActiveStep: boolean;
+  /** Transient status text (e.g. "Processing information…") rendered
+   *  with a shimmer animation below the last step while the agent is
+   *  still working. Cleared when a real step is added or stream ends. */
+  transientStatus?: string;
 }
 
 @Component({
@@ -139,7 +145,20 @@ interface AgentTimelineGroup {
                       }
                       @if (isStepExpanded(step) && canExpandStep(step)) {
                         <div class="tl-details">
-                          @if (hasStepDetailText(step)) {
+                          @if (step.type === 'reasoning' && hasReasoningText(step)) {
+                            <div class="tl-reasoning-panel" [class.tl-reasoning-streaming]="step.status === 'active'">
+                              <div class="tl-reasoning-header">
+                                <span class="material-icons tl-reasoning-icon">psychology</span>
+                                <span class="tl-reasoning-title">{{ step.status === 'active' ? 'Thinking' : 'Reasoning' }}</span>
+                                @if (step.status === 'active') {
+                                  <span class="tl-reasoning-pulse"></span>
+                                }
+                              </div>
+                              <div class="tl-reasoning-text">{{ step.reasoningText }}<!--
+                                -->@if (step.status === 'active') {<span class="tl-reasoning-cursor">▍</span>}
+                              </div>
+                            </div>
+                          } @else if (hasStepDetailText(step)) {
                             <div class="tl-detail-row">
                               <span class="tl-detail-label">{{ step.status === 'active' ? 'Narration' : 'Summary' }}</span>
                               <p class="tl-summary">{{ getStepDetailText(step) }}</p>
@@ -168,10 +187,20 @@ interface AgentTimelineGroup {
                     </div>
                   </div>
                 }
+                <!-- Transient shimmer status text (GHCP-style). Replaces in
+                     place; never persists as a step. -->
+                @if (group.transientStatus) {
+                  <div class="tl-shimmer-status" aria-live="polite">
+                    <span class="tl-shimmer-text">{{ group.transientStatus }}</span>
+                  </div>
+                }
               </section>
             }
-            <!-- Live working indicator when no active step -->
-            @if (isStreaming && (timelineSteps.length === 0 || timelineSteps[timelineSteps.length - 1].status === 'done')) {
+            <!-- Live working indicator when no steps exist yet (very first moment).
+                 We intentionally do NOT render this between completed groups
+                 because that creates a "deadzone" placeholder while we wait for
+                 the next agent's first event to arrive. -->
+            @if (isStreaming && timelineSteps.length === 0) {
               <div class="tl-step tl-active tl-step-working-alone">
                 <div class="tl-icon-col">
                   <div class="tl-icon tl-icon-working">
@@ -592,6 +621,118 @@ interface AgentTimelineGroup {
     .tl-step.tl-done .tl-icon-delegation .material-icons { color: #10b981; }
     .tl-step.tl-done .tl-icon-reasoning .material-icons  { color: #10b981; }
 
+    /* ─── Reasoning panel (Responses-API chain-of-thought) ───── */
+    .tl-reasoning-panel {
+      margin-top: 6px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: linear-gradient(180deg,
+        rgba(6, 182, 212, 0.08) 0%,
+        rgba(6, 182, 212, 0.03) 100%);
+      border: 1px solid rgba(6, 182, 212, 0.25);
+      border-left: 3px solid #06b6d4;
+    }
+
+    .tl-reasoning-panel.tl-reasoning-streaming {
+      background: linear-gradient(180deg,
+        rgba(6, 182, 212, 0.14) 0%,
+        rgba(6, 182, 212, 0.05) 100%);
+      box-shadow: 0 0 0 1px rgba(6, 182, 212, 0.15) inset;
+    }
+
+    .tl-reasoning-header {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 4px;
+    }
+
+    .tl-reasoning-icon {
+      font-size: 16px;
+      color: #06b6d4;
+    }
+
+    .tl-reasoning-title {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: #06b6d4;
+    }
+
+    .tl-reasoning-pulse {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background-color: #06b6d4;
+      animation: reasoningPulse 1.4s ease-in-out infinite;
+    }
+
+    @keyframes reasoningPulse {
+      0%, 100% { opacity: 0.3; transform: scale(0.85); }
+      50%      { opacity: 1;   transform: scale(1.15); }
+    }
+
+    .tl-reasoning-text {
+      font-family: 'Cascadia Code', 'JetBrains Mono', Consolas, monospace;
+      font-size: 12.5px;
+      line-height: 1.55;
+      color: var(--text-secondary, #4b5563);
+      max-height: 220px;
+      overflow-y: auto;
+      scroll-behavior: smooth;
+      font-style: italic;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 320px;
+      overflow-y: auto;
+    }
+
+    .tl-reasoning-cursor {
+      display: inline-block;
+      margin-left: 1px;
+      color: #06b6d4;
+      animation: reasoningBlink 1s steps(2, start) infinite;
+      font-style: normal;
+    }
+
+    @keyframes reasoningBlink {
+      to { visibility: hidden; }
+    }
+
+    /* GHCP-style transient shimmer status: a single line of action text
+       that replaces itself in place. Wave of brightness travels across
+       the text. Not a step; not persisted. */
+    .tl-shimmer-status {
+      padding: 6px 14px 8px 44px; /* align text under the icon column */
+      font-size: 0.82rem;
+      line-height: 1.3;
+      min-height: 18px;
+    }
+    .tl-shimmer-text {
+      display: inline-block;
+      background: linear-gradient(
+        90deg,
+        rgba(160, 175, 195, 0.55) 0%,
+        rgba(160, 175, 195, 0.55) 35%,
+        #f1f5f9 50%,
+        rgba(160, 175, 195, 0.55) 65%,
+        rgba(160, 175, 195, 0.55) 100%
+      );
+      background-size: 200% 100%;
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
+      color: transparent;
+      animation: tlShimmer 2.2s linear infinite;
+      font-style: italic;
+      letter-spacing: 0.01em;
+    }
+    @keyframes tlShimmer {
+      0%   { background-position: 100% 0; }
+      100% { background-position: -100% 0; }
+    }
+
     @keyframes spin {
       from { transform: rotate(0deg); }
       to   { transform: rotate(360deg); }
@@ -954,6 +1095,9 @@ export class MessageComponent implements DoCheck, OnInit, OnDestroy {
   timelineSteps: TimelineStep[] = [];
   agentTimelineGroups: AgentTimelineGroup[] = [];
   private toolCallStepIndex = new Map<string, number>();
+  /** Latest transient status text per agent (e.g. "Processing information…").
+   *  Rendered as a shimmer line, replaced in place — never persisted. */
+  private transientStatusByAgent = new Map<string, string>();
   private readonly recentCompletionOpenMs = 4000;
   private transientExpandedSteps = new Map<string, number>();
   private transientCollapseTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -1272,6 +1416,7 @@ export class MessageComponent implements DoCheck, OnInit, OnDestroy {
     this.timelineSteps = [];
     this.agentTimelineGroups = [];
     this.toolCallStepIndex.clear();
+    this.transientStatusByAgent.clear();
     const events = this.getChatterEvents();
     events.forEach(e => this.processTimelineEvent(e));
     if (!this.isStreaming) {
@@ -1294,12 +1439,20 @@ export class MessageComponent implements DoCheck, OnInit, OnDestroy {
       return;
     }
 
+    // Any non-heartbeat / non-tool event for this agent supersedes the
+    // transient shimmer status. Tool-call events in compact mode update
+    // the transient line themselves below, so don't pre-clear for those.
+    if (event.agentName && event.type !== 'tool_call' && event.type !== 'tool_result') {
+      this.transientStatusByAgent.delete(event.agentName);
+    }
+
     if (event.type === 'reasoning') {
       this.upsertReasoningStep(event);
       return;
     }
 
-    // tool_result closes a matching tool_call step
+    // tool_result closes a matching tool_call step (only when we created
+    // one — in compact mode there is no row to close).
     if (event.type === 'tool_result') {
       const stepIdx = event.toolCallId
         ? this.toolCallStepIndex.get(event.toolCallId)
@@ -1311,6 +1464,13 @@ export class MessageComponent implements DoCheck, OnInit, OnDestroy {
         step.toolResult = event.content;
         step.renderHint = event.renderHint;
         step.narration = this.buildToolResultNarration(step, event);
+      } else if (event.agentName) {
+        // Compact-mode tool result \u2014 keep the shimmer line alive briefly so
+        // the user can still see what just happened. Real updates will
+        // overwrite it.
+        const friendly = event.friendlyMessage || 'Got results\u2026';
+        this.transientStatusByAgent.set(event.agentName, friendly);
+        this.agentTimelineGroups = this.buildAgentTimelineGroups();
       }
       return;
     }
@@ -1345,6 +1505,18 @@ export class MessageComponent implements DoCheck, OnInit, OnDestroy {
     }
 
     if (event.type === 'tool_call') {
+      // Compact mode: once an agent has produced a reasoning step OR has
+      // already shown one tool call this turn, route subsequent tool
+      // activity to the transient shimmer line instead of stacking many
+      // identical "Searching for information" rows. The reasoning panel
+      // stays visible and one shimmer line below conveys live action.
+      if (this.shouldUseCompactToolMode(event.agentName)) {
+        const label = this.buildToolLabel(event);
+        this.transientStatusByAgent.set(event.agentName, label);
+        this.agentTimelineGroups = this.buildAgentTimelineGroups();
+        return;
+      }
+
       this.finalizeActiveStep(event.timestamp);
       const idx = this.timelineSteps.length;
       const step: TimelineStep = {
@@ -1386,9 +1558,26 @@ export class MessageComponent implements DoCheck, OnInit, OnDestroy {
   }
 
   private upsertPlanningStep(event: ChatterEvent): void {
+    // THINKING events fire on every token-usage ping with canned labels like
+    // "Thinking..." / "Processing information..." / "Analyzing results...".
+    // They carry no unique narrative beyond `LLM call: N input, M output tokens`.
+    // Once the agent has produced a real step (reasoning/tool/etc), promote
+    // these to a transient shimmer-text status line on the agent group
+    // instead of stacking them as steps. Behaves like GHCP's progress text.
+    const isHeartbeat =
+      !event.content || event.content.startsWith('LLM call:');
+    const agentName = event.agentName;
+    if (isHeartbeat && this.shouldSuppressHeartbeat(agentName)) {
+      const label = event.friendlyMessage || 'Working…';
+      this.transientStatusByAgent.set(agentName, label);
+      // Force a group rebuild so the shimmer line updates with the new text.
+      this.agentTimelineGroups = this.buildAgentTimelineGroups();
+      return;
+    }
+
     const label = event.friendlyMessage || 'Planning...';
     const active = this.getActiveStep();
-    if (active?.type === 'planning' && active.agentName === event.agentName) {
+    if (active?.type === 'planning' && active.agentName === agentName) {
       active.label = label;
       active.liveNarration = this.buildThinkingNarration(event);
       active.narration = this.buildThinkingSummary(event);
@@ -1402,21 +1591,80 @@ export class MessageComponent implements DoCheck, OnInit, OnDestroy {
       type: 'planning',
       label,
       status: 'active',
-      agentName: event.agentName,
+      agentName,
       liveNarration: this.buildThinkingNarration(event),
       narration: this.buildThinkingSummary(event),
       expanded: true,
     });
   }
 
+  /**
+   * True if this agent has already produced a reasoning step or tool call
+   * in this turn — meaning we already have meaningful progress narration
+   * and should hide redundant generic "Thinking…" heartbeats.
+   */
+  private shouldSuppressHeartbeat(agentName: string): boolean {
+    for (const step of this.timelineSteps) {
+      if (step.agentName !== agentName) continue;
+      if (step.type === 'reasoning' || step.type === 'tool') {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * True if this agent's tool calls should be collapsed into a single
+   * shimmer line instead of stacked as separate steps. Triggered once
+   * the agent has produced any reasoning step OR after the first tool
+   * call (so we always show the first one expanded with input args, but
+   * the next 12 "Searching for information" rows compress to a single
+   * live status line).
+   */
+  private shouldUseCompactToolMode(agentName: string): boolean {
+    // Compact mode activates after the agent already has at least one
+    // visible tool step row.  This ensures the first tool call always
+    // renders as a real row (giving the user something concrete to see),
+    // while subsequent calls collapse into the shimmer line.
+    let toolCount = 0;
+    for (const step of this.timelineSteps) {
+      if (step.agentName !== agentName) continue;
+      if (step.type === 'tool') {
+        toolCount++;
+        if (toolCount >= 1) return true;
+      }
+    }
+    return false;
+  }
+
   private upsertReasoningStep(event: ChatterEvent): void {
-    const label = event.friendlyMessage || 'Analyzing...';
+    // Each backend chatter event for type=reasoning carries only the latest
+    // delta from the model's reasoning_summary stream, not the cumulative
+    // text. We accumulate deltas into the active reasoning step.
+    const deltaText = (event.content || '').trim();
+    const hasRealText = deltaText.length > 0;
+
     const active = this.getActiveStep();
     if (active?.type === 'reasoning' && active.agentName === event.agentName) {
-      active.label = label;
-      active.liveNarration = this.buildReasoningNarration(active.agentName, true);
-      active.narration = this.buildReasoningNarration(active.agentName, false);
+      if (hasRealText) {
+        const previous = (active.reasoningText || '').trim();
+        // Avoid duplicating when the same delta is replayed (e.g. CUSTOM
+        // event re-emits the same content already accumulated by AG-UI).
+        if (!previous || !previous.endsWith(deltaText)) {
+          active.reasoningText = previous
+            ? `${previous}${this.needsSpaceJoin(previous, deltaText) ? ' ' : ''}${deltaText}`
+            : deltaText;
+        }
+        active.label = 'Thinking';
+        active.liveNarration = undefined;
+        active.narration = undefined;
+      } else if (!active.reasoningText) {
+        active.label = event.friendlyMessage || 'Analyzing...';
+        active.liveNarration = this.buildReasoningNarration(active.agentName, true);
+        active.narration = this.buildReasoningNarration(active.agentName, false);
+      }
       active.expanded = true;
+      this.scrollActiveReasoningToBottom();
       return;
     }
 
@@ -1424,13 +1672,36 @@ export class MessageComponent implements DoCheck, OnInit, OnDestroy {
     this.timelineSteps.push({
       id: `step-${event.timestamp}-${this.timelineSteps.length}`,
       type: 'reasoning',
-      label,
+      label: hasRealText ? 'Thinking' : (event.friendlyMessage || 'Analyzing...'),
       status: 'active',
       agentName: event.agentName,
-      liveNarration: this.buildReasoningNarration(event.agentName, true),
-      narration: this.buildReasoningNarration(event.agentName, false),
+      reasoningText: hasRealText ? deltaText : undefined,
+      liveNarration: hasRealText ? undefined : this.buildReasoningNarration(event.agentName, true),
+      narration: hasRealText ? undefined : this.buildReasoningNarration(event.agentName, false),
       expanded: true,
     });
+    this.scrollActiveReasoningToBottom();
+  }
+
+  /** Scroll the active reasoning panel's text area to the bottom. */
+  private scrollActiveReasoningToBottom(): void {
+    requestAnimationFrame(() => {
+      const panels = document.querySelectorAll('.tl-reasoning-streaming .tl-reasoning-text');
+      panels.forEach(el => {
+        el.scrollTop = el.scrollHeight;
+      });
+    });
+  }
+
+  /** True if joining `prev` and `next` requires a separator space. */
+  private needsSpaceJoin(prev: string, next: string): boolean {
+    if (!prev || !next) return false;
+    const lastChar = prev[prev.length - 1];
+    const firstChar = next[0];
+    // No space needed if either side already has whitespace or punctuation that flows.
+    if (/\s/.test(lastChar) || /\s/.test(firstChar)) return false;
+    if (/[.,;:!?\-\(]/.test(lastChar)) return true;
+    return /\w/.test(lastChar) && /\w/.test(firstChar);
   }
 
   private getActiveStep(): TimelineStep | undefined {
@@ -1453,6 +1724,13 @@ export class MessageComponent implements DoCheck, OnInit, OnDestroy {
   private markStepCompleted(step: TimelineStep, completedAt?: number): void {
     step.status = 'done';
     step.liveNarration = undefined;
+    // Reasoning panels stay expanded so the user can read them. Everything
+    // else collapses on completion (with a brief grace period via
+    // keepStepTemporarilyExpanded while streaming).
+    if (step.type === 'reasoning') {
+      step.expanded = true;
+      return;
+    }
     step.expanded = false;
     if (this.isStreaming) {
       this.keepStepTemporarilyExpanded(step.id, completedAt);
@@ -1552,6 +1830,17 @@ export class MessageComponent implements DoCheck, OnInit, OnDestroy {
       groups.push(currentGroup);
     }
 
+    // Attach transient shimmer-text status to the most recent group for
+    // each agent that is still active. Only render while streaming.
+    if (this.isStreaming) {
+      for (let i = groups.length - 1; i >= 0; i--) {
+        const g = groups[i];
+        if (!g.hasActiveStep) continue;
+        const txt = this.transientStatusByAgent.get(g.agentName);
+        if (txt) g.transientStatus = txt;
+      }
+    }
+
     return groups;
   }
 
@@ -1613,6 +1902,7 @@ export class MessageComponent implements DoCheck, OnInit, OnDestroy {
 
   canExpandStep(step: TimelineStep): boolean {
     return this.hasStepDetailText(step)
+      || this.hasReasoningText(step)
       || (step.toolArgs ? this.hasToolArgs(step.toolArgs) : false)
       || !!step.toolResult
       || !!step.delegationContent;
@@ -1624,6 +1914,10 @@ export class MessageComponent implements DoCheck, OnInit, OnDestroy {
 
   hasStepDetailText(step: TimelineStep): boolean {
     return !!this.getStepDetailText(step);
+  }
+
+  hasReasoningText(step: TimelineStep): boolean {
+    return !!(step.reasoningText && step.reasoningText.trim().length > 0);
   }
 
   getStepDetailText(step: TimelineStep): string {

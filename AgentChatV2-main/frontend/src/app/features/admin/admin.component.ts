@@ -161,7 +161,7 @@ import { environment } from '../../../environments/environment';
                 </div>
               </div>
               <div class="endpoint-actions">
-                @if (endpoint.endpoint_type !== 'apim') {
+                @if (!isApimType(endpoint.endpoint_type)) {
                 <button class="btn btn-icon btn-refresh" (click)="refreshAoaiEndpoint(endpoint)" title="Refresh Deployments">
                   <span class="material-icons">refresh</span>
                 </button>
@@ -480,24 +480,23 @@ import { environment } from '../../../environments/environment';
               <!-- Endpoint Type Selector -->
               <div class="form-group">
                 <label>Endpoint Type *</label>
-                <div class="endpoint-type-toggle">
-                  <button 
-                    class="toggle-btn" 
-                    [class.active]="editingAoaiEndpoint!.endpoint_type !== 'apim'"
-                    (click)="editingAoaiEndpoint!.endpoint_type = 'azure_openai'"
-                  >
-                    <span class="material-icons">cloud</span>
-                    Direct Azure OpenAI
-                  </button>
-                  <button 
-                    class="toggle-btn" 
-                    [class.active]="editingAoaiEndpoint!.endpoint_type === 'apim'"
-                    (click)="editingAoaiEndpoint!.endpoint_type = 'apim'"
-                  >
-                    <span class="material-icons">api</span>
-                    API Management (APIM)
-                  </button>
-                </div>
+                <select
+                  class="input"
+                  [(ngModel)]="editingAoaiEndpoint!.endpoint_type"
+                >
+                  <option value="azure_openai">Direct Azure OpenAI — Chat Completions</option>
+                  <option value="apim">API Management (APIM) — Chat Completions</option>
+                  <option value="azure_openai_responses">Direct Azure OpenAI — Responses (v1)</option>
+                  <option value="apim_responses">API Management (APIM) — Responses (v1)</option>
+                </select>
+                <span class="field-hint">
+                  {{ getEndpointTypeLabel(editingAoaiEndpoint!.endpoint_type) }}
+                  @if (isResponsesType(editingAoaiEndpoint!.endpoint_type)) {
+                    — uses the OpenAI Responses API surface.
+                  } @else {
+                    — uses the legacy /chat/completions surface.
+                  }
+                </span>
               </div>
 
               <div class="form-group">
@@ -511,17 +510,22 @@ import { environment } from '../../../environments/environment';
               </div>
               
               <div class="form-group">
-                <label>{{ editingAoaiEndpoint!.endpoint_type === 'apim' ? 'APIM Base URL *' : 'Endpoint URL *' }}</label>
+                <label>{{ isApimType(editingAoaiEndpoint!.endpoint_type) ? 'APIM Base URL *' : 'Endpoint URL *' }}</label>
                 <input 
                   type="url" 
                   class="input" 
                   [(ngModel)]="editingAoaiEndpoint!.endpoint"
-                  [placeholder]="editingAoaiEndpoint!.endpoint_type === 'apim' ? 'https://your-apim.azure-api.net/your-api-prefix' : 'https://your-aoai.openai.azure.com'"
+                  [placeholder]="isApimType(editingAoaiEndpoint!.endpoint_type) ? 'https://your-apim.azure-api.net/your-api-prefix' : 'https://your-aoai.openai.azure.com'"
                 />
                 <span class="field-hint">
-                  @if (editingAoaiEndpoint!.endpoint_type === 'apim') {
-                    APIM base URL <strong>without</strong> the /openai suffix (the SDK appends it automatically).
-                    E.g. if your APIM request URL is <em>https://myapim.azure-api.net/myapi/openai/deployments/...</em> enter <em>https://myapim.azure-api.net/myapi</em>
+                  @if (isApimType(editingAoaiEndpoint!.endpoint_type)) {
+                    @if (isResponsesType(editingAoaiEndpoint!.endpoint_type)) {
+                      Full APIM URL <strong>including</strong> the <em>/openai/v1</em> suffix.
+                      E.g. <em>https://myapim.azure-api.net/myapi/openai/v1</em>
+                    } @else {
+                      APIM base URL <strong>without</strong> the /openai suffix (the SDK appends it automatically).
+                      E.g. if your APIM request URL is <em>https://myapim.azure-api.net/myapi/openai/deployments/...</em> enter <em>https://myapim.azure-api.net/myapi</em>
+                    }
                   } @else {
                     Azure OpenAI endpoint URL from Azure Portal
                   }
@@ -542,21 +546,21 @@ import { environment } from '../../../environments/environment';
               
               <div class="form-row">
                 <div class="form-group">
-                  <label>{{ editingAoaiEndpoint!.endpoint_type === 'apim' ? 'APIM Subscription Key' : 'API Key (Optional)' }}</label>
+                  <label>{{ isApimType(editingAoaiEndpoint!.endpoint_type) ? 'APIM Subscription Key' : 'API Key (Optional)' }}</label>
                   <input 
                     type="password" 
                     class="input" 
                     [(ngModel)]="editingAoaiEndpoint!.api_key"
-                    [placeholder]="editingAoaiEndpoint!.endpoint_type === 'apim' ? 'APIM subscription key (api-key header)' : 'Uses managed identity if blank'"
+                    [placeholder]="isApimType(editingAoaiEndpoint!.endpoint_type) ? 'APIM subscription key (api-key header)' : 'Uses managed identity if blank'"
                   />
-                  @if (editingAoaiEndpoint!.endpoint_type === 'apim') {
+                  @if (isApimType(editingAoaiEndpoint!.endpoint_type)) {
                     <span class="field-hint">Sent as the <code>api-key</code> header to APIM</span>
                   }
                 </div>
               </div>
               
               <!-- ARM API info for deployment discovery (only for direct Azure OpenAI) -->
-              @if (editingAoaiEndpoint!.endpoint_type !== 'apim') {
+              @if (!isApimType(editingAoaiEndpoint!.endpoint_type)) {
               <div class="form-row">
                 <div class="form-group">
                   <label>Subscription ID</label>
@@ -609,14 +613,14 @@ import { environment } from '../../../environments/environment';
                   Model Deployments
                 </label>
                 <span class="field-hint">
-                  @if (editingAoaiEndpoint!.endpoint_type === 'apim') {
+                  @if (isApimType(editingAoaiEndpoint!.endpoint_type)) {
                     APIM endpoints require manual deployment entry. Add the deployment names that your APIM routes to.
                   } @else {
                     Auto-discover with Subscription ID + Resource Group, or add deployments manually below.
                   }
                 </span>
                 
-                @if (editingAoaiEndpoint!.endpoint_type !== 'apim') {
+                @if (!isApimType(editingAoaiEndpoint!.endpoint_type)) {
                 <div class="discover-row">
                   <button 
                     class="btn btn-secondary" 
@@ -791,6 +795,22 @@ import { environment } from '../../../environments/environment';
                   max="2"
                   step="0.1"
                 />
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label>Reasoning Effort</label>
+                <select
+                  class="input"
+                  [(ngModel)]="editingAgent!.reasoning_effort"
+                >
+                  <option value="">Default (medium)</option>
+                  <option value="low">Low — faster, cheaper</option>
+                  <option value="medium">Medium — balanced</option>
+                  <option value="high">High — deeper reasoning</option>
+                </select>
+                <span class="field-hint">Controls how much the model reasons before answering. Only applies to reasoning models (o-series, gpt-5+) on Responses API endpoints.</span>
               </div>
             </div>
             
@@ -3236,12 +3256,32 @@ export class AdminComponent implements OnInit, OnDestroy {
   }
 
   getCloudLabel(endpoint: string, endpointType?: string): string {
-    if (endpointType === 'apim') return 'APIM';
+    if (endpointType === 'apim' || endpointType === 'apim_responses') return 'APIM';
     const ep = (endpoint || '').toLowerCase();
     if (ep.includes('.azure.us')) return 'Gov';
     if (ep.includes('.azure.cn')) return 'China';
     if (ep.includes('.azure.com')) return 'Commercial';
     return 'Sovereign';
+  }
+
+  /** True when the endpoint type is APIM-fronted (chat/completions or Responses). */
+  isApimType(endpointType?: string): boolean {
+    return endpointType === 'apim' || endpointType === 'apim_responses';
+  }
+
+  /** True when the endpoint type targets the Responses API (direct or via APIM). */
+  isResponsesType(endpointType?: string): boolean {
+    return endpointType === 'azure_openai_responses' || endpointType === 'apim_responses';
+  }
+
+  /** Short label for the endpoint type displayed in the editor / list. */
+  getEndpointTypeLabel(endpointType?: string): string {
+    switch (endpointType) {
+      case 'apim': return 'APIM (Chat Completions)';
+      case 'azure_openai_responses': return 'Direct AOAI (Responses)';
+      case 'apim_responses': return 'APIM (Responses)';
+      default: return 'Direct AOAI (Chat Completions)';
+    }
   }
 
   editAoaiEndpoint(endpoint: AOAIEndpointConfig): void {

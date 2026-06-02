@@ -6,8 +6,11 @@ Extracted from agent_manager.py for maintainability.
 from typing import Optional, Any
 from dataclasses import dataclass, field
 from enum import Enum
+import logging
 import re
 import time
+
+logger = logging.getLogger(__name__)
 
 
 class ChatterEventType(str, Enum):
@@ -328,6 +331,18 @@ def extract_chatter_from_update(
     if not hasattr(update, 'contents') or not update.contents:
         return events
 
+    # Trace non-text content items so we can confirm whether reasoning
+    # summaries (text_reasoning) are arriving from the model. Text deltas
+    # are skipped to keep the log readable.
+    if logger.isEnabledFor(logging.INFO):
+        try:
+            interesting = [getattr(c, "type", "?") for c in update.contents
+                           if getattr(c, "type", "?") != "text"]
+            if interesting:
+                logger.info(f"[CHATTER] agent={agent_name} non_text_contents={interesting}")
+        except Exception:
+            pass
+
     for content_item in update.contents:
         if content_item.type == 'function_call':
             call_id = getattr(content_item, 'call_id', None)
@@ -386,6 +401,10 @@ def extract_chatter_from_update(
                 summary_text = "Working through the next step..."
 
             if summary_text:
+                logger.info(
+                    f"[REASONING] agent={agent_name} delta_len={len(summary_text)} "
+                    f"preview={summary_text[:120]!r}"
+                )
                 events.append(ChatterEvent(
                     type=ChatterEventType.REASONING,
                     agent_name=agent_name,

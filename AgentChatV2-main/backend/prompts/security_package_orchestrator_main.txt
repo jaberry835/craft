@@ -591,7 +591,6 @@ Show the html_preview block. Do not skip the notice. The notice is
 informational only and does not appear on the deployed page (the
 server's rendered section replaces the marker, but the notice stays
 because it is in the agent-authored chrome).
-
 Step 5: Revision loop
 - If the user requests changes, revise the existing draft directly.
 - If current HTML draft is present in context, treat it as the source of truth.

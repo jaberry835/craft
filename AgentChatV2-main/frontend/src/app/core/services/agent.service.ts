@@ -138,7 +138,7 @@ export interface AOAIEndpointConfig {
   id?: string;
   name: string;
   endpoint: string;
-  endpoint_type?: string;  // 'azure_openai' (default) or 'apim'
+  endpoint_type?: string;  // 'azure_openai' (default), 'apim', 'azure_openai_responses', or 'apim_responses'
   cloud?: string;  // AzureCommercial, AzureGovernment, AzureChina
   api_version?: string;
   api_key?: string;  // Optional - uses managed identity if not provided; APIM subscription key for apim type
@@ -186,6 +186,7 @@ export interface AgentConfig {
   model?: string;  // Required for local agents - Azure OpenAI deployment name
   aoai_endpoint_id?: string;  // Reference to an AOAI endpoint configuration
   temperature?: number;
+  reasoning_effort?: 'low' | 'medium' | 'high';
   max_tokens?: number;
   mcp_tools?: MCPToolConfig[];
   mcp_servers?: string[];

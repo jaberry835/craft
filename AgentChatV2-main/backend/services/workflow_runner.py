@@ -274,6 +274,89 @@ async def run_workflow_and_collect(
     return results
 
 
+async def run_single_agent_streaming(
+    agent: Agent,
+    agent_id: str,
+    agent_name: str,
+    user_message: str,
+    chatter_queue: Optional[asyncio.Queue] = None,
+) -> dict:
+    """
+    Stream a single specialist agent directly (bypassing WorkflowBuilder).
+
+    Why: WorkflowBuilder buffers all of an executor's stream events until the
+    superstep completes ("Yielding pre-loop events"), which causes a long
+    silent gap on the wire when the agent does multi-second tool calls.
+    Calling ``agent.run(stream=True)`` directly yields each AgentResponseUpdate
+    in real time, so chatter (reasoning, tool_call, tool_result) reaches the
+    frontend immediately.
+    """
+    seen_tool_calls: set[str] = set()
+    seen_tool_results: set[str] = set()
+    pending_tool_calls: dict[str, tuple[float, str, Optional[dict]]] = {}
+    token_accumulator: dict[str, int] = {"input": 0, "output": 0}
+    progress_buffer = ProgressDirectiveBuffer()
+    parts: list[str] = []
+    error: Optional[str] = None
+    start = time.time()
+
+    if should_log_agent():
+        logger.info(f"Streaming single specialist directly: {agent_name}")
+
+    try:
+        async for update in agent.run(user_message, stream=True):
+            if not isinstance(update, AgentResponseUpdate):
+                continue
+
+            chatter_events = extract_chatter_from_update(
+                update, agent_name,
+                seen_tool_calls, seen_tool_results,
+                pending_tool_calls, token_accumulator,
+            )
+            if chatter_queue:
+                for ce in chatter_events:
+                    await chatter_queue.put(ce)
+
+            if update.text:
+                visible_text, progress_updates = progress_buffer.push(update.text)
+                if chatter_queue:
+                    for progress_update in progress_updates:
+                        await chatter_queue.put(ChatterEvent(
+                            type=ChatterEventType.THINKING,
+                            agent_name=agent_name,
+                            content=progress_update,
+                            friendly_message=progress_update,
+                        ))
+                if visible_text:
+                    parts.append(visible_text)
+    except Exception as e:
+        error = str(e)
+        logger.exception(f"Single-agent streaming failed for {agent_name}: {e}")
+
+    trailing = progress_buffer.finalize()
+    if trailing:
+        parts.append(trailing)
+
+    duration_ms = (time.time() - start) * 1000
+    if chatter_queue:
+        await chatter_queue.put(ChatterEvent(
+            type=ChatterEventType.CONTENT,
+            agent_name=agent_name,
+            content="Finished preparing the specialist response.",
+            duration_ms=duration_ms,
+            friendly_message=f"{agent_name} finished" + (f" in {duration_ms/1000:.1f}s" if duration_ms else ""),
+        ))
+
+    entry: dict[str, Any] = {
+        "agent_id": agent_id,
+        "agent_name": agent_name,
+        "response": "".join(parts),
+    }
+    if error:
+        entry["error"] = error
+    return entry
+
+
 async def execute_specialists_with_pattern(
     pattern: str,
     specialist_ids: list[str],
@@ -293,6 +376,8 @@ async def execute_specialists_with_pattern(
     search_service=None,
     # For evaluation (Magentic)
     run_evaluation_fn=None,
+    # Per-specialist focused queries from orchestrator
+    specialist_queries: Optional[dict[str, str]] = None,
 ) -> list[dict]:
     """
     Phase 2: Execute specialists using Agent Framework WorkflowBuilder.
@@ -353,6 +438,79 @@ async def execute_specialists_with_pattern(
     # -----------------------------------------------------------------
     # Build the workflow graph based on pattern
     # -----------------------------------------------------------------
+
+    # FAST PATH: Bypass WorkflowBuilder for single / sequential / concurrent
+    # patterns so AgentResponseUpdate stream events flow to the chatter
+    # queue in real time. The framework otherwise buffers them until the
+    # workflow's superstep completes ("Yielding pre-loop events"), causing
+    # a long silent gap on the wire during multi-second tool-call loops.
+    #
+    # Only Magentic (with eval loop) and group_chat still need the workflow
+    # framework for their cross-agent coordination.
+    use_fast_path = pattern in (
+        OrchestrationPattern.SINGLE,
+        OrchestrationPattern.SEQUENTIAL,
+        OrchestrationPattern.CONCURRENT,
+    ) or (len(agents_for_workflow) == 1 and not (
+        pattern == OrchestrationPattern.MAGENTIC and orchestrator_config and run_evaluation_fn
+    ))
+
+    if use_fast_path:
+        def _agent_info(agent):
+            return agent_id_map.get(
+                agent.name, (agent.name, getattr(agent, "name", "Agent"))
+            )
+
+        def _query_for(agent_id: str) -> str:
+            """Return the per-specialist query if available, else the shared message."""
+            if specialist_queries and agent_id in specialist_queries:
+                return specialist_queries[agent_id]
+            return user_message
+
+        if len(agents_for_workflow) == 1 or pattern == OrchestrationPattern.SINGLE:
+            # Single specialist
+            agent = agents_for_workflow[0]
+            aid, aname = _agent_info(agent)
+            single_result = await run_single_agent_streaming(
+                agent=agent, agent_id=aid, agent_name=aname,
+                user_message=_query_for(aid), chatter_queue=chatter_queue,
+            )
+            results.append(single_result)
+
+        elif pattern == OrchestrationPattern.SEQUENTIAL:
+            # Stream each specialist one after the other; the output of
+            # the previous agent becomes the input for the next.
+            current_message = user_message
+            for agent in agents_for_workflow:
+                aid, aname = _agent_info(agent)
+                msg = _query_for(aid) if current_message == user_message else current_message
+                r = await run_single_agent_streaming(
+                    agent=agent, agent_id=aid, agent_name=aname,
+                    user_message=msg, chatter_queue=chatter_queue,
+                )
+                results.append(r)
+                # Chain: feed this agent's response as input to the next
+                current_message = r.get("response") or current_message
+
+        elif pattern == OrchestrationPattern.CONCURRENT:
+            # Fire all specialists at once, each streaming independently.
+            async def _run_one(agent):
+                aid, aname = _agent_info(agent)
+                return await run_single_agent_streaming(
+                    agent=agent, agent_id=aid, agent_name=aname,
+                    user_message=_query_for(aid), chatter_queue=chatter_queue,
+                )
+            concurrent_results = await asyncio.gather(
+                *[_run_one(a) for a in agents_for_workflow]
+            )
+            results.extend(concurrent_results)
+
+        return results + a2a_results
+
+    # ---------------------------------------------------------------
+    # WORKFLOW PATH: group_chat, Magentic (with eval loop), etc.
+    # These need framework cross-agent coordination.
+    # ---------------------------------------------------------------
 
     if pattern == OrchestrationPattern.SINGLE or len(agents_for_workflow) == 1:
         agent = agents_for_workflow[0]

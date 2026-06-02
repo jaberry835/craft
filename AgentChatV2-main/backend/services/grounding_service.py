@@ -936,18 +936,27 @@ class GroundingService:
 
             # -- Pass 1: Hybrid search (vector + BM25 + semantic reranking) --
             # Fall back to plain hybrid if the index has no semantic configuration.
-            try:
-                hybrid_results = list(search_client.search(
-                    search_text=query,
-                    vector_queries=[vector_query],
-                    filter=odata_filter,
-                    select=select_fields,
-                    top=top_k,
-                    query_type=QueryType.SEMANTIC,
-                    semantic_configuration_name="default-semantic",
-                ))
-            except Exception as sem_err:
-                logger.warning(f"Semantic search unavailable for index (no semantic config?), falling back to hybrid: {sem_err}")
+            # Managed indexes use "default-semantic"; BYOI indexes may use "default"
+            # or another name. Try the primary name, then a common alternative,
+            # then fall back to plain hybrid (no semantic reranking).
+            semantic_names = ["default-semantic", "default"] if is_external else ["default-semantic"]
+            hybrid_results = None
+            for sem_name in semantic_names:
+                try:
+                    hybrid_results = list(search_client.search(
+                        search_text=query,
+                        vector_queries=[vector_query],
+                        filter=odata_filter,
+                        select=select_fields,
+                        top=top_k,
+                        query_type=QueryType.SEMANTIC,
+                        semantic_configuration_name=sem_name,
+                    ))
+                    break  # success
+                except Exception:
+                    continue  # try next name
+            if hybrid_results is None:
+                logger.warning("Semantic search unavailable for index, falling back to plain hybrid")
                 hybrid_results = list(search_client.search(
                     search_text=query,
                     vector_queries=[vector_query],

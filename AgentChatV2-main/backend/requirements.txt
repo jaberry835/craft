@@ -5,11 +5,14 @@
 # - ClientCallInterceptor: Authentication for secured A2A endpoints
 # - Streaming: Real-time updates via SSE
 # Uses agent-framework-ag-ui for AG-UI protocol support (standardized SSE events)
-# Uses agent-framework-openai for OpenAIChatCompletionClient (replaces deprecated
-# agent_framework.azure.AzureOpenAIChatClient per ADR 0021).
+# Uses agent-framework-openai for both:
+#   - OpenAIChatCompletionClient (legacy /chat/completions surface)
+#   - OpenAIChatClient            (Responses API surface; required for endpoint_type
+#                                  = azure_openai_responses or apim_responses)
+# (Replaces deprecated agent_framework.azure.AzureOpenAIChatClient per ADR 0021.)
 # Versions pinned (mixed beta/RC/stable) to avoid surprise drift on prerelease packages.
-agent-framework-core==1.0.1
-agent-framework-openai==1.0.1
+agent-framework-core==1.1.0
+agent-framework-openai==1.1.0
 agent-framework-azure-ai==1.0.0rc6
 agent-framework-a2a==1.0.0b260409
 agent-framework-ag-ui==1.0.0b260409

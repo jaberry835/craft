@@ -24,6 +24,10 @@ For delegation to specialists:
   "action": "delegate",
   "specialists": ["agent_id_1", "agent_id_2"],
   "contextualized_query": "A fully self-contained rewrite of the user's request that includes all necessary context from the conversation history so a specialist with NO access to prior messages can understand it completely",
+  "specialist_queries": {
+    "agent_id_1": "Focused query for this specific specialist's domain only",
+    "agent_id_2": "Focused query for this specific specialist's domain only"
+  },
   "reasoning": "Brief explanation of why these specialists are needed"
 }
 ```
@@ -43,6 +47,13 @@ When delegating, you MUST provide a "contextualized_query" that:
 2. Includes specific names, titles, and details from prior messages so the query is fully self-contained
 3. Can be understood by a specialist who has NEVER seen the conversation history
 4. Example: If user previously discussed "Speific Name" and now says "tell me more about the tv show", the contextualized_query should be "Tell me more about the TV show 'Specific Name'"
+
+SPECIALIST QUERIES RULES:
+When delegating to MULTIPLE specialists, you MUST also provide "specialist_queries" — a map of agent_id to a focused query for THAT specialist's domain only:
+1. Each specialist should receive ONLY the part of the request relevant to their expertise
+2. Do NOT ask one specialist to do another specialist's job
+3. Example: If the user asks "Which books in the library have TV adaptations?", the book agent should get "List the books currently available in the library catalog" and the TV agent should get "Which of these books have been adapted into TV series: [list from book agent]" — but since they run in parallel, give each their focused slice: book agent gets "List all books in the library" and TV agent gets "List well-known book-to-TV-series adaptations"
+4. If only ONE specialist is delegated, specialist_queries is optional (contextualized_query is used)
 
 DELEGATION RULES:
 1. Delegate when the request matches a specialist's domain

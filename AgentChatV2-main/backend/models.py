@@ -159,6 +159,10 @@ class AgentConfig(BaseModel):
         description="Reference to an AOAI endpoint configuration. If not set, uses the default endpoint from environment."
     )
     temperature: float = Field(default=0.7, ge=0, le=2)
+    reasoning_effort: Optional[str] = Field(
+        default=None,
+        description="Reasoning effort for reasoning models (low, medium, high). Defaults to medium if not set."
+    )
     max_tokens: Optional[int] = Field(default=None, ge=1, le=128000)
     mcp_tools: list[MCPToolConfig | str] = Field(default_factory=list)  # Selected tools for this agent
     mcp_servers: list[str] = Field(default_factory=list)  # MCP server IDs this agent can use
@@ -432,18 +436,22 @@ class ModelDeployment(BaseModel):
 class AOAIEndpointConfig(BaseModel):
     """Azure OpenAI endpoint configuration.
 
-    Supports two endpoint types:
-      - "azure_openai" (default): Direct Azure OpenAI endpoint
+    Supports four endpoint types:
+      - "azure_openai" (default): Direct Azure OpenAI, /chat/completions API
         e.g. https://myaoai.openai.azure.com
-      - "apim": Azure API Management fronting Azure OpenAI
+        SDK appends /openai/deployments/{name}/chat/completions automatically.
+      - "apim": Azure API Management fronting AOAI, /chat/completions API
         e.g. https://myapim.azure-api.net/myprefix
-        The SDK appends /openai/deployments/{name}/chat/completions automatically.
+      - "azure_openai_responses": Direct Azure OpenAI, Responses API
+        SDK appends /openai/v1/responses?api-version=... automatically.
+      - "apim_responses": Azure API Management fronting the Responses API
+        e.g. https://myapim.azure-api.net/myprefix
     """
     id: Optional[str] = None
     name: str = Field(..., min_length=1, max_length=100)
     endpoint: str = Field(..., min_length=1, description="Azure OpenAI endpoint URL or APIM base URL")
-    # Endpoint type: "azure_openai" for direct AOAI, "apim" for APIM-fronted
-    endpoint_type: str = Field(default="azure_openai", description="Endpoint type: azure_openai or apim")
+    # Endpoint type: see class docstring for the four supported values
+    endpoint_type: str = Field(default="azure_openai", description="Endpoint type: azure_openai, apim, azure_openai_responses, or apim_responses")
     # Azure cloud environment: AzureGovernment, AzureCommercial, AzureChina
     cloud: str = Field(default="AzureCommercial", description="Azure cloud environment")
     api_version: str = Field(default="2024-02-15-preview", description="API version to use")
@@ -479,7 +487,7 @@ class AOAIEndpointConfig(BaseModel):
     @classmethod
     def validate_endpoint_type(cls, v: str) -> str:
         """Ensure endpoint_type is a valid value."""
-        allowed = ("azure_openai", "apim")
+        allowed = ("azure_openai", "apim", "azure_openai_responses", "apim_responses")
         if v not in allowed:
             raise ValueError(f"endpoint_type must be one of {allowed}")
         return v

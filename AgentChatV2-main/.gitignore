@@ -83,3 +83,4 @@ backend/MCPServerDevCert-protected.pfx
 
 backend/package-lock.json
 frontend/package-lock.json
+extension-key.pem

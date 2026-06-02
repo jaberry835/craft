@@ -3,7 +3,7 @@ Orchestration Pipeline
 Two-phase orchestration: Analysis → Pattern Execution → Synthesis.
 Extracted from agent_manager.py for maintainability.
 """
-from typing import Optional, AsyncIterator
+from typing import Optional, AsyncIterator, Callable
 from dataclasses import dataclass, field
 import asyncio
 import json as json_module
@@ -12,7 +12,14 @@ import re
 from agent_framework import Agent, AgentSession, Message
 
 from observability import get_logger, should_log_agent, track_performance, MetricType
-from services.chatter import ChatterEvent, ChatterEventType
+from services.chatter import (
+    ChatterEvent,
+    ChatterEventType,
+    extract_chatter_from_update,
+)
+
+
+ChatterEmitter = Callable[[ChatterEvent], None]
 
 
 logger = get_logger(__name__)
@@ -150,6 +157,35 @@ earlier, you must spell it out explicitly.
 
 """
 
+# ── Supplement for per-specialist focused queries ──
+SPECIALIST_QUERIES_SUPPLEMENT = """
+
+PER-SPECIALIST QUERIES (multi-delegation):
+When delegating to MULTIPLE specialists, you SHOULD also include a
+"specialist_queries" field — a JSON object mapping each agent ID to a focused
+query scoped to THAT specialist's domain only.
+
+Rules:
+1. Each specialist should receive ONLY the part of the request relevant to
+   their expertise. Do NOT ask one specialist to do another specialist's job.
+2. Keep each query self-contained (same rules as contextualized_query).
+3. If only ONE specialist is delegated, specialist_queries is optional.
+
+Example JSON when delegating to two specialists:
+```json
+{
+  "action": "delegate",
+  "specialists": ["book-agent-id", "tv-agent-id"],
+  "contextualized_query": "Full combined query for all specialists",
+  "specialist_queries": {
+    "book-agent-id": "List which books are currently available in the library catalog",
+    "tv-agent-id": "List well-known books that have been adapted into TV series"
+  },
+  "reasoning": "..."
+}
+```
+"""
+
 DEFAULT_EVALUATION_PROMPT = """You are evaluating whether the specialist agents have gathered enough information to answer the user's question.
 
 ORIGINAL USER QUESTION:
@@ -207,6 +243,7 @@ async def run_orchestrator_for_analysis(
     cosmos_service,
     embedding_service,
     search_service,
+    chatter_emitter: Optional[ChatterEmitter] = None,
 ) -> dict:
     """
     Phase 1: Run orchestrator to analyze the request and decide action.
@@ -299,6 +336,12 @@ async def run_orchestrator_for_analysis(
     if "contextualized_query" not in analysis_prompt:
         analysis_prompt += CONTEXTUALIZED_QUERY_SUPPLEMENT
 
+    # Append per-specialist query instructions so the orchestrator
+    # gives each specialist a focused, domain-scoped query when
+    # delegating to multiple specialists.
+    if "specialist_queries" not in analysis_prompt:
+        analysis_prompt += SPECIALIST_QUERIES_SUPPLEMENT
+
     if preview_context:
         analysis_prompt += f"""
 
@@ -315,7 +358,11 @@ Do not treat preview revisions as generic requests for coding advice or direct e
     
     # Create chat client
     chat_client = create_chat_client_fn(orchestrator_config)
-    
+    from services.agent_manager import AgentManager  # local import to avoid cycles
+    default_options = AgentManager.default_options_for_agent(orchestrator_config)
+    if default_options:
+        logger.info(f"[AOAI-CONFIG] Agent 'Analyzer': enabling reasoning summary stream (default_options={default_options})")
+
     # Create analysis agent with context providers for automatic
     # history loading and RAG injection (no manual message building).
     # store_inputs/store_outputs default to False so the analysis
@@ -327,6 +374,7 @@ Do not treat preview revisions as generic requests for coding advice or direct e
             CosmosHistoryProvider(cosmos_service),
             DocumentRAGProvider(embedding_service, search_service),
         ],
+        default_options=default_options,
     )
     
     # Create an AgentSession and populate provider-scoped state so the
@@ -347,10 +395,24 @@ Do not treat preview revisions as generic requests for coding advice or direct e
     # adds user_message as the current input.
     response_parts = []
     token_accumulator = {"input": 0, "output": 0}
+    # Per-call chatter extraction state (mirrors specialist agent loop)
+    seen_tool_calls: set[str] = set()
+    seen_tool_results: set[str] = set()
+    pending_tool_calls: dict[str, str] = {}
+    # Use the orchestrator's display name so analyzer chatter groups under
+    # the Orchestrator card in the UI rather than a separate "Analyzer" card.
+    analyzer_name = orchestrator_config.get("name", "Orchestrator")
     async for update in analysis_agent.run(
         user_message, session=session, stream=True
     ):
         _accumulate_usage_from_update(update, token_accumulator)
+        if chatter_emitter is not None:
+            for ce in extract_chatter_from_update(
+                update, analyzer_name,
+                seen_tool_calls, seen_tool_results,
+                pending_tool_calls, token_accumulator,
+            ):
+                chatter_emitter(ce)
         if update.text:
             response_parts.append(update.text)
     
@@ -490,11 +552,13 @@ async def run_orchestrator_for_evaluation(
     
     # Create chat client and agent
     chat_client = create_chat_client_fn(orchestrator_config)
+    from services.agent_manager import AgentManager  # local import to avoid cycles
     eval_agent = Agent(
         name="Evaluator",
         description="Evaluates if more investigation is needed",
         instructions=eval_prompt,
-        client=chat_client
+        client=chat_client,
+        default_options=AgentManager.default_options_for_agent(orchestrator_config),
     )
     
     # Get evaluation
@@ -557,6 +621,7 @@ async def run_orchestrator_for_synthesis(
     specialist_results: list[dict],
     user_message: str,
     create_chat_client_fn,
+    chatter_emitter: Optional[ChatterEmitter] = None,
 ) -> dict:
     """
     Phase 3: Run orchestrator to synthesize specialist results.
@@ -589,7 +654,11 @@ async def run_orchestrator_for_synthesis(
     
     # Create chat client
     chat_client = create_chat_client_fn(orchestrator_config)
-    
+    from services.agent_manager import AgentManager  # local import to avoid cycles
+    synth_default_options = AgentManager.default_options_for_agent(orchestrator_config)
+    if synth_default_options:
+        logger.info(f"[AOAI-CONFIG] Agent 'Synthesizer': enabling reasoning summary stream (default_options={synth_default_options})")
+
     # Create synthesis agent — instructions contain the synthesis prompt
     # with specialist responses already embedded.  No providers or session
     # needed; the synthesizer only needs the user question + specialist output.
@@ -598,14 +667,27 @@ async def run_orchestrator_for_synthesis(
         description="Synthesizes results",
         instructions=synthesis_prompt,
         client=chat_client,
+        default_options=synth_default_options,
     )
     
     # Pass only the user's original question; the specialist responses are
     # embedded in the instructions (system prompt) already.
     response_parts = []
     token_accumulator = {"input": 0, "output": 0}
+    seen_tool_calls: set[str] = set()
+    seen_tool_results: set[str] = set()
+    pending_tool_calls: dict[str, str] = {}
+    # Group synthesizer chatter under the Orchestrator card.
+    synth_name = orchestrator_config.get("name", "Orchestrator")
     async for update in synthesis_agent.run(user_message, stream=True):
         _accumulate_usage_from_update(update, token_accumulator)
+        if chatter_emitter is not None:
+            for ce in extract_chatter_from_update(
+                update, synth_name,
+                seen_tool_calls, seen_tool_results,
+                pending_tool_calls, token_accumulator,
+            ):
+                chatter_emitter(ce)
         if update.text:
             response_parts.append(update.text)
     

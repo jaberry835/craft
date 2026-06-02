@@ -786,7 +786,7 @@ async def create_aoai_endpoint(
     # Try to auto-discover deployments (only for direct Azure OpenAI endpoints)
     discovered_deployments = []
     discovery_error = None
-    is_apim = endpoint_config.endpoint_type == "apim"
+    is_apim = endpoint_config.endpoint_type in ("apim", "apim_responses")
     if is_apim:
         logger.info("APIM endpoint - skipping ARM auto-discovery (add deployments manually)")
     elif endpoint_config.subscription_id and endpoint_config.resource_group:
@@ -886,7 +886,7 @@ async def refresh_aoai_deployments(
         raise HTTPException(status_code=404, detail="AOAI endpoint not found")
     
     # APIM endpoints don't support ARM auto-discovery
-    if existing.get("endpoint_type") == "apim":
+    if existing.get("endpoint_type") in ("apim", "apim_responses"):
         raise HTTPException(
             status_code=400,
             detail="APIM endpoints do not support ARM auto-discovery. "

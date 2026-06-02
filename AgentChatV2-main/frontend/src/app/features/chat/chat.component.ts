@@ -1189,9 +1189,11 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
       case 'REASONING_MESSAGE_CONTENT': {
         // Append reasoning text to the most recent reasoning event
         const rEvents = this.streamingMessage.chatterEvents || [];
+        const delta = event.delta || '';
+        console.debug('[AG-UI] REASONING_MESSAGE_CONTENT delta_len=', delta.length, 'preview=', delta.slice(0, 80));
         for (let i = rEvents.length - 1; i >= 0; i--) {
           if (rEvents[i].type === 'reasoning') {
-            rEvents[i].content += event.delta || '';
+            rEvents[i].content += delta;
             this.streamingMessage.chatterEvents = [...rEvents];
             break;
           }
@@ -1202,6 +1204,7 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
       case 'REASONING_MESSAGE_START':
       case 'REASONING_MESSAGE_END':
       case 'REASONING_END':
+        console.debug('[AG-UI] reasoning lifecycle:', event.type);
         // Lifecycle events — no additional UI action needed
         break;
 
