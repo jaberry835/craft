@@ -17,6 +17,15 @@ interface CsvDataset {
   adxColumns: AdxColumn[];
 }
 
+interface OperationalLineage {
+  scenarioId: string;
+  countryId: string;
+  countryName: string;
+  packId: string;
+  packSeed: number;
+  corpusRunId: string;
+}
+
 interface AddressRecord {
   addressId: string;
   personId: string;
@@ -289,6 +298,50 @@ function buildCsv(header: string[], rows: Array<Array<string | number>>): string
   return [header, ...rows]
     .map((row) => row.map((cell) => escapeCsvCell(cell)).join(","))
     .join("\n");
+}
+
+function createOperationalLineage(pack: ScenarioPack): OperationalLineage {
+  return {
+    scenarioId: pack.scenarioId,
+    countryId: pack.country.id,
+    countryName: pack.country.name,
+    packId: pack.packId,
+    packSeed: pack.seed,
+    corpusRunId: pack.corpusRunId ?? "standalone"
+  };
+}
+
+function appendOperationalLineage(dataset: CsvDataset, lineage: OperationalLineage): CsvDataset {
+  return {
+    ...dataset,
+    adxColumns: [
+      ...dataset.adxColumns,
+      { name: "scenario_id", type: "string" },
+      { name: "country_id", type: "string" },
+      { name: "country_name", type: "string" },
+      { name: "pack_id", type: "string" },
+      { name: "pack_seed", type: "int" },
+      { name: "corpus_run_id", type: "string" }
+    ],
+    header: [
+      ...dataset.header,
+      "scenario_id",
+      "country_id",
+      "country_name",
+      "pack_id",
+      "pack_seed",
+      "corpus_run_id"
+    ],
+    rows: dataset.rows.map((row) => [
+      ...row,
+      lineage.scenarioId,
+      lineage.countryId,
+      lineage.countryName,
+      lineage.packId,
+      lineage.packSeed,
+      lineage.corpusRunId
+    ])
+  };
 }
 
 function createFaker(seed: number): Faker {
@@ -1201,7 +1254,7 @@ function getAllEntityIds(pack: ScenarioPack): string[] {
 }
 
 function buildStandardCsvDatasets(pack: ScenarioPack): CsvDataset[] {
-  return [
+  const datasets: CsvDataset[] = [
     {
       relativePath: "exports/reports.csv",
       description: "Normalized report export",
@@ -1253,6 +1306,8 @@ function buildStandardCsvDatasets(pack: ScenarioPack): CsvDataset[] {
       ])
     }
   ];
+
+  return datasets;
 }
 
 function buildOperationalCsvDatasets(pack: ScenarioPack): CsvDataset[] {
@@ -1294,8 +1349,9 @@ function buildOperationalCsvDatasets(pack: ScenarioPack): CsvDataset[] {
   const mentions = createPersonMentions(pack, localizedPersonNames, vehicles, tollTransactions, borderCrossings);
   const peopleDirectoryRows = createPeopleDirectoryRows(pack, profilesByLanguage, organizationLanguages, localizedPersonNames, localizedOrganizationNames, addresses, mentions, countriesByLanguage);
   const sharedSourceEntityIds = [pack.country.id, ...pack.people.map((person) => person.id)];
+  const lineage = createOperationalLineage(pack);
 
-  return [
+  const datasets: CsvDataset[] = [
     {
       relativePath: "exports/people-directory.csv",
       description: "Localized people directory export with address linkage and mention counts",
@@ -1895,6 +1951,8 @@ function buildOperationalCsvDatasets(pack: ScenarioPack): CsvDataset[] {
       ])
     }
   ];
+
+  return datasets.map((dataset) => appendOperationalLineage(dataset, lineage));
 }
 
 function buildAdxCreateTablesScript(datasets: CsvDataset[]): string {

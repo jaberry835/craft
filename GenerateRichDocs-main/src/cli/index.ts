@@ -2,6 +2,7 @@ import "dotenv/config";
 import { Command } from "commander";
 import { runGenerateCorpusCommand } from "./generateCorpus.js";
 import { runGenerateCommand } from "./generate.js";
+import { runPrepareCorpusIngestCommand } from "./prepareCorpusIngest.js";
 import { runValidateCommand } from "./validate.js";
 import { scenarioCatalog } from "../scenarios/catalog.js";
 import type { FictionalCountryId, ScenarioId, SupportedLocale } from "../core/types.js";
@@ -184,6 +185,24 @@ program
     await runValidateCommand({
       outputDir: options.outputDir
     });
+  });
+
+program
+  .command("prepare-corpus-ingest")
+  .description("Prepare Azure Blob upload and ADX ingest scripts for a generated corpus")
+  .requiredOption("--corpus-dir <path>", "Corpus output directory containing corpus-manifest.json")
+  .option("-o, --output-dir <path>", "Optional directory for generated ingest scripts")
+  .action(async (options) => {
+    try {
+      await runPrepareCorpusIngestCommand({
+        corpusDir: options.corpusDir,
+        outputDir: options.outputDir
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(message);
+      process.exitCode = 1;
+    }
   });
 
 await program.parseAsync(process.argv);

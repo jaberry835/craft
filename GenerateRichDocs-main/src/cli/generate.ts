@@ -20,6 +20,8 @@ export interface GenerateCommandOptions {
   locale: SupportedLocale;
   dataLanguage?: SupportedLocale;
   seed: number;
+  packId?: string;
+  corpusRunId?: string;
   countryId?: FictionalCountryId;
   peoplePerOrganization?: number;
   reportCount?: number;
@@ -66,6 +68,8 @@ export async function runGenerateCommand(options: GenerateCommandOptions): Promi
     dataLanguage: options.dataLanguage ?? options.locale,
     seed: options.seed,
     outputDir: outputDirectory,
+    packId: options.packId,
+    corpusRunId: options.corpusRunId,
     countryId: options.countryId,
     generationProfile: resolveGenerationProfile(options),
     customPrompt: options.prompt

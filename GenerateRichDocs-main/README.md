@@ -96,6 +96,19 @@ You can now batch that pattern directly from the CLI and get a root `corpus-mani
 tsx src/cli/index.ts generate-corpus --scenarios correspondence-dossier,talent-mobility --countries country-veloria,country-astriv --seed 500 --people-per-organization 4 --report-count 12 --email-count 20 --csv-scale 2 --output-dir generated/demo-corpus --validate
 ```
 
+Once a corpus has been generated, you can prepare the upload and ADX ingest scripts directly from that corpus root:
+
+```bash
+tsx src/cli/index.ts prepare-corpus-ingest --corpus-dir generated/demo-corpus
+```
+
+This writes an `ingest/` folder under the corpus directory with:
+
+- `upload-corpus-to-blob.ps1` to upload the corpus to Azure Blob Storage via `az storage blob upload-batch`
+- `adx-create-tables.kql` to create or merge the target ADX tables
+- `adx-create-mappings.kql` to create the CSV ingestion mappings
+- `adx-ingest-corpus.kql` to ingest every generated CSV export from Blob storage after placeholder substitution
+
 PowerShell example for one scenario across all fictional countries:
 
 ```powershell

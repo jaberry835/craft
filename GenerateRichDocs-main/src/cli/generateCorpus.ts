@@ -19,6 +19,8 @@ export interface GenerateCorpusCommandOptions {
 }
 
 interface CorpusPackSummary {
+  packId: string;
+  corpusRunId: string;
   scenarioId: ScenarioId;
   countryId: FictionalCountryId;
   seed: number;
@@ -29,6 +31,7 @@ interface CorpusPackSummary {
 }
 
 interface CorpusManifest {
+  corpusRunId: string;
   seedStart: number;
   generatedAt: string;
   locale: SupportedLocale;
@@ -41,6 +44,7 @@ interface CorpusManifest {
 
 export async function runGenerateCorpusCommand(options: GenerateCorpusCommandOptions): Promise<void> {
   const outputDirectory = options.outputDir ?? path.resolve(process.cwd(), "generated", `corpus-seed-${options.seed}`);
+  const corpusRunId = path.basename(outputDirectory);
   const packs: CorpusPackSummary[] = [];
   let nextSeed = options.seed;
 
@@ -48,13 +52,16 @@ export async function runGenerateCorpusCommand(options: GenerateCorpusCommandOpt
 
   for (const scenario of options.scenarios) {
     for (const countryId of options.countries) {
-      const packOutputDir = path.join(outputDirectory, `${scenario}-${countryId}-seed-${nextSeed}`);
+      const packId = `${scenario}-${countryId}-seed-${nextSeed}`;
+      const packOutputDir = path.join(outputDirectory, packId);
 
       await runGenerateCommand({
         scenario,
         locale: options.locale,
         dataLanguage: options.dataLanguage ?? options.locale,
         seed: nextSeed,
+        packId,
+        corpusRunId,
         countryId,
         peoplePerOrganization: options.peoplePerOrganization,
         reportCount: options.reportCount,
@@ -69,6 +76,8 @@ export async function runGenerateCorpusCommand(options: GenerateCorpusCommandOpt
       const manifest = JSON.parse(manifestContent) as RunManifest;
 
       packs.push({
+        packId: manifest.packId,
+        corpusRunId,
         scenarioId: manifest.scenarioId,
         countryId: manifest.countryId,
         seed: manifest.seed,
@@ -83,6 +92,7 @@ export async function runGenerateCorpusCommand(options: GenerateCorpusCommandOpt
   }
 
   const corpusManifest: CorpusManifest = {
+    corpusRunId,
     seedStart: options.seed,
     generatedAt: new Date().toISOString(),
     locale: options.locale,
@@ -96,6 +106,7 @@ export async function runGenerateCorpusCommand(options: GenerateCorpusCommandOpt
   await writeFile(path.join(outputDirectory, "corpus-manifest.json"), `${JSON.stringify(corpusManifest, null, 2)}\n`, "utf8");
 
   console.log(`Generated corpus with ${corpusManifest.packCount} packs`);
+  console.log(`Corpus run id: ${corpusManifest.corpusRunId}`);
   console.log(`Seed start: ${corpusManifest.seedStart}`);
   console.log(`Total artifacts: ${corpusManifest.totalArtifacts}`);
   console.log(`Output: ${outputDirectory}`);

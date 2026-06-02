@@ -145,6 +145,8 @@ export interface ScenarioBrief {
   dataLanguage?: SupportedLocale;
   seed: number;
   outputDir: string;
+  packId?: string;
+  corpusRunId?: string;
   countryId?: FictionalCountryId;
   generationProfile?: Partial<GenerationProfile>;
   customPrompt?: string;
@@ -165,6 +167,8 @@ export interface CreativeDirective {
 }
 
 export interface ScenarioPack {
+  packId: string;
+  corpusRunId?: string;
   scenarioId: ScenarioId;
   locale: SupportedLocale;
   dataLanguage: SupportedLocale;
@@ -189,6 +193,8 @@ export interface OutputArtifact {
 }
 
 export interface RunManifest {
+  packId: string;
+  corpusRunId?: string;
   scenarioId: ScenarioId;
   locale: SupportedLocale;
   dataLanguage: SupportedLocale;

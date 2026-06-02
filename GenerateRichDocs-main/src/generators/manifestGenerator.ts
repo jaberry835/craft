@@ -32,6 +32,8 @@ export async function generateManifest(
   };
 
   const manifest: RunManifest = {
+    packId: pack.packId,
+    corpusRunId: pack.corpusRunId,
     scenarioId: pack.scenarioId,
     locale: pack.locale,
     dataLanguage: pack.dataLanguage,

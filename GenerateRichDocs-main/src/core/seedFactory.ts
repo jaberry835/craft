@@ -764,6 +764,8 @@ export async function createScenarioPack(
   const events = buildEvents(reports, emails);
 
   return {
+    packId: brief.packId ?? `${brief.scenarioId}-${country.id}-seed-${brief.seed}`,
+    corpusRunId: brief.corpusRunId,
     scenarioId: brief.scenarioId,
     locale: brief.locale,
     dataLanguage: brief.dataLanguage ?? brief.locale,
