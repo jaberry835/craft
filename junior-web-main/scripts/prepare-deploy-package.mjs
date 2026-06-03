@@ -1,6 +1,5 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -17,32 +16,9 @@ async function ensureExists(targetPath) {
   }
 }
 
-async function installRuntimeDependencies(workingDirectory) {
-  const command = process.platform === 'win32' ? 'cmd.exe' : 'npm';
-  const args = process.platform === 'win32'
-    ? ['/d', '/s', '/c', 'npm install --omit=dev']
-    : ['install', '--omit=dev'];
-  await new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      cwd: workingDirectory,
-      stdio: 'inherit'
-    });
-
-    child.on('error', reject);
-    child.on('exit', (code) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-
-      reject(new Error(`npm install --omit=dev failed with exit code ${code ?? 'unknown'}.`));
-    });
-  });
-}
-
 async function main() {
   await ensureExists(path.join(distRoot, 'client'));
-  await ensureExists(path.join(distRoot, 'server'));
+  await ensureExists(path.join(distRoot, 'server', 'index.js'));
 
   await fs.rm(packageRoot, { recursive: true, force: true });
   await fs.mkdir(packageRoot, { recursive: true });
@@ -53,6 +29,9 @@ async function main() {
   await fs.cp(path.join(repoRoot, 'data'), path.join(packageRoot, 'data'), { recursive: true });
 
   const packageJson = JSON.parse(await fs.readFile(path.join(repoRoot, 'package.json'), 'utf8'));
+  // Server is bundled by esbuild; no runtime dependencies are required on the
+  // App Service host. Ship a minimal package.json so `npm start` works without
+  // any `npm install` step on the deployment target.
   const deploymentPackageJson = {
     name: packageJson.name,
     version: packageJson.version,
@@ -60,8 +39,7 @@ async function main() {
     type: 'module',
     scripts: {
       start: 'node server/index.js'
-    },
-    dependencies: packageJson.dependencies
+    }
   };
 
   await fs.writeFile(
@@ -70,7 +48,7 @@ async function main() {
     'utf8'
   );
 
-  await installRuntimeDependencies(packageRoot);
+  console.log(`Deploy package staged at ${packageRoot}`);
 }
 
 main().catch((error) => {
