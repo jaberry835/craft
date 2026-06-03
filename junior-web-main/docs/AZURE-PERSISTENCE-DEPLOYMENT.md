@@ -154,6 +154,8 @@ Grant these permissions:
 4. Azure AI Search: the appropriate search data/query role if using Entra auth grounding.
 5. Blob Storage when using identity auth: `Storage Blob Data Contributor` on the storage account or container scope.
 
+If you deploy from a separate VM by using that VM's system-assigned managed identity, that VM identity also needs deployment RBAC on the target web app. The narrow starting point is `Website Contributor` on the web app resource. This deployment role is separate from the runtime roles above.
+
 Blob storage note:
 
 - Use `AZURE_STORAGE_CONNECTION_STRING` when key auth is allowed.

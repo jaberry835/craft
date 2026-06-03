@@ -1,5 +1,7 @@
 import express from 'express';
 import cors from 'cors';
+import fs from 'node:fs';
+import path from 'node:path';
 import { HttpError } from './httpErrors.js';
 import type { AgentConfigStore } from './services/agentConfigStore.js';
 import { AdminConnectivityService } from './services/adminConnectivityService.js';
@@ -26,11 +28,13 @@ export interface WorkbenchAppDependencies {
 
 export interface WorkbenchAppOptions {
   identity?: RequestIdentityOptionsInput;
+  clientDistPath?: string;
 }
 
 export function createWorkbenchApp(dependencies: WorkbenchAppDependencies, options: WorkbenchAppOptions = {}): express.Express {
   const app = express();
   const identityOptions = resolveRequestIdentityOptions(options.identity);
+  const clientDistPath = options.clientDistPath;
   app.use(cors());
   app.use(express.json({ limit: '2mb' }));
   app.use(attachRequestIdentity(identityOptions));
@@ -717,6 +721,17 @@ export function createWorkbenchApp(dependencies: WorkbenchAppDependencies, optio
       next(error);
     }
   });
+
+  if (clientDistPath && fs.existsSync(clientDistPath)) {
+    app.use(express.static(clientDistPath, { index: false }));
+    app.get(/^(?!\/api(?:\/|$)).*/, (_request, response, next) => {
+      response.sendFile(path.join(clientDistPath, 'index.html'), (error) => {
+        if (error) {
+          next(error);
+        }
+      });
+    });
+  }
 
   app.use((error: unknown, _request: express.Request, response: express.Response, next: express.NextFunction) => {
     void next;

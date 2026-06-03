@@ -38,11 +38,56 @@ npm run dev
 
 Open the Vite URL shown in the terminal. The API listens on `http://localhost:8787`, and Vite proxies `/api` plus `/published` to it.
 
+## Deploy To Azure App Service
+
+The default deployment path is to push this app into an existing Azure App Service web app.
+
+Build only:
+
+```bash
+npm run build:deploy
+```
+
+That build produces a self-contained deploy package in `.deploy/package`, including production `node_modules`, so the normal deploy path does not need App Service to install packages.
+
+Configure App Service deployment settings as a separate step when needed:
+
+```powershell
+npm run azure:configure-appservice:pwsh -- -ResourceGroup <rg> -AppName <app-name>
+```
+
+If deployments run from a VM by using that VM's system-assigned managed identity, grant that identity `Website Contributor` on the target web app before using the deploy script.
+
+Build and deploy to an existing web app with:
+
+```powershell
+az login
+npm run azure:deploy:pwsh -- -ResourceGroup <rg> -AppName <app-name>
+```
+
+Deploy an existing build without rebuilding:
+
+```powershell
+npm run azure:deploy:pwsh -- -ResourceGroup <rg> -AppName <app-name> -SkipBuild
+```
+
+This is the preferred steady-state deployment path once `.deploy/package` has already been built.
+
+If the web app does not exist yet and you want the script to create it in an existing App Service plan, opt into that explicitly:
+
+```powershell
+npm run azure:deploy:pwsh -- -ResourceGroup <rg> -AppName <app-name> -CreateIfMissing -AppServicePlan <existing-plan-name>
+```
+
+For the full deployment notes, see [docs/AZURE-APP-SERVICE-DEPLOY.md](docs/AZURE-APP-SERVICE-DEPLOY.md).
+
 ## Configuration
 
 Use [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for local configuration, environment variables, shared admin config, workspace config, workspace secrets, and storage backend selection.
 
 Use [docs/README-identity.md](docs/README-identity.md) for identity modes, Entra app registration setup, role mapping, and deployment guidance.
+
+Use [docs/AZURE-APP-SERVICE-DEPLOY.md](docs/AZURE-APP-SERVICE-DEPLOY.md) for the Azure CLI deployment flow, including existing-web-app deploys and optional app creation in an existing App Service plan.
 
 Use [docs/FOUNDRY-VS-OPENAI.md](docs/FOUNDRY-VS-OPENAI.md) for the connection model differences between Microsoft Foundry, Azure OpenAI resource endpoints, and the public OpenAI API.
 

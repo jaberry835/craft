@@ -60,6 +60,8 @@ await workspaceManager.load();
 const app = createWorkbenchApp({
   agentConfigStore,
   workspaceManager
+}, {
+  clientDistPath: path.join(repoRoot, 'client')
 });
 
 const port = Number(process.env.PORT ?? 8787);

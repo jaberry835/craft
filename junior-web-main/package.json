@@ -8,12 +8,16 @@
     "dev:client": "vite",
     "dev:server": "node --watch --import tsx server/index.ts",
     "build": "tsc -b && vite build",
+    "build:server": "tsc -p tsconfig.server.json",
+    "build:deploy": "npm run build && npm run build:server && node scripts/prepare-deploy-package.mjs",
     "test:server": "tsx --test server/test/**/*.test.ts",
     "lint": "eslint .",
     "preview": "vite preview",
     "azure:bootstrap-persistence": "bash scripts/bootstrap-azure-persistence.sh",
     "azure:bootstrap-persistence:pwsh": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap-azure-persistence.ps1",
-    "azure:bootstrap-identity:pwsh": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap-azure-identity.ps1"
+    "azure:bootstrap-identity:pwsh": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap-azure-identity.ps1",
+    "azure:configure-appservice:pwsh": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/configure-azure-appservice-settings.ps1",
+    "azure:deploy:pwsh": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/deploy-azure-appservice.ps1"
   },
   "dependencies": {
     "@azure/cosmos": "^4.9.3",
