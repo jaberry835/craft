@@ -2,6 +2,7 @@ import "dotenv/config";
 import { Command } from "commander";
 import { runGenerateCorpusCommand } from "./generateCorpus.js";
 import { runGenerateCommand } from "./generate.js";
+import { runMaterializeCorpusIngestCommand } from "./materializeCorpusIngest.js";
 import { runPrepareCorpusIngestCommand } from "./prepareCorpusIngest.js";
 import { runValidateCommand } from "./validate.js";
 import { scenarioCatalog } from "../scenarios/catalog.js";
@@ -197,6 +198,32 @@ program
       await runPrepareCorpusIngestCommand({
         corpusDir: options.corpusDir,
         outputDir: options.outputDir
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(message);
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command("materialize-corpus-ingest")
+  .description("Resolve prepared corpus ingest placeholders into execution-ready scripts")
+  .requiredOption("--ingest-dir <path>", "Prepared ingest directory containing KQL and upload scripts")
+  .option("-o, --output-dir <path>", "Optional directory for resolved ingest scripts")
+  .option("--storage-account <name>", "Azure Blob storage account name")
+  .option("--container <name>", "Azure Blob container name")
+  .option("--blob-prefix <prefix>", "Blob prefix used for upload batch paths")
+  .option("--sas-token <token>", "Optional SAS token beginning with ?")
+  .action(async (options) => {
+    try {
+      await runMaterializeCorpusIngestCommand({
+        ingestDir: options.ingestDir,
+        outputDir: options.outputDir,
+        storageAccountName: options.storageAccount,
+        containerName: options.container,
+        blobPrefix: options.blobPrefix,
+        sasToken: options.sasToken
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

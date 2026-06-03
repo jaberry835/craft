@@ -102,6 +102,19 @@ Once a corpus has been generated, you can prepare the upload and ADX ingest scri
 tsx src/cli/index.ts prepare-corpus-ingest --corpus-dir generated/demo-corpus
 ```
 
+To turn those prepared templates into execution-ready files with your storage settings substituted:
+
+```bash
+tsx src/cli/index.ts materialize-corpus-ingest --ingest-dir generated/demo-corpus/ingest --storage-account mystorageacct --container demo-corpus --blob-prefix generated-demo --sas-token "?sv=..."
+```
+
+The same values can also come from environment variables:
+
+- `AZURE_STORAGE_ACCOUNT_NAME`
+- `AZURE_STORAGE_CONTAINER_NAME`
+- `AZURE_STORAGE_BLOB_PREFIX`
+- `AZURE_STORAGE_SAS_TOKEN`
+
 This writes an `ingest/` folder under the corpus directory with:
 
 - `upload-corpus-to-blob.ps1` to upload the corpus to Azure Blob Storage via `az storage blob upload-batch`
