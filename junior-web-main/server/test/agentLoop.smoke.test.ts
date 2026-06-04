@@ -386,12 +386,16 @@ test('agent auto-applies a new workspace file when enabled', async (t) => {
   assert.equal(response.pendingChanges.length, 0);
   assert.equal((await harness.changeManager.list()).length, 0);
   assert.match(await readWorkspaceFile(harness.storage, 'package/agent-notes.md'), /Created by the smoke test\./);
-  assert.equal((await harness.workspaceIndexer.refresh()).fileCount >= 5, true);
+  assert.equal((await harness.workspaceIndexer.refresh()).fileCount >= 2, true);
 });
 
 test('agent falls back to deterministic package drafting when the model returns no draft text', async (t) => {
   const harness = await createHarness(new FakeAzureOpenAiChatClient({ draftResponses: [null] }));
   t.after(async () => cleanupHarness(harness));
+
+  await harness.storage.writeTextFile('package/system-overview.md', '# System Overview\n');
+  await harness.storage.writeTextFile('package/approval-checklist.md', '# Approval Checklist\n');
+  await harness.workspaceIndexer.refresh();
 
   const response = await harness.agent.sendMessage('Draft the next security approval package updates.', undefined, { autoApproveChanges: false });
 

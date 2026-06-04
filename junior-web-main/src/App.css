@@ -90,6 +90,10 @@
   --surface-selected: #1b3256;
   --surface-selected-strong: #20395f;
   --surface-user-message: #1a2432;
+  --surface-success: #12261c;
+  --surface-warning: #2a2212;
+  --surface-danger: #311b20;
+  --surface-danger-hover: #402129;
   --border: #243246;
   --border-soft: #2a3950;
   --border-strong: #344766;
@@ -97,6 +101,7 @@
   --border-button-hover: #5d789c;
   --border-selected: #406398;
   --border-user-message: #32465f;
+  --border-success: #2f7a52;
   --border-warning: #876a2a;
   --border-danger: #8c4e54;
   --border-danger-hover: #aa6269;
@@ -247,6 +252,15 @@
 .auth-mode-token {
   border-color: var(--border-selected);
   background: var(--surface-selected);
+}
+
+.workbench-shell.theme-dark .auth-mode-trusted-header {
+  color: #d8f4e4;
+}
+
+.workbench-shell.theme-dark .auth-mode-local-fallback,
+.workbench-shell.theme-dark .auth-mode-loading {
+  color: #f4ddb0;
 }
 
 .dev-identity-form {
@@ -833,6 +847,10 @@
   color: var(--text-body);
   font-size: 13px;
   line-height: 1.5;
+}
+
+.workbench-shell.theme-dark .connector-hint {
+  color: #f2e0bc;
 }
 
 .danger {
@@ -1469,6 +1487,22 @@ button:disabled {
 .connection-status.missing {
   border-color: var(--border-warning);
   background: var(--surface-warning);
+}
+
+.workbench-shell.theme-dark .connection-status.ready {
+  color: #d8f4e4;
+}
+
+.workbench-shell.theme-dark .connection-status.ready span {
+  color: #b6d9c3;
+}
+
+.workbench-shell.theme-dark .connection-status.missing {
+  color: #f4ddb0;
+}
+
+.workbench-shell.theme-dark .connection-status.missing span {
+  color: #d7bf90;
 }
 
 .connection-status strong {

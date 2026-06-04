@@ -2,6 +2,7 @@ import { DefaultAzureCredential } from '@azure/identity';
 import { BlobServiceClient, ContainerClient } from '@azure/storage-blob';
 import path from 'node:path';
 import type { WorkspaceFile, WorkspaceTreeNode } from '../types.js';
+import { PathIsDirectoryError } from '../httpErrors.js';
 import type { WorkspaceStorage } from './workspaceStorage.js';
 import { seedFiles } from './workspaceSeed.js';
 
@@ -48,12 +49,13 @@ export class BlobWorkspaceStorage implements WorkspaceStorage {
     const roots: WorkspaceTreeNode[] = [];
 
     for await (const blob of this.container.listBlobsFlat({ prefix: this.workspacePrefix })) {
+      const isDirectoryPlaceholder = blob.name.endsWith(`/${directoryPlaceholder}`);
       const relativePath = this.relativePath(blob.name);
       if (!relativePath || !this.isVisiblePath(relativePath)) {
         continue;
       }
 
-      this.insertNode(roots, relativePath);
+      this.insertNode(roots, relativePath, isDirectoryPlaceholder);
     }
 
     return this.sortNodes(roots);
@@ -62,6 +64,12 @@ export class BlobWorkspaceStorage implements WorkspaceStorage {
   async readTextFile(relativePath: string): Promise<WorkspaceFile> {
     const normalizedPath = this.normalizeRelativePath(relativePath);
     const blobClient = this.container.getBlobClient(this.blobName(normalizedPath));
+    if (!(await blobClient.exists())) {
+      if (await this.isDirectoryPath(normalizedPath)) {
+        throw new PathIsDirectoryError(`Workspace path is a directory: ${normalizedPath}`);
+      }
+    }
+
     const download = await blobClient.download();
     const content = await this.streamToString(download.readableStreamBody);
 
@@ -146,17 +154,31 @@ export class BlobWorkspaceStorage implements WorkspaceStorage {
     return relativePath.replaceAll('\\', '/').replace(/^\/+/, '');
   }
 
+  private async isDirectoryPath(relativePath: string): Promise<boolean> {
+    const placeholderBlob = this.container.getBlobClient(this.blobName(`${relativePath}/${directoryPlaceholder}`));
+    if (await placeholderBlob.exists()) {
+      return true;
+    }
+
+    for await (const _blob of this.container.listBlobsFlat({ prefix: this.blobName(`${relativePath}/`) })) {
+      return true;
+    }
+
+    return false;
+  }
+
   private isVisiblePath(relativePath: string): boolean {
     return relativePath.split('/').every((segment) => segment.length > 0 && !segment.startsWith('.'));
   }
 
-  private insertNode(nodes: WorkspaceTreeNode[], relativePath: string): void {
+  private insertNode(nodes: WorkspaceTreeNode[], relativePath: string, forceLeafDirectory = false): void {
     const segments = relativePath.split('/').filter(Boolean);
     let currentNodes = nodes;
 
     for (let index = 0; index < segments.length; index += 1) {
       const segment = segments[index];
       const isLeaf = index === segments.length - 1;
+      const isDirectoryNode = !isLeaf || forceLeafDirectory;
       const nodePath = segments.slice(0, index + 1).join('/');
       let node = currentNodes.find((candidate) => candidate.path === nodePath);
 
@@ -164,15 +186,15 @@ export class BlobWorkspaceStorage implements WorkspaceStorage {
         node = {
           name: segment,
           path: nodePath,
-          type: isLeaf ? 'file' : 'directory'
+          type: isDirectoryNode ? 'directory' : 'file'
         };
-        if (!isLeaf) {
+        if (isDirectoryNode) {
           node.children = [];
         }
         currentNodes.push(node);
       }
 
-      if (!isLeaf) {
+      if (isDirectoryNode) {
         node.type = 'directory';
         node.children ??= [];
         currentNodes = node.children;

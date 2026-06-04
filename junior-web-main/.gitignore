@@ -23,6 +23,7 @@ dist-ssr
 *.sln
 *.sw?
 .env
+.env.app
 config/connector-secrets.local.json
 data/workspaces/*/.junior/
 
@@ -30,3 +31,4 @@ SecureChatExtension/
 
 .deploy/
 deploy/
+

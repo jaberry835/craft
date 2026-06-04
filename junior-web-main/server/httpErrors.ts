@@ -25,3 +25,9 @@ export class NotFoundError extends HttpError {
     super(message, 404, 'not_found');
   }
 }
+
+export class PathIsDirectoryError extends HttpError {
+  constructor(message = 'The requested workspace path is a directory.') {
+    super(message, 400, 'path_is_directory');
+  }
+}

@@ -272,7 +272,7 @@ export function createWorkbenchApp(dependencies: WorkbenchAppDependencies, optio
 
     app.get(`${basePath}/files`, async (request, response, next) => {
       try {
-        const filePath = String(request.query.path ?? 'package/index.md');
+        const filePath = String(request.query.path ?? 'README.md');
         response.json(await resolveWorkspace(request).storage.readTextFile(filePath));
       } catch (error) {
         next(error);

@@ -40,14 +40,36 @@ export class WorkspaceIndexer {
     const tree = await this.storage.listTree();
     const fileNodes = this.flattenFiles(tree);
     const documents = new Map<string, IndexedDocument>();
-    const entries = await Promise.all(fileNodes.map((node) => this.createEntry(node)));
+    const entries = (await Promise.all(fileNodes.map(async (node) => {
+      try {
+        return await this.createEntry(node);
+      } catch (error) {
+        if (isMissingPathError(error)) {
+          console.warn(`[workspace-indexer] Skipping missing file during refresh: ${node.path}`);
+          return undefined;
+        }
+
+        throw error;
+      }
+    }))).filter((entry): entry is WorkspaceIndexEntry => Boolean(entry));
 
     for (const entry of entries) {
       if (!entry.indexed) {
         continue;
       }
 
-      const file = await this.storage.readTextFile(entry.path);
+      let file: WorkspaceFile;
+      try {
+        file = await this.storage.readTextFile(entry.path);
+      } catch (error) {
+        if (isMissingPathError(error)) {
+          console.warn(`[workspace-indexer] Skipping missing indexed file during refresh: ${entry.path}`);
+          continue;
+        }
+
+        throw error;
+      }
+
       documents.set(entry.path, {
         file,
         entry,
@@ -138,4 +160,23 @@ export class WorkspaceIndexer {
     const start = Math.max(0, index - 90);
     return normalizedContent.slice(start, start + 240);
   }
+}
+
+function isMissingPathError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+
+  const candidate = error as {
+    code?: unknown;
+    statusCode?: unknown;
+    details?: { errorCode?: unknown };
+  };
+
+  return candidate.statusCode === 404 ||
+    candidate.code === 'ENOENT' ||
+    candidate.code === 'BlobNotFound' ||
+    candidate.code === 'ContainerNotFound' ||
+    candidate.details?.errorCode === 'BlobNotFound' ||
+    candidate.details?.errorCode === 'ContainerNotFound';
 }

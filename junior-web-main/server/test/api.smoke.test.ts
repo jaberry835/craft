@@ -48,6 +48,28 @@ test('workspace file routes can create and read a file', async (t) => {
   assert.equal(readFile.content, createdFile.content);
 });
 
+test('workspace file routes reject reading a directory as a file', async (t) => {
+  const harness = await createHarness(new FakeAzureOpenAiChatClient());
+  const { server, baseUrl } = await startHarnessServer(harness);
+  t.after(async () => {
+    await stopHarnessServer(server);
+    await cleanupHarness(harness);
+  });
+
+  const createDirectoryResponse = await fetch(`${baseUrl}/api/workspaces/current/directories`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: 'notes' })
+  });
+  assert.equal(createDirectoryResponse.status, 200);
+
+  const readResponse = await fetch(`${baseUrl}/api/workspaces/current/files?path=${encodeURIComponent('notes')}`);
+  assert.equal(readResponse.status, 400);
+  const payload = await readResponse.json() as { error: string; code: string };
+  assert.equal(payload.code, 'path_is_directory');
+  assert.match(payload.error, /directory/i);
+});
+
 test('workspace registry lists the default workspace and supports id-scoped file routes', async (t) => {
   const harness = await createHarness(new FakeAzureOpenAiChatClient());
   const { server, baseUrl } = await startHarnessServer(harness);
@@ -64,11 +86,11 @@ test('workspace registry lists the default workspace and supports id-scoped file
   assert.equal(workspaces[0]?.name, 'Default Workspace');
   assert.equal(workspaces[0]?.ownerId, 'admin');
 
-  const fileResponse = await fetch(`${baseUrl}/api/workspaces/default/files?path=${encodeURIComponent('package/index.md')}`);
+  const fileResponse = await fetch(`${baseUrl}/api/workspaces/default/files?path=${encodeURIComponent('README.md')}`);
   assert.equal(fileResponse.status, 200);
   const file = await fileResponse.json() as { path: string; content: string };
-  assert.equal(file.path, 'package/index.md');
-  assert.match(file.content, /Executive Summary/);
+  assert.equal(file.path, 'README.md');
+  assert.match(file.content, /Junior workspace/);
 });
 
 test('identity endpoint returns the resolved fallback identity', async (t) => {
@@ -121,10 +143,10 @@ test('workspace creation adds a new workspace with isolated seeded files', async
   assert.equal(workspaces.length, 2);
   assert.equal(workspaces.some((workspace) => workspace.id === createdWorkspace.id), true);
 
-  const fileResponse = await fetch(`${baseUrl}/api/workspaces/${encodeURIComponent(createdWorkspace.id)}/files?path=${encodeURIComponent('package/index.md')}`);
+  const fileResponse = await fetch(`${baseUrl}/api/workspaces/${encodeURIComponent(createdWorkspace.id)}/files?path=${encodeURIComponent('README.md')}`);
   assert.equal(fileResponse.status, 200);
   const file = await fileResponse.json() as { content: string };
-  assert.match(file.content, /Executive Summary/);
+  assert.match(file.content, /Junior workspace/);
 });
 
 test('workspace settings can attach a shared template after creation', async (t) => {

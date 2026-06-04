@@ -17,7 +17,12 @@ import type { WorkspaceSummary } from './types.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, '..');
-const dataRoot = path.join(repoRoot, 'data');
+// Workspace data must live under a writable path. On Azure App Service with
+// WEBSITE_RUN_FROM_PACKAGE=1, wwwroot is mounted read-only, so set
+// JUNIOR_DATA_ROOT to a writable location (for example /home/data).
+const dataRoot = process.env.JUNIOR_DATA_ROOT
+  ? path.resolve(process.env.JUNIOR_DATA_ROOT)
+  : path.join(repoRoot, 'data');
 const configRoot = path.join(repoRoot, 'config');
 
 const agentConfigStore = new AgentConfigStore(configRoot);

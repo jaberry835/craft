@@ -142,7 +142,8 @@ export class LocalWorkspaceManager {
       ...catalog,
       items: catalog.items.map((workspace) => ({
         ...workspace,
-        ownerId: workspace.ownerId || ownerId
+        ownerId: workspace.ownerId || ownerId,
+        rootPath: path.join(this.workspacesRoot, workspace.id)
       }))
     };
   }

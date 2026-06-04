@@ -1,8 +1,11 @@
 import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { WorkspaceFile, WorkspaceTreeNode } from '../types.js';
+import { PathIsDirectoryError } from '../httpErrors.js';
 import type { WorkspaceStorage } from './workspaceStorage.js';
 import { seedFiles } from './workspaceSeed.js';
+
+const directoryPlaceholder = '.keep';
 
 export class LocalWorkspaceStorage implements WorkspaceStorage {
   constructor(private readonly rootPath: string) {}
@@ -27,11 +30,17 @@ export class LocalWorkspaceStorage implements WorkspaceStorage {
   }
 
   async readTextFile(relativePath: string): Promise<WorkspaceFile> {
-    const absolutePath = this.resolvePath(relativePath);
-    const [content, stats] = await Promise.all([readFile(absolutePath, 'utf8'), stat(absolutePath)]);
+    const normalizedPath = this.normalizeRelativePath(relativePath);
+    const absolutePath = this.resolvePath(normalizedPath);
+    const stats = await stat(absolutePath);
+    if (stats.isDirectory()) {
+      throw new PathIsDirectoryError(`Workspace path is a directory: ${normalizedPath}`);
+    }
+
+    const content = await readFile(absolutePath, 'utf8');
 
     return {
-      path: this.normalizeRelativePath(relativePath),
+      path: normalizedPath,
       content,
       updatedAt: stats.mtime.toISOString()
     };
@@ -49,6 +58,7 @@ export class LocalWorkspaceStorage implements WorkspaceStorage {
     const normalizedPath = this.normalizeRelativePath(relativePath);
     const absolutePath = this.resolvePath(normalizedPath);
     await mkdir(absolutePath, { recursive: true });
+    await writeFile(path.join(absolutePath, directoryPlaceholder), '', 'utf8');
 
     return {
       name: path.posix.basename(normalizedPath),

@@ -23,15 +23,11 @@ await build({
     'fsevents'
   ],
   banner: {
-    // Provide CommonJS-style helpers some bundled deps reach for under ESM.
-    js: [
-      "import { createRequire as __createRequire } from 'node:module';",
-      "import { fileURLToPath as __fileURLToPath } from 'node:url';",
-      "import { dirname as __dirname_fn } from 'node:path';",
-      "const require = __createRequire(import.meta.url);",
-      "const __filename = __fileURLToPath(import.meta.url);",
-      "const __dirname = __dirname_fn(__filename);"
-    ].join('\n')
+    // Provide a CommonJS `require` shim for any bundled CJS module that
+    // reaches for it. Do not redeclare `__dirname` / `__filename` here —
+    // bundled modules declare their own at module scope and a top-level
+    // declaration would collide.
+    js: "import { createRequire as __createRequire } from 'node:module'; const require = __createRequire(import.meta.url);"
   }
 });
 

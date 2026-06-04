@@ -48,7 +48,7 @@ Build only:
 npm run build:deploy
 ```
 
-That build produces a self-contained deploy package in `.deploy/package`, including production `node_modules`, so the normal deploy path does not need App Service to install packages.
+That build produces a self-contained deploy package in `.deploy/package`. The server is bundled by esbuild into a single `server/index.js` with all runtime dependencies inlined, so the package does not contain `node_modules` and App Service does not need to install packages.
 
 Configure App Service deployment settings as a separate step when needed:
 

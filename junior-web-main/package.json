@@ -17,6 +17,8 @@
     "azure:bootstrap-persistence:pwsh": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap-azure-persistence.ps1",
     "azure:bootstrap-identity:pwsh": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap-azure-identity.ps1",
     "azure:configure-appservice:pwsh": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/configure-azure-appservice-settings.ps1",
+    "azure:apply-env:pwsh": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/apply-env-to-appservice.ps1",
+    "azure:grant-runtime-roles:pwsh": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/grant-azure-runtime-roles.ps1",
     "azure:deploy:pwsh": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/deploy-azure-appservice.ps1"
   },
   "dependencies": {
