@@ -1010,6 +1010,7 @@ export class AgentLoop {
             'find_references',
             'get_diagnostics',
             'get_open_editors',
+            'ask_user',
         ]);
 
         if (readOnlyTools.has(name)) { return true; }

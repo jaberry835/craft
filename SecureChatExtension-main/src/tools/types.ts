@@ -3,7 +3,7 @@
  */
 import * as vscode from 'vscode';
 import * as cp from 'child_process';
-import { ToolDefinition, ToolHandler } from '../types';
+import { ToolDefinition, ToolHandler, AskUserQuestion, AskUserAnswers } from '../types';
 import { WorkspaceIndexer } from '../workspaceIndexer';
 import { SymbolIndexer } from '../symbolIndexer';
 import { SemanticIndexer } from '../semanticIndexer';
@@ -40,6 +40,8 @@ export interface ToolContext {
     notifyFileChanged(absPath: string, relPath: string): void;
     collectDiagnosticsAfterEdit(absPath: string, relPath: string): Promise<string>;
     requestConfirmation(description: string, category?: string): Promise<boolean>;
+    /** Ask the user one or more structured questions and wait for the answers (null if dismissed). */
+    askUser(questions: AskUserQuestion[]): Promise<AskUserAnswers | null>;
     resolveSymbolPosition(
         filePath: string,
         symbol: string,

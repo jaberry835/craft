@@ -107,6 +107,35 @@ export interface ToolResult {
 
 export type ToolHandler = (args: Record<string, unknown>) => Promise<ToolResult>;
 
+// ── Ask-User (interactive question) Types ──
+
+export interface AskUserOption {
+    /** Display label and value for the option. */
+    label: string;
+    /** Optional secondary text shown with the option. */
+    description?: string;
+    /** Marks this option as the recommended/default choice. */
+    recommended?: boolean;
+}
+
+export interface AskUserQuestion {
+    /** Short unique identifier so answers can be mapped back to the question. */
+    header: string;
+    /** The question text to display to the user. */
+    question: string;
+    /** Optional markdown detail shown below the question for extra context. */
+    detail?: string;
+    /** Optional predefined choices. Omit for a free-text question. */
+    options?: AskUserOption[];
+    /** Allow selecting multiple options when options are provided. */
+    multiSelect?: boolean;
+    /** Allow a custom typed answer in addition to options. Defaults to true. */
+    allowFreeformInput?: boolean;
+}
+
+/** Map of question header -> selected/typed answer value(s). */
+export type AskUserAnswers = Record<string, string[]>;
+
 // ── MCP Types ──
 
 export interface McpAuthSessionConfig {
@@ -354,6 +383,7 @@ export type WebviewMessage =
     | { type: 'attachFile' }
     | { type: 'attachContext'; kind: ContextAttachmentKind }
     | { type: 'confirmAction'; actionId: string; approved: boolean; allowSession?: boolean; category?: string }
+    | { type: 'askUserResponse'; requestId: string; answers: AskUserAnswers; cancelled?: boolean }
     | { type: 'continueIteration'; shouldContinue: boolean }
     | { type: 'fileChangeAction'; action: 'keep' | 'undo' }
     | { type: 'fileChangeFileAction'; file: string; action: 'keep' | 'undo' }
@@ -396,6 +426,7 @@ export type ExtensionMessage =
     | { type: 'sessionCleared' }
     | { type: 'setStatus'; status: string }
     | { type: 'confirmAction'; actionId: string; description: string; category?: string; diff?: string }
+    | { type: 'askUser'; requestId: string; questions: AskUserQuestion[] }
     | { type: 'fileAttached'; name: string; content: string }
     | { type: 'contextAttached'; kind: ContextAttachmentKind; name: string; content: string }
     | { type: 'sessionList'; sessions: Array<{ id: string; title: string; updatedAt: number; messageCount: number }>; activeId: string }

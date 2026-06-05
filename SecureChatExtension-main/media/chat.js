@@ -24,6 +24,9 @@ window.onerror = function(msg, src, line, col, err) {
     const modelMenuEl = document.getElementById('model-menu');
     const modelSearchEl = document.getElementById('model-search');
     const modelListEl = document.getElementById('model-list');
+    const reasoningControlEl = document.getElementById('reasoning-control');
+    const reasoningTriggerEl = document.getElementById('reasoning-trigger');
+    const reasoningTriggerLabelEl = document.getElementById('reasoning-trigger-label');
     const modelReasoningSubmenuEl = document.getElementById('model-reasoning-submenu');
     const modelNoteEl = document.getElementById('model-note');
     const permissionSelectEl = document.getElementById('permission-select');
@@ -950,6 +953,13 @@ window.onerror = function(msg, src, line, col, err) {
         });
     }
 
+    if (reasoningTriggerEl) {
+        reasoningTriggerEl.addEventListener('click', function(e) {
+            e.stopPropagation();
+            toggleReasoningMenu();
+        });
+    }
+
     if (modelSearchEl) {
         modelSearchEl.addEventListener('input', function() {
             renderModelOptions();
@@ -961,7 +971,7 @@ window.onerror = function(msg, src, line, col, err) {
             cancelReasoningClose();
         });
         modelReasoningSubmenuEl.addEventListener('mouseleave', function() {
-            scheduleReasoningClose();
+            if (reasoningAnchorEl) { scheduleReasoningClose(); }
         });
     }
 
@@ -1026,9 +1036,11 @@ window.onerror = function(msg, src, line, col, err) {
     document.addEventListener('click', function(e) {
         if (modeSwitchEl && modeSwitchEl.contains(e.target)) { return; }
         if (modelControlEl && modelControlEl.contains(e.target)) { return; }
+        if (reasoningControlEl && reasoningControlEl.contains(e.target)) { return; }
         if ((attachMenuEl && attachMenuEl.contains(e.target)) || (btnAttach && btnAttach.contains(e.target))) { return; }
         closeModeMenu();
         closeModelMenu();
+        closeReasoningMenu();
         closeAttachMenu();
     });
 
@@ -1036,6 +1048,7 @@ window.onerror = function(msg, src, line, col, err) {
         if (e.key === 'Escape') {
             closeModeMenu();
             closeModelMenu();
+            closeReasoningMenu();
             closeAttachMenu();
         }
     });
@@ -1121,11 +1134,13 @@ window.onerror = function(msg, src, line, col, err) {
         const visible = !!(reasoning && reasoning.visible);
         if (!visible) {
             if (modelTriggerMetaEl) { modelTriggerMetaEl.textContent = ''; }
-            closeReasoningSubmenu();
+            updateReasoningTrigger();
+            closeReasoningMenu();
             return;
         }
 
         updateModelTrigger();
+        updateReasoningTrigger();
         renderReasoningOptions();
         if (modelNoteEl) {
             modelNoteEl.textContent = reasoning.wireApi === 'responses'
@@ -1137,6 +1152,7 @@ window.onerror = function(msg, src, line, col, err) {
     function toggleModelMenu() {
         if (!modelMenuEl || !modelTriggerEl || modelTriggerEl.disabled) { return; }
         closeModeMenu();
+        closeReasoningMenu();
         closeAttachMenu();
         const open = modelMenuEl.classList.contains('hidden');
         modelControlEl.classList.toggle('open', open);
@@ -1154,13 +1170,39 @@ window.onerror = function(msg, src, line, col, err) {
 
     function closeModelMenu() {
         if (!modelMenuEl || !modelTriggerEl) { return; }
-        clearReasoningHoverTimer();
-        cancelReasoningClose();
-        closeReasoningSubmenu();
         modelControlEl.classList.remove('open');
         modelMenuEl.classList.add('hidden');
         modelTriggerEl.classList.remove('active');
         modelTriggerEl.setAttribute('aria-expanded', 'false');
+    }
+
+    function toggleReasoningMenu() {
+        if (!modelReasoningSubmenuEl || !reasoningTriggerEl || reasoningTriggerEl.disabled) { return; }
+        closeModeMenu();
+        closeModelMenu();
+        closeAttachMenu();
+        const open = modelReasoningSubmenuEl.classList.contains('hidden');
+        if (open) {
+            renderReasoningOptions();
+            modelReasoningSubmenuEl.classList.remove('hidden');
+            reasoningControlEl.classList.add('open');
+            reasoningTriggerEl.classList.add('active');
+            reasoningTriggerEl.setAttribute('aria-expanded', 'true');
+            positionReasoningMenu();
+        } else {
+            closeReasoningMenu();
+        }
+    }
+
+    function closeReasoningMenu() {
+        clearReasoningHoverTimer();
+        cancelReasoningClose();
+        closeReasoningSubmenu();
+        if (reasoningControlEl) { reasoningControlEl.classList.remove('open'); }
+        if (reasoningTriggerEl) {
+            reasoningTriggerEl.classList.remove('active');
+            reasoningTriggerEl.setAttribute('aria-expanded', 'false');
+        }
     }
 
     function toggleAttachMenu() {
@@ -1219,6 +1261,24 @@ window.onerror = function(msg, src, line, col, err) {
         reasoningAnchorEl = null;
     }
 
+    function positionReasoningMenu() {
+        if (!modelReasoningSubmenuEl || !reasoningControlEl) { return; }
+        modelReasoningSubmenuEl.classList.remove('open-left', 'open-right', 'open-inside');
+        modelReasoningSubmenuEl.style.left = '0px';
+        modelReasoningSubmenuEl.style.right = 'auto';
+        modelReasoningSubmenuEl.style.top = '';
+        modelReasoningSubmenuEl.style.transform = '';
+        const rect = modelReasoningSubmenuEl.getBoundingClientRect();
+        const margin = 8;
+        let offset = 0;
+        if (rect.left < margin) {
+            offset = margin - rect.left;
+        } else if (rect.right > window.innerWidth - margin) {
+            offset = window.innerWidth - margin - rect.right;
+        }
+        modelReasoningSubmenuEl.style.left = offset + 'px';
+    }
+
     function positionReasoningSubmenu() {
         if (!modelReasoningSubmenuEl || !reasoningAnchorEl || !modelMenuEl) { return; }
         modelReasoningSubmenuEl.classList.remove('open-left', 'open-right', 'open-inside');
@@ -1260,10 +1320,20 @@ window.onerror = function(msg, src, line, col, err) {
         const selected = currentModels.find(m => m.deploymentId === currentActiveDeployment) || currentModels[0];
         if (modelTriggerEl) { modelTriggerEl.disabled = currentModels.length === 0; }
         if (modelTriggerLabelEl) { modelTriggerLabelEl.textContent = selected ? (selected.name || selected.deploymentId) : 'No models configured'; }
-        const effortLabel = currentReasoningConfig && currentReasoningConfig.visible
-            ? formatReasoningEffort(currentReasoningConfig.effort)
-            : '';
-        if (modelTriggerMetaEl) { modelTriggerMetaEl.textContent = effortLabel ? '\u00b7 ' + effortLabel : ''; }
+        if (modelTriggerMetaEl) { modelTriggerMetaEl.textContent = ''; }
+        updateReasoningTrigger();
+    }
+
+    function updateReasoningTrigger() {
+        const visible = !!(currentReasoningConfig && currentReasoningConfig.visible);
+        if (reasoningControlEl) { reasoningControlEl.classList.toggle('hidden', !visible); }
+        if (reasoningTriggerEl) {
+            reasoningTriggerEl.disabled = !visible;
+            reasoningTriggerEl.title = visible ? 'Choose thinking effort' : 'Thinking effort is unavailable for this model';
+        }
+        if (reasoningTriggerLabelEl) {
+            reasoningTriggerLabelEl.textContent = visible ? formatReasoningEffort(currentReasoningConfig.effort) : 'Reasoning';
+        }
     }
 
     function scheduleReasoningHover(anchorEl, model) {
@@ -1326,7 +1396,7 @@ window.onerror = function(msg, src, line, col, err) {
                 '<span class="model-option-meta"></span>';
             btn.querySelector('.model-option-name').textContent = label;
             const meta = btn.querySelector('.model-option-meta');
-            if (meta) { meta.textContent = m.supportsReasoning ? formatReasoningEffort(currentReasoningConfig && currentReasoningConfig.effort) : ''; }
+            if (meta) { meta.textContent = m.supportsReasoning ? 'Supports reasoning' : ''; }
             btn.addEventListener('click', function() {
                 currentActiveDeployment = m.deploymentId;
                 modelSelectEl.value = m.deploymentId;
@@ -1335,12 +1405,6 @@ window.onerror = function(msg, src, line, col, err) {
                 closeModelMenu();
                 vscode.postMessage({ type: 'selectModelById', deploymentId: m.deploymentId });
                 inputEl.focus();
-            });
-            btn.addEventListener('mouseenter', function() {
-                scheduleReasoningHover(btn, m);
-            });
-            btn.addEventListener('mouseleave', function() {
-                scheduleReasoningClose();
             });
             modelListEl.appendChild(btn);
         });
@@ -1395,6 +1459,7 @@ window.onerror = function(msg, src, line, col, err) {
                 currentReasoningConfig.summary = value;
                 vscode.postMessage({ type: 'updateReasoningConfig', summary: value });
             }
+            updateReasoningTrigger();
             renderReasoningOptions();
             renderModelOptions();
         });
@@ -1777,6 +1842,190 @@ window.onerror = function(msg, src, line, col, err) {
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
+    }
+
+    // ── Ask-user interactive question form ──
+    function renderAskUser(msg) {
+        const questions = Array.isArray(msg.questions) ? msg.questions : [];
+        if (questions.length === 0) { return; }
+
+        const dialog = document.createElement('div');
+        dialog.className = 'ask-dialog';
+        dialog.dataset.requestId = msg.requestId;
+
+        // Per-question state: selected option labels + freeform text.
+        const state = questions.map(function() { return { selected: [], freeform: '' }; });
+
+        questions.forEach(function(q, qi) {
+            const qEl = document.createElement('div');
+            qEl.className = 'ask-question';
+
+            const textEl = document.createElement('div');
+            textEl.className = 'ask-q-text';
+            textEl.textContent = q.question;
+            qEl.appendChild(textEl);
+
+            if (q.detail) {
+                const detailEl = document.createElement('div');
+                detailEl.className = 'ask-q-detail';
+                detailEl.textContent = q.detail;
+                qEl.appendChild(detailEl);
+            }
+
+            const hasOptions = Array.isArray(q.options) && q.options.length > 0;
+            const multi = q.multiSelect === true;
+            // Default true unless explicitly disabled. Free-text-only when no options.
+            const allowFree = !hasOptions || q.allowFreeformInput !== false;
+
+            if (hasOptions) {
+                const optsEl = document.createElement('div');
+                optsEl.className = 'ask-options';
+                q.options.forEach(function(opt) {
+                    const label = document.createElement('label');
+                    label.className = 'ask-option';
+
+                    const input = document.createElement('input');
+                    input.type = multi ? 'checkbox' : 'radio';
+                    input.name = 'ask_' + msg.requestId + '_' + qi;
+                    input.value = opt.label;
+
+                    const body = document.createElement('div');
+                    body.className = 'ask-option-body';
+                    const lab = document.createElement('div');
+                    lab.className = 'ask-option-label';
+                    lab.textContent = opt.label;
+                    if (opt.recommended) {
+                        const rec = document.createElement('span');
+                        rec.className = 'ask-option-rec';
+                        rec.textContent = 'Recommended';
+                        lab.appendChild(rec);
+                    }
+                    body.appendChild(lab);
+                    if (opt.description) {
+                        const desc = document.createElement('div');
+                        desc.className = 'ask-option-desc';
+                        desc.textContent = opt.description;
+                        body.appendChild(desc);
+                    }
+
+                    input.addEventListener('change', function() {
+                        if (multi) {
+                            if (input.checked) {
+                                if (state[qi].selected.indexOf(opt.label) === -1) { state[qi].selected.push(opt.label); }
+                            } else {
+                                state[qi].selected = state[qi].selected.filter(function(v) { return v !== opt.label; });
+                            }
+                            label.classList.toggle('selected', input.checked);
+                        } else {
+                            state[qi].selected = [opt.label];
+                            Array.prototype.forEach.call(optsEl.querySelectorAll('.ask-option'), function(el) {
+                                el.classList.remove('selected');
+                            });
+                            label.classList.add('selected');
+                        }
+                        updateSubmitState();
+                    });
+
+                    label.appendChild(input);
+                    label.appendChild(body);
+                    optsEl.appendChild(label);
+                });
+                qEl.appendChild(optsEl);
+            }
+
+            if (allowFree) {
+                const ta = document.createElement('textarea');
+                ta.className = 'ask-freeform';
+                ta.rows = 1;
+                ta.placeholder = hasOptions ? 'Or type a custom answer…' : 'Type your answer…';
+                ta.addEventListener('input', function() {
+                    state[qi].freeform = ta.value;
+                    ta.style.height = 'auto';
+                    ta.style.height = Math.min(ta.scrollHeight, 140) + 'px';
+                    updateSubmitState();
+                });
+                ta.addEventListener('keydown', function(e) {
+                    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                        e.preventDefault();
+                        submit();
+                    }
+                });
+                qEl.appendChild(ta);
+            }
+
+            dialog.appendChild(qEl);
+        });
+
+        const actions = document.createElement('div');
+        actions.className = 'ask-actions';
+        const cancelBtn = document.createElement('button');
+        cancelBtn.className = 'btn-ask-cancel';
+        cancelBtn.textContent = 'Skip';
+        const submitBtn = document.createElement('button');
+        submitBtn.className = 'btn-ask-submit';
+        submitBtn.textContent = 'Submit';
+        actions.appendChild(cancelBtn);
+        actions.appendChild(submitBtn);
+        dialog.appendChild(actions);
+
+        function answerFor(qi) {
+            const values = state[qi].selected.slice();
+            const free = (state[qi].freeform || '').trim();
+            if (free) { values.push(free); }
+            return values;
+        }
+
+        function isComplete() {
+            for (let qi = 0; qi < questions.length; qi++) {
+                if (answerFor(qi).length === 0) { return false; }
+            }
+            return true;
+        }
+
+        function updateSubmitState() {
+            submitBtn.disabled = !isComplete();
+        }
+
+        let resolved = false;
+        function finish(cancelled) {
+            if (resolved) { return; }
+            resolved = true;
+            const answers = {};
+            const summaryParts = [];
+            questions.forEach(function(q, qi) {
+                const values = cancelled ? [] : answerFor(qi);
+                answers[q.header] = values;
+                if (!cancelled) {
+                    summaryParts.push(q.question + ' → ' + (values.length ? values.join(', ') : '(skipped)'));
+                }
+            });
+            vscode.postMessage({ type: 'askUserResponse', requestId: msg.requestId, answers: answers, cancelled: !!cancelled });
+
+            // Lock the form and show a compact summary.
+            dialog.classList.add('answered');
+            Array.prototype.forEach.call(dialog.querySelectorAll('input, textarea, button'), function(el) {
+                el.disabled = true;
+            });
+            const summary = document.createElement('div');
+            summary.className = 'ask-answered-summary';
+            summary.textContent = cancelled ? 'Skipped.' : summaryParts.join('  •  ');
+            dialog.appendChild(summary);
+        }
+
+        function submit() {
+            if (!isComplete()) { return; }
+            finish(false);
+        }
+
+        submitBtn.addEventListener('click', submit);
+        cancelBtn.addEventListener('click', function() { finish(true); });
+
+        updateSubmitState();
+        messagesEl.appendChild(dialog);
+        pinWorkingIndicatorToBottom();
+        scrollToBottom();
+        const firstField = dialog.querySelector('input, textarea');
+        if (firstField) { firstField.focus(); }
     }
 
     // ── Unique ID for copy buttons ──
@@ -2256,6 +2505,10 @@ window.onerror = function(msg, src, line, col, err) {
                 messagesEl.appendChild(dialog);
                 pinWorkingIndicatorToBottom();
                 scrollToBottom();
+                break;
+            }
+            case 'askUser': {
+                renderAskUser(msg);
                 break;
             }
             case 'continueIteration': {

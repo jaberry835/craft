@@ -907,6 +907,9 @@ ${personaSections.length ? `## Member Personas\n${personaSections.join('\n\n')}\
                         this.builtinTools.resolveConfirmation(msg.actionId, msg.approved);
                     }
                     break;
+                case 'askUserResponse':
+                    this.builtinTools.resolveQuestions(msg.requestId, msg.cancelled ? null : msg.answers);
+                    break;
                 case 'continueIteration':
                     if (this.activeProvider === 'copilot-cli') {
                         // SDK handles continuation internally
@@ -1076,6 +1079,11 @@ ${personaSections.length ? `## Member Personas\n${personaSections.join('\n\n')}\
         // Confirmation callback for built-in tools
         this.builtinTools.setConfirmCallback((actionId, description, category, diff) => {
             this.sendToWebview({ type: 'confirmAction', actionId, description, category, diff });
+        });
+
+        // Ask-user callback — renders an interactive question form in the chat
+        this.builtinTools.setAskUserCallback((requestId, questions) => {
+            this.sendToWebview({ type: 'askUser', requestId, questions });
         });
 
         // Live file-change callback — sends tick to webview as each file is touched
@@ -2864,6 +2872,77 @@ body { display: flex; flex-direction: column; }
     color: var(--fg);
 }
 
+/* ASK-USER QUESTION FORM */
+.ask-dialog {
+    background: var(--tool-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin: 4px 0;
+    flex-shrink: 0;
+}
+.ask-question { margin-bottom: 12px; }
+.ask-question:last-of-type { margin-bottom: 10px; }
+.ask-q-text { font-size: 12px; font-weight: 600; color: var(--fg); margin-bottom: 2px; }
+.ask-q-detail { font-size: 11px; color: var(--muted-fg, #888); margin-bottom: 6px; white-space: pre-wrap; }
+.ask-options { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+.ask-option {
+    display: flex;
+    align-items: flex-start;
+    gap: 7px;
+    padding: 5px 8px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 12px;
+    line-height: 1.35;
+}
+.ask-option:hover { background: rgba(255,255,255,0.04); }
+.ask-option.selected { border-color: var(--user-msg); background: rgba(55,148,255,0.08); }
+.ask-option input { margin-top: 2px; flex-shrink: 0; }
+.ask-option-body { min-width: 0; }
+.ask-option-label { color: var(--fg); }
+.ask-option-rec {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    color: var(--user-msg);
+    margin-left: 6px;
+}
+.ask-option-desc { font-size: 11px; color: var(--muted-fg, #888); margin-top: 1px; }
+.ask-freeform {
+    width: 100%;
+    margin-top: 6px;
+    padding: 5px 7px;
+    font-size: 12px;
+    font-family: var(--vscode-font-family, system-ui, sans-serif);
+    color: var(--fg);
+    background: var(--input-bg);
+    border: 1px solid var(--input-border);
+    border-radius: 5px;
+    resize: vertical;
+    box-sizing: border-box;
+}
+.ask-freeform:focus { outline: none; border-color: var(--user-msg); }
+.ask-actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 4px; }
+.ask-dialog button {
+    font-size: 12px;
+    padding: 4px 14px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+}
+.ask-dialog .btn-ask-submit { background: var(--btn-bg); color: var(--btn-fg); }
+.ask-dialog .btn-ask-submit:hover { background: var(--btn-hover); }
+.ask-dialog .btn-ask-submit:disabled { opacity: 0.5; cursor: not-allowed; }
+.ask-dialog .btn-ask-cancel {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--fg);
+}
+.ask-dialog.answered { opacity: 0.65; }
+.ask-answered-summary { font-size: 11px; color: var(--muted-fg, #888); margin-top: 6px; }
+
 /* CONTINUE ITERATION DIALOG */
 .continue-iteration-dialog {
     background: var(--tool-bg);
@@ -3830,21 +3909,26 @@ body { display: flex; flex-direction: column; }
 }
 .history-item .hi-delete:hover { opacity: 1; color: var(--error-fg); background: rgba(255,68,68,0.1); }
 
-.model-control {
+.model-control,
+.reasoning-control {
     position: relative;
     display: inline-flex;
     align-items: center;
     flex-shrink: 1;
     min-width: 0;
 }
+.reasoning-control.hidden {
+    display: none;
+}
 #model-select {
     display: none;
 }
-.model-trigger {
+.model-trigger,
+.reasoning-trigger {
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    min-width: 116px;
+    min-width: 0;
     max-width: 220px;
     min-height: 28px;
     box-sizing: border-box;
@@ -3860,20 +3944,31 @@ body { display: flex; flex-direction: column; }
     cursor: pointer;
     transition: background 0.12s ease, border-color 0.12s ease;
 }
+.model-trigger {
+    min-width: 82px;
+}
+.reasoning-trigger {
+    max-width: 112px;
+}
 .model-trigger:hover,
-.model-trigger.active {
+.model-trigger.active,
+.reasoning-trigger:hover,
+.reasoning-trigger.active {
     background: rgba(255,255,255,0.05);
     border-color: rgba(255,255,255,0.14);
 }
-.model-trigger:focus-visible {
+.model-trigger:focus-visible,
+.reasoning-trigger:focus-visible {
     outline: 1px solid var(--vscode-focusBorder, #3794ff);
     outline-offset: 1px;
 }
-.model-trigger:disabled {
+.model-trigger:disabled,
+.reasoning-trigger:disabled {
     opacity: 0.55;
     cursor: default;
 }
-.model-trigger-label {
+.model-trigger-label,
+.reasoning-trigger-label {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -3893,6 +3988,9 @@ body { display: flex; flex-direction: column; }
     transition: transform 0.12s ease;
 }
 .model-control.open .model-trigger-chevron {
+    transform: rotate(180deg);
+}
+.reasoning-control.open .model-trigger-chevron {
     transform: rotate(180deg);
 }
 .model-menu,
@@ -3983,22 +4081,25 @@ body { display: flex; flex-direction: column; }
 }
 .model-reasoning-submenu {
     position: absolute;
-    left: calc(100% + 7px);
-    top: 0;
+    bottom: calc(100% + 6px);
+    left: 0;
     z-index: 45;
     width: 320px;
     max-width: calc(100vw - 24px);
     padding: 6px;
 }
 .model-reasoning-submenu.open-left {
+    bottom: auto;
     left: auto;
     right: calc(100% + 7px);
 }
 .model-reasoning-submenu.open-right {
+    bottom: auto;
     left: calc(100% + 7px);
     right: auto;
 }
 .model-reasoning-submenu.open-inside {
+    bottom: auto;
     left: 0;
     right: auto;
     width: 100%;
@@ -4028,7 +4129,8 @@ body { display: flex; flex-direction: column; }
 .model-note:empty {
     display: none;
 }
-.model-trigger:focus {
+.model-trigger:focus,
+.reasoning-trigger:focus {
     border-color: var(--vscode-focusBorder, var(--btn-bg));
 }
 
@@ -4528,11 +4630,17 @@ body { display: flex; flex-direction: column; }
                 <div id="model-menu" class="model-menu hidden" role="menu" aria-label="Models">
                     <input id="model-search" class="model-search" type="text" placeholder="Search models" aria-label="Search models" />
                     <div id="model-list" class="model-list"></div>
-                    <div id="model-reasoning-submenu" class="model-reasoning-submenu hidden" role="menu" aria-label="Reasoning options">
-                        <div class="reasoning-option-group" data-reasoning-group="effort"></div>
-                        <div class="reasoning-option-group" data-reasoning-group="summary"></div>
-                        <div id="model-note" class="model-note"></div>
-                    </div>
+                </div>
+            </div>
+            <div id="reasoning-control" class="reasoning-control hidden">
+                <button id="reasoning-trigger" class="reasoning-trigger" type="button" title="Choose thinking effort" aria-haspopup="menu" aria-expanded="false">
+                    <span id="reasoning-trigger-label" class="reasoning-trigger-label">Reasoning</span>
+                    <span class="model-trigger-chevron" aria-hidden="true"><i class="codicon codicon-chevron-down"></i></span>
+                </button>
+                <div id="model-reasoning-submenu" class="model-reasoning-submenu hidden" role="menu" aria-label="Reasoning options">
+                    <div class="reasoning-option-group" data-reasoning-group="effort"></div>
+                    <div class="reasoning-option-group" data-reasoning-group="summary"></div>
+                    <div id="model-note" class="model-note"></div>
                 </div>
             </div>
             <button id="btn-tools" class="composer-btn" title="MCP Tools"><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="4" width="14" height="1.2" rx="0.6"/><circle cx="10.5" cy="4.6" r="2"/><rect x="1" y="10.8" width="14" height="1.2" rx="0.6"/><circle cx="5.5" cy="11.4" r="2"/></svg></button>

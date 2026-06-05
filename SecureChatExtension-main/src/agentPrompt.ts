@@ -30,6 +30,7 @@ const SYSTEM_PROMPTS: Record<ChatMode, string> = {
 - When helpful, mention Plan mode as the read-only option for producing a preflight plan before execution.
 - For code navigation questions, prefer symbol tools before broad grep.
 - For conceptual questions, prefer semantic search before broad grep.
+- If a request is genuinely ambiguous, call ask_user to ask a small number of clarifying questions rather than guessing. Never use it for sensitive input such as passwords, API keys, or tokens.
 - Keep answers concise, practical, and grounded in the current codebase.
 
 ## Planning
@@ -114,6 +115,7 @@ const SYSTEM_PROMPTS: Record<ChatMode, string> = {
 - If a tool call fails, try to understand why and retry with adjusted parameters
 - Be thorough but concise in explanations
 - When the user asks you to do something, take action using tools rather than just explaining what to do
+- When a request is genuinely ambiguous and you cannot proceed confidently, call ask_user to ask a small number of clarifying questions (free-text, single-select, or multi-select) instead of guessing. Do NOT use it for sensitive input such as passwords, API keys, or tokens, and do not ask questions you can answer yourself by inspecting the workspace.
 
 ## Post-Edit Validation
 - After write_file and edit_file, diagnostics are automatically checked. If the result includes "Post-edit diagnostics", errors or warnings were detected.

@@ -5,14 +5,14 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import { AgentPermissionLevel, ToolDefinition, ToolResult, ToolHandler } from './types';
+import { AgentPermissionLevel, ToolDefinition, ToolResult, ToolHandler, AskUserQuestion, AskUserAnswers } from './types';
 import { WorkspaceIndexer } from './workspaceIndexer';
 import { SymbolIndexer } from './symbolIndexer';
 import { SemanticIndexer } from './semanticIndexer';
 import { countLineChanges } from './diffUtils';
 import { DEFAULT_PERMISSION_LEVEL, shouldConfirmLocalCategory } from './permissions';
 import { ToolContext, ToolCallbacks, BackgroundProcessEntry } from './tools/types';
-import { createFileTools, createSearchTools, createTerminalTools, createCodeActionTools, createPlanTools } from './tools';
+import { createFileTools, createSearchTools, createTerminalTools, createCodeActionTools, createPlanTools, createAskUserTools } from './tools';
 
 export class BuiltinTools {
     private handlers: Map<string, ToolHandler> = new Map();
@@ -21,7 +21,9 @@ export class BuiltinTools {
     private sessionAllowTerminal: boolean = false;
     private sessionAllowWrites: boolean = false;
     private pendingConfirmations: Map<string, { resolve: (approved: boolean) => void }> = new Map();
+    private pendingQuestions: Map<string, { resolve: (answers: AskUserAnswers | null) => void }> = new Map();
     private onConfirmRequest?: (actionId: string, description: string, category?: string, diff?: string) => void;
+    private onAskUserRequest?: (requestId: string, questions: AskUserQuestion[]) => void;
     private onFileTouched?: (relPath: string, additions: number, deletions: number) => void;
     /** Tracks files modified during an agent run. Stores original content for diff/undo. */
     private touchedFiles: Map<string, { relPath: string; isNew: boolean; originalContent: string }> = new Map();
@@ -51,6 +53,10 @@ export class BuiltinTools {
 
     setConfirmCallback(cb: (actionId: string, description: string, category?: string, diff?: string) => void) {
         this.onConfirmRequest = cb;
+    }
+
+    setAskUserCallback(cb: (requestId: string, questions: AskUserQuestion[]) => void) {
+        this.onAskUserRequest = cb;
     }
 
     setFileTouchedCallback(cb: (relPath: string, additions: number, deletions: number) => void) {
@@ -342,6 +348,14 @@ export class BuiltinTools {
         }
     }
 
+    resolveQuestions(requestId: string, answers: AskUserAnswers | null) {
+        const pending = this.pendingQuestions.get(requestId);
+        if (pending) {
+            pending.resolve(answers);
+            this.pendingQuestions.delete(requestId);
+        }
+    }
+
     getDefinitions(): ToolDefinition[] {
         return this.definitions;
     }
@@ -448,6 +462,29 @@ export class BuiltinTools {
     }
 
     /**
+     * Ask the user one or more structured questions and wait for the answers.
+     * Resolves with a header->values map, or null if dismissed/timed out.
+     */
+    private async askUser(questions: AskUserQuestion[]): Promise<AskUserAnswers | null> {
+        if (!this.onAskUserRequest || questions.length === 0) { return null; }
+        const requestId = `ask_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        return new Promise((resolve) => {
+            this.pendingQuestions.set(requestId, { resolve });
+            this.onAskUserRequest!(requestId, questions);
+            // Timeout after 5 minutes — auto-dismiss with visible feedback.
+            setTimeout(() => {
+                if (this.pendingQuestions.has(requestId)) {
+                    this.pendingQuestions.delete(requestId);
+                    vscode.window.showWarningMessage(
+                        'Junior: Question timed out without an answer. You can re-run the task to try again.'
+                    );
+                    resolve(null);
+                }
+            }, 300000);
+        });
+    }
+
+    /**
      * Build a compact unified-style diff string showing only changed lines with context.
      * Returns empty string if contents are identical.
      */
@@ -535,6 +572,7 @@ export class BuiltinTools {
             ...createTerminalTools(ctx),
             ...createCodeActionTools(ctx),
             ...createPlanTools(ctx),
+            ...createAskUserTools(ctx),
         ]) {
             this.register(entry.definition, entry.handler);
         }
@@ -549,6 +587,7 @@ export class BuiltinTools {
             notifyFileChanged: (a, r) => this.notifyFileChanged(a, r),
             collectDiagnosticsAfterEdit: (a, r) => this.collectDiagnosticsAfterEdit(a, r),
             requestConfirmation: (d, c) => this.requestConfirmation(d, c),
+            askUser: (q) => this.askUser(q),
             resolveSymbolPosition: (f, s, l) => this.resolveSymbolPosition(f, s, l),
             workspaceIndexer: this.workspaceIndexer,
             symbolIndexer: this.symbolIndexer,
