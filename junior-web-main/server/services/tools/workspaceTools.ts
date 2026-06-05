@@ -313,8 +313,39 @@ export function createWorkspaceTools(dependencies: WorkspaceToolDependencies): L
     },
     {
       definition: {
+        name: 'create_directory',
+        description: 'Create a workspace directory (staged). This stages a .keep placeholder file so the directory can be created through pending changes.',
+        isReadOnly: false,
+        requiresConfirmation: true,
+        confirmationCategory: 'file-write',
+        category: 'workspace',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string' },
+            summary: { type: 'string' }
+          },
+          required: ['path']
+        }
+      },
+      execute: async (context, args) => {
+        const rawPath = String(args.path ?? '').trim();
+        const normalizedPath = rawPath.replace(/^\/+|\/+$/g, '');
+        if (!normalizedPath) {
+          return { success: false, result: 'path is required.' };
+        }
+
+        const placeholderPath = `${normalizedPath}/.keep`;
+        const summary = String(args.summary ?? `Create directory ${normalizedPath}`);
+        context.staged.push(await dependencies.changeManager.stageFileChange(placeholderPath, '', summary));
+        context.toolEvents.push(createToolEvent('edit', 'Staged directory create', summary, normalizedPath));
+        return { success: true, result: `Staged directory create for ${normalizedPath}.` };
+      }
+    },
+    {
+      definition: {
         name: 'write_file',
-        description: 'Create or fully replace a workspace file with the provided content.',
+        description: 'Create or fully replace a workspace file with the provided content. Parent directories are created automatically when needed.',
         isReadOnly: false,
         requiresConfirmation: true,
         confirmationCategory: 'file-write',

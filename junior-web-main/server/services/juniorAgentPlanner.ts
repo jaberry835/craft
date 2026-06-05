@@ -104,6 +104,7 @@ export class JuniorAgentPlanner {
 
     const prompt = [
       'You are the assistant in a web-based agent loop working over files.',
+      'The runtime can create folders and files in the workspace. Use create_directory for folder requests and write_file for file creation.',
       'Answer the user directly when no tool is needed.',
       JuniorAgentPlanner.directAnswerGuidance,
       'Use a provided tool only when it is necessary to inspect the workspace, search, or make a change.',

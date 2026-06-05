@@ -25,6 +25,7 @@ import type { WorkspaceStorage } from './workspaceStorage.js';
 
 export type LoopStep =
   | 'inspect-workspace'
+  | 'create_directory'
   | 'list_directory'
   | 'read_file'
   | 'replace_lines'
@@ -46,6 +47,7 @@ export interface JuniorAgentLoopProgressHandlers {
 
 export class JuniorAgentLoop {
   private static readonly directAnswerSystemMessage = 'When replying directly to the user, write plain text for an in-app chat surface. Avoid markdown headings, tables, fenced code blocks, and long bullet lists unless the user explicitly asks for them. Keep the answer brief and focused on the main result.';
+  private static readonly workspaceCapabilitySystemMessage = 'You are operating inside Junior Workbench with direct workspace write capability. You can create directories and files, and edit existing files by using workspace tools. When the user asks to create a folder, call create_directory first, then write files under it if requested. Prefer taking concrete file actions instead of only describing what to do when the request is clear.';
   private static readonly noReasoningMessage = 'No reasoning was emitted for this turn.';
 
   private readonly registry = new AgentToolRegistry();
@@ -84,7 +86,7 @@ export class JuniorAgentLoop {
   }
 
   private toolDefinitionsForAgent(activeAgent: AgentDefinition, hasMcpTools: boolean) {
-    const internalTools = new Set<LoopStep>(['inspect-workspace']);
+    const internalTools = new Set<LoopStep>(['inspect-workspace', 'create_directory', 'write_file']);
     if (hasMcpTools) {
       internalTools.add('call_mcp_tool');
     }
@@ -129,6 +131,7 @@ export class JuniorAgentLoop {
       iteration: 0,
       loopMessages: this.contextManager.trimIfNeeded([
         { role: 'system', content: JuniorAgentLoop.directAnswerSystemMessage },
+        { role: 'system', content: JuniorAgentLoop.workspaceCapabilitySystemMessage },
         { role: 'system', content: activeAgent.instructions },
         ...(mcpSystemMessage ? [{ role: 'system' as const, content: mcpSystemMessage }] : []),
         ...normalizedChatHistory.map((message) => ({
