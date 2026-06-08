@@ -5,7 +5,7 @@
  * for our existing BuiltinTools + MCP tool registration patterns.
  */
 
-import type { ToolDefinition, ToolResult, ToolHandler } from '../types';
+import type { ToolDefinition, ToolResult, ToolHandler, ToolContext } from '../types';
 import type { FunctionMiddleware, FunctionContext } from './middleware';
 import { MiddlewarePipeline } from './middleware';
 import { validateToolArgs, type ValidationResult } from '../toolValidator';
@@ -32,8 +32,9 @@ export interface IFunctionTool {
      * Execute the tool with the given arguments.
      * Arguments should already be validated.
      * @param abortSignal  Optional signal to cancel the execution.
+     * @param ctx          Optional execution context (progress emitter, callId).
      */
-    execute(args: Record<string, unknown>, abortSignal?: AbortSignal): Promise<ToolResult>;
+    execute(args: Record<string, unknown>, abortSignal?: AbortSignal, ctx?: ToolContext): Promise<ToolResult>;
 
     /**
      * Validate arguments against the tool's JSON Schema.
@@ -74,8 +75,8 @@ export class FunctionTool implements IFunctionTool {
         this.confirmationCategory = config.confirmationCategory;
     }
 
-    async execute(args: Record<string, unknown>, _abortSignal?: AbortSignal): Promise<ToolResult> {
-        return this.handler(args);
+    async execute(args: Record<string, unknown>, _abortSignal?: AbortSignal, ctx?: ToolContext): Promise<ToolResult> {
+        return this.handler(args, ctx);
     }
 
     validate(args: Record<string, unknown>): ValidationResult {
@@ -176,13 +177,15 @@ export class ToolExecutor {
      * Execute a tool by name with the given arguments.
      * Runs through the FunctionMiddleware pipeline.
      * @param abortSignal   Optional signal to cancel the tool execution.
+     * @param onProgress    Optional live progress emitter forwarded to the tool.
      */
     async execute(
         name: string,
         args: Record<string, unknown>,
         callId: string,
         state?: Map<string, unknown>,
-        abortSignal?: AbortSignal
+        abortSignal?: AbortSignal,
+        onProgress?: (update: import('../types').ToolProgressUpdate) => void
     ): Promise<ToolResult> {
         if (abortSignal?.aborted) {
             return { success: false, result: 'Cancelled by user.' };
@@ -210,17 +213,26 @@ export class ToolExecutor {
             abortSignal,
         };
 
+        const toolCtx: ToolContext = { callId, signal: abortSignal, onProgress };
+
         // Self-timed tools (run_terminal_command) get a generous wrapper;
         // orchestration tools can override the generic 60s tool budget.
-        const timeoutMs = TOOL_TIMEOUT_OVERRIDES_MS[name] ?? (SELF_TIMED_TOOLS.has(name)
-            ? this.defaultTimeoutMs * 3
-            : this.defaultTimeoutMs);
+        // Connected-agent delegation (delegate_to_*) talks to a remote A2A
+        // host that enforces its own per-request timeouts (120s stream / 60s
+        // send / 20s card fetch) and streams live progress, so the generic
+        // 60s wrapper must not pre-empt it.
+        const timeoutMs = TOOL_TIMEOUT_OVERRIDES_MS[name]
+            ?? (name.startsWith('delegate_to_')
+                ? 0
+                : SELF_TIMED_TOOLS.has(name)
+                    ? this.defaultTimeoutMs * 3
+                    : this.defaultTimeoutMs);
 
         return this.executeWithTimeout(
             () => MiddlewarePipeline.runFunction(
                 this.middleware,
                 context,
-                () => tool.execute(args, abortSignal)
+                () => tool.execute(args, abortSignal, toolCtx)
             ),
             timeoutMs,
             name,

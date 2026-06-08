@@ -105,7 +105,28 @@ export interface ToolResult {
     result: string;
 }
 
-export type ToolHandler = (args: Record<string, unknown>) => Promise<ToolResult>;
+/** A live progress update emitted by a tool while it executes. Currently used
+ *  by A2A connected-agent delegation to surface the remote agent's reasoning /
+ *  narration in real time instead of only at completion. */
+export interface ToolProgressUpdate {
+    /** Render channel. 'reasoning' is the remote model's thinking; 'narration'
+     *  is progress / tool-call status; 'answer' is final content. */
+    channel: 'reasoning' | 'narration' | 'answer';
+    text: string;
+}
+
+/** Optional execution context handed to a ToolHandler. Handlers that don't need
+ *  it ignore the second argument (backward compatible). */
+export interface ToolContext {
+    /** The tool call id, matching the working-block action entry. */
+    callId: string;
+    /** Cancellation signal for the current run. */
+    signal?: AbortSignal;
+    /** Emit an incremental progress update for live UI rendering. */
+    onProgress?: (update: ToolProgressUpdate) => void;
+}
+
+export type ToolHandler = (args: Record<string, unknown>, ctx?: ToolContext) => Promise<ToolResult>;
 
 // ── Ask-User (interactive question) Types ──
 
@@ -190,6 +211,8 @@ export interface ChatSession {
     activeCustomAgentId?: string;
     /** Id of the active Junior Dev Team, if any. When set, the chat runs in agent mode with a team persona applied. */
     activeDevTeamId?: string;
+    /** Ids of connected (remote A2A) agents enabled as delegation targets for this session. */
+    enabledConnectedAgentIds?: string[];
     runtimeState?: RuntimeSessionState;
 }
 
@@ -256,6 +279,9 @@ export interface WorkingBlockActionEntry {
     filePath?: string;
     toolName?: string;
     icon?: string;
+    /** Live progress lines emitted by the tool (e.g. a remote A2A agent's
+     *  reasoning / narration), rendered as a sub-log under the action. */
+    progressLog?: ToolProgressUpdate[];
 }
 
 export type WorkingBlockEntry = WorkingBlockProgressEntry | WorkingBlockActionEntry | WorkingBlockTerminalEntry;
@@ -379,6 +405,10 @@ export type WebviewMessage =
     | { type: 'createDevTeam' }
     | { type: 'editDevTeam'; id: string }
     | { type: 'deleteDevTeam'; id: string }
+    | { type: 'toggleConnectedAgent'; id: string; enabled: boolean }
+    | { type: 'createConnectedAgent' }
+    | { type: 'editConnectedAgent'; id: string }
+    | { type: 'deleteConnectedAgent'; id: string }
     | { type: 'runPlanInAgent' }
     | { type: 'attachFile' }
     | { type: 'attachContext'; kind: ContextAttachmentKind }
@@ -412,6 +442,7 @@ export type ExtensionMessage =
     | { type: 'setChatMode'; mode: ChatMode }
     | { type: 'setCustomAgents'; agents: Array<{ id: string; name: string; description?: string; scope: 'workspace' | 'global'; source?: 'junior' | 'agent-md'; readonly?: boolean }>; activeId: string | null }
     | { type: 'setDevTeams'; teams: Array<{ id: string; name: string; description?: string; scope: 'workspace' | 'global'; memberCount: number; members?: DevTeamResponseSummary['members'] }>; activeId: string | null }
+    | { type: 'setConnectedAgents'; agents: Array<{ id: string; name: string; description?: string; endpoint: string; scope: 'workspace' | 'global' }>; enabledIds: string[] }
     | { type: 'searchCitations'; agentName: string; query: string; citations: Array<{ index: number; title: string; url?: string; snippet?: string; score?: number; rerankerScore?: number }> }
     | { type: 'planReady'; visible: boolean }
     | { type: 'agentStarted' }
@@ -441,6 +472,7 @@ export type ExtensionMessage =
     | { type: 'workingTextAppended'; blockId: string; entry: WorkingBlockProgressEntry }
     | { type: 'workingActionAdded'; blockId: string; entry: WorkingBlockActionEntry }
     | { type: 'workingActionUpdated'; blockId: string; entryId: string; status: 'running' | 'done' | 'error'; text?: string; detail?: string; filePath?: string; icon?: string; repeatCount?: number }
+    | { type: 'workingActionProgress'; blockId: string; entryId: string; update: ToolProgressUpdate }
     | { type: 'workingBlockCompleted'; blockId: string; summary: string; completedAt: number }
     | { type: 'narrationText'; text: string }
     | { type: 'devTeamRoomEvent'; event: DevTeamRoomEvent }

@@ -39,6 +39,7 @@ window.onerror = function(msg, src, line, col, err) {
     const modeOptions = modeMenuEl ? Array.from(modeMenuEl.querySelectorAll('.mode-option[data-mode]')) : [];
     const customAgentListEl = document.getElementById('custom-agent-list');
     const devTeamListEl = document.getElementById('dev-team-list');
+    const connectedAgentListEl = document.getElementById('connected-agent-list');
     const planActionBarEl = document.getElementById('plan-action-bar');
     const btnRunPlan = document.getElementById('btn-run-plan');
     const workingEl = document.getElementById('working-indicator');
@@ -76,6 +77,8 @@ window.onerror = function(msg, src, line, col, err) {
     let activeCustomAgentId = null;
     let devTeams = [];
     let activeDevTeamId = null;
+    let connectedAgents = [];
+    let enabledConnectedAgentIds = [];
     let currentAssistantTeam = null;
     const toolStateById = new Map();
     const workingBlocksById = new Map();
@@ -467,6 +470,7 @@ window.onerror = function(msg, src, line, col, err) {
         });
         renderCustomAgentList();
         renderDevTeamList();
+        renderConnectedAgentList();
         if (!agentRunning && inputEl) {
             inputEl.placeholder = getModePlaceholder(currentMode);
         }
@@ -598,6 +602,79 @@ window.onerror = function(msg, src, line, col, err) {
                 inputEl.focus();
             });
             devTeamListEl.appendChild(btn);
+        });
+    }
+
+    function renderConnectedAgentList() {
+        if (!connectedAgentListEl) { return; }
+        connectedAgentListEl.innerHTML = '';
+        if (!connectedAgents.length) { return; }
+        var header = document.createElement('div');
+        header.className = 'mode-menu-section-label';
+        header.textContent = 'Connected agents';
+        connectedAgentListEl.appendChild(header);
+        connectedAgents.forEach(function(ag) {
+            var enabled = enabledConnectedAgentIds.indexOf(ag.id) !== -1;
+            var btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'mode-option mode-option-custom' + (enabled ? ' active' : '');
+            btn.setAttribute('role', 'menuitemcheckbox');
+            btn.setAttribute('aria-checked', enabled ? 'true' : 'false');
+            btn.dataset.connectedAgentId = ag.id;
+            var icon = document.createElement('span');
+            icon.className = 'mode-icon';
+            icon.setAttribute('aria-hidden', 'true');
+            icon.innerHTML = '<i class="codicon codicon-cloud"></i>';
+            var label = document.createElement('span');
+            label.className = 'mode-option-label';
+            label.textContent = ag.name;
+            if (ag.scope === 'workspace') {
+                var scope = document.createElement('span');
+                scope.className = 'mode-option-scope';
+                scope.textContent = 'WS';
+                label.appendChild(scope);
+            }
+            btn.title = ag.description ? (ag.name + ' — ' + ag.description) : ag.endpoint;
+            var actions = document.createElement('span');
+            actions.className = 'mode-option-actions';
+            var editBtn = document.createElement('button');
+            editBtn.type = 'button';
+            editBtn.title = 'Edit connected agent';
+            editBtn.innerHTML = '<i class="codicon codicon-edit"></i>';
+            editBtn.addEventListener('click', function(ev) {
+                ev.stopPropagation();
+                closeModeMenu();
+                vscode.postMessage({ type: 'editConnectedAgent', id: ag.id });
+            });
+            var delBtn = document.createElement('button');
+            delBtn.type = 'button';
+            delBtn.title = 'Disconnect agent';
+            delBtn.innerHTML = '<i class="codicon codicon-trash"></i>';
+            delBtn.addEventListener('click', function(ev) {
+                ev.stopPropagation();
+                vscode.postMessage({ type: 'deleteConnectedAgent', id: ag.id });
+            });
+            actions.appendChild(editBtn);
+            actions.appendChild(delBtn);
+            var check = document.createElement('span');
+            check.className = 'mode-option-check';
+            check.setAttribute('aria-hidden', 'true');
+            check.innerHTML = '<i class="codicon codicon-check"></i>';
+            btn.appendChild(icon);
+            btn.appendChild(label);
+            btn.appendChild(actions);
+            btn.appendChild(check);
+            btn.addEventListener('click', function() {
+                var nowEnabled = enabledConnectedAgentIds.indexOf(ag.id) === -1;
+                if (nowEnabled) {
+                    enabledConnectedAgentIds = enabledConnectedAgentIds.concat([ag.id]);
+                } else {
+                    enabledConnectedAgentIds = enabledConnectedAgentIds.filter(function(x) { return x !== ag.id; });
+                }
+                renderConnectedAgentList();
+                vscode.postMessage({ type: 'toggleConnectedAgent', id: ag.id, enabled: nowEnabled });
+            });
+            connectedAgentListEl.appendChild(btn);
         });
     }
 
@@ -1030,6 +1107,14 @@ window.onerror = function(msg, src, line, col, err) {
         createDevTeamBtn.addEventListener('click', function() {
             closeModeMenu();
             vscode.postMessage({ type: 'createDevTeam' });
+        });
+    }
+
+    var createConnectedAgentBtn = modeMenuEl ? modeMenuEl.querySelector('[data-action="create-connected-agent"]') : null;
+    if (createConnectedAgentBtn) {
+        createConnectedAgentBtn.addEventListener('click', function() {
+            closeModeMenu();
+            vscode.postMessage({ type: 'createConnectedAgent' });
         });
     }
 
@@ -2766,6 +2851,12 @@ window.onerror = function(msg, src, line, col, err) {
                 setChatMode(currentMode);
                 break;
             }
+            case 'setConnectedAgents': {
+                connectedAgents = Array.isArray(msg.agents) ? msg.agents : [];
+                enabledConnectedAgentIds = Array.isArray(msg.enabledIds) ? msg.enabledIds : [];
+                renderConnectedAgentList();
+                break;
+            }
             case 'searchCitations': {
                 renderSourcesCard(msg.agentName || 'Agent', msg.query || '', Array.isArray(msg.citations) ? msg.citations : []);
                 scrollToBottom();
@@ -2959,6 +3050,10 @@ window.onerror = function(msg, src, line, col, err) {
             case 'workingActionUpdated': {
                 updateWorkingActionEntry(msg.blockId, msg.entryId, msg);
                 scrollToBottom();
+                break;
+            }
+            case 'workingActionProgress': {
+                appendWorkingActionProgress(msg.blockId, msg.entryId, msg.update);
                 break;
             }
             case 'terminalOutput': {
@@ -3241,6 +3336,7 @@ window.onerror = function(msg, src, line, col, err) {
             '<div class="wb-action-copy">' +
                 '<div class="wb-action-text"></div>' +
                 '<div class="wb-action-detail"></div>' +
+                '<div class="wb-action-progress"></div>' +
             '</div>' +
             '<span class="wb-action-diff"></span>';
         renderWorkingActionRow(row, entry);
@@ -3277,6 +3373,71 @@ window.onerror = function(msg, src, line, col, err) {
         } else if (diffEl) {
             diffEl.innerHTML = '';
         }
+        renderWorkingActionProgress(row, entry);
+    }
+
+    // Render the live progress sub-log (remote A2A agent reasoning/narration)
+    // attached to an action entry. Untrusted remote output — escaped, not markdown.
+    function renderWorkingActionProgress(row, entry) {
+        var progEl = row.querySelector('.wb-action-progress');
+        if (!progEl) { return; }
+        var log = entry.progressLog;
+        if (!log || !log.length) {
+            progEl.style.display = 'none';
+            progEl.innerHTML = '';
+            return;
+        }
+        progEl.style.display = 'block';
+        var view = coalesceProgressLog(log);
+        progEl.innerHTML = view.map(function (u) { return progressLineHtml(u); }).join('');
+    }
+
+    // Remote agents often stream reasoning token-by-token (one SSE piece per
+    // word), which would otherwise render as one badge per word. Merge
+    // consecutive reasoning pieces into a single growing line; keep narration
+    // and answer pieces as discrete lines.
+    function coalesceProgressLog(log) {
+        var out = [];
+        for (var i = 0; i < log.length; i++) {
+            var u = log[i];
+            var channel = (u && u.channel) || 'narration';
+            var text = (u && u.text) || '';
+            var last = out.length ? out[out.length - 1] : null;
+            if (channel === 'reasoning' && last && last.channel === 'reasoning') {
+                last.text = joinReasoningText(last.text, text);
+            } else {
+                out.push({ channel: channel, text: text });
+            }
+        }
+        return out;
+    }
+
+    function joinReasoningText(prev, next) {
+        if (!prev) { return next; }
+        if (!next) { return prev; }
+        var needsSpace = !/\s$/.test(prev) && !/^\s/.test(next) && !/^[.,!?;:)]/.test(next);
+        return prev + (needsSpace ? ' ' : '') + next;
+    }
+
+    function progressLineHtml(update) {
+        var channel = (update && update.channel) || 'narration';
+        var text = (update && update.text) || '';
+        return '<div class="wb-progress-line ' + channel + '">' +
+            (channel === 'reasoning' ? '<span class="wb-progress-tag">reasoning</span> ' : '') +
+            escapeHtml(text) +
+            '</div>';
+    }
+
+    function appendWorkingActionProgress(blockId, entryId, update) {
+        var entryRecord = workingEntriesById.get(entryId);
+        if (!entryRecord) { return; }
+        if (!entryRecord.entry.progressLog) { entryRecord.entry.progressLog = []; }
+        entryRecord.entry.progressLog.push(update);
+        // Re-render the (coalesced) view so streamed reasoning tokens collapse
+        // into a single growing line instead of one badge per word.
+        renderWorkingActionProgress(entryRecord.el, entryRecord.entry);
+        var record = workingBlocksById.get(blockId);
+        if (record) { scrollWorkingBodyToBottom(record); }
     }
 
     function scrollWorkingBodyToBottom(record) {

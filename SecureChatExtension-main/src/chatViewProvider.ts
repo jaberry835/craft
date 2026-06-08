@@ -86,6 +86,9 @@ import { DevTeamDef, DevTeamStore } from './devTeams';
 import { DevTeamEditor } from './devTeamEditor';
 import { buildDevTeamConsultContext, DevTeamConsultResult, DevTeamRuntime, selectDevTeamExecutionResults } from './devTeamRuntime';
 import { acquireSearchEntraToken, createSearchKnowledgeTool } from './tools/searchKnowledge';
+import { createConnectedAgentTool } from './tools/a2aAgent';
+import { ConnectedAgentDef, ConnectedAgentStore, acquireConnectedAgentEntraToken } from './connectedAgents';
+import { ConnectedAgentEditor } from './connectedAgentEditor';
 
 /** Minimum interval (ms) between consecutive agent loop submissions */
 const MIN_SUBMISSION_INTERVAL_MS = 2000;
@@ -120,6 +123,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private customAgentsCache: CustomAgentDef[] = [];
     /** Cached list of Dev Teams to push to the webview. */
     private devTeamsCache: DevTeamDef[] = [];
+    /** Connected (remote A2A) agents the active persona may delegate to. */
+    private enabledConnectedAgentIds: string[] = [];
+    /** Cached list of connected agents to push to the webview. */
+    private connectedAgentsCache: ConnectedAgentDef[] = [];
     private log: (msg: string) => void;
     private lastSubmissionTime = 0;
     private restoringTranscript = false;
@@ -139,6 +146,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         private customAgentStore?: CustomAgentStore,
         private devTeamStore?: DevTeamStore,
         private extensionContext?: vscode.ExtensionContext,
+        private connectedAgentStore?: ConnectedAgentStore,
     ) {
         this.log = log || (() => {});
         this.providerRouter = new ProviderRouter(
@@ -150,6 +158,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.activeCustomAgentId = currentSession.activeCustomAgentId ?? null;
         this.activeDevTeamId = currentSession.activeDevTeamId ?? null;
         this.currentPermissionLevel = currentSession.activePermissionLevel ?? DEFAULT_PERMISSION_LEVEL;
+        this.enabledConnectedAgentIds = Array.isArray(currentSession.enabledConnectedAgentIds) ? [...currentSession.enabledConnectedAgentIds] : [];
         this.refreshProviderAvailability();
         this.applyPermissionLevel(this.currentPermissionLevel, { persist: false, sync: false });
         // When a file is fully resolved via inline diff CodeLens, update the dock
@@ -564,6 +573,29 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         });
     }
 
+    /** Push the connected (remote A2A) agent registry + enabled toggles to the webview. */
+    private async syncConnectedAgentsToWebview(): Promise<void> {
+        if (!this.connectedAgentStore) {
+            this.sendToWebview({ type: 'setConnectedAgents', agents: [], enabledIds: [] });
+            return;
+        }
+        const agents = await this.connectedAgentStore.list();
+        this.connectedAgentsCache = agents;
+        // Drop enabled toggles for agents that have been deleted.
+        this.enabledConnectedAgentIds = this.enabledConnectedAgentIds.filter(id => agents.some(a => a.id === id));
+        this.sendToWebview({
+            type: 'setConnectedAgents',
+            agents: agents.map(a => ({
+                id: a.id,
+                name: a.name,
+                description: a.description,
+                endpoint: a.endpoint,
+                scope: a.scope ?? 'global',
+            })),
+            enabledIds: [...this.enabledConnectedAgentIds],
+        });
+    }
+
     /**
      * Apply the active custom agent (if any) to the existing AgentLoop. Must be
      * called before each run so newly-created or edited agents take effect.
@@ -575,6 +607,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             await this.applyActiveDevTeam();
             return;
         }
+        // Ambient delegation tools for enabled connected agents are available
+        // regardless of whether a custom persona is active.
+        this.agentLoop.setConnectedTools(await this.buildConnectedAgentTools());
         if (!this.activeCustomAgentId || !this.customAgentStore) {
             this.agentLoop.setPersona(null);
             return;
@@ -621,8 +656,25 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.agentLoop.setPersona({ systemPrompt: def.systemPrompt, extraTools });
     }
 
+    /** Build one delegation tool per enabled connected (remote A2A) agent. */
+    private async buildConnectedAgentTools() {
+        if (!this.connectedAgentStore || this.enabledConnectedAgentIds.length === 0) { return []; }
+        const all = await this.connectedAgentStore.list();
+        const tools = [];
+        for (const id of this.enabledConnectedAgentIds) {
+            const agent = all.find(a => a.id === id);
+            if (!agent) { continue; }
+            tools.push(createConnectedAgentTool(agent, {
+                getApiKey: () => this.connectedAgentStore!.getKey(agent.id),
+                getEntraToken: () => acquireConnectedAgentEntraToken(agent),
+            }));
+        }
+        return tools;
+    }
+
     private async applyActiveDevTeam(): Promise<void> {
         if (!this.agentLoop) { return; }
+        this.agentLoop.setConnectedTools(await this.buildConnectedAgentTools());
         if (!this.activeDevTeamId || !this.devTeamStore) {
             this.agentLoop.setPersona(null);
             return;
@@ -833,6 +885,79 @@ ${personaSections.length ? `## Member Personas\n${personaSections.join('\n\n')}\
         await this.syncDevTeamsToWebview();
     }
 
+    // ── Connected Agents (remote A2A delegation targets) ──
+
+    /** Enable/disable a connected agent as a delegation target for this session. */
+    private async handleToggleConnectedAgent(id: string, enabled: boolean): Promise<void> {
+        if (!this.connectedAgentStore) {
+            this.sendToWebview({ type: 'error', message: 'Connected agents are not available in this build.' });
+            return;
+        }
+        const exists = (await this.connectedAgentStore.list()).some(a => a.id === id);
+        if (!exists) {
+            await this.syncConnectedAgentsToWebview();
+            return;
+        }
+        const set = new Set(this.enabledConnectedAgentIds);
+        if (enabled) { set.add(id); } else { set.delete(id); }
+        this.enabledConnectedAgentIds = [...set];
+        const sess = this.sessionManager.getCurrentSession();
+        if (sess) {
+            (sess as any).enabledConnectedAgentIds = this.enabledConnectedAgentIds.length
+                ? [...this.enabledConnectedAgentIds]
+                : undefined;
+        }
+        await this.applyActiveCustomAgent();
+        await this.syncConnectedAgentsToWebview();
+    }
+
+    private async openConnectedAgentEditor(existingId?: string): Promise<void> {
+        if (!this.connectedAgentStore || !this.extensionContext) {
+            vscode.window.showErrorMessage('Connected agents are not available in this build.');
+            return;
+        }
+        const existing = existingId ? await this.connectedAgentStore.get(existingId) : undefined;
+        await ConnectedAgentEditor.open(this.extensionContext, this.connectedAgentStore, {
+            existing,
+            onSaved: async (saved) => {
+                // Newly connected agents start enabled so they're immediately usable.
+                if (!this.enabledConnectedAgentIds.includes(saved.id)) {
+                    this.enabledConnectedAgentIds = [...this.enabledConnectedAgentIds, saved.id];
+                    const sess = this.sessionManager.getCurrentSession();
+                    if (sess) {
+                        (sess as any).enabledConnectedAgentIds = [...this.enabledConnectedAgentIds];
+                    }
+                }
+                await this.applyActiveCustomAgent();
+                await this.syncConnectedAgentsToWebview();
+            },
+        });
+    }
+
+    private async handleDeleteConnectedAgent(id: string): Promise<void> {
+        if (!this.connectedAgentStore) { return; }
+        const def = await this.connectedAgentStore.get(id);
+        if (!def) { return; }
+        const choice = await vscode.window.showWarningMessage(
+            `Disconnect agent "${def.name}"?`,
+            { modal: true },
+            'Disconnect',
+        );
+        if (choice !== 'Disconnect') { return; }
+        await this.connectedAgentStore.delete(id, def.scope ?? 'global');
+        if (this.enabledConnectedAgentIds.includes(id)) {
+            this.enabledConnectedAgentIds = this.enabledConnectedAgentIds.filter(x => x !== id);
+            const sess = this.sessionManager.getCurrentSession();
+            if (sess) {
+                (sess as any).enabledConnectedAgentIds = this.enabledConnectedAgentIds.length
+                    ? [...this.enabledConnectedAgentIds]
+                    : undefined;
+            }
+            await this.applyActiveCustomAgent();
+        }
+        await this.syncConnectedAgentsToWebview();
+    }
+
     private handleWebviewMessage(msg: WebviewMessage) {
         try {
             switch (msg.type) {
@@ -890,6 +1015,18 @@ ${personaSections.length ? `## Member Personas\n${personaSections.join('\n\n')}\
                     break;
                 case 'deleteDevTeam':
                     void this.handleDeleteDevTeam(msg.id);
+                    break;
+                case 'toggleConnectedAgent':
+                    void this.handleToggleConnectedAgent(msg.id, msg.enabled);
+                    break;
+                case 'createConnectedAgent':
+                    void this.openConnectedAgentEditor();
+                    break;
+                case 'editConnectedAgent':
+                    void this.openConnectedAgentEditor(msg.id);
+                    break;
+                case 'deleteConnectedAgent':
+                    void this.handleDeleteConnectedAgent(msg.id);
                     break;
                 case 'runPlanInAgent':
                     this.sendToWebview({ type: 'planReady', visible: false });
@@ -966,6 +1103,7 @@ ${personaSections.length ? `## Member Personas\n${personaSections.join('\n\n')}\
                     this.sendToWebview({ type: 'setChatMode', mode: this.activeMode });
                     void this.syncCustomAgentsToWebview();
                     void this.syncDevTeamsToWebview();
+                    void this.syncConnectedAgentsToWebview();
                     this.syncModelsToWebview();
                     this.restoreSession();
                     this.sendSessionList();
@@ -1282,26 +1420,30 @@ ${personaSections.length ? `## Member Personas\n${personaSections.join('\n\n')}\
     }
 
     private buildCustomAgentExtraTools(agent: CustomAgentDef | undefined) {
-        if (!agent?.search || !this.customAgentStore) { return []; }
-        const embedding = agent.search.embedding;
-        const tool = createSearchKnowledgeTool(agent, {
-            getSearchKey: () => this.customAgentStore!.getSearchKey(agent.id),
-            getEntraToken: () => acquireSearchEntraToken(agent.search?.endpoint, {
-                authProviderId: agent.search?.authProviderId,
-                entraScope: agent.search?.entraScope,
-            }),
-            getEmbeddingKey: embedding && embedding.auth === 'key'
-                ? () => this.customAgentStore!.getEmbeddingKey(agent.id)
-                : undefined,
-            getEmbeddingEntraToken: embedding && embedding.auth === 'entra'
-                ? () => acquireSearchEntraToken(embedding.endpoint, {
-                    authProviderId: embedding.authProviderId,
-                    entraScope: embedding.entraScope || 'https://cognitiveservices.azure.com/.default',
-                })
-                : undefined,
-            onCitations: (payload) => this.sendToWebview({ type: 'searchCitations', ...payload }),
-        });
-        return tool ? [tool] : [];
+        if (!this.customAgentStore || !agent) { return []; }
+        const extraTools = [];
+        if (agent.search) {
+            const embedding = agent.search.embedding;
+            const tool = createSearchKnowledgeTool(agent, {
+                getSearchKey: () => this.customAgentStore!.getSearchKey(agent.id),
+                getEntraToken: () => acquireSearchEntraToken(agent.search?.endpoint, {
+                    authProviderId: agent.search?.authProviderId,
+                    entraScope: agent.search?.entraScope,
+                }),
+                getEmbeddingKey: embedding && embedding.auth === 'key'
+                    ? () => this.customAgentStore!.getEmbeddingKey(agent.id)
+                    : undefined,
+                getEmbeddingEntraToken: embedding && embedding.auth === 'entra'
+                    ? () => acquireSearchEntraToken(embedding.endpoint, {
+                        authProviderId: embedding.authProviderId,
+                        entraScope: embedding.entraScope || 'https://cognitiveservices.azure.com/.default',
+                    })
+                    : undefined,
+                onCitations: (payload) => this.sendToWebview({ type: 'searchCitations', ...payload }),
+            });
+            if (tool) { extraTools.push(tool); }
+        }
+        return extraTools;
     }
 
     private buildDevTeamMemberWorkerPrompt(team: DevTeamDef, member: DevTeamDef['members'][number], agent: CustomAgentDef | undefined): string {
@@ -2245,11 +2387,13 @@ You are running in Junior's normal Agent mode for this member pass. You may insp
         this.activeMode = this.getSessionMode(session);
         this.activeCustomAgentId = session.activeCustomAgentId ?? null;
         this.activeDevTeamId = session.activeDevTeamId ?? null;
+        this.enabledConnectedAgentIds = Array.isArray(session.enabledConnectedAgentIds) ? [...session.enabledConnectedAgentIds] : [];
         this.applyPermissionLevel(session.activePermissionLevel ?? DEFAULT_PERMISSION_LEVEL, { persist: false });
         this.sendToWebview({ type: 'setChatMode', mode: this.activeMode });
         this.sendToWebview({ type: 'planReady', visible: false });
         void this.syncCustomAgentsToWebview();
         void this.syncDevTeamsToWebview();
+        void this.syncConnectedAgentsToWebview();
 
         if (session.transcript && session.transcript.items.length > 0) {
             this.restoringTranscript = true;
@@ -3440,6 +3584,38 @@ body { display: flex; flex-direction: column; }
     white-space: normal;
     overflow-wrap: anywhere;
 }
+.wb-action-progress {
+    display: none;
+    margin-top: 4px;
+    padding-left: 8px;
+    border-left: 2px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
+}
+.wb-progress-line {
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--vscode-descriptionForeground, #9aa0a6);
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+.wb-progress-line.reasoning {
+    font-style: italic;
+    opacity: 0.85;
+}
+.wb-progress-line.answer {
+    color: var(--vscode-foreground);
+}
+.wb-progress-tag {
+    display: inline-block;
+    font-style: normal;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 0 4px;
+    margin-right: 4px;
+    border-radius: 3px;
+    background: var(--vscode-badge-background, rgba(255,255,255,0.1));
+    color: var(--vscode-badge-foreground, var(--vscode-descriptionForeground));
+}
 .wb-action-diff {
     display: inline-flex;
     gap: 6px;
@@ -3797,6 +3973,13 @@ body { display: flex; flex-direction: column; }
     margin-left: 4px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
+}
+.mode-menu-section-label {
+    padding: 4px 10px 2px;
+    font-size: 9.5px;
+    opacity: 0.5;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
 }
 
 /* Tools button SVG */
@@ -4607,6 +4790,7 @@ body { display: flex; flex-direction: column; }
                     </button>
                     <div id="custom-agent-list"></div>
                     <div id="dev-team-list"></div>
+                    <div id="connected-agent-list"></div>
                     <div class="mode-menu-separator" role="separator"></div>
                     <button class="mode-option mode-option-action" data-action="create-custom-agent" role="menuitem" type="button">
                         <span class="mode-icon" aria-hidden="true"><i class="codicon codicon-add"></i></span>
@@ -4615,6 +4799,10 @@ body { display: flex; flex-direction: column; }
                     <button class="mode-option mode-option-action" data-action="create-dev-team" role="menuitem" type="button">
                         <span class="mode-icon" aria-hidden="true"><i class="codicon codicon-add"></i></span>
                         <span class="mode-option-label">Create Dev Team…</span>
+                    </button>
+                    <button class="mode-option mode-option-action" data-action="create-connected-agent" role="menuitem" type="button">
+                        <span class="mode-icon" aria-hidden="true"><i class="codicon codicon-cloud"></i></span>
+                        <span class="mode-option-label">Connect cloud agent…</span>
                     </button>
                 </div>
             </div>

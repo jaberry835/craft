@@ -38,6 +38,7 @@ export function shouldPersistTranscriptMessage(message: ExtensionMessage): boole
         case 'workingTextAppended':
         case 'workingActionAdded':
         case 'workingActionUpdated':
+        case 'workingActionProgress':
         case 'workingBlockCompleted':
         case 'terminalOutput':
         case 'error':
@@ -171,6 +172,15 @@ export function applyTranscriptMessage(
             entry.filePath = typeof message.filePath === 'string' ? message.filePath : entry.filePath;
             entry.icon = typeof message.icon === 'string' ? message.icon : entry.icon;
             entry.repeatCount = typeof message.repeatCount === 'number' ? message.repeatCount : entry.repeatCount;
+            return current;
+        }
+        case 'workingActionProgress': {
+            const block = findWorkingBlock(current, message.blockId);
+            if (!block) { return current; }
+            const entry = block.entries.find((candidate): candidate is WorkingBlockActionEntry => candidate.kind === 'action' && candidate.id === message.entryId);
+            if (!entry) { return current; }
+            if (!entry.progressLog) { entry.progressLog = []; }
+            entry.progressLog.push({ ...message.update });
             return current;
         }
         case 'workingBlockCompleted': {

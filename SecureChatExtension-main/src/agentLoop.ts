@@ -25,7 +25,7 @@ import { getSetting } from './config';
 import {
     ChatMessage, ContentPart, ToolCall, ToolDefinition, ToolResult,
     ExtensionMessage, AgentPlanStep, ChatMode, WorkingActionType, WorkingBlock,
-    WorkingBlockActionEntry, WorkingBlockProgressEntry,
+    WorkingBlockActionEntry, WorkingBlockProgressEntry, ToolProgressUpdate,
 } from './types';
 import { TokenTracker } from './tokenTracker';
 import { getSystemPrompt } from './agentPrompt';
@@ -114,6 +114,9 @@ export class AgentLoop {
     private toolRegistry: ToolRegistry;
     /** Optional persona overlay (custom agent). When set, replaces the system prompt and adds extra tools. */
     private persona: { systemPrompt: string; toolNames: string[] } | null = null;
+    /** Names of ambient delegation tools (connected/remote agents) registered
+     *  independently of any persona, so plain Local keeps its default prompt. */
+    private connectedToolNames: string[] = [];
     private retryMiddleware: RetryMiddleware;
     private recoveryMiddleware: RecoveryMiddleware;
     private autofixMiddleware: AutofixMiddleware;
@@ -472,6 +475,20 @@ export class AgentLoop {
             });
         };
 
+        // Build a live progress emitter bound to a specific action entry, used by
+        // tools (e.g. A2A delegation) that stream intermediate reasoning/narration.
+        const makeToolProgress = (entry: WorkingBlockActionEntry | null): ((update: ToolProgressUpdate) => void) | undefined => {
+            if (!entry) { return undefined; }
+            const blockId = activeWorkingBlock?.id;
+            if (!blockId) { return undefined; }
+            return (update: ToolProgressUpdate) => {
+                if (!update?.text?.trim()) { return; }
+                if (!entry.progressLog) { entry.progressLog = []; }
+                entry.progressLog.push(update);
+                this.callbacks.sendToWebview({ type: 'workingActionProgress', blockId, entryId: entry.id, update });
+            };
+        };
+
         const completeActiveWorkingBlock = () => {
             if (!activeWorkingBlock || activeWorkingBlock.status !== 'in_progress') { return; }
             if (activeWorkingBlock.entries.length === 0) {
@@ -676,7 +693,8 @@ export class AgentLoop {
                         if (this.cancelled) { return { tc, result: { success: false, result: 'Cancelled by user.' } }; }
                         let args: Record<string, unknown>;
                         try { args = JSON.parse(tc.function.arguments); } catch { args = {}; }
-                        const result = await this.executeToolForMode(tc.function.name, args, tc.id, agentContext.state);
+                        const onProgress = makeToolProgress(actionEntries.get(tc.id) || null);
+                        const result = await this.executeToolForMode(tc.function.name, args, tc.id, agentContext.state, onProgress);
                         return { tc, result };
                     }));
 
@@ -712,7 +730,8 @@ export class AgentLoop {
                         const desc = this.describeToolForProgress(tc.function.name, args);
                         const actionEntry = addWorkingAction(desc, 'running', tc.function.name);
 
-                        const result = await this.executeToolForMode(tc.function.name, args, tc.id, agentContext.state);
+                        const onProgress = makeToolProgress(actionEntry);
+                        const result = await this.executeToolForMode(tc.function.name, args, tc.id, agentContext.state, onProgress);
 
                         if (result.success && WRITE_TOOLS.has(tc.function.name) && typeof args.path === 'string') {
                             this.editedFiles.add(args.path);
@@ -801,6 +820,10 @@ export class AgentLoop {
                 if (tool) { personaDefs.push(tool.definition); }
             }
         }
+        for (const name of this.connectedToolNames) {
+            const tool = this.toolRegistry.get(name);
+            if (tool) { personaDefs.push(tool.definition); }
+        }
         return [...builtin, ...mcp, ...personaDefs].filter(def => this.isToolAllowed(def.function.name, mode));
     }
 
@@ -848,6 +871,29 @@ export class AgentLoop {
             toolNames.push(tool.name);
         }
         this.persona = { systemPrompt: persona.systemPrompt, toolNames };
+    }
+
+    /**
+     * Register (or clear) ambient delegation tools for connected/remote agents.
+     * Unlike a persona, this does NOT change the system prompt — the tools are
+     * simply made available to whatever persona (or default Local mode) is
+     * active. Re-applies idempotently.
+     */
+    setConnectedTools(tools: ToolEntry[]): void {
+        for (const name of this.connectedToolNames) {
+            this.toolRegistry.unregister(name);
+        }
+        this.connectedToolNames = [];
+        for (const entry of tools) {
+            const tool = new FunctionTool({
+                definition: entry.definition,
+                handler: entry.handler,
+                isReadOnly: true,
+                requiresConfirmation: false,
+            });
+            this.toolRegistry.register(tool);
+            this.connectedToolNames.push(tool.name);
+        }
     }
 
     createSubagentTool(): ToolEntry {
@@ -1021,12 +1067,12 @@ export class AgentLoop {
         return false;
     }
 
-    private async executeToolForMode(name: string, args: Record<string, unknown>, callId: string, state?: Map<string, unknown>): Promise<ToolResult> {
+    private async executeToolForMode(name: string, args: Record<string, unknown>, callId: string, state?: Map<string, unknown>, onProgress?: (update: ToolProgressUpdate) => void): Promise<ToolResult> {
         if (!this.isToolAllowed(name)) {
             const modeLabel = this.currentMode === 'ask' ? 'Ask' : 'Plan';
             return { success: false, result: `${modeLabel} mode does not allow the tool "${name}".` };
         }
-        return this.toolExecutor.execute(name, args, callId, state, this.abortController?.signal);
+        return this.toolExecutor.execute(name, args, callId, state, this.abortController?.signal, onProgress);
     }
 
     private findFallbackDeployment(): { name: string; deploymentId: string } | null {

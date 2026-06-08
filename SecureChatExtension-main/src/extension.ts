@@ -17,6 +17,7 @@ import { getCopilotCliBearerAuthSessionConfig, COPILOT_CLI_API_KEY_SECRET_KEY, s
 import { CustomAgentStore } from './customAgents';
 import { CustomAgentEditor } from './customAgentEditor';
 import { DevTeamStore } from './devTeams';
+import { ConnectedAgentStore } from './connectedAgents';
 import { setNetworkLogger, setNetworkStorageUri } from './network';
 
 let chatViewProvider: ChatViewProvider;
@@ -108,6 +109,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     const customAgentStore = CustomAgentStore.fromContext(context);
     const devTeamStore = DevTeamStore.fromContext(context);
+    const connectedAgentStore = ConnectedAgentStore.fromContext(context);
 
     chatViewProvider = new ChatViewProvider(
         context.extensionUri,
@@ -124,6 +126,7 @@ export function activate(context: vscode.ExtensionContext) {
         customAgentStore,
         devTeamStore,
         context,
+        connectedAgentStore,
     );
 
     context.subscriptions.push(

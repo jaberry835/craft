@@ -115,6 +115,32 @@ export function isValidHttpsEndpoint(endpoint: string): boolean {
 /** @deprecated Use isValidHttpsEndpoint. Kept for callers prior to the rename. */
 export const isValidSearchEndpoint = isValidHttpsEndpoint;
 
+/** True when the hostname is an IPv4/IPv6 loopback address or `localhost`.
+ *  Used to allow plain-HTTP only for traffic that never leaves the machine. */
+export function isLoopbackHostname(hostname: string): boolean {
+    const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    if (host === 'localhost') { return true; }
+    if (host === '::1') { return true; }
+    // 127.0.0.0/8 is entirely loopback.
+    if (/^127(?:\.\d{1,3}){3}$/.test(host)) { return true; }
+    return false;
+}
+
+/** Validate a connected-agent (A2A) endpoint. Requires https for any real
+ *  network host, but permits plain http when the host is loopback
+ *  (`localhost`, `127.0.0.0/8`, `::1`) so local dev agents work without TLS. */
+export function isValidConnectedAgentEndpoint(endpoint: string): boolean {
+    try {
+        const u = new URL(endpoint);
+        if (!u.hostname || u.hostname.includes(' ')) { return false; }
+        if (u.protocol === 'https:') { return true; }
+        if (u.protocol === 'http:' && isLoopbackHostname(u.hostname)) { return true; }
+        return false;
+    } catch {
+        return false;
+    }
+}
+
 /** Convert a display name into a stable slug. */
 export function slugifyAgentName(name: string): string {
     return name
