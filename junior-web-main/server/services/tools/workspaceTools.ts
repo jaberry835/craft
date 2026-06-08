@@ -160,9 +160,9 @@ export function createWorkspaceTools(dependencies: WorkspaceToolDependencies): L
           return { success: false, result: 'pattern is required.' };
         }
 
-        let matcher: RegExp | null = null;
+        let matcher: RegExp | undefined;
         try {
-          matcher = isRegex ? new RegExp(pattern, 'i') : null;
+          matcher = isRegex ? new RegExp(pattern, 'i') : undefined;
         } catch (error) {
           return { success: false, result: `Invalid regex: ${error instanceof Error ? error.message : String(error)}` };
         }

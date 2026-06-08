@@ -251,7 +251,7 @@ test('azure chat client keeps legacy max_tokens for non-v1 endpoints', async () 
 test('azure chat client concatenates assistant text fragments from responses payloads', async () => {
   const client = new AzureOpenAiChatClient(() => 'test-key');
   const originalFetch = globalThis.fetch;
-  let result = '';
+  let result: string | undefined;
 
   globalThis.fetch = async () => new Response(JSON.stringify({
     output: [
@@ -270,7 +270,7 @@ test('azure chat client concatenates assistant text fragments from responses pay
   });
 
   try {
-    result = await client.complete(createConnection('https://jb-foundry.services.ai.azure.com/api/projects/proj1/openai/v1/responses'), [{ role: 'user', content: 'hello' }]) ?? '';
+    result = await client.complete(createConnection('https://jb-foundry.services.ai.azure.com/api/projects/proj1/openai/v1/responses'), [{ role: 'user', content: 'hello' }]) ?? undefined;
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -281,7 +281,7 @@ test('azure chat client concatenates assistant text fragments from responses pay
 test('azure chat client keeps text-bearing assistant content beyond output_text', async () => {
   const client = new AzureOpenAiChatClient(() => 'test-key');
   const originalFetch = globalThis.fetch;
-  let result = '';
+  let result: string | undefined;
 
   globalThis.fetch = async () => new Response(JSON.stringify({
     output: [
@@ -300,7 +300,7 @@ test('azure chat client keeps text-bearing assistant content beyond output_text'
   });
 
   try {
-    result = await client.complete(createConnection('https://jb-foundry.services.ai.azure.com/api/projects/proj1/openai/v1/responses'), [{ role: 'user', content: 'hello' }]) ?? '';
+    result = await client.complete(createConnection('https://jb-foundry.services.ai.azure.com/api/projects/proj1/openai/v1/responses'), [{ role: 'user', content: 'hello' }]) ?? undefined;
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -381,4 +381,61 @@ test('azure chat client streams assistant text and reasoning deltas from respons
 
   assert.deepEqual(seenText, ['Hel', 'lo']);
   assert.deepEqual(seenReasoning, ['Think', 'ing']);
+});
+
+test('azure chat client falls back to non-stream request when responses stream reports model invalid content', async () => {
+  const client = new AzureOpenAiChatClient(() => 'test-key');
+  const originalFetch = globalThis.fetch;
+  const seenText: string[] = [];
+  let callCount = 0;
+
+  globalThis.fetch = async (_input, init) => {
+    callCount += 1;
+
+    if (callCount === 1) {
+      return new Response(new ReadableStream({
+        start(controller) {
+          const encoder = new TextEncoder();
+          controller.enqueue(encoder.encode('data: {"type":"response.failed","response":{"error":{"message":"The model produced invalid content. See https://aka.ms/model-error"}}}\n\n'));
+          controller.close();
+        }
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' }
+      });
+    }
+
+    const parsedBody = JSON.parse(String(init?.body ?? '{}')) as { stream?: boolean; input?: unknown[] };
+    assert.equal(parsedBody.stream, false);
+    assert.equal(Array.isArray(parsedBody.input), true);
+
+    return new Response(JSON.stringify({
+      output: [
+        {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: 'Recovered answer.' }]
+        }
+      ]
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  };
+
+  try {
+    for await (const chunk of client.completeWithToolsStream(
+      createConnection('https://jb-foundry.services.ai.azure.com/api/projects/proj1/openai/v1/responses'),
+      [{ role: 'user', content: 'hello' }]
+    )) {
+      if (chunk.type === 'text') {
+        seenText.push(chunk.text);
+      }
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(callCount, 2);
+  assert.deepEqual(seenText, ['Recovered answer.']);
 });

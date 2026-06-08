@@ -1181,6 +1181,23 @@ button:disabled {
   color: var(--text-contrast);
 }
 
+.svg-preview-shell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100%;
+  padding: 8px;
+}
+
+.svg-preview-image {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--surface-alt);
+}
+
 .pane-splitter {
   min-width: 0;
   min-height: 0;

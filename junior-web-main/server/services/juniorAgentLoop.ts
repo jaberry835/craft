@@ -38,7 +38,7 @@ export type LoopStep =
   | 'identify-open-questions'
   | 'draft-package-updates';
 
-export interface LoopContext extends LoopToolContext {}
+export type LoopContext = LoopToolContext;
 
 export interface JuniorAgentLoopProgressHandlers {
   onReasoning?: (text: string) => void | Promise<void>;
@@ -150,7 +150,7 @@ export class JuniorAgentLoop {
     if (!modelConnection.configured) {
       const assistant = this.createMessage(
         'assistant',
-        `Agent \"${activeAgent.name}\" is using model connection \"${modelConnection.name}\", but it is not fully configured yet. Missing: ${modelConnection.missing.join(', ')}.`
+        `Agent "${activeAgent.name}" is using model connection "${modelConnection.name}", but it is not fully configured yet. Missing: ${modelConnection.missing.join(', ')}.`
       );
 
       return {
@@ -200,12 +200,7 @@ export class JuniorAgentLoop {
 
         for (const toolCall of toolCalls) {
           context.state.set('currentToolCallId', toolCall.id ?? randomUUID());
-          let toolArgs: Record<string, unknown> = {};
-          try {
-            toolArgs = JSON.parse(toolCall.function.arguments || '{}') as Record<string, unknown>;
-          } catch {
-            toolArgs = {};
-          }
+          const toolArgs = this.tryParseToolArgs(toolCall.function.arguments);
 
           await this.executor.execute(toolCall.function.name as LoopStep, toolArgs, context);
 
@@ -288,7 +283,7 @@ export class JuniorAgentLoop {
     }
 
     if (!context.availableTools.some((tool) => tool.name === 'draft-package-updates')) {
-      return `I inspected the workspace for agent \"${context.activeAgent.name}\", but it did not produce a file action for that request.`;
+      return `I inspected the workspace for agent "${context.activeAgent.name}", but it did not produce a file action for that request.`;
     }
 
     return 'I reviewed the package workspace but did not find a markdown document to update yet.';
@@ -334,6 +329,14 @@ export class JuniorAgentLoop {
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       return `The connection to the LLM is not available right now. ${detail}`.trim();
+    }
+  }
+
+  private tryParseToolArgs(rawArgs: string | undefined): Record<string, unknown> {
+    try {
+      return JSON.parse(rawArgs || '{}') as Record<string, unknown>;
+    } catch {
+      return {};
     }
   }
 

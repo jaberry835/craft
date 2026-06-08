@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import path from 'node:path';
 import { FallbackWorkspaceStorage } from '../services/fallbackWorkspaceStorage.js';
 import { LocalWorkspaceStorage } from '../services/localWorkspaceStorage.js';
 import type { WorkspaceFile, WorkspaceTreeNode } from '../types.js';
@@ -108,7 +109,7 @@ test('workspace storage factory uses explicit local cache root for blob storage'
   });
   const storage = createStorage(sampleWorkspace);
 
-  assert.equal(storage.getAbsoluteRoot(), '/tmp/junior-cache/admin/demo-workspace');
+  assert.equal(storage.getAbsoluteRoot(), path.join('/tmp/junior-cache', 'admin', 'demo-workspace'));
 });
 
 test('workspace storage factory rejects blob mode without blob credentials', () => {

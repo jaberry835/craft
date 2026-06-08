@@ -19,7 +19,8 @@ class StubChatSessionStore {
     return this.options.fallbackSession ?? this.sampleSession();
   }
 
-  async getSession(_sessionId: string): Promise<ChatSession> {
+  async getSession(sessionId: string): Promise<ChatSession> {
+    void sessionId;
     if (this.options.getSessionError) {
       throw this.options.getSessionError;
     }

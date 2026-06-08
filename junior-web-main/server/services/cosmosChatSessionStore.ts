@@ -65,7 +65,7 @@ export class CosmosChatSessionStore implements ChatSessionStore {
       return this.fromDocument(resource);
     } catch (error) {
       if (error && typeof error === 'object' && 'code' in error && error.code === 404) {
-        throw new Error(`Chat session not found: ${sessionId}`);
+        throw new Error(`Chat session not found: ${sessionId}`, { cause: error });
       }
 
       logCosmosOperationError('chat-session-store', `read chat session ${sessionId} from Cosmos DB`, this.binding.settings, error);

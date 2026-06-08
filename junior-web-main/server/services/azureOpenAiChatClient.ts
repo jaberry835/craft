@@ -193,17 +193,7 @@ export class AzureOpenAiChatClient {
 
     if (!/\/responses$/i.test(request.url)) {
       const result = await this.completeWithTools(connection, messages, tools, options);
-      if (result.reasoning) {
-        yield { type: 'reasoning', text: result.reasoning };
-      }
-      if (result.content) {
-        yield { type: 'text', text: result.content };
-      }
-      if (result.toolCalls.length > 0) {
-        yield { type: 'toolCallStarted' };
-        yield { type: 'toolCalls', calls: result.toolCalls };
-      }
-      yield { type: 'done' };
+      yield* this.toStreamChunks(result);
       return;
     }
 
@@ -300,6 +290,23 @@ export class AzureOpenAiChatClient {
             return;
           }
           case 'response_failed':
+            if (this.isModelContentFailure(event.message)) {
+              try {
+                const fallbackResult = await this.completeWithTools(connection, messages, tools, {
+                  ...options,
+                  // Retry once with non-reasoning settings to reduce model-side content-generation failures.
+                  reasoningMode: false,
+                  reasoningEffort: 'none'
+                });
+                yield* this.toStreamChunks(fallbackResult);
+                return;
+              } catch (fallbackError) {
+                throw new Error(
+                  `Azure OpenAI streaming response failed: ${event.message}. Fallback request also failed: ${this.describeError(fallbackError)}`,
+                  { cause: fallbackError }
+                );
+              }
+            }
             throw new Error(`Azure OpenAI streaming response failed: ${event.message}`);
         }
       }
@@ -324,6 +331,25 @@ export class AzureOpenAiChatClient {
     }
 
     yield { type: 'done' };
+  }
+
+  private *toStreamChunks(result: ChatCompletionResult): Generator<ChatCompletionStreamChunk> {
+    if (result.reasoning) {
+      yield { type: 'reasoning', text: result.reasoning };
+    }
+    if (result.content) {
+      yield { type: 'text', text: result.content };
+    }
+    if (result.toolCalls.length > 0) {
+      yield { type: 'toolCallStarted' };
+      yield { type: 'toolCalls', calls: result.toolCalls };
+    }
+    yield { type: 'done' };
+  }
+
+  private isModelContentFailure(message: string): boolean {
+    const normalized = message.toLowerCase();
+    return normalized.includes('model produced invalid content') || normalized.includes('aka.ms/model-error');
   }
 
   private safeHost(endpoint: string): string {

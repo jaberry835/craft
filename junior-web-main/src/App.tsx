@@ -50,6 +50,7 @@ const themeStorageKey = 'jr-workbench-theme';
 
 type ThemeMode = 'light' | 'dark';
 type MarkdownViewMode = 'edit' | 'preview' | 'split';
+type PreviewFileType = 'markdown' | 'svg';
 type AuthBootstrapState = 'loading' | 'authorized' | 'signin-required' | 'access-denied';
 
 interface LiveAssistantTurn {
@@ -194,6 +195,9 @@ function languageForPath(path: string): string {
   if (path.endsWith('.md')) {
     return 'markdown';
   }
+  if (path.endsWith('.svg')) {
+    return 'xml';
+  }
   if (path.endsWith('.json')) {
     return 'json';
   }
@@ -208,7 +212,15 @@ function isMarkdownPath(path?: string | null): boolean {
   return path.endsWith('.md') || path.endsWith('.markdown');
 }
 
-const uploadableExtensions = new Set(['.md', '.markdown', '.txt', '.json', '.yaml', '.yml', '.csv']);
+function isSvgPath(path?: string | null): boolean {
+  if (!path) {
+    return false;
+  }
+
+  return path.endsWith('.svg');
+}
+
+const uploadableExtensions = new Set(['.md', '.markdown', '.txt', '.json', '.yaml', '.yml', '.csv', '.svg']);
 
 function normalizeUploadPath(fileName: string): string {
   return `uploads/${fileName.replaceAll('\\', '/').split('/').pop() ?? fileName}`;
@@ -637,6 +649,10 @@ function App() {
   const autoApproveChanges = true;
 
   const [markdownViewMode, setMarkdownViewMode] = useState<MarkdownViewMode>('edit');
+  const [lastEditModeByPreviewType, setLastEditModeByPreviewType] = useState<Record<PreviewFileType, boolean>>({
+    markdown: false,
+    svg: false
+  });
   const [markdownViewMenuOpen, setMarkdownViewMenuOpen] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(240);
   const [chatPaneWidth, setChatPaneWidth] = useState(() => {
@@ -680,6 +696,8 @@ function App() {
   const previousSessionHadMessagesRef = useRef(false);
   const pendingScrollMessageIdRef = useRef<string | null>(null);
   const [chatTailSpacerHeight, setChatTailSpacerHeight] = useState(0);
+  const [svgPreviewUrl, setSvgPreviewUrl] = useState<string | null>(null);
+  const [svgPreviewInvalid, setSvgPreviewInvalid] = useState(false);
   const isAdminIdentity = hasAdminRole(currentIdentity);
   const canAccessWorkbench = hasWorkbenchRole(currentIdentity);
   const showDevIdentityTools = isLocalDevHost() && authConfig?.identityMode === 'trusted-header';
@@ -743,6 +761,10 @@ function App() {
 
   const files = useMemo(() => flattenFiles(tree), [tree]);
   const isMarkdownFile = isMarkdownPath(currentFile?.path);
+  const isSvgFile = isSvgPath(currentFile?.path);
+  const supportsPreviewMode = isMarkdownFile || isSvgFile;
+  const currentPreviewFileType: PreviewFileType | null = isMarkdownFile ? 'markdown' : isSvgFile ? 'svg' : null;
+  const previewModeLabel = isMarkdownFile ? 'Markdown' : 'SVG';
   const isWorkspaceSettings = activeScreen === 'workspace-settings';
   const editableAgents = isWorkspaceSettings ? workspaceSettingsAgents : agents;
   const editableConnections = isWorkspaceSettings ? workspaceSettingsConnections : connections;
@@ -1180,10 +1202,48 @@ function App() {
   useEffect(() => {
     setMarkdownViewMenuOpen(false);
 
-    if (!isMarkdownFile) {
+    if (!currentPreviewFileType) {
       setMarkdownViewMode('edit');
+      return;
     }
-  }, [currentFile?.path, isMarkdownFile]);
+
+    setMarkdownViewMode(lastEditModeByPreviewType[currentPreviewFileType] ? 'edit' : 'preview');
+  }, [currentFile?.path, currentPreviewFileType, lastEditModeByPreviewType]);
+
+  useEffect(() => {
+    if (!currentPreviewFileType) {
+      return;
+    }
+
+    setLastEditModeByPreviewType((current) => {
+      const nextIsEdit = markdownViewMode === 'edit';
+      if (current[currentPreviewFileType] === nextIsEdit) {
+        return current;
+      }
+
+      return {
+        ...current,
+        [currentPreviewFileType]: nextIsEdit
+      };
+    });
+  }, [markdownViewMode, currentPreviewFileType]);
+
+  useEffect(() => {
+    if (!isSvgFile || !editorValue.trim()) {
+      setSvgPreviewUrl(null);
+      setSvgPreviewInvalid(false);
+      return;
+    }
+
+    const blob = new Blob([editorValue], { type: 'image/svg+xml;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    setSvgPreviewUrl(url);
+    setSvgPreviewInvalid(false);
+
+    return () => {
+      URL.revokeObjectURL(url);
+    };
+  }, [editorValue, isSvgFile]);
 
   useEffect(() => {
     if (!markdownViewMenuOpen) {
@@ -1319,6 +1379,8 @@ function App() {
 
     setChatPaneWidth(clampChatPaneWidth(defaultChatPaneWidth(gridRect.width)));
     hasInitializedChatPaneWidth.current = true;
+  // Intentional one-time sizing initialization guarded by hasInitializedChatPaneWidth.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isSidebarCollapsed, sidebarWidth]);
 
   useEffect(() => {
@@ -1351,6 +1413,8 @@ function App() {
       window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', handlePointerUp);
     };
+  // Pointer-resize handlers intentionally depend on resize mode toggles, not helper function identities.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isResizingSidebarPane, isChatPaneCollapsed, chatPaneWidth]);
 
   useEffect(() => {
@@ -1383,6 +1447,8 @@ function App() {
       window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', handlePointerUp);
     };
+  // Pointer-resize handlers intentionally depend on resize mode toggles, not helper function identities.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isResizingChatPane, isSidebarCollapsed, sidebarWidth]);
 
   function clampSidebarWidth(nextWidth: number): number {
@@ -3606,7 +3672,7 @@ function App() {
               <div className="pane-toolbar">
                 <span>{currentFile?.path ?? 'No file selected'}</span>
                 <div className="editor-toolbar-actions">
-                  {isMarkdownFile && (
+                  {supportsPreviewMode && (
                     <div className="editor-view-menu" ref={markdownViewMenuRef}>
                       <div className="editor-view-toggle-group">
                         <button
@@ -3621,7 +3687,7 @@ function App() {
                           type="button"
                           className="icon-only editor-view-menu-trigger"
                           onClick={() => setMarkdownViewMenuOpen((open) => !open)}
-                          title="Choose markdown view"
+                          title={`Choose ${previewModeLabel.toLowerCase()} view`}
                           aria-haspopup="menu"
                           aria-expanded={markdownViewMenuOpen}
                         >
@@ -3629,7 +3695,7 @@ function App() {
                         </button>
                       </div>
                       {markdownViewMenuOpen && (
-                        <div className="editor-view-menu-popover" role="menu" aria-label="Markdown view options">
+                        <div className="editor-view-menu-popover" role="menu" aria-label={`${previewModeLabel} view options`}>
                           <button type="button" role="menuitemradio" aria-checked={markdownViewMode === 'edit'} onClick={() => { setMarkdownViewMode('edit'); setMarkdownViewMenuOpen(false); }}>
                             <span>Edit</span>
                             {markdownViewMode === 'edit' && <strong>Current</strong>}
@@ -3652,7 +3718,7 @@ function App() {
                   </button>
                 </div>
               </div>
-              {isMarkdownFile && markdownViewMode !== 'edit' ? (
+              {supportsPreviewMode && markdownViewMode !== 'edit' ? (
                 markdownViewMode === 'split' ? (
                   <div className="editor-content split-markdown-view">
                     <div className="editor-surface">
@@ -3666,12 +3732,42 @@ function App() {
                       />
                     </div>
                     <div className="markdown-preview-pane">
-                      <ReactMarkdown>{editorValue || 'Nothing to preview yet.'}</ReactMarkdown>
+                      {isSvgFile ? (
+                        <div className="svg-preview-shell">
+                          {svgPreviewUrl && !svgPreviewInvalid ? (
+                            <img
+                              src={svgPreviewUrl}
+                              alt={currentFile?.path ?? 'SVG preview'}
+                              className="svg-preview-image"
+                              onError={() => setSvgPreviewInvalid(true)}
+                            />
+                          ) : (
+                            <p className="muted">{editorValue.trim() ? 'Unable to render SVG preview.' : 'Nothing to preview yet.'}</p>
+                          )}
+                        </div>
+                      ) : (
+                        <ReactMarkdown>{editorValue || 'Nothing to preview yet.'}</ReactMarkdown>
+                      )}
                     </div>
                   </div>
                 ) : (
                   <div className="editor-content markdown-preview-pane">
-                    <ReactMarkdown>{editorValue || 'Nothing to preview yet.'}</ReactMarkdown>
+                    {isSvgFile ? (
+                      <div className="svg-preview-shell">
+                        {svgPreviewUrl && !svgPreviewInvalid ? (
+                          <img
+                            src={svgPreviewUrl}
+                            alt={currentFile?.path ?? 'SVG preview'}
+                            className="svg-preview-image"
+                            onError={() => setSvgPreviewInvalid(true)}
+                          />
+                        ) : (
+                          <p className="muted">{editorValue.trim() ? 'Unable to render SVG preview.' : 'Nothing to preview yet.'}</p>
+                        )}
+                      </div>
+                    ) : (
+                      <ReactMarkdown>{editorValue || 'Nothing to preview yet.'}</ReactMarkdown>
+                    )}
                   </div>
                 )
               ) : (

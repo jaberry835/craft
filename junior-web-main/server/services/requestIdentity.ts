@@ -3,11 +3,9 @@ import { AuthenticationError, AuthorizationError } from '../httpErrors.js';
 import type { RequestIdentity } from '../types.js';
 import { createEntraTokenVerifier, type EntraAuthOptions, type TokenVerifier } from './entraTokenVerifier.js';
 
-declare global {
-  namespace Express {
-    interface Request {
-      requestIdentity?: RequestIdentity;
-    }
+declare module 'express-serve-static-core' {
+  interface Request {
+    requestIdentity?: RequestIdentity;
   }
 }
 

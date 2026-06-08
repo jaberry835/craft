@@ -179,7 +179,7 @@ export class McpHttpRuntime {
       };
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
-        throw new Error(`Request timed out for ${connection.server.name}.`);
+        throw new Error(`Request timed out for ${connection.server.name}.`, { cause: error });
       }
 
       throw error;

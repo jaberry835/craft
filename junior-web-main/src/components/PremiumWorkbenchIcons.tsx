@@ -305,6 +305,7 @@ export function PremiumPluginToolsIcon(props: PremiumIconProps) {
   );
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export const premiumWorkbenchIconCatalog = [
   { name: 'Junior Workbench', Icon: PremiumJuniorWorkbenchIcon },
   { name: 'AI Assistant', Icon: PremiumAIAssistantIcon },

@@ -640,6 +640,36 @@ test('write_file stages a create change for a new workspace file', async (t) => 
   await expectMissingWorkspaceFile(harness.storage, 'uploads/smoke-created.md');
 });
 
+test('agent auto-applies create_directory by writing a folder placeholder file', async (t) => {
+  const harness = await createHarness(new FakeAzureOpenAiChatClient({
+    plannerResponses: [
+      {
+        content: 'I will create a folder for generated notes.',
+        toolCalls: [createToolCall('create_directory', {
+          path: 'uploads/generated-notes',
+          summary: 'Create generated notes folder.'
+        })]
+      },
+      {
+        content: 'The folder was created.',
+        toolCalls: []
+      }
+    ]
+  }));
+  t.after(async () => cleanupHarness(harness));
+
+  const response = await harness.agent.sendMessage('Create a folder called uploads/generated-notes.', undefined, { autoApproveChanges: true });
+
+  assert.equal(response.changeHandling, 'auto-apply');
+  assert.equal(response.appliedChangeCount, 1);
+  assert.equal(response.pendingChanges.length, 0);
+  assert.equal(await readWorkspaceFile(harness.storage, 'uploads/generated-notes/.keep'), '');
+
+  const tree = await harness.storage.listTree();
+  const hasDirectory = tree.some((node) => node.path === 'uploads' && node.children?.some((child) => child.path === 'uploads/generated-notes'));
+  assert.equal(hasDirectory, true);
+});
+
 test('agent can execute an attached HTTP MCP tool', async (t) => {
   const mcpServer = http.createServer(async (request, response) => {
     const chunks: Buffer[] = [];

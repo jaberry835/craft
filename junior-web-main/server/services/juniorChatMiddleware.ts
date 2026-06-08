@@ -103,6 +103,8 @@ export class RecoveryChatMiddleware implements ChatMiddleware {
 
     const message = String((error as { message?: string }).message ?? '').toLowerCase();
     return message.includes('invalid_prompt') ||
+      message.includes('model produced invalid content') ||
+      message.includes('aka.ms/model-error') ||
       message.includes('context_length_exceeded') ||
       message.includes('maximum context length') ||
       message.includes('token limit') ||

@@ -39,8 +39,9 @@ export class FakeAzureOpenAiChatClient extends AzureOpenAiChatClient {
     _connection: AgentConnection,
     _messages: ChatMessageInput[],
     tools?: ChatToolDefinition[],
-    _options?: ChatCompletionOptions
+    options?: ChatCompletionOptions
   ): Promise<ChatCompletionResult> {
+    void options;
     if (tools && tools.length > 0) {
       return this.plannerResponses.shift() ?? { content: null, toolCalls: [] };
     }
