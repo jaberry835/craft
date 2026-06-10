@@ -81,6 +81,7 @@ program
   .option("--csv-scale <count>", "Multiplier for operational CSV row volume", "1")
   .option("-o, --output-dir <path>", "Optional output directory")
   .option("-p, --prompt <prompt>", "Additional scenario guidance")
+  .option("--show-prompts", "Log full provider prompts to the terminal", false)
   .option("--validate", "Validate the generated pack after writing files", false)
   .action(async (options) => {
     const scenario = options.scenario as keyof typeof scenarioCatalog;
@@ -98,6 +99,11 @@ program
 
     if (locale !== "en") {
       console.warn(`Locale ${locale} is not fully implemented yet; continuing with locale-ready English templates.`);
+    }
+
+    if (options.showPrompts) {
+      process.env.GENERATE_RICH_DOCS_SHOW_PROMPTS = "1";
+      console.log("[generate] Prompt logging enabled (showing full system and user prompts)");
     }
 
     try {
@@ -136,6 +142,7 @@ program
   .option("--csv-scale <count>", "Multiplier for operational CSV row volume", "1")
   .option("-o, --output-dir <path>", "Optional corpus output directory")
   .option("-p, --prompt <prompt>", "Additional scenario guidance")
+  .option("--show-prompts", "Log full provider prompts to the terminal", false)
   .option("--validate", "Validate each generated pack after writing files", false)
   .action(async (options) => {
     const locale = parseSupportedLocale(options.locale, "locale");
@@ -143,6 +150,11 @@ program
 
     if (locale !== "en") {
       console.warn(`Locale ${locale} is not fully implemented yet; continuing with locale-ready English templates.`);
+    }
+
+    if (options.showPrompts) {
+      process.env.GENERATE_RICH_DOCS_SHOW_PROMPTS = "1";
+      console.log("[corpus] Prompt logging enabled (showing full system and user prompts)");
     }
 
     try {

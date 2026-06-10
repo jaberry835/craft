@@ -5,23 +5,21 @@ import { MockCreativeProvider } from "./mockCreativeProvider.js";
 
 export function createCreativeProvider(): CreativeProvider {
   const config = loadConfig();
-  const hasAzureConfig = Boolean(
-    config.azureOpenAiApiKey &&
-    config.azureOpenAiApiVersion &&
-    config.azureOpenAiDeployment &&
-    config.azureOpenAiEndpoint
-  );
+  const endpoint = config.azureOpenAiEndpoint;
+  const apiKey = config.azureOpenAiApiKey;
+  const deployment = config.azureOpenAiDeployment;
+  const apiVersion = config.azureOpenAiApiVersion;
 
-  if (hasAzureConfig) {
+  if (endpoint && apiKey && deployment && apiVersion) {
     console.log(
-      `[provider] Using azure-openai endpoint=${config.azureOpenAiEndpoint} deployment=${config.azureOpenAiDeployment} apiVersion=${config.azureOpenAiApiVersion}`
+      `[provider] Using azure-openai endpoint=${endpoint} deployment=${deployment} apiVersion=${apiVersion}`
     );
 
     return new AzureOpenAiCreativeProvider({
-      azureOpenAiApiKey: config.azureOpenAiApiKey,
-      azureOpenAiApiVersion: config.azureOpenAiApiVersion,
-      azureOpenAiDeployment: config.azureOpenAiDeployment,
-      azureOpenAiEndpoint: config.azureOpenAiEndpoint
+      azureOpenAiApiKey: apiKey,
+      azureOpenAiApiVersion: apiVersion,
+      azureOpenAiDeployment: deployment,
+      azureOpenAiEndpoint: endpoint
     });
   }
 

@@ -16,8 +16,12 @@ export class AzureOpenAiCreativeProvider implements CreativeProvider {
   public readonly name = "azure-openai";
   private readonly client: OpenAI;
   private static readonly defaultRequestTimeoutMs = 60000;
-  private static readonly dossierPlanTimeoutMs = 25000;
+  private static readonly dossierPlanTimeoutMs = AzureOpenAiCreativeProvider.defaultRequestTimeoutMs;
   private hasLoggedConnection = false;
+
+  private static shouldLogPrompts(): boolean {
+    return process.env.GENERATE_RICH_DOCS_SHOW_PROMPTS === "1";
+  }
 
   public constructor(private readonly config: Required<Pick<AppConfig, "azureOpenAiApiKey" | "azureOpenAiApiVersion" | "azureOpenAiDeployment" | "azureOpenAiEndpoint">>) {
     this.client = new OpenAI({
@@ -123,7 +127,17 @@ export class AzureOpenAiCreativeProvider implements CreativeProvider {
     for (const attempt of attempts) {
       let content: string;
       const attemptStartedAt = Date.now();
-      console.log(`[azure-openai] Requesting ${label} (temperature=${attempt.temperature})...`);
+      console.log(`[azure-openai] Requesting ${label} (temperature=${attempt.temperature}, timeoutMs=${timeoutMs})...`);
+
+      if (AzureOpenAiCreativeProvider.shouldLogPrompts()) {
+        console.log(`[azure-openai] Prompt label: ${label}`);
+        console.log(`[azure-openai] ---- SYSTEM PROMPT START (${label}) ----`);
+        console.log(attempt.systemPrompt);
+        console.log(`[azure-openai] ---- SYSTEM PROMPT END (${label}) ----`);
+        console.log(`[azure-openai] ---- USER PROMPT START (${label}) ----`);
+        console.log(attempt.userPrompt);
+        console.log(`[azure-openai] ---- USER PROMPT END (${label}) ----`);
+      }
 
       try {
         content = await this.requestJson(attempt.systemPrompt, attempt.userPrompt, attempt.temperature, timeoutMs);

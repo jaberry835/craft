@@ -78,6 +78,12 @@ Example medium pack:
 npm run generate -- --scenario correspondence-dossier --locale en --country country-astriv --seed 42 --people-per-organization 4 --report-count 40 --email-count 80 --csv-scale 3 --validate
 ```
 
+To print the full provider prompts in terminal output for debugging, add `--show-prompts`:
+
+```bash
+npm run generate -- --scenario correspondence-dossier --locale en --seed 42 --show-prompts
+```
+
 Example large pack intended for haystack-style search and workflow demos:
 
 ```bash
