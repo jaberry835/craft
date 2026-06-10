@@ -186,7 +186,7 @@ export interface AgentConfig {
   model?: string;  // Required for local agents - Azure OpenAI deployment name
   aoai_endpoint_id?: string;  // Reference to an AOAI endpoint configuration
   temperature?: number;
-  reasoning_effort?: 'low' | 'medium' | 'high';
+  reasoning_effort?: 'low' | 'medium' | 'high' | 'none' | '';
   max_tokens?: number;
   mcp_tools?: MCPToolConfig[];
   mcp_servers?: string[];

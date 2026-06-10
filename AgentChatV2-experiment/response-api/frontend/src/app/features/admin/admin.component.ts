@@ -805,12 +805,13 @@ import { environment } from '../../../environments/environment';
                   class="input"
                   [(ngModel)]="editingAgent!.reasoning_effort"
                 >
-                  <option value="">Default (medium)</option>
+                  <option value="">Auto (detect from model)</option>
                   <option value="low">Low — faster, cheaper</option>
                   <option value="medium">Medium — balanced</option>
                   <option value="high">High — deeper reasoning</option>
+                  <option value="none">None — disable reasoning</option>
                 </select>
-                <span class="field-hint">Controls how much the model reasons before answering. Only applies to reasoning models (o-series, gpt-5+) on Responses API endpoints.</span>
+                <span class="field-hint">Controls how much the model reasons before answering, on Responses API endpoints. Choosing Low/Medium/High forces reasoning on even if the deployment name isn't recognized as a reasoning model. Auto detects reasoning models (o-series, gpt-5+) from the deployment name; None disables it.</span>
               </div>
             </div>
             

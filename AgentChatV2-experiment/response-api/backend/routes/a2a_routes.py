@@ -40,6 +40,25 @@ logger = get_logger(__name__)
 router = APIRouter(tags=["a2a"])
 
 
+# Maps internal ChatterEventType values to the A2A status-update metadata.type
+# contract that external callers parse. A2A has no first-class reasoning field,
+# so Message.metadata.type is the spec-compliant extension point.
+#   "reasoning" -> model reasoning summaries
+#   "tool_call" -> tool invocation / result narration
+#   "progress"  -> all other progress narration (thinking, delegation, content)
+# Values are plain strings (not the ChatterEventType enum) to avoid importing
+# the enum at module load time and to keep the mapping explicit.
+_A2A_EVENT_TYPE_MAP = {
+    "reasoning": "reasoning",
+    "tool_call": "tool_call",
+    "tool_result": "tool_call",
+    "thinking": "progress",
+    "delegation": "progress",
+    "content": "progress",
+    "html_preview": "progress",
+}
+
+
 # =============================================================================
 # Browser-Friendly GET for Agent Base URLs
 # =============================================================================
@@ -111,7 +130,7 @@ class ChatAgentExecutor(AgentExecutor):
         self.agent_id = agent_id
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
-        from services.agent_manager import agent_manager, ChatterEvent
+        from services.agent_manager import agent_manager, ChatterEvent, ChatterEventType
 
         # Extract text from incoming A2A message parts
         input_text = context.get_user_input()
@@ -150,13 +169,42 @@ class ChatAgentExecutor(AgentExecutor):
                 if isinstance(item, str):
                     chunks.append(item)
                 elif isinstance(item, ChatterEvent):
-                    # Emit intermediate A2A status update so streaming
-                    # clients see real-time progress (tool calls, thinking, etc.)
-                    friendly = item.friendly_message or item.content
+                    # Emit intermediate A2A status update so streaming clients
+                    # (message/stream) see real-time progress: reasoning
+                    # summaries, tool calls, and progress narration.
+                    #
+                    # For reasoning events the actual summary text lives in
+                    # item.content — friendly_message is only the generic label
+                    # "Reasoning..." — so prefer content there. For other event
+                    # kinds the friendly_message is the human-readable narration.
+                    if item.type == ChatterEventType.REASONING:
+                        narration_text = item.content or item.friendly_message or ""
+                    else:
+                        narration_text = item.friendly_message or item.content or ""
+
+                    if not narration_text.strip():
+                        continue
+
+                    # Tag intent via Message.metadata.type so external callers
+                    # can distinguish reasoning vs. narration and render them
+                    # distinctly. A2A has no first-class reasoning field, so
+                    # metadata is the spec-compliant extension point. Values are
+                    # collapsed to the contract the caller parses:
+                    #   "reasoning"  -> model reasoning summaries
+                    #   "tool_call"  -> tool invocation / result narration
+                    #   "progress"   -> all other progress narration
+                    event_type = _A2A_EVENT_TYPE_MAP.get(item.type.value, "progress")
+                    status_metadata: dict = {"type": event_type}
+                    if item.tool_name:
+                        status_metadata["tool_name"] = item.tool_name
+                    if item.call_id:
+                        status_metadata["call_id"] = item.call_id
+
                     status_message = Message(
                         role=Role.agent,
-                        parts=[Part(root=TextPart(text=friendly))],
+                        parts=[Part(root=TextPart(text=narration_text))],
                         message_id=str(uuid.uuid4()),
+                        metadata=status_metadata,
                     )
                     try:
                         await event_queue.enqueue_event(

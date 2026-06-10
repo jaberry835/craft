@@ -342,14 +342,21 @@ class AgentManager:
     @staticmethod
     def _is_reasoning_model(deployment_name: str) -> bool:
         """Return True for deployment names that map to reasoning-capable
-        OpenAI models (gpt-5*, o-series like o1/o3/o4)."""
+        OpenAI models (gpt-5*, o-series like o1/o3/o4).
+
+        Deployment names are operator-chosen and often carry a project prefix
+        (e.g. ``project-name-gpt-5.4`` or ``team_o3-mini``), so we match the
+        model token anywhere in the name rather than requiring it at the start.
+        """
         if not deployment_name:
             return False
         name = deployment_name.lower()
-        if name.startswith("gpt-5"):
+        # gpt-5 family anywhere in the name (handles prefixed deployments).
+        if re.search(r"gpt-5", name):
             return True
-        # o1, o1-mini, o3, o3-mini, o4-mini, etc. (avoid matching 'omni'-style names)
-        return bool(re.match(r"^o\d+(-|$)", name))
+        # o-series (o1, o1-mini, o3, o3-mini, o4-mini, ...) at a word boundary
+        # so we don't match 'omni'-style names or letters mid-word.
+        return bool(re.search(r"(?:^|[-_/])o\d+(?:-|$)", name))
 
     @staticmethod
     def default_options_for_agent(agent_config: dict) -> Optional[dict]:
@@ -370,14 +377,26 @@ class AgentManager:
         use_responses = endpoint_type in ("azure_openai_responses", "apim_responses")
         if not use_responses:
             return None
-        if not AgentManager._is_reasoning_model(deployment):
-            return None
+
         # Reasoning effort is configurable per-agent in Cosmos:
-        #   "reasoning_effort": "low" | "medium" | "high"
-        # Defaults to "medium" if not set.
-        effort = (agent_config.get("reasoning_effort") or "medium").lower()
-        if effort not in ("low", "medium", "high"):
-            effort = "medium"
+        #   "reasoning_effort": "" (auto) | "low" | "medium" | "high" | "none"
+        raw_effort = (agent_config.get("reasoning_effort") or "").lower().strip()
+
+        # Explicit opt-out: admin selected "None" to disable reasoning even on a
+        # reasoning-capable model.
+        if raw_effort in ("none", "off", "disabled"):
+            return None
+
+        # Decide whether to request reasoning. An explicit effort selection by
+        # the admin (low/medium/high) is treated as intent to use reasoning,
+        # even when the deployment name doesn't look like a known reasoning
+        # model (e.g. a custom name like "project-name-gpt-5.4"). Otherwise we
+        # fall back to name-based detection.
+        explicit = raw_effort in ("low", "medium", "high")
+        if not explicit and not AgentManager._is_reasoning_model(deployment):
+            return None
+
+        effort = raw_effort if explicit else "medium"
         return {
             "reasoning": {"effort": effort, "summary": "auto"},
         }
