@@ -15,6 +15,9 @@ import type {
 export class AzureOpenAiCreativeProvider implements CreativeProvider {
   public readonly name = "azure-openai";
   private readonly client: OpenAI;
+  private static readonly defaultRequestTimeoutMs = 60000;
+  private static readonly dossierPlanTimeoutMs = 25000;
+  private hasLoggedConnection = false;
 
   public constructor(private readonly config: Required<Pick<AppConfig, "azureOpenAiApiKey" | "azureOpenAiApiVersion" | "azureOpenAiDeployment" | "azureOpenAiEndpoint">>) {
     this.client = new OpenAI({
@@ -45,7 +48,8 @@ export class AzureOpenAiCreativeProvider implements CreativeProvider {
         "Return JSON with this shape:",
         '{"overview":"string","anchorFacts":["string"],"reportPlans":[{"reportId":"string","title":"string","organizationId":"string","authorPersonId":"string","outputFormat":"txt|html|docx|pdf","styleProfile":"string","subjectTags":["string"],"summaryFocus":"string","outline":["string"],"relatedEntityIds":["string"],"referenceDocumentIds":["string"]}],"emailPlans":[{"emailId":"string","threadId":"string","styleProfile":"string","subject":"string","fromPersonId":"string","toPersonIds":["string"],"ccPersonIds":["string"],"relatedDocumentIds":["string"],"purpose":"string","talkingPoints":["string"]}]}'
       ].join("\n"),
-      "dossier plan"
+      "dossier plan",
+      AzureOpenAiCreativeProvider.dossierPlanTimeoutMs
     );
   }
 
@@ -100,7 +104,7 @@ export class AzureOpenAiCreativeProvider implements CreativeProvider {
     );
   }
 
-  private async requestStructuredJson<T>(systemPrompt: string, userPrompt: string, label: string): Promise<T> {
+  private async requestStructuredJson<T>(systemPrompt: string, userPrompt: string, label: string, timeoutMs = AzureOpenAiCreativeProvider.defaultRequestTimeoutMs): Promise<T> {
     const attempts = [
       {
         temperature: 0.6,
@@ -118,12 +122,23 @@ export class AzureOpenAiCreativeProvider implements CreativeProvider {
 
     for (const attempt of attempts) {
       let content: string;
+      const attemptStartedAt = Date.now();
+      console.log(`[azure-openai] Requesting ${label} (temperature=${attempt.temperature})...`);
 
       try {
-        content = await this.requestJson(attempt.systemPrompt, attempt.userPrompt, attempt.temperature);
+        content = await this.requestJson(attempt.systemPrompt, attempt.userPrompt, attempt.temperature, timeoutMs);
       } catch (error) {
         throw this.wrapAzureRequestError(error, label);
       }
+
+      if (!this.hasLoggedConnection) {
+        console.log(
+          `[azure-openai] Connection verified endpoint=${this.config.azureOpenAiEndpoint} deployment=${this.config.azureOpenAiDeployment}`
+        );
+        this.hasLoggedConnection = true;
+      }
+
+      console.log(`[azure-openai] Received ${label} (${Date.now() - attemptStartedAt} ms)`);
 
       try {
         return this.parseJson<T>(content, label);
@@ -135,39 +150,46 @@ export class AzureOpenAiCreativeProvider implements CreativeProvider {
     throw lastError ?? new Error(`Azure OpenAI returned invalid JSON for ${label}.`);
   }
 
-  private async requestJson(systemPrompt: string, userPrompt: string, temperature: number): Promise<string> {
-    const completion = await this.client.chat.completions.create({
-      model: this.config.azureOpenAiDeployment,
-      temperature,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: systemPrompt
-        },
-        {
-          role: "user",
-          content: userPrompt
-        }
-      ]
-    });
+  private async requestJson(systemPrompt: string, userPrompt: string, temperature: number, timeoutMs: number): Promise<string> {
+    const completion = await this.client.chat.completions.create(
+      {
+        model: this.config.azureOpenAiDeployment,
+        temperature,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content: systemPrompt
+          },
+          {
+            role: "user",
+            content: userPrompt
+          }
+        ]
+      },
+      {
+        timeout: timeoutMs
+      }
+    );
 
     return completion.choices[0]?.message?.content?.trim() ?? "";
   }
 
   private wrapAzureRequestError(error: unknown, label: string): Error {
+    const contextLabel = `endpoint=${this.config.azureOpenAiEndpoint} deployment=${this.config.azureOpenAiDeployment}`;
+
     if (error instanceof OpenAI.APIError) {
       const status = error.status ? ` ${error.status}` : "";
       const code = error.code ? ` (${error.code})` : "";
       const detail = error.message || "Unknown Azure OpenAI error";
-      return new Error(`Azure OpenAI request failed for ${label}:${status}${code} ${detail}`.trim());
+      return new Error(`Azure OpenAI request failed for ${label} (${contextLabel}):${status}${code} ${detail}`.trim());
     }
 
     if (error instanceof Error) {
-      return new Error(`Azure OpenAI request failed for ${label}: ${error.message}`);
+      return new Error(`Azure OpenAI request failed for ${label} (${contextLabel}): ${error.message}`);
     }
 
-    return new Error(`Azure OpenAI request failed for ${label}: ${String(error)}`);
+    return new Error(`Azure OpenAI request failed for ${label} (${contextLabel}): ${String(error)}`);
   }
 
   private parseJson<T>(content: string, label: string): T {

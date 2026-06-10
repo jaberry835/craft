@@ -47,13 +47,24 @@ export async function runGenerateCorpusCommand(options: GenerateCorpusCommandOpt
   const corpusRunId = path.basename(outputDirectory);
   const packs: CorpusPackSummary[] = [];
   let nextSeed = options.seed;
+  const totalPacks = options.scenarios.length * options.countries.length;
+  let completedPacks = 0;
+  const startedAt = Date.now();
 
   await mkdir(outputDirectory, { recursive: true });
+
+  console.log(`[corpus] Starting corpus generation`);
+  console.log(`[corpus] Corpus run id: ${corpusRunId}`);
+  console.log(`[corpus] Output: ${outputDirectory}`);
+  console.log(`[corpus] Planned packs: ${totalPacks}`);
 
   for (const scenario of options.scenarios) {
     for (const countryId of options.countries) {
       const packId = `${scenario}-${countryId}-seed-${nextSeed}`;
       const packOutputDir = path.join(outputDirectory, packId);
+      const packStartedAt = Date.now();
+
+      console.log(`[corpus] [${completedPacks + 1}/${totalPacks}] Generating ${packId}...`);
 
       await runGenerateCommand({
         scenario,
@@ -87,6 +98,9 @@ export async function runGenerateCorpusCommand(options: GenerateCorpusCommandOpt
         generationProfile: manifest.generationProfile
       });
 
+      completedPacks += 1;
+      console.log(`[corpus] [${completedPacks}/${totalPacks}] Completed ${packId} (${Date.now() - packStartedAt} ms)`);
+
       nextSeed += 1;
     }
   }
@@ -110,4 +124,5 @@ export async function runGenerateCorpusCommand(options: GenerateCorpusCommandOpt
   console.log(`Seed start: ${corpusManifest.seedStart}`);
   console.log(`Total artifacts: ${corpusManifest.totalArtifacts}`);
   console.log(`Output: ${outputDirectory}`);
+  console.log(`[corpus] Completed in ${Date.now() - startedAt} ms`);
 }

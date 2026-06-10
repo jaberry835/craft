@@ -592,8 +592,9 @@ async function buildReports(
 ): Promise<ReportDocument[]> {
   const reports: ReportDocument[] = [];
   const internalReferenceMap = buildInternalReferenceMap(context, plan);
+  const totalReports = plan.reportPlans.length;
 
-  for (const reportPlan of plan.reportPlans) {
+  for (const [index, reportPlan] of plan.reportPlans.entries()) {
     const organization = organizations.find((candidate) => candidate.id === reportPlan.organizationId) ?? organizations[0];
     const author = people.find((candidate) => candidate.id === reportPlan.authorPersonId) ?? people[0];
     const createdAt = faker.date.betweens({
@@ -603,6 +604,7 @@ async function buildReports(
     })[0]?.toISOString() ?? "2025-05-14T09:00:00.000Z";
 
     const fallbackDraft = createFallbackReportDraft(reportPlan, context.country, organization, author, directive, plan);
+    console.log(`[seedFactory] Drafting report ${index + 1}/${totalReports}: ${reportPlan.reportId}`);
     const reportDraft = await provider.createReportDraft({
       ...context,
       plan,
@@ -672,6 +674,7 @@ async function buildEmails(
 ): Promise<EmailMessage[]> {
   const emails: EmailMessage[] = [];
   const internalReferenceMap = buildInternalReferenceMap(context, plan, reports);
+  const totalEmails = plan.emailPlans.length;
 
   const mimeTypeByFormat: Record<ReportDocument["outputFormat"], string> = {
     txt: "text/plain",
@@ -680,7 +683,7 @@ async function buildEmails(
     pdf: "application/pdf"
   };
 
-  for (const emailPlan of plan.emailPlans) {
+  for (const [index, emailPlan] of plan.emailPlans.entries()) {
     const relatedReport = reports.find((report) => report.id === emailPlan.relatedDocumentIds[0]);
     const sentAt = faker.date.betweens({
       from: relatedReport?.createdAt ?? "2025-01-10T08:00:00.000Z",
@@ -690,6 +693,7 @@ async function buildEmails(
     const sender = people.find((person) => person.id === emailPlan.fromPersonId) ?? people[0];
     const recipient = people.find((person) => person.id === emailPlan.toPersonIds[0]) ?? people[0];
     const fallbackDraft = createFallbackEmailDraft(emailPlan, sender, recipient, relatedReport);
+    console.log(`[seedFactory] Drafting email ${index + 1}/${totalEmails}: ${emailPlan.emailId}`);
     const emailDraft = await provider.createEmailDraft({
       ...context,
       plan,
@@ -757,10 +761,22 @@ export async function createScenarioPack(
   const directive = createDirective(brief, country);
   const context = createCreativeContext(brief, country, directive, organizations, people, generationProfile);
   const fallbackPlan = createDefaultDossierPlan(context);
-  const providerPlan = await provider.createDossierPlan(context);
-  const dossierPlan = normalizeDossierPlan(providerPlan, fallbackPlan, context);
+  console.log(`[seedFactory] Creating dossier plan using provider: ${provider.name}`);
+  let dossierPlan = fallbackPlan;
+
+  try {
+    const providerPlan = await provider.createDossierPlan(context);
+    dossierPlan = normalizeDossierPlan(providerPlan, fallbackPlan, context);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`[seedFactory] Provider dossier plan failed, using deterministic fallback plan. Reason: ${message}`);
+  }
+
+  console.log(`[seedFactory] Dossier plan ready with ${dossierPlan.reportPlans.length} reports and ${dossierPlan.emailPlans.length} emails`);
   const reports = await buildReports(context, organizations, people, directive, dossierPlan, provider, faker);
+  console.log(`[seedFactory] Report drafting complete`);
   const emails = await buildEmails(context, dossierPlan, reports, people, provider, faker);
+  console.log(`[seedFactory] Email drafting complete`);
   const events = buildEvents(reports, emails);
 
   return {
