@@ -161,7 +161,12 @@ class AgentConfig(BaseModel):
     temperature: float = Field(default=0.7, ge=0, le=2)
     reasoning_effort: Optional[str] = Field(
         default=None,
-        description="Reasoning effort for reasoning models (low, medium, high). Defaults to medium if not set."
+        description=(
+            "Reasoning effort on Responses API endpoints: 'low', 'medium', 'high', "
+            "'none' (disable), or empty/None for auto-detect. An explicit low/medium/high "
+            "forces reasoning on even when the deployment name isn't recognized as a "
+            "reasoning model. Defaults to auto-detect."
+        )
     )
     max_tokens: Optional[int] = Field(default=None, ge=1, le=128000)
     mcp_tools: list[MCPToolConfig | str] = Field(default_factory=list)  # Selected tools for this agent

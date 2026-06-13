@@ -805,12 +805,13 @@ import { environment } from '../../../environments/environment';
                   class="input"
                   [(ngModel)]="editingAgent!.reasoning_effort"
                 >
-                  <option value="">Default (medium)</option>
+                  <option value="">Auto (detect from model)</option>
                   <option value="low">Low — faster, cheaper</option>
                   <option value="medium">Medium — balanced</option>
                   <option value="high">High — deeper reasoning</option>
+                  <option value="none">None — disable reasoning</option>
                 </select>
-                <span class="field-hint">Controls how much the model reasons before answering. Only applies to reasoning models (o-series, gpt-5+) on Responses API endpoints.</span>
+                <span class="field-hint">Controls how much the model reasons before answering, on Responses API endpoints. Choosing Low/Medium/High forces reasoning on even if the deployment name isn't recognized as a reasoning model. Auto detects reasoning models (o-series, gpt-5+) from the deployment name; None disables it.</span>
               </div>
             </div>
             
@@ -2929,9 +2930,29 @@ export class AdminComponent implements OnInit, OnDestroy {
   copiedAgentId: string | null = null;
   
   getAgentA2AUrl(agent: AgentConfig): string {
-    // Build the A2A base URL for local agents (A2A clients append /.well-known/agent.json)
-    // Use backendUrl in dev (different port), window.location.origin in prod (same origin)
-    const baseUrl = environment.backendUrl || window.location.origin;
+    // Build the A2A base URL for local agents (A2A clients append /.well-known/agent.json).
+    // The backend (API) is a SEPARATE Azure App Service from the frontend (UI),
+    // so we must NOT use window.location.origin as the primary source — that is
+    // the UI host and would produce an unreachable A2A endpoint.
+    //
+    // Source-of-truth order:
+    //   1. environment.backendUrl when explicitly injected.
+    //   2. Otherwise derive the backend origin from environment.apiUrl (the same
+    //      value every other API call uses). When apiUrl is absolute
+    //      (e.g. "https://api-host/api") we strip the trailing "/api" since A2A
+    //      endpoints live at the backend root ("/a2a/{id}"), not under "/api".
+    //   3. Only when apiUrl is relative (proxied dev) do we fall back to the
+    //      current origin, where the proxy forwards to the backend.
+    let baseUrl = environment.backendUrl;
+    if (!baseUrl) {
+      const apiUrl = environment.apiUrl || '';
+      if (/^https?:\/\//i.test(apiUrl)) {
+        baseUrl = apiUrl.replace(/\/api\/?$/i, '');
+      } else {
+        baseUrl = window.location.origin;
+      }
+    }
+    baseUrl = baseUrl.replace(/\/$/, '');
     return `${baseUrl}/a2a/${agent.id}`;
   }
   
