@@ -769,7 +769,17 @@ export async function createScenarioPack(
     dossierPlan = normalizeDossierPlan(providerPlan, fallbackPlan, context);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    console.warn(`[seedFactory] Provider dossier plan failed, using deterministic fallback plan. Reason: ${message}`);
+    console.error(`[seedFactory] ====== PROVIDER ERROR ======`);
+    console.error(`[seedFactory] Provider dossier plan failed.`);
+    console.error(`[seedFactory] Error: ${message}`);
+    console.error(`[seedFactory] Falling back to deterministic dossier plan.`);
+    if (provider.name === "azure-openai") {
+      console.error(`[seedFactory] Diagnostics:`);
+      console.error(`[seedFactory]   - Check that AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_DEPLOYMENT, AZURE_OPENAI_API_KEY are set in .env`);
+      console.error(`[seedFactory]   - Verify the endpoint is reachable and the deployment is deployed`);
+      console.error(`[seedFactory]   - Check network connectivity and firewall rules`);
+    }
+    console.error(`[seedFactory] ====== END PROVIDER ERROR ======`);
   }
 
   console.log(`[seedFactory] Dossier plan ready with ${dossierPlan.reportPlans.length} reports and ${dossierPlan.emailPlans.length} emails`);

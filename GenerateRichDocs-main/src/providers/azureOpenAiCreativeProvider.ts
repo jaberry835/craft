@@ -15,6 +15,7 @@ import type {
 export class AzureOpenAiCreativeProvider implements CreativeProvider {
   public readonly name = "azure-openai";
   private readonly client: OpenAI;
+  private readonly endpointRoot: string;
   private static readonly defaultRequestTimeoutMs = 60000;
   private static readonly dossierPlanTimeoutMs = AzureOpenAiCreativeProvider.defaultRequestTimeoutMs;
   private hasLoggedConnection = false;
@@ -23,10 +24,37 @@ export class AzureOpenAiCreativeProvider implements CreativeProvider {
     return process.env.GENERATE_RICH_DOCS_SHOW_PROMPTS === "1";
   }
 
+  private static normalizeEndpoint(endpoint: string): { endpointRoot: string; warnings: string[] } {
+    const warnings: string[] = [];
+    let normalized = endpoint.trim().replace(/\/+$/, "");
+
+    if (/\/openai\/deployments\//i.test(normalized)) {
+      warnings.push("AZURE_OPENAI_ENDPOINT appears to include '/openai/deployments/...'. Use only the resource root endpoint.");
+      normalized = normalized.replace(/\/openai\/deployments\/.*$/i, "");
+    } else if (/\/openai$/i.test(normalized)) {
+      warnings.push("AZURE_OPENAI_ENDPOINT appears to include '/openai'. Use only the resource root endpoint.");
+      normalized = normalized.replace(/\/openai$/i, "");
+    }
+
+    if (/\/models$/i.test(normalized)) {
+      warnings.push("AZURE_OPENAI_ENDPOINT appears to include '/models'. Use the Azure OpenAI resource root endpoint.");
+      normalized = normalized.replace(/\/models$/i, "");
+    }
+
+    return { endpointRoot: normalized, warnings };
+  }
+
   public constructor(private readonly config: Required<Pick<AppConfig, "azureOpenAiApiKey" | "azureOpenAiApiVersion" | "azureOpenAiDeployment" | "azureOpenAiEndpoint">>) {
+    const normalizedEndpoint = AzureOpenAiCreativeProvider.normalizeEndpoint(config.azureOpenAiEndpoint);
+    this.endpointRoot = normalizedEndpoint.endpointRoot;
+
+    for (const warning of normalizedEndpoint.warnings) {
+      console.warn(`[azure-openai] ${warning}`);
+    }
+
     this.client = new OpenAI({
       apiKey: config.azureOpenAiApiKey,
-      baseURL: `${config.azureOpenAiEndpoint}/openai/deployments/${config.azureOpenAiDeployment}`,
+      baseURL: `${this.endpointRoot}/openai/deployments/${config.azureOpenAiDeployment}`,
       defaultQuery: { "api-version": config.azureOpenAiApiVersion },
       defaultHeaders: { "api-key": config.azureOpenAiApiKey }
     });
@@ -147,7 +175,7 @@ export class AzureOpenAiCreativeProvider implements CreativeProvider {
 
       if (!this.hasLoggedConnection) {
         console.log(
-          `[azure-openai] Connection verified endpoint=${this.config.azureOpenAiEndpoint} deployment=${this.config.azureOpenAiDeployment}`
+          `[azure-openai] Connection verified endpoint=${this.endpointRoot} deployment=${this.config.azureOpenAiDeployment}`
         );
         this.hasLoggedConnection = true;
       }
@@ -190,20 +218,105 @@ export class AzureOpenAiCreativeProvider implements CreativeProvider {
   }
 
   private wrapAzureRequestError(error: unknown, label: string): Error {
-    const contextLabel = `endpoint=${this.config.azureOpenAiEndpoint} deployment=${this.config.azureOpenAiDeployment}`;
+    const contextLabel = `endpoint=${this.endpointRoot} deployment=${this.config.azureOpenAiDeployment}`;
+    const errorType = this.classifyError(error);
 
     if (error instanceof OpenAI.APIError) {
       const status = error.status ? ` ${error.status}` : "";
       const code = error.code ? ` (${error.code})` : "";
       const detail = error.message || "Unknown Azure OpenAI error";
+
+      if (errorType === "timeout") {
+        return new Error(
+          `Azure OpenAI request timed out for ${label} (${contextLabel}). ` +
+          `Check that AZURE_OPENAI_ENDPOINT is reachable and AZURE_OPENAI_DEPLOYMENT is deployed. ` +
+          `${status}${code} ${detail}`.trim()
+        );
+      }
+
+      if (errorType === "connection") {
+        return new Error(
+          `Azure OpenAI connection failed for ${label} (${contextLabel}). ` +
+          `Verify AZURE_OPENAI_ENDPOINT is valid and accessible. ` +
+          `Check network connectivity and firewall rules. ` +
+          `${status}${code} ${detail}`.trim()
+        );
+      }
+
+      if (errorType === "auth") {
+        return new Error(
+          `Azure OpenAI authentication failed for ${label} (${contextLabel}). ` +
+          `Verify AZURE_OPENAI_API_KEY is valid and has permission for AZURE_OPENAI_DEPLOYMENT. ` +
+          `${status}${code} ${detail}`.trim()
+        );
+      }
+
       return new Error(`Azure OpenAI request failed for ${label} (${contextLabel}):${status}${code} ${detail}`.trim());
     }
 
     if (error instanceof Error) {
-      return new Error(`Azure OpenAI request failed for ${label} (${contextLabel}): ${error.message}`);
+      const message = error.message;
+
+      if (errorType === "timeout") {
+        return new Error(
+          `Azure OpenAI request timed out for ${label} (${contextLabel}). ` +
+          `Request did not complete within configured timeout. ${message}`
+        );
+      }
+
+      if (errorType === "connection") {
+        return new Error(
+          `Azure OpenAI connection failed for ${label} (${contextLabel}). ` +
+          `Check network connectivity and AZURE_OPENAI_ENDPOINT validity. ${message}`
+        );
+      }
+
+      return new Error(`Azure OpenAI request failed for ${label} (${contextLabel}): ${message}`);
     }
 
     return new Error(`Azure OpenAI request failed for ${label} (${contextLabel}): ${String(error)}`);
+  }
+
+  private classifyError(error: unknown): "timeout" | "connection" | "auth" | "other" {
+    if (error instanceof OpenAI.APIError) {
+      const message = error.message.toLowerCase();
+      const code = error.code?.toLowerCase() ?? "";
+
+      if (message.includes("timeout") || code === "econnaborted" || code === "etimedout") {
+        return "timeout";
+      }
+
+      if (
+        message.includes("econnrefused") ||
+        message.includes("enotfound") ||
+        message.includes("connection refused") ||
+        message.includes("network") ||
+        code === "econnrefused" ||
+        code === "enotfound" ||
+        code === "ehostunreach"
+      ) {
+        return "connection";
+      }
+
+      if (error.status === 401 || error.status === 403 || message.includes("unauthorized") || message.includes("forbidden")) {
+        return "auth";
+      }
+
+      return "other";
+    }
+
+    if (error instanceof Error) {
+      const message = error.message.toLowerCase();
+      if (message.includes("timeout") || message.includes("etimedout")) {
+        return "timeout";
+      }
+
+      if (message.includes("econnrefused") || message.includes("enotfound") || message.includes("connection")) {
+        return "connection";
+      }
+    }
+
+    return "other";
   }
 
   private parseJson<T>(content: string, label: string): T {
