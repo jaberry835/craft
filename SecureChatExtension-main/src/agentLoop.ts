@@ -524,6 +524,14 @@ export class AgentLoop {
         // the upstream can skip re-deriving reasoning for prior turns.
         const useServerSideState = !!getSetting<boolean>('azureOpenAI.useServerSideState');
         let lastResponseId: string | undefined;
+        // Number of `this.messages` entries already reflected in upstream
+        // server-side state (everything up to and including the assistant
+        // response that produced `lastResponseId`). When threading
+        // `previous_response_id`, only items beyond this index are resent so
+        // we don't redundantly upload the entire transcript each iteration —
+        // which otherwise grows unbounded and trips "please check your inputs
+        // and try again" stream errors once the payload gets too large.
+        let serverStateCommittedCount = 0;
 
         try {
             // ── Core iteration loop ──
@@ -545,6 +553,11 @@ export class AgentLoop {
                 if (this.messages !== preTriMessages) {
                     this.callbacks.sendToWebview({ type: 'setStatus', status: 'Compacting conversation...' });
                     this.log?.('Context compacted: trimmed conversation to fit context window.');
+                    if (lastResponseId) {
+                        this.log?.('Server-side state reset because local context compaction rewrote the transcript.');
+                        lastResponseId = undefined;
+                        serverStateCommittedCount = 0;
+                    }
                 }
 
                 // Build request messages with memory injection
@@ -552,6 +565,27 @@ export class AgentLoop {
 
                 if (this.tokenTracker) {
                     this.tokenTracker.setContextSize(this.contextManager.estimateTotalTokens(requestMessages));
+                }
+
+                // When server-side state is active and we already hold a
+                // response id, send only the conversation items added since
+                // that response (the upstream still has the rest). System /
+                // developer messages are always re-sent so `instructions`
+                // stay current; the orphan tool-result tail is intentionally
+                // NOT normalized here because its originating assistant
+                // tool_calls turn lives in server-side state, not the payload.
+                const threadServerState = useServerSideState && !!lastResponseId;
+                let outboundMessages = requestMessages;
+                if (threadServerState) {
+                    const systemMsgs = requestMessages.filter(
+                        m => m.role === 'system' || m.role === 'developer'
+                    );
+                    const incrementalTail = this.messages.slice(serverStateCommittedCount);
+                    outboundMessages = [...systemMsgs, ...incrementalTail];
+                    this.log?.(
+                        `Server-side state: threading previous_response_id with ${incrementalTail.length} incremental item(s) ` +
+                        `(instead of ${this.messages.length} transcript message(s)).`
+                    );
                 }
 
                 // Validate client
@@ -575,11 +609,11 @@ export class AgentLoop {
                 let reasoningStreamOpen = false;
 
                 try {
-                    const stream = this.chatClient.getResponseStream(requestMessages, {
+                    const stream = this.chatClient.getResponseStream(outboundMessages, {
                         tools,
                         signal: this.abortController!.signal,
                         reasoningMode: this.recoveryMiddleware.activeReasoningMode,
-                        ...(useServerSideState && lastResponseId ? { previousResponseId: lastResponseId } : {}),
+                        ...(threadServerState ? { previousResponseId: lastResponseId } : {}),
                     });
 
                     for await (const chunk of stream) {
@@ -653,6 +687,13 @@ export class AgentLoop {
                     }
                 }
                 this.messages.push(assistantMsg);
+
+                // Mark everything up to and including this assistant response
+                // as committed to server-side state, so the next iteration
+                // only resends the tool results / new turns that follow it.
+                if (useServerSideState && lastResponseId) {
+                    serverStateCommittedCount = this.messages.length;
+                }
 
                 // ── No tool calls → kernel finished ──
                 if (toolCalls.length === 0) {

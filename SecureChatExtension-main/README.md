@@ -297,7 +297,7 @@ If your APIM route does NOT expose `/openai/v1/responses` (older Azure OpenAI te
 | `junior.azureOpenAI.wireApi` | `"chat-completions"` | `responses` for the Foundry `/openai/v1/responses` path; `chat-completions` for the classic Azure OpenAI deployment route. The bundled APIM samples set this to `responses`. |
 | `junior.azureOpenAI.reasoningEffort` | `"high"` | `none`, `low`, `medium`, `high`, or `xhigh`. Honored only when `wireApi=responses` and the deployment is reasoning-capable. Lower = faster + cheaper. |
 | `junior.azureOpenAI.reasoningSummary` | `"auto"` | `auto`, `detailed`, or `none`. Controls the streamed reasoning summary that powers the **Thinking** panel in the chat view. |
-| `junior.azureOpenAI.useServerSideState` | `false` | When `true` and `wireApi=responses`, threads `previous_response_id` across iterations within a turn so the model doesn't re-derive prior reasoning. |
+| `junior.azureOpenAI.useServerSideState` | `false` | When `true` and `wireApi=responses`, threads `previous_response_id` across iterations so the model doesn't re-derive prior reasoning. Once a response id is held, only incremental conversation items (new tool results / turns) are sent instead of the full transcript, keeping requests small. |
 
 See [docs/APIM-FOUNDRY-KEY-SETUP.md](docs/APIM-FOUNDRY-KEY-SETUP.md) or [docs/APIM-FOUNDRY-BEARER-SETUP.md](docs/APIM-FOUNDRY-BEARER-SETUP.md) for the matching APIM configuration.
 

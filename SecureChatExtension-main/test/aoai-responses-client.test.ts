@@ -206,6 +206,27 @@ describe('buildResponsesRequest', () => {
         expect(body.previous_response_id).toBe('resp_prev');
         expect(body.store).toBe(true);
     });
+
+    it('emits an incremental tool-result payload when threading previous_response_id', () => {
+        // Mirrors what the agent loop sends once server-side state holds the
+        // prior turns: only the new function_call_output(s) since the last
+        // response — NOT the originating assistant function_call (which lives
+        // server-side) and NOT the full transcript.
+        const messages: ChatMessage[] = [
+            { role: 'system', content: 'You are a helpful assistant.' },
+            { role: 'tool', tool_call_id: 'call_1', content: 'file contents' },
+        ];
+        const body = buildResponsesRequest('gpt-5.4', messages, [], {
+            stream: true, store: true, previousResponseId: 'resp_prev',
+        });
+        expect(body.previous_response_id).toBe('resp_prev');
+        // System message folds into instructions; only the tool result remains in input.
+        expect(body.instructions).toBe('You are a helpful assistant.');
+        expect(body.input.map(i => i.type)).toEqual(['function_call_output']);
+        const fco = body.input[0] as any;
+        expect(fco.call_id).toBe('call_1');
+        expect(fco.output).toBe('file contents');
+    });
 });
 
 describe('buildResponsesUrl', () => {

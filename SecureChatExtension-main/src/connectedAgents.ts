@@ -55,8 +55,16 @@ export interface ConnectedAgentDef {
      *  use 'microsoft-sovereign-cloud' for Gov/sovereign clouds). */
     authProviderId?: string;
     /** OAuth scope / audience requested when auth === 'entra', e.g.
-     *  'api://<app-id>/.default'. Controls the token's `aud` claim. */
+     *  'api://<app-id>/.default'. Controls the token's `aud` claim.
+     *  Back-compat single-scope field; mirrors `entraScopes[0]`. */
     entraScope?: string;
+    /** Full ordered list of scopes / directives passed to
+     *  `vscode.authentication.getSession` when auth === 'entra'. Supports the
+     *  Microsoft provider's advanced directives alongside resource scopes, e.g.
+     *  `VSCODE_CLIENT_ID:<app-id>`, `VSCODE_TENANT:<tenant-id>`,
+     *  `api://<app-id>/MCPaccess`. When unset, `[entraScope]` is used. */
+    entraScopes?: string[];
+
     /** Where this agent lives. Set by the store at load time. */
     scope?: ConnectedAgentScope;
 }
@@ -93,6 +101,7 @@ export function validateConnectedAgent(def: Partial<ConnectedAgentDef>): Connect
     let headerName: string | undefined;
     let authProviderId: string | undefined;
     let entraScope: string | undefined;
+    let entraScopes: string[] | undefined;
     if (auth === 'apiKey') {
         headerName = (typeof def.headerName === 'string' && def.headerName.trim()) ? def.headerName.trim() : 'x-api-key';
         if (!/^[A-Za-z0-9-]+$/.test(headerName)) {
@@ -100,15 +109,35 @@ export function validateConnectedAgent(def: Partial<ConnectedAgentDef>): Connect
         }
     }
     if (auth === 'entra') {
-        entraScope = (typeof def.entraScope === 'string' && def.entraScope.trim()) ? def.entraScope.trim() : undefined;
-        if (!entraScope) {
-            throw new Error('Interactive bearer auth requires an Entra scope (audience), e.g. "api://<app-id>/.default".');
+        // Accept either the multi-scope `entraScopes` array or the legacy
+        // single `entraScope` string. Normalize into a deduped ordered list.
+        const rawScopes: string[] = Array.isArray(def.entraScopes)
+            ? def.entraScopes
+            : (typeof def.entraScope === 'string' ? [def.entraScope] : []);
+        const seen = new Set<string>();
+        const scopes: string[] = [];
+        for (const raw of rawScopes) {
+            if (typeof raw !== 'string') { continue; }
+            const s = raw.trim();
+            if (!s) { continue; }
+            if (/\s/.test(s)) {
+                throw new Error(`Invalid Entra scope "${s}". Each scope must be a single whitespace-free entry (one per line).`);
+            }
+            if (seen.has(s)) { continue; }
+            seen.add(s);
+            scopes.push(s);
         }
+        if (scopes.length === 0) {
+            throw new Error('Interactive bearer auth requires at least one Entra scope (audience), e.g. "api://<app-id>/.default".');
+        }
+        entraScopes = scopes;
+        entraScope = scopes[0];
         authProviderId = (typeof def.authProviderId === 'string' && def.authProviderId.trim()) ? def.authProviderId.trim() : 'microsoft';
         if (!/^[A-Za-z0-9._-]+$/.test(authProviderId)) {
             throw new Error('Connected agent auth provider id must contain only letters, numbers, dots, dashes and underscores.');
         }
     }
+
     // Reject any embedded credential fields that may have been set in JSON.
     // Secrets must live in SecretStorage — never on disk.
     for (const forbidden of ['apiKey', 'key', 'token', 'secret']) {
@@ -125,6 +154,7 @@ export function validateConnectedAgent(def: Partial<ConnectedAgentDef>): Connect
         headerName,
         authProviderId,
         entraScope,
+        entraScopes,
     };
 }
 
@@ -264,15 +294,18 @@ export class ConnectedAgentStore {
  * @returns the access token, or undefined if unavailable / sign-in declined.
  */
 export async function acquireConnectedAgentEntraToken(
-    agent: Pick<ConnectedAgentDef, 'auth' | 'authProviderId' | 'entraScope'>,
+    agent: Pick<ConnectedAgentDef, 'auth' | 'authProviderId' | 'entraScope' | 'entraScopes'>,
     interactive = true,
 ): Promise<string | undefined> {
-    if (agent.auth !== 'entra' || !agent.entraScope) { return undefined; }
+    const scopes = (agent.entraScopes && agent.entraScopes.length)
+        ? agent.entraScopes
+        : (agent.entraScope ? [agent.entraScope] : []);
+    if (agent.auth !== 'entra' || scopes.length === 0) { return undefined; }
     const providerId = (agent.authProviderId || 'microsoft').trim() || 'microsoft';
     try {
         const session = await vscode.authentication.getSession(
             providerId,
-            [agent.entraScope],
+            scopes,
             interactive ? { createIfNone: true } : { silent: true },
         );
         return session?.accessToken;

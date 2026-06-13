@@ -9,6 +9,11 @@
  *   - Agent URL (required, https — JSON-RPC service or Agent Card URL)
  *   - Auth: None | Bearer token (stored) | Bearer token (Microsoft sign-in) |
  *           API key header (+ header name + secret)
+ *     For interactive Microsoft sign-in, one or more sign-in scopes may be
+ *     supplied (one per line), including the Microsoft provider directives
+ *     `VSCODE_CLIENT_ID:` / `VSCODE_TENANT:` used by sovereign-cloud setups.
+ *     The provider is selected from Commercial Microsoft or Microsoft
+ *     Sovereign Cloud.
  *
  * Styled with VS Code theme tokens to feel native.
  */
@@ -64,6 +69,7 @@ export class ConnectedAgentEditor {
                             headerName: msg.payload.headerName,
                             authProviderId: msg.payload.authProviderId,
                             entraScope: msg.payload.entraScope,
+                            entraScopes: msg.payload.entraScopes,
                         });
                         const scope: ConnectedAgentScope = msg.payload.scope === 'global' ? 'global' : 'workspace';
                         if (scope === 'workspace' && !vscode.workspace.workspaceFolders?.length) {
@@ -84,6 +90,9 @@ export class ConnectedAgentEditor {
                     }
                     case 'cancel':
                         panel.dispose();
+                        break;
+                    case 'openUserSettingsJson':
+                        await vscode.commands.executeCommand('workbench.action.openSettingsJson');
                         break;
                 }
             } catch (err: any) {
@@ -108,9 +117,11 @@ type EditorWebviewMessage =
             key?: string;
             authProviderId?: string;
             entraScope?: string;
+            entraScopes?: string[];
         };
     }
-    | { type: 'cancel' };
+    | { type: 'cancel' }
+    | { type: 'openUserSettingsJson' };
 
 // ── HTML ──
 
@@ -123,6 +134,8 @@ function renderHtml(webview: vscode.Webview, initial: ConnectedAgentDef | undefi
         `img-src ${webview.cspSource} data:`,
     ].join('; ');
 
+    const authProviderId = initial?.authProviderId ?? '';
+    const authProviderChoice = authProviderId === 'microsoft-sovereign-cloud' ? 'sovereign' : 'microsoft';
     const data = {
         name: initial?.name ?? '',
         description: initial?.description ?? '',
@@ -130,8 +143,12 @@ function renderHtml(webview: vscode.Webview, initial: ConnectedAgentDef | undefi
         endpoint: initial?.endpoint ?? '',
         auth: initial?.auth ?? 'none',
         headerName: initial?.headerName ?? '',
-        authProviderId: initial?.authProviderId ?? '',
-        entraScope: initial?.entraScope ?? '',
+        authProviderId,
+        authProviderChoice,
+        entraScopes: (initial?.entraScopes && initial.entraScopes.length
+            ? initial.entraScopes
+            : (initial?.entraScope ? [initial.entraScope] : [])
+        ).join('\n'),
         hasKey: !!initialKey,
         isEdit: !!initial,
     };
@@ -168,7 +185,21 @@ input[type="text"], input[type="password"], select {
     font-family: var(--vscode-font-family);
     font-size: 13px;
 }
-input:focus, select:focus { outline: 1px solid var(--vscode-focusBorder); border-color: var(--vscode-focusBorder); }
+textarea {
+    width: 100%;
+    box-sizing: border-box;
+    background: var(--vscode-input-background);
+    color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border, transparent);
+    border-radius: 2px;
+    padding: 6px 8px;
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 12.5px;
+    line-height: 1.5;
+    resize: vertical;
+    min-height: 64px;
+}
+input:focus, select:focus, textarea:focus { outline: 1px solid var(--vscode-focusBorder); border-color: var(--vscode-focusBorder); }
 .row { display: flex; gap: 12px; }
 .row > .field { flex: 1; }
 .actions { margin-top: 28px; display: flex; gap: 8px; justify-content: flex-end; }
@@ -186,6 +217,24 @@ button.secondary { background: var(--vscode-button-secondaryBackground); color: 
 button.secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
 .banner { padding: 8px 12px; border-radius: 3px; font-size: 12.5px; margin-bottom: 14px; }
 .banner.error { background: var(--vscode-inputValidation-errorBackground); color: var(--vscode-inputValidation-errorForeground); border: 1px solid var(--vscode-inputValidation-errorBorder); }
+.callout {
+    background: var(--vscode-textBlockQuote-background, transparent);
+    border-left: 3px solid var(--vscode-textBlockQuote-border, var(--vscode-focusBorder));
+    color: var(--vscode-descriptionForeground);
+    font-size: 12px;
+    line-height: 1.45;
+    margin-top: 8px;
+    padding: 8px 10px;
+}
+.callout code { color: var(--vscode-textPreformat-foreground, var(--vscode-foreground)); }
+.callout pre {
+    background: var(--vscode-textCodeBlock-background, var(--vscode-editor-background));
+    color: var(--vscode-textPreformat-foreground, var(--vscode-foreground));
+    overflow: auto;
+    padding: 8px;
+    white-space: pre;
+}
+.callout button { margin-top: 8px; }
 .has-key-note { font-size: 11px; color: var(--vscode-descriptionForeground); margin-top: 4px; }
 </style>
 </head>
@@ -246,15 +295,36 @@ button.secondary:hover { background: var(--vscode-button-secondaryHoverBackgroun
     </div>
 
     <div class="field" id="entraScopeField" style="display:none">
-        <label for="entraScope">Sign-in scope (audience)</label>
-        <input id="entraScope" type="text" placeholder="api://&lt;app-id&gt;/.default" value="${escapeHtml(data.entraScope)}" />
-        <div class="hint">The OAuth scope requested at sign-in; controls the token's <code>aud</code> claim. Usually the remote agent's App ID URI followed by <code>/.default</code>.</div>
+        <label for="entraScopes">Sign-in scopes (audience)</label>
+        <textarea id="entraScopes" rows="4" placeholder="api://&lt;app-id&gt;/.default">${escapeHtml(data.entraScopes)}</textarea>
+        <div class="hint">One scope per line; requested at sign-in to shape the token's <code>aud</code>/<code>scp</code> claims. Usually the remote agent's App ID URI followed by <code>/.default</code>.<br/>
+        For sovereign / advanced sign-in you can add the Microsoft provider directives, e.g.:
+        <code>VSCODE_CLIENT_ID:&lt;vscode-client-app-id&gt;</code>, <code>VSCODE_TENANT:&lt;tenant-id&gt;</code>, then the resource scope <code>api://&lt;app-id&gt;/MCPaccess</code>.</div>
     </div>
 
     <div class="field" id="authProviderField" style="display:none">
-        <label for="authProviderId">Auth provider (optional)</label>
-        <input id="authProviderId" type="text" placeholder="microsoft" value="${escapeHtml(data.authProviderId)}" />
-        <div class="hint">VS Code auth provider id. Defaults to <code>microsoft</code>; use <code>microsoft-sovereign-cloud</code> for Gov / sovereign clouds.</div>
+        <label for="authProviderChoice">Microsoft sign-in provider</label>
+        <select id="authProviderChoice">
+            <option value="microsoft" ${data.authProviderChoice === 'microsoft' ? 'selected' : ''}>Microsoft commercial cloud</option>
+            <option value="sovereign" ${data.authProviderChoice === 'sovereign' ? 'selected' : ''}>Microsoft sovereign cloud</option>
+        </select>
+        <div class="hint">Controls which VS Code authentication provider acquires the bearer token.</div>
+        <div class="callout" id="sovereignProviderHelp" style="display:none">
+                        Sovereign cloud uses provider id <code>microsoft-sovereign-cloud</code>. If your tenant is in a built-in cloud, set <code>microsoft-sovereign-cloud.environment</code> to the matching value such as <code>AzureUSGovernment</code> or <code>AzureChinaCloud</code>. For private / site-specific sovereign endpoints, set <code>microsoft-sovereign-cloud.environment</code> to <code>custom</code> and add <code>microsoft-sovereign-cloud.customEnvironment</code> in User Settings before signing in.
+                        <pre>{
+    "microsoft-sovereign-cloud.environment": "custom",
+    "microsoft-sovereign-cloud.customEnvironment": {
+        "name": "Gov",
+        "portalUrl": "https://portal.azure.us/",
+        "activeDirectoryEndpointUrl": "https://login.microsoftonline.us/",
+        "activeDirectoryResourceId": "https://management.azure.us/",
+        "resourceManagerEndpointUrl": "https://management.azure.us/",
+        "managementEndpointUrl": "https://management.azure.us/"
+    }
+}</pre>
+            <br/>
+            <button type="button" class="secondary" id="btnOpenUserSettings">Open User Settings JSON</button>
+        </div>
     </div>
 
     <button type="button" class="secondary" id="btnTest">Validate URL</button>
@@ -275,14 +345,30 @@ const keyField = $('keyField');
 const headerNameField = $('headerNameField');
 const entraScopeField = $('entraScopeField');
 const authProviderField = $('authProviderField');
+const authProviderChoice = $('authProviderChoice');
+const sovereignProviderHelp = $('sovereignProviderHelp');
+
+function selectedAuthProviderId() {
+    const choice = authProviderChoice.value;
+    if (choice === 'sovereign') { return 'microsoft-sovereign-cloud'; }
+    return 'microsoft';
+}
+
+function syncAuthProviderFields() {
+    const showProvider = auth.value === 'entra';
+    authProviderField.style.display = showProvider ? '' : 'none';
+    sovereignProviderHelp.style.display = showProvider && authProviderChoice.value === 'sovereign' ? '' : 'none';
+}
+
 function syncAuthFields() {
     const v = auth.value;
     keyField.style.display = (v === 'bearer' || v === 'apiKey') ? '' : 'none';
     headerNameField.style.display = v === 'apiKey' ? '' : 'none';
     entraScopeField.style.display = v === 'entra' ? '' : 'none';
-    authProviderField.style.display = v === 'entra' ? '' : 'none';
+    syncAuthProviderFields();
 }
 auth.addEventListener('change', syncAuthFields);
+authProviderChoice.addEventListener('change', syncAuthProviderFields);
 syncAuthFields();
 
 function showError(msg) {
@@ -295,6 +381,9 @@ function showError(msg) {
 
 $('btnSave').addEventListener('click', () => {
     const authVal = $('auth').value;
+    const entraScopes = authVal === 'entra'
+        ? $('entraScopes').value.split('\\n').map(s => s.trim()).filter(Boolean)
+        : undefined;
     const payload = {
         name: $('name').value.trim(),
         description: $('description').value.trim() || undefined,
@@ -303,13 +392,14 @@ $('btnSave').addEventListener('click', () => {
         auth: authVal,
         headerName: authVal === 'apiKey' ? ($('headerName').value.trim() || undefined) : undefined,
         key: (authVal === 'bearer' || authVal === 'apiKey') ? $('key').value : undefined,
-        entraScope: authVal === 'entra' ? ($('entraScope').value.trim() || undefined) : undefined,
-        authProviderId: authVal === 'entra' ? ($('authProviderId').value.trim() || undefined) : undefined,
+        entraScopes: entraScopes && entraScopes.length ? entraScopes : undefined,
+        authProviderId: authVal === 'entra' ? selectedAuthProviderId() : undefined,
     };
     vscode.postMessage({ type: 'save', payload });
 });
 
 $('btnCancel').addEventListener('click', () => vscode.postMessage({ type: 'cancel' }));
+    $('btnOpenUserSettings').addEventListener('click', () => vscode.postMessage({ type: 'openUserSettingsJson' }));
 $('btnTest').addEventListener('click', () => {
     const el = $('testResult');
     let ok = false;

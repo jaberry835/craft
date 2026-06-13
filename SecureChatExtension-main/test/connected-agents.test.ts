@@ -130,6 +130,43 @@ describe('validateConnectedAgent', () => {
         });
         expect(v.authProviderId).toBe('microsoft-sovereign-cloud');
     });
+
+    it('accepts multiple advanced sign-in scopes (incl. VS Code directives)', () => {
+        const v = validateConnectedAgent({
+            ...base,
+            auth: 'entra',
+            authProviderId: 'microsoft-sovereign-cloud',
+            entraScopes: [
+                'VSCODE_TENANT:03f141f3-496d-4319-bbea-a3e9286cab10',
+                'api://6349498a-a2f9-4081-8b82-d2119ac8f23c/MCPaccess',
+            ],
+        });
+        expect(v.entraScopes).toEqual([
+            'VSCODE_TENANT:03f141f3-496d-4319-bbea-a3e9286cab10',
+            'api://6349498a-a2f9-4081-8b82-d2119ac8f23c/MCPaccess',
+        ]);
+        // Back-compat single field mirrors the first scope.
+        expect(v.entraScope).toBe('VSCODE_TENANT:03f141f3-496d-4319-bbea-a3e9286cab10');
+    });
+
+    it('trims, drops blanks and dedupes Entra scopes', () => {
+        const v = validateConnectedAgent({
+            ...base,
+            auth: 'entra',
+            entraScopes: ['  api://abc/.default  ', '', 'api://abc/.default', 'api://abc/MCPaccess'],
+        });
+        expect(v.entraScopes).toEqual(['api://abc/.default', 'api://abc/MCPaccess']);
+    });
+
+    it('rejects an Entra scope containing whitespace', () => {
+        expect(() => validateConnectedAgent({
+            ...base, auth: 'entra', entraScopes: ['api://abc/.default extra'],
+        })).toThrow(/single whitespace-free/i);
+    });
+
+    it('requires at least one Entra scope when the list is empty', () => {
+        expect(() => validateConnectedAgent({ ...base, auth: 'entra', entraScopes: ['', '   '] })).toThrow(/scope/i);
+    });
 });
 
 describe('ConnectedAgentStore', () => {
@@ -197,6 +234,27 @@ describe('acquireConnectedAgentEntraToken', () => {
         });
         expect(token).toBe('tok-123');
         expect(getSession).toHaveBeenCalledWith('microsoft', ['api://abc/.default'], { createIfNone: true });
+    });
+
+    it('passes the full advanced scope list to getSession', async () => {
+        getSession.mockResolvedValueOnce({ accessToken: 'tok-multi' });
+        const token = await acquireConnectedAgentEntraToken({
+            auth: 'entra',
+            authProviderId: 'microsoft-sovereign-cloud',
+            entraScopes: [
+                'VSCODE_TENANT:03f141f3-496d-4319-bbea-a3e9286cab10',
+                'api://6349498a-a2f9-4081-8b82-d2119ac8f23c/MCPaccess',
+            ],
+        });
+        expect(token).toBe('tok-multi');
+        expect(getSession).toHaveBeenCalledWith(
+            'microsoft-sovereign-cloud',
+            [
+                'VSCODE_TENANT:03f141f3-496d-4319-bbea-a3e9286cab10',
+                'api://6349498a-a2f9-4081-8b82-d2119ac8f23c/MCPaccess',
+            ],
+            { createIfNone: true },
+        );
     });
 
     it('uses silent mode when not interactive', async () => {
