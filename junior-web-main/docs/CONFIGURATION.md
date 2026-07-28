@@ -83,6 +83,8 @@ These files seed the shared admin catalog:
 - `config/mcp-catalog.json`
 - `config/workspace-templates.json`
 
+Workspace templates can also declare standard filesystem scaffolds. Add optional `directories` and `files` fields to a template, where each file supplies a relative `path` and UTF-8 `content`. When a template is applied, Junior creates missing folders and files through the workspace storage seam; it never overwrites an existing workspace file.
+
 `.env.example` includes the baseline Azure OpenAI and optional shared-config Cosmos settings.
 
 To persist the shared admin config in Cosmos DB, set:

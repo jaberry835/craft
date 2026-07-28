@@ -1,5 +1,5 @@
 import { InteractionRequiredAuthError, PublicClientApplication } from '@azure/msal-browser';
-import type { AdminConnectivityReport, AdminConnectivityTestResult, AgentConnectionSaveRequest, AgentDefinition, AgentCreateRequest, AgentModelConnectionStatus, AgentResponse, AgentRunOptions, AgentTemplateDefinition, AgentUpdateRequest, AuthConfig, AuthDiagnostics, ChatMessage, ChatSessionSummary, ClassificationBarSettings, ClassificationBarSettingsSaveRequest, McpCatalogEntry, McpServerSaveRequest, McpServerStatus, PendingChange, RequestIdentitySummary, WorkspaceCreateRequest, WorkspaceFile, WorkspaceIndex, WorkspaceSearchResult, WorkspaceSummary, WorkspaceTemplateDefinition, WorkspaceTemplateImportRequest, WorkspaceTemplateImportResult, WorkspaceTreeNode, WorkspaceUpdateRequest } from '../types/workbench';
+import type { AdminConnectivityReport, AdminConnectivityTestResult, AgentConnectionSaveRequest, AgentDefinition, AgentCreateRequest, AgentModelConnectionStatus, AgentResponse, AgentRunOptions, AgentTemplateDefinition, AgentUpdateRequest, AuthConfig, AuthDiagnostics, ChatMessage, ChatSessionSummary, ClassificationBarSettings, ClassificationBarSettingsSaveRequest, McpCatalogEntry, McpServerSaveRequest, McpServerStatus, PendingChange, RequestIdentitySummary, WorkspaceCreateRequest, WorkspaceFile, WorkspaceHistorySettings, WorkspaceHistorySettingsSaveRequest, WorkspaceIndex, WorkspaceSearchResult, WorkspaceSummary, WorkspaceTemplateDefinition, WorkspaceTemplateImportRequest, WorkspaceTemplateImportResult, WorkspaceTemplateSaveRequest, WorkspaceTreeNode, WorkspaceUpdateRequest } from '../types/workbench';
 
 export type AgentMessageStreamEvent =
   | { type: 'assistant_text'; text: string }
@@ -34,6 +34,13 @@ export class AuthRequiredError extends Error {
   constructor(message = 'Sign-in is required.') {
     super(message);
     this.name = 'AuthRequiredError';
+  }
+}
+
+export class ApiUnavailableError extends Error {
+  constructor(message = 'The Junior API cannot be reached.') {
+    super(message);
+    this.name = 'ApiUnavailableError';
   }
 }
 
@@ -155,15 +162,19 @@ function shouldRetryWithFreshAuth(path: string, status: number): boolean {
 
 async function fetchWithResolvedAuth(path: string, init?: RequestInit, forceRefresh = false): Promise<Response> {
   const authHeaders = await resolveAuthHeaders(path, forceRefresh);
-  return fetch(path, {
-    ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      ...requestIdentityHeaders(),
-      ...authHeaders,
-      ...init?.headers
-    }
-  });
+  try {
+    return await fetch(path, {
+      ...init,
+      headers: {
+        'Content-Type': 'application/json',
+        ...requestIdentityHeaders(),
+        ...authHeaders,
+        ...init?.headers
+      }
+    });
+  } catch {
+    throw new ApiUnavailableError();
+  }
 }
 
 function msalConfigKey(config: AuthConfig): string {
@@ -255,11 +266,16 @@ async function acquireMsalAccessToken(forceRefresh = false): Promise<string> {
 }
 
 async function fetchAuthConfig(): Promise<AuthConfig> {
-  const response = await fetch('/api/auth/config', {
-    headers: {
-      'Content-Type': 'application/json'
-    }
-  });
+  let response: Response;
+  try {
+    response = await fetch('/api/auth/config', {
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+  } catch {
+    throw new ApiUnavailableError();
+  }
 
   if (!response.ok) {
     const payload = await response.json().catch(() => ({ error: response.statusText }));
@@ -308,12 +324,17 @@ export const workbenchApi = {
     }
 
     const authHeaders = await resolveAuthHeaders('/api/me', forceRefresh);
-    const response = await fetch('/api/me', {
-      headers: {
-        'Content-Type': 'application/json',
-        ...authHeaders
-      }
-    });
+    let response: Response;
+    try {
+      response = await fetch('/api/me', {
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders
+        }
+      });
+    } catch {
+      throw new ApiUnavailableError();
+    }
 
     if (!response.ok) {
       const payload = await response.json().catch(() => ({ error: response.statusText }));
@@ -371,6 +392,13 @@ export const workbenchApi = {
     method: 'DELETE'
   }),
   getWorkspaceTemplates: () => requestJson<WorkspaceTemplateDefinition[]>('/api/admin/workspace-templates'),
+  saveWorkspaceTemplate: (template: WorkspaceTemplateSaveRequest) => requestJson<WorkspaceTemplateDefinition>(template.id ? `/api/admin/workspace-templates/${encodeURIComponent(template.id)}` : '/api/admin/workspace-templates', {
+    method: template.id ? 'PUT' : 'POST',
+    body: JSON.stringify(template)
+  }),
+  deleteWorkspaceTemplate: (id: string) => requestJson<WorkspaceTemplateDefinition>(`/api/admin/workspace-templates/${encodeURIComponent(id)}`, {
+    method: 'DELETE'
+  }),
   getAgentTemplates: () => requestJson<AgentTemplateDefinition[]>('/api/admin/agent-templates'),
   getMcpCatalog: () => requestJson<McpCatalogEntry[]>('/api/admin/mcp-catalog'),
   getClassificationBar: () => requestJson<ClassificationBarSettings>('/api/admin/classification-bar'),
@@ -426,6 +454,11 @@ export const workbenchApi = {
   }),
   deleteWorkspaceMcpServer: (id: string, workspaceId?: string) => requestJson<McpServerStatus>(`${workspaceBasePath(workspaceId)}/settings/mcp-servers/${encodeURIComponent(id)}`, {
     method: 'DELETE'
+  }),
+  getWorkspaceHistorySettings: (workspaceId?: string) => requestJson<WorkspaceHistorySettings>(`${workspaceBasePath(workspaceId)}/settings/history`),
+  saveWorkspaceHistorySettings: (settings: WorkspaceHistorySettingsSaveRequest, workspaceId?: string) => requestJson<WorkspaceHistorySettings>(`${workspaceBasePath(workspaceId)}/settings/history`, {
+    method: 'PUT',
+    body: JSON.stringify(settings)
   }),
   getFile: (path: string, workspaceId?: string) => requestJson<WorkspaceFile>(`${workspaceBasePath(workspaceId)}/files?path=${encodeURIComponent(path)}`),
   saveFile: (path: string, content: string, workspaceId?: string) => requestJson<WorkspaceFile>(`${workspaceBasePath(workspaceId)}/files`, {

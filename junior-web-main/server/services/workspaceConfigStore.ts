@@ -16,6 +16,8 @@ import type {
   McpServerSaveRequest,
   McpServerStatus,
   ResolvedMcpServerDefinition,
+  WorkspaceHistorySettings,
+  WorkspaceHistorySettingsSaveRequest,
   WorkspaceTemplateImportRequest,
   WorkspaceTemplateImportResult,
   WorkspaceTemplateDefinition
@@ -29,9 +31,15 @@ interface WorkspaceConfigDocument {
   connections: AgentConnection[];
   mcpServers: McpServerDefinition[];
   importedTemplateIds: string[];
+  historySettings?: WorkspaceHistorySettings;
 }
 
 const configPath = '.junior/workspace-config.json';
+
+const defaultHistorySettings: WorkspaceHistorySettings = {
+  enabled: false,
+  includeReasoning: true
+};
 
 function normalizeAgentAiSettings(aiSettings: AgentAiSettings | undefined, fallbackReasoningEffort?: AgentAiSettings['reasoningEffort']): AgentAiSettings | undefined {
   const temperature = aiSettings?.temperature;
@@ -89,6 +97,25 @@ export class WorkspaceConfigStore implements RuntimeAgentConfigStore {
 
   listPersistedMcpServers(): McpServerStatus[] {
     return this.config.mcpServers.map((server) => this.toMcpStatus(server));
+  }
+
+  getHistorySettings(): WorkspaceHistorySettings {
+    return {
+      ...defaultHistorySettings,
+      ...this.config.historySettings
+    };
+  }
+
+  async saveHistorySettings(request: WorkspaceHistorySettingsSaveRequest): Promise<WorkspaceHistorySettings> {
+    const current = this.getHistorySettings();
+    const next: WorkspaceHistorySettings = {
+      enabled: request.enabled ?? current.enabled,
+      includeReasoning: request.includeReasoning ?? current.includeReasoning
+    };
+
+    this.config.historySettings = next;
+    await this.saveConfig();
+    return next;
   }
 
   listRuntimeAgents(): AgentDefinition[] {
@@ -456,6 +483,7 @@ export class WorkspaceConfigStore implements RuntimeAgentConfigStore {
       templateId: template.id,
       agentTemplateIds: template.agentTemplateIds,
       mcpCatalogIds: template.mcpCatalogIds,
+      mcpServerIds: template.mcpServerIds,
       connectorIds: template.connectorIds
     }, true);
   }
@@ -467,21 +495,29 @@ export class WorkspaceConfigStore implements RuntimeAgentConfigStore {
   ): Promise<WorkspaceTemplateImportResult> {
     const selectedConnectorIds = this.selectTemplateIds('connectors', selection.connectorIds, template.connectorIds);
     const selectedMcpCatalogIds = this.selectTemplateIds('MCP catalog entries', selection.mcpCatalogIds, template.mcpCatalogIds);
+    const selectedMcpServerIds = this.selectTemplateIds('MCP servers', selection.mcpServerIds, template.mcpServerIds);
     const selectedAgentTemplateIds = this.selectTemplateIds('agent templates', selection.agentTemplateIds, template.agentTemplateIds);
     const selectedTemplate: WorkspaceTemplateDefinition = {
       ...template,
       connectorIds: selectedConnectorIds,
       mcpCatalogIds: selectedMcpCatalogIds,
+      mcpServerIds: selectedMcpServerIds,
       agentTemplateIds: selectedAgentTemplateIds
     };
 
     const importedConnections = selectedConnectorIds
       .map((connectionId) => this.sharedStore.getConnectionDefinition(connectionId))
       .filter((connection): connection is AgentConnection => Boolean(connection));
-    const importedMcpServers = selectedMcpCatalogIds
+    const importedMcpCatalogServers = selectedMcpCatalogIds
       .map((catalogId) => this.sharedStore.getMcpCatalogEntry(catalogId))
       .filter((entry): entry is McpCatalogEntry => Boolean(entry))
       .map((entry) => this.sharedStore.materializeMcpCatalogEntry(entry));
+    const importedConfiguredMcpServers = selectedMcpServerIds
+      .map((serverId) => this.sharedStore.getMcpServerDefinition(serverId))
+      .filter((server): server is McpServerDefinition => Boolean(server));
+    const importedMcpServers = Array.from(new Map(
+      [...importedMcpCatalogServers, ...importedConfiguredMcpServers].map((server) => [server.id, server])
+    ).values());
     const availableMcpIds = new Set([
       ...this.config.mcpServers.map((server) => server.id),
       ...importedMcpServers.map((server) => server.id)

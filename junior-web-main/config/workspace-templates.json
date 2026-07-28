@@ -11,6 +11,25 @@
     ],
     "connectorIds": [
       "default-azure-openai"
+    ],
+    "directories": [
+      "research",
+      "sources",
+      "deliverables"
+    ],
+    "files": [
+      {
+        "path": "research/README.md",
+        "content": "# Research workspace\n\nUse this folder for working notes, comparisons, and source-backed findings.\n"
+      },
+      {
+        "path": "sources/README.md",
+        "content": "# Sources\n\nRecord source links, owners, access dates, and key evidence here.\n"
+      },
+      {
+        "path": "deliverables/summary.md",
+        "content": "# Research summary\n\n## Scope\n\n## Findings\n\n## Recommendations\n\n## Open questions\n"
+      }
     ]
   },
   {
@@ -22,6 +41,35 @@
     ],
     "connectorIds": [
       "default-azure-openai"
+    ],
+    "directories": [
+      "01-intake",
+      "02-architecture",
+      "03-risk-and-controls",
+      "04-evidence",
+      "05-approval"
+    ],
+    "files": [
+      {
+        "path": "01-intake/README.md",
+        "content": "# Intake\n\n## Request\n\n## Business owner\n\n## Scope\n\n## Open questions\n"
+      },
+      {
+        "path": "02-architecture/architecture.md",
+        "content": "# Architecture\n\n## System overview\n\n## Data flows\n\n## Dependencies\n"
+      },
+      {
+        "path": "03-risk-and-controls/risk-register.md",
+        "content": "# Risk register\n\n| Risk | Impact | Mitigation | Owner | Status |\n| --- | --- | --- | --- | --- |\n"
+      },
+      {
+        "path": "04-evidence/README.md",
+        "content": "# Evidence\n\nStore links, screenshots, exports, and evidence summaries in this folder.\n"
+      },
+      {
+        "path": "05-approval/approval-summary.md",
+        "content": "# Approval summary\n\n## Decision requested\n\n## Key risks\n\n## Evidence reviewed\n\n## Remaining questions\n"
+      }
     ]
   }
 ]

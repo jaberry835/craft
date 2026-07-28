@@ -5,6 +5,7 @@ import { createWorkbenchApp } from './app.js';
 import { AgentConfigStore } from './services/agentConfigStore.js';
 import { AzureOpenAiChatClient } from './services/azureOpenAiChatClient.js';
 import { ChangeManager } from './services/changeManager.js';
+import { ConversationHistoryArchiver } from './services/conversationHistoryArchiver.js';
 import { GroundingService } from './services/groundingService.js';
 import { LocalWorkspaceManager } from './services/localWorkspaceManager.js';
 import { createChatSessionStore, createPendingChangeStore, createWorkspaceMetadataStore, createWorkspaceSecretStore, createWorkspaceStateStore } from './services/persistenceFactories.js';
@@ -48,7 +49,18 @@ const workspaceManager = new LocalWorkspaceManager(workspacesRoot, async (worksp
   const pendingChangeStore = createPendingChangeStore(workspace);
   const changeManager = new ChangeManager(storage, pendingChangeStore);
   const sessionStore = createChatSessionStore(workspace);
-  const agent = new SimpleJuniorAgent(storage, changeManager, workspaceIndexer, configStore, groundingService, chatClient, sessionStore);
+  const historyArchiver = new ConversationHistoryArchiver(storage);
+  const agent = new SimpleJuniorAgent(
+    storage,
+    changeManager,
+    workspaceIndexer,
+    configStore,
+    groundingService,
+    chatClient,
+    sessionStore,
+    historyArchiver,
+    () => configStore.getHistorySettings()
+  );
 
   const runtime = {
     ...workspace,

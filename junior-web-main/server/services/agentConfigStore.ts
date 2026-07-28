@@ -3,7 +3,7 @@ import { DefaultAzureCredential } from '@azure/identity';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { updatePersistenceMode } from './persistenceModeTracker.js';
-import type { AgentAiSettings, AgentConnection, AgentConnectionSaveRequest, AgentConnectionStatus, AgentCreateRequest, AgentDefinition, AgentModelConnection, AgentModelConnectionStatus, AgentTemplateDefinition, AgentUpdateRequest, AzureAiSearchConnectionDefinition, ClassificationBarSettings, ClassificationBarSettingsSaveRequest, McpCatalogEntry, McpCustomHeader, McpServerDefinition, McpServerSaveRequest, McpServerStatus, ResolvedMcpServerDefinition, WorkspaceSummary, WorkspaceTemplateDefinition } from '../types.js';
+import type { AgentAiSettings, AgentConnection, AgentConnectionSaveRequest, AgentConnectionStatus, AgentCreateRequest, AgentDefinition, AgentModelConnection, AgentModelConnectionStatus, AgentTemplateDefinition, AgentUpdateRequest, AzureAiSearchConnectionDefinition, ClassificationBarSettings, ClassificationBarSettingsSaveRequest, McpCatalogEntry, McpCustomHeader, McpServerDefinition, McpServerSaveRequest, McpServerStatus, ResolvedMcpServerDefinition, WorkspaceSummary, WorkspaceTemplateDefinition, WorkspaceTemplateSaveRequest } from '../types.js';
 
 export type RuntimeAgentConfigStore = Pick<AgentConfigStore, 'getConnection' | 'getSearchConnection' | 'resolveApiKey' | 'getConnectionStatus' | 'getResolvedMcpServer'> & {
   getAgent(agentId?: string): AgentDefinition | Promise<AgentDefinition>;
@@ -83,14 +83,14 @@ export class AgentConfigStore {
     const seedWorkspaceTemplates = JSON.parse(workspaceTemplatesJson) as WorkspaceTemplateDefinition[];
     const seedAdminSettings = JSON.parse(adminSettingsJson) as { classificationBar?: ClassificationBarSettings };
     this.cosmosContainer = this.createCosmosContainer();
-    const cosmosConfig = this.cosmosContainer ? await this.loadFromCosmos(seedAgents, seedConnections, seedMcpServers) : undefined;
+    const cosmosConfig = this.cosmosContainer ? await this.loadFromCosmos(seedAgents, seedConnections, seedMcpServers, seedWorkspaceTemplates) : undefined;
 
     this.agents = cosmosConfig?.agents ?? seedAgents;
     this.connections = cosmosConfig?.connections ?? seedConnections;
     this.mcpServers = cosmosConfig?.mcpServers ?? seedMcpServers;
     this.agentTemplates = seedAgentTemplates;
     this.mcpCatalog = seedMcpCatalog;
-    this.workspaceTemplates = seedWorkspaceTemplates;
+    this.workspaceTemplates = cosmosConfig?.workspaceTemplates ?? seedWorkspaceTemplates;
     this.classificationBarSettings = this.normalizeClassificationBarSettings(seedAdminSettings.classificationBar);
     this.secrets = await this.loadSecrets();
     this.mcpSecrets = await this.loadMcpSecrets();
@@ -136,6 +136,47 @@ export class AgentConfigStore {
 
   getWorkspaceTemplate(templateId: string): WorkspaceTemplateDefinition | undefined {
     return this.workspaceTemplates.find((candidate) => candidate.id === templateId);
+  }
+
+  getMcpServerDefinition(serverId: string): McpServerDefinition | undefined {
+    return this.mcpServers.find((candidate) => candidate.id === serverId);
+  }
+
+  async saveWorkspaceTemplate(request: WorkspaceTemplateSaveRequest): Promise<WorkspaceTemplateDefinition> {
+    const name = request.name.trim();
+    if (!name) {
+      throw new Error('Workspace template name is required.');
+    }
+
+    const id = request.id?.trim() || this.uniqueId(this.slugify(name), this.workspaceTemplates.map((template) => template.id));
+    const template: WorkspaceTemplateDefinition = {
+      id,
+      name,
+      description: request.description?.trim() ?? '',
+      agentTemplateIds: this.cleanTemplateReferences('agent templates', request.agentTemplateIds, this.agentTemplates.map((agentTemplate) => agentTemplate.id)),
+      mcpCatalogIds: this.cleanTemplateReferences('MCP catalog entries', request.mcpCatalogIds, this.mcpCatalog.map((entry) => entry.id)),
+      mcpServerIds: this.cleanTemplateReferences('MCP servers', request.mcpServerIds, this.mcpServers.map((server) => server.id)),
+      connectorIds: this.cleanTemplateReferences('connectors', request.connectorIds, this.connections.map((connection) => connection.id)),
+      directories: this.cleanTemplateDirectories(request.directories),
+      files: this.cleanTemplateFiles(request.files)
+    };
+
+    this.workspaceTemplates = this.workspaceTemplates.some((candidate) => candidate.id === id)
+      ? this.workspaceTemplates.map((candidate) => candidate.id === id ? template : candidate)
+      : [...this.workspaceTemplates, template];
+    await this.saveWorkspaceTemplates();
+    return template;
+  }
+
+  async deleteWorkspaceTemplate(templateId: string): Promise<WorkspaceTemplateDefinition> {
+    const template = this.workspaceTemplates.find((candidate) => candidate.id === templateId);
+    if (!template) {
+      throw new Error(`Workspace template not found: ${templateId}`);
+    }
+
+    this.workspaceTemplates = this.workspaceTemplates.filter((candidate) => candidate.id !== templateId);
+    await this.saveWorkspaceTemplates();
+    return template;
   }
 
   getConnectionDefinition(connectionId: string): AgentConnection | undefined {
@@ -654,6 +695,15 @@ export class AgentConfigStore {
     await writeFile(path.join(this.configRoot, 'mcp-servers.json'), `${JSON.stringify(this.mcpServers, null, 2)}\n`, 'utf8');
   }
 
+  private async saveWorkspaceTemplates(): Promise<void> {
+    if (this.cosmosContainer) {
+      await this.upsertConfigDocument('workspaceTemplates', this.workspaceTemplates);
+      return;
+    }
+
+    await writeFile(path.join(this.configRoot, 'workspace-templates.json'), `${JSON.stringify(this.workspaceTemplates, null, 2)}\n`, 'utf8');
+  }
+
   private async saveAdminSettings(): Promise<void> {
     await writeFile(path.join(this.configRoot, 'admin-settings.json'), `${JSON.stringify({ classificationBar: this.classificationBarSettings }, null, 2)}\n`, 'utf8');
   }
@@ -707,16 +757,17 @@ export class AgentConfigStore {
     return client.database(databaseId).container(containerId);
   }
 
-  private async loadFromCosmos(seedAgents: AgentDefinition[], seedConnections: AgentConnection[], seedMcpServers: McpServerDefinition[]): Promise<{ agents: AgentDefinition[]; connections: AgentConnection[]; mcpServers: McpServerDefinition[] }> {
+  private async loadFromCosmos(seedAgents: AgentDefinition[], seedConnections: AgentConnection[], seedMcpServers: McpServerDefinition[], seedWorkspaceTemplates: WorkspaceTemplateDefinition[]): Promise<{ agents: AgentDefinition[]; connections: AgentConnection[]; mcpServers: McpServerDefinition[]; workspaceTemplates: WorkspaceTemplateDefinition[] }> {
     try {
-      const [agents, connections, mcpServers] = await Promise.all([
+      const [agents, connections, mcpServers, workspaceTemplates] = await Promise.all([
         this.readConfigDocument('agents', seedAgents),
         this.readConfigDocument('connections', seedConnections),
-        this.readConfigDocument('mcpServers', seedMcpServers)
+        this.readConfigDocument('mcpServers', seedMcpServers),
+        this.readConfigDocument('workspaceTemplates', seedWorkspaceTemplates)
       ]);
 
       console.info('[config-store] Loaded agent and connector configuration from Cosmos DB.');
-      return { agents, connections, mcpServers };
+      return { agents, connections, mcpServers, workspaceTemplates };
     } catch (error) {
       this.logCosmosError('load configuration from Cosmos DB', error);
       console.warn('[config-store] Falling back to local JSON config because Cosmos DB is unavailable.');
@@ -725,7 +776,8 @@ export class AgentConfigStore {
       return {
         agents: seedAgents,
         connections: seedConnections,
-        mcpServers: seedMcpServers
+        mcpServers: seedMcpServers,
+        workspaceTemplates: seedWorkspaceTemplates
       };
     }
   }
@@ -763,6 +815,48 @@ export class AgentConfigStore {
       this.logCosmosError(`save "${id}" configuration document to Cosmos DB`, error);
       throw error;
     }
+  }
+
+  private cleanTemplateReferences(label: string, values: string[] | undefined, validValues: string[]): string[] | undefined {
+    const cleaned = Array.from(new Set((values ?? []).map((value) => value.trim()).filter(Boolean)));
+    const valid = new Set(validValues);
+    const invalid = cleaned.filter((value) => !valid.has(value));
+    if (invalid.length > 0) {
+      throw new Error(`Unknown ${label}: ${invalid.join(', ')}.`);
+    }
+
+    return cleaned.length > 0 ? cleaned : undefined;
+  }
+
+  private cleanTemplateDirectories(values: string[] | undefined): string[] | undefined {
+    const directories = Array.from(new Set((values ?? []).map((value) => this.normalizeTemplatePath(value)).filter(Boolean)));
+    return directories.length > 0 ? directories : undefined;
+  }
+
+  private cleanTemplateFiles(values: Array<{ path: string; content: string }> | undefined): Array<{ path: string; content: string }> | undefined {
+    const seen = new Set<string>();
+    const files = (values ?? []).map((file) => {
+      const path = this.normalizeTemplatePath(file.path);
+      if (seen.has(path)) {
+        throw new Error(`Workspace template contains duplicate file path: ${path}.`);
+      }
+      seen.add(path);
+      if (typeof file.content !== 'string') {
+        throw new Error(`Workspace template file ${path} must include text content.`);
+      }
+      return { path, content: file.content };
+    });
+
+    return files.length > 0 ? files : undefined;
+  }
+
+  private normalizeTemplatePath(value: string): string {
+    const normalized = value.trim().replaceAll('\\', '/').replace(/^\/+|\/+$/g, '');
+    const segments = normalized.split('/');
+    if (!normalized || segments.some((segment) => !segment || segment === '.' || segment === '..')) {
+      throw new Error(`Invalid workspace template path: ${value}`);
+    }
+    return normalized;
   }
 
   private normalizeClassificationBarSettings(settings?: Partial<ClassificationBarSettings>): ClassificationBarSettings {

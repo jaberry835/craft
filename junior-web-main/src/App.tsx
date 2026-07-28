@@ -1,14 +1,16 @@
 import type { ChangeEvent, SyntheticEvent } from 'react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import Editor from '@monaco-editor/react';
 import ReactMarkdown from 'react-markdown';
 import {
   Bot,
+  House,
   ChevronDown,
   ChevronRight,
   Database,
   FileText,
   Folder,
+  LibraryBig,
   MessageSquare,
   Moon,
   Send,
@@ -23,15 +25,17 @@ import {
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
+  RefreshCw,
+  ServerCrash,
   Sparkles,
   Square,
   Sun,
   Trash2,
   X
 } from 'lucide-react';
-import { AuthRequiredError, RequestError, workbenchApi } from './api/workbenchApi';
+import { ApiUnavailableError, AuthRequiredError, RequestError, workbenchApi } from './api/workbenchApi';
 import { PremiumJuniorWorkbenchIcon } from './components/PremiumWorkbenchIcons';
-import type { AdminConnectivityReport, AgentAiSettings, AgentConnectionSaveRequest, AgentConnectionType, AgentDefinition, AgentGroundingSource, AgentModelConnectionStatus, AgentResponse, AgentTemplateDefinition, AuthConfig, AuthDiagnostics, AzureAiSearchGroundingSource, AzureAuthMode, AzureCloud, AzureOpenAiEndpointKind, ChatMessage, ChatMessageDisplayPart, ChatSessionSummary, ClassificationBarSettings, ConnectivityCheck, ConnectivitySection, McpCatalogEntry, McpCustomHeader, McpServerAuthMode, McpServerStatus, ReasoningEffort, RequestIdentitySummary, WorkspaceFile, WorkspaceIndex, WorkspaceSummary, WorkspaceTemplateDefinition, WorkspaceTreeNode } from './types/workbench';
+import type { AdminConnectivityReport, AgentAiSettings, AgentConnectionSaveRequest, AgentConnectionType, AgentDefinition, AgentGroundingSource, AgentModelConnectionStatus, AgentResponse, AgentTemplateDefinition, AuthConfig, AuthDiagnostics, AzureAiSearchGroundingSource, AzureAuthMode, AzureCloud, AzureOpenAiEndpointKind, ChatMessage, ChatMessageDisplayPart, ChatSessionSummary, ClassificationBarSettings, ConnectivityCheck, ConnectivitySection, McpCatalogEntry, McpCustomHeader, McpServerAuthMode, McpServerStatus, ReasoningEffort, RequestIdentitySummary, WorkspaceFile, WorkspaceHistorySettings, WorkspaceIndex, WorkspaceSummary, WorkspaceTemplateDefinition, WorkspaceTemplateFile, WorkspaceTreeNode } from './types/workbench';
 import './App.css';
 
 const defaultCustomAgentPrompt = `You are a domain-expert assistant.
@@ -51,7 +55,9 @@ const themeStorageKey = 'jr-workbench-theme';
 type ThemeMode = 'light' | 'dark';
 type MarkdownViewMode = 'edit' | 'preview' | 'split';
 type PreviewFileType = 'markdown' | 'svg';
-type AuthBootstrapState = 'loading' | 'authorized' | 'signin-required' | 'access-denied';
+type WorkspaceCenterView = 'home' | 'catalog' | 'file';
+type CatalogSection = 'agents' | 'mcp' | 'skills';
+type AuthBootstrapState = 'loading' | 'authorized' | 'signin-required' | 'access-denied' | 'api-unavailable';
 
 interface LiveAssistantTurn {
   id: string;
@@ -172,6 +178,23 @@ function flattenFiles(nodes: WorkspaceTreeNode[]): WorkspaceTreeNode[] {
   return nodes.flatMap((node) => node.type === 'file' ? [node] : flattenFiles(node.children ?? []));
 }
 
+const pinnedToBottomFolders = new Set(['conversation-history']);
+
+function sortWorkspaceTree(nodes: WorkspaceTreeNode[]): WorkspaceTreeNode[] {
+  const normalized = nodes.map((node) => node.children
+    ? { ...node, children: sortWorkspaceTree(node.children) }
+    : node);
+
+  return normalized.sort((left, right) => {
+    const leftPinned = left.type === 'directory' && pinnedToBottomFolders.has(left.name);
+    const rightPinned = right.type === 'directory' && pinnedToBottomFolders.has(right.name);
+    if (leftPinned !== rightPinned) {
+      return leftPinned ? 1 : -1;
+    }
+    return 0;
+  });
+}
+
 function findTreeNode(nodes: WorkspaceTreeNode[], targetPath: string | null | undefined): WorkspaceTreeNode | undefined {
   if (!targetPath) {
     return undefined;
@@ -218,6 +241,482 @@ function isSvgPath(path?: string | null): boolean {
   }
 
   return path.endsWith('.svg');
+}
+
+function catalogSectionLabel(section: CatalogSection): string {
+  if (section === 'agents') {
+    return 'Agent Catalog';
+  }
+
+  if (section === 'mcp') {
+    return 'MCP Catalog';
+  }
+
+  return 'Skills and Tools';
+}
+
+function catalogSectionDescription(section: CatalogSection): string {
+  if (section === 'agents') {
+    return 'Browse global agent templates and open workspace-specific agents in the config drawer.';
+  }
+
+  if (section === 'mcp') {
+    return 'Inspect known MCP servers and jump into the workspace editor for personal instances.';
+  }
+
+  return 'This section is reserved for the future skills/tools catalog and will stay browse-first in the first slice.';
+}
+
+interface WorkspaceHomeSurfaceProps {
+  activeWorkspace?: WorkspaceSummary;
+  files: WorkspaceTreeNode[];
+  workspaces: WorkspaceSummary[];
+  workspaceIndex: WorkspaceIndex | null;
+  onCreateWorkspace: () => void;
+  onBrowseCatalog: (section: CatalogSection) => void;
+  onSelectWorkspace: (workspaceId: string) => void;
+  onOpenWorkspaceSettings: () => void;
+}
+
+function WorkspaceHomeSurface({
+  activeWorkspace,
+  files,
+  workspaces,
+  workspaceIndex,
+  onCreateWorkspace,
+  onBrowseCatalog,
+  onSelectWorkspace,
+  onOpenWorkspaceSettings
+}: WorkspaceHomeSurfaceProps) {
+  const recentWorkspaces = workspaces.filter((workspace) => workspace.id !== 'current').slice(0, 4);
+
+  return (
+    <div className="surface-shell workspace-home-surface">
+      <div className="surface-hero">
+        <div className="surface-hero-badge">
+          <Sparkles size={14} />
+          Control Home
+        </div>
+        <h2>Browse, plan, and pivot without leaving the workbench</h2>
+        <p>
+          Start here to create a workspace, browse the agent and MCP catalogs, or jump back into workspace settings.
+          The first slice keeps this view centered on discovery instead of runtime execution.
+        </p>
+        <div className="surface-action-row">
+          <button type="button" className="primary" onClick={onCreateWorkspace}>
+            <Plus size={16} />
+            Create Workspace
+          </button>
+          <button type="button" onClick={() => onBrowseCatalog('agents')}>
+            <LibraryBig size={16} />
+            Browse Agent Catalog
+          </button>
+          <button type="button" onClick={() => onBrowseCatalog('mcp')}>
+            <Database size={16} />
+            Browse MCP Catalog
+          </button>
+          <button type="button" onClick={() => onBrowseCatalog('skills')}>
+            <House size={16} />
+            Learn More
+          </button>
+        </div>
+      </div>
+
+      <div className="surface-stat-grid">
+        <article className="surface-stat-card">
+          <strong>Active workspace</strong>
+          <span>{activeWorkspace?.name ?? 'Workspace'}</span>
+          <small>{activeWorkspace?.description ?? 'Open a workspace to inspect its files, agents, and catalogs.'}</small>
+        </article>
+        <article className="surface-stat-card">
+          <strong>Workspace files</strong>
+          <span>{files.length}</span>
+          <small>{workspaceIndex ? `${workspaceIndex.indexedFileCount}/${workspaceIndex.fileCount} indexed` : 'Index not loaded yet'}</small>
+        </article>
+        <article className="surface-stat-card">
+          <strong>Workspace settings</strong>
+          <span>{activeWorkspace?.templateName ?? 'No template attached'}</span>
+          <small>Use the settings drawer to manage workspace-local agents and MCP servers.</small>
+        </article>
+      </div>
+
+      <div className="surface-recent-panel">
+        <div className="surface-section-header">
+          <div>
+            <strong>Recent workspaces</strong>
+            <span>Switch context without leaving the control home.</span>
+          </div>
+          <button type="button" onClick={onOpenWorkspaceSettings}>
+            <Settings size={16} />
+            Workspace Settings
+          </button>
+        </div>
+        <div className="surface-recent-list">
+          {recentWorkspaces.length > 0 ? recentWorkspaces.map((workspace) => (
+            <button key={workspace.id} type="button" className="surface-recent-card" onClick={() => onSelectWorkspace(workspace.id)}>
+              <strong>{workspace.name}</strong>
+              <span>{workspace.description ?? 'No description provided'}</span>
+              <small>{workspace.templateName ?? 'No template attached'}</small>
+              <ChevronRight size={14} />
+            </button>
+          )) : (
+            <div className="surface-empty-state">
+              <strong>No recent workspaces</strong>
+              <span>Create a workspace to seed this list.</span>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface WorkspaceOnboardingDialogProps {
+  name: string;
+  description: string;
+  templateId: string;
+  templates: WorkspaceTemplateDefinition[];
+  busy: boolean;
+  onNameChange: (value: string) => void;
+  onDescriptionChange: (value: string) => void;
+  onTemplateChange: (value: string) => void;
+  onClose: () => void;
+  onCreate: () => void;
+}
+
+function WorkspaceOnboardingDialog({
+  name,
+  description,
+  templateId,
+  templates,
+  busy,
+  onNameChange,
+  onDescriptionChange,
+  onTemplateChange,
+  onClose,
+  onCreate
+}: WorkspaceOnboardingDialogProps) {
+  const selectedTemplate = templates.find((template) => template.id === templateId);
+  const resourceCount = (selectedTemplate?.agentTemplateIds?.length ?? 0)
+    + (selectedTemplate?.connectorIds?.length ?? 0)
+    + (selectedTemplate?.mcpCatalogIds?.length ?? 0)
+    + (selectedTemplate?.directories?.length ?? 0)
+    + (selectedTemplate?.files?.length ?? 0);
+
+  return (
+    <div
+      className="workspace-onboarding-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !busy) {
+          onClose();
+        }
+      }}
+    >
+      <section
+        className="workspace-onboarding-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="workspace-onboarding-title"
+        onKeyDown={(event) => {
+          if (event.key === 'Escape' && !busy) {
+            onClose();
+          }
+        }}
+      >
+        <div className="workspace-onboarding-banner">
+          <div className="workspace-onboarding-icon"><Sparkles size={22} /></div>
+          <div>
+            <span>New workspace</span>
+            <h2 id="workspace-onboarding-title">Start with a focused foundation</h2>
+            <p>Name the workspace, then optionally begin with a shared template.</p>
+          </div>
+          <button type="button" className="icon-only workspace-onboarding-close" onClick={onClose} disabled={busy} aria-label="Close workspace setup">
+            <X size={18} />
+          </button>
+        </div>
+
+        <form
+          className="workspace-onboarding-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (name.trim()) {
+              onCreate();
+            }
+          }}
+        >
+          <label className="workspace-onboarding-field">
+            <span>Workspace name <em>Required</em></span>
+            <input
+              autoFocus
+              value={name}
+              onChange={(event) => onNameChange(event.target.value)}
+              placeholder="e.g. Contoso security approval"
+              disabled={busy}
+              required
+            />
+          </label>
+
+          <label className="workspace-onboarding-field">
+            <span>Description <small>Optional</small></span>
+            <textarea
+              value={description}
+              onChange={(event) => onDescriptionChange(event.target.value)}
+              placeholder="What will this workspace help the team produce?"
+              rows={3}
+              disabled={busy}
+            />
+          </label>
+
+          <label className="workspace-onboarding-field">
+            <span>Starting template <small>Optional</small></span>
+            <select value={templateId} onChange={(event) => onTemplateChange(event.target.value)} disabled={busy}>
+              <option value="">Blank workspace</option>
+              {templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}
+            </select>
+          </label>
+
+          <div className={selectedTemplate ? 'workspace-template-choice selected' : 'workspace-template-choice'} aria-live="polite">
+            <div className="workspace-template-choice-icon"><LibraryBig size={18} /></div>
+            <div>
+              <strong>{selectedTemplate?.name ?? 'Blank workspace'}</strong>
+              <p>{selectedTemplate?.description ?? 'Start with an empty workspace and add files, agents, and connections when you are ready.'}</p>
+              {selectedTemplate && (
+                <div className="workspace-template-choice-tags">
+                  <span>{selectedTemplate.agentTemplateIds?.length ?? 0} agent template{selectedTemplate.agentTemplateIds?.length === 1 ? '' : 's'}</span>
+                  <span>{selectedTemplate.connectorIds?.length ?? 0} connector{selectedTemplate.connectorIds?.length === 1 ? '' : 's'}</span>
+                  <span>{selectedTemplate.mcpCatalogIds?.length ?? 0} MCP server{selectedTemplate.mcpCatalogIds?.length === 1 ? '' : 's'}</span>
+                  <span>{selectedTemplate.directories?.length ?? 0} folder{selectedTemplate.directories?.length === 1 ? '' : 's'}</span>
+                  <span>{selectedTemplate.files?.length ?? 0} starter file{selectedTemplate.files?.length === 1 ? '' : 's'}</span>
+                </div>
+              )}
+            </div>
+            {selectedTemplate && <span className="workspace-template-choice-ready">{resourceCount} resources</span>}
+          </div>
+
+          <div className="workspace-onboarding-actions">
+            <button type="button" onClick={onClose} disabled={busy}>Cancel</button>
+            <button type="submit" className="primary" disabled={busy || !name.trim()}>
+              <Plus size={16} />
+              {busy ? 'Creating workspace…' : 'Create workspace'}
+            </button>
+          </div>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+interface WorkspaceCatalogSurfaceProps {
+  catalogSection: CatalogSection;
+  agentTemplates: AgentTemplateDefinition[];
+  mcpCatalog: McpCatalogEntry[];
+  workspaceSettingsAgents: AgentDefinition[];
+  workspaceSettingsMcpServers: McpServerStatus[];
+  selectedCatalogAgentTemplateId: string;
+  selectedCatalogMcpId: string;
+  onBrowseCatalog: (section: CatalogSection) => void;
+  onSelectAgentTemplate: (id: string) => void;
+  onSelectMcpCatalog: (id: string) => void;
+  onEditWorkspaceAgent: (id: string) => void;
+  onEditWorkspaceMcpServer: (id: string) => void;
+  onOpenWorkspaceSettings: () => void;
+  onOpenHomeSurface: () => void;
+}
+
+function WorkspaceCatalogSurface({
+  catalogSection,
+  agentTemplates,
+  mcpCatalog,
+  workspaceSettingsAgents,
+  workspaceSettingsMcpServers,
+  selectedCatalogAgentTemplateId,
+  selectedCatalogMcpId,
+  onBrowseCatalog,
+  onSelectAgentTemplate,
+  onSelectMcpCatalog,
+  onEditWorkspaceAgent,
+  onEditWorkspaceMcpServer,
+  onOpenWorkspaceSettings,
+  onOpenHomeSurface
+}: WorkspaceCatalogSurfaceProps) {
+  const selectedAgentTemplate = agentTemplates.find((template) => template.id === selectedCatalogAgentTemplateId) ?? agentTemplates[0];
+  const selectedMcpEntry = mcpCatalog.find((entry) => entry.id === selectedCatalogMcpId) ?? mcpCatalog[0];
+
+  return (
+    <div className="surface-shell workspace-catalog-surface">
+      <div className="pane-toolbar surface-toolbar">
+        <span>{catalogSectionLabel(catalogSection)}</span>
+        <div className="editor-toolbar-actions">
+          <button type="button" onClick={onOpenHomeSurface} title="Return to the control home">
+            <House size={16} />
+            Home
+          </button>
+          <button type="button" onClick={onOpenWorkspaceSettings} title="Open workspace settings">
+            <Settings size={16} />
+            Workspace Settings
+          </button>
+        </div>
+      </div>
+
+      <div className="catalog-section-switcher" role="tablist" aria-label="Catalog sections">
+        <button type="button" className={catalogSection === 'agents' ? 'selected' : ''} onClick={() => onBrowseCatalog('agents')} role="tab" aria-selected={catalogSection === 'agents'}>Agents</button>
+        <button type="button" className={catalogSection === 'mcp' ? 'selected' : ''} onClick={() => onBrowseCatalog('mcp')} role="tab" aria-selected={catalogSection === 'mcp'}>MCP Servers</button>
+        <button type="button" className={catalogSection === 'skills' ? 'selected' : ''} onClick={() => onBrowseCatalog('skills')} role="tab" aria-selected={catalogSection === 'skills'}>Skills / Tools</button>
+      </div>
+
+      <div className="catalog-layout">
+        <aside className="catalog-list-pane">
+          <div className="config-list-header">
+            <div>
+              <strong>{catalogSectionLabel(catalogSection)}</strong>
+              <span>{catalogSectionDescription(catalogSection)}</span>
+            </div>
+          </div>
+
+          {catalogSection === 'agents' ? (
+            <div className="config-item-list">
+              <div className="catalog-group-label">Global templates</div>
+              {agentTemplates.length > 0 ? agentTemplates.map((template) => (
+                <button key={template.id} type="button" className={selectedAgentTemplate?.id === template.id ? 'config-item-row selected' : 'config-item-row'} onClick={() => onSelectAgentTemplate(template.id)}>
+                  <strong>{template.name}</strong>
+                  <span>{template.description}</span>
+                </button>
+              )) : <div className="surface-empty-state compact"><strong>No agent templates</strong><span>Add one in the admin config screen.</span></div>}
+
+              <div className="catalog-group-label">Workspace agents</div>
+              {workspaceSettingsAgents.length > 0 ? workspaceSettingsAgents.map((agent) => (
+                <button key={agent.id} type="button" className="config-item-row" onClick={() => onEditWorkspaceAgent(agent.id)}>
+                  <strong>{agent.name}</strong>
+                  <span>{agent.description || 'No description set'}</span>
+                </button>
+              )) : <div className="surface-empty-state compact"><strong>No workspace agents</strong><span>Open Workspace Settings to create one.</span></div>}
+            </div>
+          ) : catalogSection === 'mcp' ? (
+            <div className="config-item-list">
+              <div className="catalog-group-label">Global catalog</div>
+              {mcpCatalog.length > 0 ? mcpCatalog.map((entry) => (
+                <button key={entry.id} type="button" className={selectedMcpEntry?.id === entry.id ? 'config-item-row selected' : 'config-item-row'} onClick={() => onSelectMcpCatalog(entry.id)}>
+                  <strong>{entry.name}</strong>
+                  <span>{entry.description}</span>
+                </button>
+              )) : <div className="surface-empty-state compact"><strong>No MCP catalog entries</strong><span>Add one in the admin config screen.</span></div>}
+
+              <div className="catalog-group-label">Workspace servers</div>
+              {workspaceSettingsMcpServers.length > 0 ? workspaceSettingsMcpServers.map((server) => (
+                <button key={server.id} type="button" className="config-item-row" onClick={() => onEditWorkspaceMcpServer(server.id)}>
+                  <strong>{server.name}</strong>
+                  <span>{server.configured ? 'Configured' : `Missing ${server.missing.join(', ')}`}</span>
+                </button>
+              )) : <div className="surface-empty-state compact"><strong>No workspace MCP servers</strong><span>Open Workspace Settings to create one.</span></div>}
+            </div>
+          ) : (
+            <div className="surface-empty-state catalog-placeholder">
+              <strong>Skills and tools are next</strong>
+              <span>This first slice stops at browse surfaces. The execution and runtime model for skills/tools comes later.</span>
+              <button type="button" onClick={onOpenHomeSurface}>
+                <House size={16} />
+                Return Home
+              </button>
+            </div>
+          )}
+        </aside>
+
+        <section className="catalog-detail-pane">
+          {catalogSection === 'agents' ? (
+            selectedAgentTemplate ? (
+              <>
+                <div className="catalog-detail-header">
+                  <div>
+                    <p className="eyebrow">Global agent template</p>
+                    <h2>{selectedAgentTemplate.name}</h2>
+                    <p>{selectedAgentTemplate.description}</p>
+                  </div>
+                  <button type="button" onClick={onOpenWorkspaceSettings}>
+                    <Settings size={16} />
+                    Edit workspace copy
+                  </button>
+                </div>
+                <div className="catalog-detail-body">
+                  <div className="catalog-meta-grid">
+                    <div>
+                      <strong>Instructions</strong>
+                      <span>{selectedAgentTemplate.instructions.slice(0, 240) || 'No instructions set.'}</span>
+                    </div>
+                    <div>
+                      <strong>Suggested model</strong>
+                      <span>{selectedAgentTemplate.suggestedModelConnectionId ?? 'Not specified'}</span>
+                    </div>
+                    <div>
+                      <strong>MCP servers</strong>
+                      <span>{selectedAgentTemplate.mcpServerIds?.length ? selectedAgentTemplate.mcpServerIds.join(', ') : 'None attached'}</span>
+                    </div>
+                    <div>
+                      <strong>Grounding sources</strong>
+                      <span>{selectedAgentTemplate.groundingSources?.length ? selectedAgentTemplate.groundingSources.length : 'None attached'}</span>
+                    </div>
+                  </div>
+                  <div className="surface-empty-state detail-note">
+                    <strong>Read-only catalog item</strong>
+                    <span>Use workspace settings to create or edit the workspace-local version of this agent.</span>
+                  </div>
+                </div>
+              </>
+            ) : null
+          ) : catalogSection === 'mcp' ? (
+            selectedMcpEntry ? (
+              <>
+                <div className="catalog-detail-header">
+                  <div>
+                    <p className="eyebrow">Global MCP entry</p>
+                    <h2>{selectedMcpEntry.name}</h2>
+                    <p>{selectedMcpEntry.description}</p>
+                  </div>
+                  <button type="button" onClick={onOpenWorkspaceSettings}>
+                    <Settings size={16} />
+                    Edit workspace copy
+                  </button>
+                </div>
+                <div className="catalog-detail-body">
+                  <div className="catalog-meta-grid">
+                    <div>
+                      <strong>Transport</strong>
+                      <span>{selectedMcpEntry.transport}</span>
+                    </div>
+                    <div>
+                      <strong>Auth mode</strong>
+                      <span>{selectedMcpEntry.authMode}</span>
+                    </div>
+                    <div>
+                      <strong>Endpoint</strong>
+                      <span>{selectedMcpEntry.endpoint ?? 'Not specified'}</span>
+                    </div>
+                    <div>
+                      <strong>Audience</strong>
+                      <span>{selectedMcpEntry.audience ?? 'Not specified'}</span>
+                    </div>
+                  </div>
+                  <div className="surface-empty-state detail-note">
+                    <strong>Read-only catalog item</strong>
+                    <span>Use workspace settings to create or edit the workspace-local server.</span>
+                  </div>
+                </div>
+              </>
+            ) : null
+          ) : (
+            <div className="surface-empty-state catalog-placeholder detail-placeholder">
+              <strong>Skills and tools catalog</strong>
+              <span>The first implementation only introduces the navigation shell. The actual schema and runtime integration come in a later slice.</span>
+              <button type="button" onClick={onOpenWorkspaceSettings}>
+                <Settings size={16} />
+                Open Workspace Settings
+              </button>
+            </div>
+          )}
+        </section>
+      </div>
+    </div>
+  );
 }
 
 const uploadableExtensions = new Set(['.md', '.markdown', '.txt', '.json', '.yaml', '.yml', '.csv', '.svg']);
@@ -281,6 +780,11 @@ function hasWorkbenchRole(identity: RequestIdentitySummary | null): boolean {
   }
 
   return identity.roles.some((role) => role === 'admin' || role === 'Junior.Admin' || role === 'Junior.User');
+}
+
+function isApiUnavailableError(error: unknown): boolean {
+  return error instanceof ApiUnavailableError
+    || (error instanceof RequestError && error.status >= 500);
 }
 
 function authModeLabel(identity: RequestIdentitySummary | null): string {
@@ -590,7 +1094,12 @@ function App() {
   const [workspaceSettingsConnections, setWorkspaceSettingsConnections] = useState<AgentModelConnectionStatus[]>([]);
   const [mcpServers, setMcpServers] = useState<McpServerStatus[]>([]);
   const [workspaceSettingsMcpServers, setWorkspaceSettingsMcpServers] = useState<McpServerStatus[]>([]);
+  const [workspaceHistorySettings, setWorkspaceHistorySettings] = useState<WorkspaceHistorySettings>({ enabled: false, includeReasoning: true });
   const [mcpCatalog, setMcpCatalog] = useState<McpCatalogEntry[]>([]);
+  const [workspaceCenterView, setWorkspaceCenterView] = useState<WorkspaceCenterView>('home');
+  const [catalogSection, setCatalogSection] = useState<CatalogSection>('agents');
+  const [selectedCatalogAgentTemplateId, setSelectedCatalogAgentTemplateId] = useState('');
+  const [selectedCatalogMcpId, setSelectedCatalogMcpId] = useState('');
   const [selectedAgentId, setSelectedAgentId] = useState<string | undefined>();
   const [selectedWorkspaceAgentId, setSelectedWorkspaceAgentId] = useState<string | undefined>();
   const [activeScreen, setActiveScreen] = useState<'workbench' | 'admin' | 'workspace-settings'>('workbench');
@@ -605,6 +1114,15 @@ function App() {
   const [workspaceTemplateAgentImportIds, setWorkspaceTemplateAgentImportIds] = useState<string[]>([]);
   const [workspaceTemplateMcpImportIds, setWorkspaceTemplateMcpImportIds] = useState<string[]>([]);
   const [workspaceTemplateConnectionImportIds, setWorkspaceTemplateConnectionImportIds] = useState<string[]>([]);
+  const [selectedAdminWorkspaceTemplateId, setSelectedAdminWorkspaceTemplateId] = useState('new');
+  const [adminWorkspaceTemplateNameDraft, setAdminWorkspaceTemplateNameDraft] = useState('');
+  const [adminWorkspaceTemplateDescriptionDraft, setAdminWorkspaceTemplateDescriptionDraft] = useState('');
+  const [adminWorkspaceTemplateAgentIdsDraft, setAdminWorkspaceTemplateAgentIdsDraft] = useState<string[]>([]);
+  const [adminWorkspaceTemplateMcpCatalogIdsDraft, setAdminWorkspaceTemplateMcpCatalogIdsDraft] = useState<string[]>([]);
+  const [adminWorkspaceTemplateMcpServerIdsDraft, setAdminWorkspaceTemplateMcpServerIdsDraft] = useState<string[]>([]);
+  const [adminWorkspaceTemplateConnectionIdsDraft, setAdminWorkspaceTemplateConnectionIdsDraft] = useState<string[]>([]);
+  const [adminWorkspaceTemplateDirectoriesDraft, setAdminWorkspaceTemplateDirectoriesDraft] = useState('');
+  const [adminWorkspaceTemplateFilesDraft, setAdminWorkspaceTemplateFilesDraft] = useState<WorkspaceTemplateFile[]>([]);
   const [selectedConnectorId, setSelectedConnectorId] = useState<string>('new');
   const [connectorTypeDraft, setConnectorTypeDraft] = useState<AgentConnectionType>('azure-openai');
   const [connectorNameDraft, setConnectorNameDraft] = useState('Azure OpenAI');
@@ -646,6 +1164,10 @@ function App() {
   const [prompt, setPrompt] = useState('');
   const [themeMode, setThemeMode] = useState<ThemeMode>(getInitialTheme);
   const [workspaceCreateMenuOpen, setWorkspaceCreateMenuOpen] = useState(false);
+  const [isWorkspaceOnboardingOpen, setIsWorkspaceOnboardingOpen] = useState(false);
+  const [newWorkspaceName, setNewWorkspaceName] = useState('');
+  const [newWorkspaceDescription, setNewWorkspaceDescription] = useState('');
+  const [newWorkspaceTemplateId, setNewWorkspaceTemplateId] = useState('');
   const autoApproveChanges = true;
 
   const [markdownViewMode, setMarkdownViewMode] = useState<MarkdownViewMode>('edit');
@@ -653,6 +1175,7 @@ function App() {
     markdown: false,
     svg: false
   });
+  const lastEditModeByPreviewTypeRef = useRef(lastEditModeByPreviewType);
   const [markdownViewMenuOpen, setMarkdownViewMenuOpen] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(240);
   const [chatPaneWidth, setChatPaneWidth] = useState(() => {
@@ -676,6 +1199,8 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [authConfig, setAuthConfig] = useState<AuthConfig | null>(null);
   const [authBootstrapState, setAuthBootstrapState] = useState<AuthBootstrapState>('loading');
+  const [apiFailureMessage, setApiFailureMessage] = useState('');
+  const [authBootstrapAttempt, setAuthBootstrapAttempt] = useState(0);
   const [authDiagnostics, setAuthDiagnostics] = useState<AuthDiagnostics | null>(null);
   const [isIdentityMenuOpen, setIsIdentityMenuOpen] = useState(false);
   const [currentIdentity, setCurrentIdentity] = useState<RequestIdentitySummary | null>(null);
@@ -766,18 +1291,15 @@ function App() {
   const currentPreviewFileType: PreviewFileType | null = isMarkdownFile ? 'markdown' : isSvgFile ? 'svg' : null;
   const previewModeLabel = isMarkdownFile ? 'Markdown' : 'SVG';
   const isWorkspaceSettings = activeScreen === 'workspace-settings';
-  const editableAgents = isWorkspaceSettings ? workspaceSettingsAgents : agents;
-  const editableConnections = isWorkspaceSettings ? workspaceSettingsConnections : connections;
-  const editableMcpServers = isWorkspaceSettings ? workspaceSettingsMcpServers : mcpServers;
-  const allConnections = useMemo(() => {
-    const next = [...workspaceSettingsConnections];
-    for (const connection of connections) {
-      if (!next.some((candidate) => candidate.id === connection.id)) {
-        next.push(connection);
-      }
-    }
-    return next;
-  }, [connections, workspaceSettingsConnections]);
+  const editableConnections = useMemo(
+    () => (isWorkspaceSettings ? workspaceSettingsConnections : connections),
+    [connections, isWorkspaceSettings, workspaceSettingsConnections]
+  );
+  const allConnections = editableConnections;
+  const editableAgents = useMemo(
+    () => (isWorkspaceSettings ? workspaceSettingsAgents : agents),
+    [agents, isWorkspaceSettings, workspaceSettingsAgents]
+  );
   const selectedConfigAgent = editableAgents.find((agent) => agent.id === selectedAgentId) ?? editableAgents[0];
   const selectedWorkspaceAgent = workspaceAgents.find((agent) => agent.id === selectedWorkspaceAgentId) ?? workspaceAgents[0] ?? selectedConfigAgent;
   const selectedConnection = allConnections.find((connection) => connection.id === selectedWorkspaceAgent?.modelConnectionId);
@@ -792,6 +1314,10 @@ function App() {
   const connectorRoleHint = connectorTypeDraft === 'azure-openai'
     ? azureOpenAiRoleHint(connectorEndpointDraft.trim(), connectorAuthDraft)
     : null;
+  const editableMcpServers = useMemo(
+    () => (isWorkspaceSettings ? workspaceSettingsMcpServers : mcpServers),
+    [isWorkspaceSettings, mcpServers, workspaceSettingsMcpServers]
+  );
   const selectedMcpServer = editableMcpServers.find((server) => server.id === selectedMcpServerId);
   const selectedWorkspaceNode = useMemo(() => files.find((node) => node.path === selectedWorkspacePath) ?? findTreeNode(tree, selectedWorkspacePath), [files, selectedWorkspacePath, tree]);
   const activeWorkspace = useMemo(() => {
@@ -836,10 +1362,11 @@ function App() {
   }, [activeWorkspaceId]);
 
   const refreshWorkspace = useCallback(async (selectPath?: string) => {
-    const [nextTree, nextIndex] = await Promise.all([
+    const [rawTree, nextIndex] = await Promise.all([
       workbenchApi.getTree(activeWorkspaceId),
       workbenchApi.refreshIndex(activeWorkspaceId)
     ]);
+    const nextTree = sortWorkspaceTree(rawTree);
     setTree(nextTree);
     setWorkspaceIndex(nextIndex);
     const fallbackFilePath = flattenFiles(nextTree)[0]?.path;
@@ -862,14 +1389,16 @@ function App() {
   }, [activeWorkspaceId]);
 
   const refreshWorkspaceSettingsConfig = useCallback(async () => {
-    const [nextAgents, nextConnections, nextMcpServers] = await Promise.all([
+    const [nextAgents, nextConnections, nextMcpServers, nextHistorySettings] = await Promise.all([
       workbenchApi.getWorkspaceSettingsAgents(activeWorkspaceId),
       workbenchApi.getWorkspaceAgentConnections(activeWorkspaceId),
-      workbenchApi.getWorkspaceMcpServers(activeWorkspaceId)
+      workbenchApi.getWorkspaceMcpServers(activeWorkspaceId),
+      workbenchApi.getWorkspaceHistorySettings(activeWorkspaceId)
     ]);
     setWorkspaceSettingsAgents(nextAgents);
     setWorkspaceSettingsConnections(nextConnections);
     setWorkspaceSettingsMcpServers(nextMcpServers);
+    setWorkspaceHistorySettings(nextHistorySettings);
     setSelectedAgentId((current) => nextAgents.some((agent) => agent.id === current) ? current : nextAgents[0]?.id);
     setSelectedConnectorId((current) => nextConnections.some((connection) => connection.id === current) ? current : 'new');
     setSelectedMcpServerId((current) => nextMcpServers.some((server) => server.id === current) ? current : 'new');
@@ -910,12 +1439,17 @@ function App() {
     window.location.reload();
   }, []);
 
+  const retryAuthenticationBootstrap = useCallback(() => {
+    setApiFailureMessage('');
+    setAuthBootstrapState('loading');
+    setAuthBootstrapAttempt((attempt) => attempt + 1);
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
 
     void (async () => {
       let nextAuthConfig: AuthConfig | null = null;
-      let identityAuthorized = false;
 
       try {
         nextAuthConfig = await workbenchApi.getAuthConfig();
@@ -958,8 +1492,8 @@ function App() {
           return;
         }
 
-        identityAuthorized = true;
         setAuthBootstrapState('authorized');
+        setApiFailureMessage('');
 
         const nextWorkspaces = await workbenchApi.getWorkspaces();
         if (cancelled) {
@@ -1040,25 +1574,32 @@ function App() {
           return;
         }
 
+        if (isApiUnavailableError(error)) {
+          setAuthBootstrapState('api-unavailable');
+          const detail = typeof (error as { message?: unknown }).message === 'string'
+            ? (error as { message: string }).message
+            : 'The Junior API did not return a usable response.';
+          setApiFailureMessage(detail);
+          setStatus('Junior API is unavailable. Access could not be verified.');
+          return;
+        }
+
         if (error instanceof RequestError && error.status === 403) {
           setAuthBootstrapState('access-denied');
           setStatus(error.message);
           return;
         }
 
-        if (identityAuthorized) {
-          setAuthBootstrapState('authorized');
-        } else {
-          setAuthBootstrapState('access-denied');
-        }
-        setStatus(error instanceof Error ? error.message : 'Failed to load the workbench');
+        setAuthBootstrapState('api-unavailable');
+        setApiFailureMessage(error instanceof Error ? error.message : 'Authentication could not be completed.');
+        setStatus('Junior API or authentication setup could not be reached. Access was not evaluated.');
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [activeWorkspace?.templateId, activeWorkspaceId, refreshChatSessions, refreshWorkspace, refreshWorkspaceSettingsConfig]);
+  }, [activeWorkspace?.templateId, activeWorkspaceId, authBootstrapAttempt, refreshChatSessions, refreshWorkspace, refreshWorkspaceSettingsConfig]);
 
   useEffect(() => {
     if (authBootstrapState !== 'access-denied') {
@@ -1199,7 +1740,7 @@ function App() {
     document.documentElement.style.colorScheme = themeMode;
   }, [themeMode]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     setMarkdownViewMenuOpen(false);
 
     if (!currentPreviewFileType) {
@@ -1207,8 +1748,8 @@ function App() {
       return;
     }
 
-    setMarkdownViewMode(lastEditModeByPreviewType[currentPreviewFileType] ? 'edit' : 'preview');
-  }, [currentFile?.path, currentPreviewFileType, lastEditModeByPreviewType]);
+    setMarkdownViewMode(lastEditModeByPreviewTypeRef.current[currentPreviewFileType] ? 'edit' : 'preview');
+  }, [currentFile?.path, currentPreviewFileType]);
 
   useEffect(() => {
     if (!currentPreviewFileType) {
@@ -1229,6 +1770,10 @@ function App() {
   }, [markdownViewMode, currentPreviewFileType]);
 
   useEffect(() => {
+    lastEditModeByPreviewTypeRef.current = lastEditModeByPreviewType;
+  }, [lastEditModeByPreviewType]);
+
+  useEffect(() => {
     if (!isSvgFile || !editorValue.trim()) {
       setSvgPreviewUrl(null);
       setSvgPreviewInvalid(false);
@@ -1244,6 +1789,18 @@ function App() {
       URL.revokeObjectURL(url);
     };
   }, [editorValue, isSvgFile]);
+
+  useEffect(() => {
+    if (!selectedCatalogMcpId && mcpCatalog[0]) {
+      setSelectedCatalogMcpId(mcpCatalog[0].id);
+    }
+  }, [mcpCatalog, selectedCatalogMcpId]);
+
+  useEffect(() => {
+    if (!selectedCatalogAgentTemplateId && agentTemplates[0]) {
+      setSelectedCatalogAgentTemplateId(agentTemplates[0].id);
+    }
+  }, [agentTemplates, selectedCatalogAgentTemplateId]);
 
   useEffect(() => {
     if (!markdownViewMenuOpen) {
@@ -1544,8 +2101,18 @@ function App() {
     setMarkdownViewMode((current) => current === 'preview' ? 'edit' : 'preview');
   }
 
+  function openHomeSurface() {
+    setWorkspaceCenterView('home');
+  }
+
+  function openCatalogSurface(section: CatalogSection) {
+    setCatalogSection(section);
+    setWorkspaceCenterView('catalog');
+  }
+
   async function openFile(path: string) {
     setSelectedWorkspacePath(path);
+    setWorkspaceCenterView('file');
     const node = findTreeNode(tree, path);
     if (node?.type === 'directory') {
       setCurrentFile(null);
@@ -1655,6 +2222,7 @@ function App() {
         await refreshWorkspace(currentFile?.path);
         setStatus(`Junior applied ${response.appliedChangeCount} file change${response.appliedChangeCount === 1 ? '' : 's'} directly`);
       } else {
+        await refreshWorkspace(currentFile?.path);
         setStatus('Junior finished without new file edits');
       }
     } catch (error) {
@@ -1704,24 +2272,26 @@ function App() {
     }
   }
 
-  async function createWorkspace() {
-    const name = window.prompt('Workspace name', 'New Workspace');
-    if (!name?.trim()) {
+  function createWorkspace() {
+    setNewWorkspaceName('');
+    setNewWorkspaceDescription('');
+    setNewWorkspaceTemplateId('');
+    setIsWorkspaceOnboardingOpen(true);
+  }
+
+  async function submitWorkspaceOnboarding() {
+    const name = newWorkspaceName.trim();
+    if (!name) {
       return;
     }
 
-    const description = window.prompt('Workspace description', '');
-    const templateOptions = workspaceTemplates.map((template) => `${template.id}: ${template.name}`).join('\n');
-    const templateId = workspaceTemplates.length > 0
-      ? window.prompt(`Workspace template id (leave blank for none)\n${templateOptions}`, '')?.trim() || undefined
-      : undefined;
-    const template = templateId ? workspaceTemplates.find((candidate) => candidate.id === templateId) : undefined;
+    const template = workspaceTemplates.find((candidate) => candidate.id === newWorkspaceTemplateId);
 
     setBusy(true);
     try {
       const createdWorkspace = await workbenchApi.createWorkspace({
-        name: name.trim(),
-        description: description?.trim() || undefined,
+        name,
+        description: newWorkspaceDescription.trim() || undefined,
         templateId: template?.id,
         templateName: template?.name
       });
@@ -1732,6 +2302,7 @@ function App() {
       setMessages([]);
       setCurrentFile(null);
       setEditorValue('');
+      setIsWorkspaceOnboardingOpen(false);
       setStatus(`Created workspace ${createdWorkspace.name}`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Failed to create workspace');
@@ -2132,6 +2703,95 @@ function App() {
     setActiveScreen('admin');
   }
 
+  function beginCreateWorkspaceTemplate() {
+    setSelectedAdminWorkspaceTemplateId('new');
+    setAdminWorkspaceTemplateNameDraft('');
+    setAdminWorkspaceTemplateDescriptionDraft('');
+    setAdminWorkspaceTemplateAgentIdsDraft([]);
+    setAdminWorkspaceTemplateMcpCatalogIdsDraft([]);
+    setAdminWorkspaceTemplateMcpServerIdsDraft([]);
+    setAdminWorkspaceTemplateConnectionIdsDraft([]);
+    setAdminWorkspaceTemplateDirectoriesDraft('');
+    setAdminWorkspaceTemplateFilesDraft([]);
+  }
+
+  function loadWorkspaceTemplateDraft(template: WorkspaceTemplateDefinition) {
+    setSelectedAdminWorkspaceTemplateId(template.id);
+    setAdminWorkspaceTemplateNameDraft(template.name);
+    setAdminWorkspaceTemplateDescriptionDraft(template.description);
+    setAdminWorkspaceTemplateAgentIdsDraft(template.agentTemplateIds ?? []);
+    setAdminWorkspaceTemplateMcpCatalogIdsDraft(template.mcpCatalogIds ?? []);
+    setAdminWorkspaceTemplateMcpServerIdsDraft(template.mcpServerIds ?? []);
+    setAdminWorkspaceTemplateConnectionIdsDraft(template.connectorIds ?? []);
+    setAdminWorkspaceTemplateDirectoriesDraft(linesFromList(template.directories));
+    setAdminWorkspaceTemplateFilesDraft((template.files ?? []).map((file) => ({ ...file })));
+  }
+
+  function selectWorkspaceTemplateForEditing(templateId: string) {
+    const template = workspaceTemplates.find((candidate) => candidate.id === templateId);
+    if (template) {
+      loadWorkspaceTemplateDraft(template);
+    }
+  }
+
+  function updateWorkspaceTemplateFile(index: number, update: Partial<WorkspaceTemplateFile>) {
+    setAdminWorkspaceTemplateFilesDraft((files) => files.map((file, fileIndex) => fileIndex === index ? { ...file, ...update } : file));
+  }
+
+  async function saveWorkspaceTemplate() {
+    if (!adminWorkspaceTemplateNameDraft.trim()) {
+      setStatus('A workspace template name is required.');
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const saved = await workbenchApi.saveWorkspaceTemplate({
+        id: selectedAdminWorkspaceTemplateId === 'new' ? undefined : selectedAdminWorkspaceTemplateId,
+        name: adminWorkspaceTemplateNameDraft,
+        description: adminWorkspaceTemplateDescriptionDraft,
+        agentTemplateIds: adminWorkspaceTemplateAgentIdsDraft,
+        mcpCatalogIds: adminWorkspaceTemplateMcpCatalogIdsDraft,
+        mcpServerIds: adminWorkspaceTemplateMcpServerIdsDraft,
+        connectorIds: adminWorkspaceTemplateConnectionIdsDraft,
+        directories: listFromLines(adminWorkspaceTemplateDirectoriesDraft),
+        files: adminWorkspaceTemplateFilesDraft
+      });
+      const templates = await workbenchApi.getWorkspaceTemplates();
+      setWorkspaceTemplates(templates);
+      loadWorkspaceTemplateDraft(saved);
+      setStatus(`Saved workspace template ${saved.name}.`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : 'Failed to save workspace template');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteSelectedWorkspaceTemplate() {
+    if (selectedAdminWorkspaceTemplateId === 'new') {
+      return;
+    }
+
+    const template = workspaceTemplates.find((candidate) => candidate.id === selectedAdminWorkspaceTemplateId);
+    if (!window.confirm(`Delete workspace template ${template?.name ?? selectedAdminWorkspaceTemplateId}? Existing workspaces will keep their files, but can no longer select this template.`)) {
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const deleted = await workbenchApi.deleteWorkspaceTemplate(selectedAdminWorkspaceTemplateId);
+      const templates = await workbenchApi.getWorkspaceTemplates();
+      setWorkspaceTemplates(templates);
+      beginCreateWorkspaceTemplate();
+      setStatus(`Deleted workspace template ${deleted.name}.`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : 'Failed to delete workspace template');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function saveClassificationBar() {
     setBusy(true);
     try {
@@ -2195,11 +2855,28 @@ function App() {
     }
   }
 
+  async function saveWorkspaceHistorySettingsChange(partial: Partial<WorkspaceHistorySettings>) {
+    if (!activeWorkspace || activeWorkspaceId === 'current') {
+      return;
+    }
+
+    const previous = workspaceHistorySettings;
+    const next = { ...previous, ...partial };
+    setWorkspaceHistorySettings(next);
+    try {
+      const saved = await workbenchApi.saveWorkspaceHistorySettings(partial, activeWorkspace.id);
+      setWorkspaceHistorySettings(saved);
+      setStatus(next.enabled ? 'Conversation history archiving enabled.' : 'Conversation history archiving disabled.');
+    } catch (error) {
+      setWorkspaceHistorySettings(previous);
+      setStatus(error instanceof Error ? error.message : 'Failed to update conversation history settings');
+    }
+  }
+
   async function importWorkspaceTemplateResources() {
     if (!activeWorkspace || activeWorkspaceId === 'current' || !selectedWorkspaceTemplate) {
       return;
     }
-
     setBusy(true);
     try {
       const result = await workbenchApi.importWorkspaceTemplateResources({
@@ -2333,6 +3010,9 @@ function App() {
     }
   }
 
+  const showWorkspaceHomeSurface = workspaceCenterView === 'home' || (!currentFile && workspaceCenterView !== 'catalog');
+  const showWorkspaceCatalogSurface = workspaceCenterView === 'catalog';
+
   return (
     <main className={`workbench-shell theme-${themeMode}`}>
       {classificationBar.text.trim() ? (
@@ -2349,6 +3029,18 @@ function App() {
           </div>
         </div>
         <div className="topbar-actions">
+          {authBootstrapState === 'authorized' ? (
+            <>
+              <button type="button" className="topbar-settings-button topbar-surface-button" onClick={openHomeSurface} title="Show the control home">
+                <House size={17} />
+                Home
+              </button>
+              <button type="button" className="topbar-settings-button topbar-surface-button" onClick={() => openCatalogSurface('agents')} title="Browse catalogs">
+                <LibraryBig size={17} />
+                Catalog
+              </button>
+            </>
+          ) : null}
           {authBootstrapState === 'signin-required' && signInUrl ? (
             <button type="button" className="topbar-settings-button" onClick={beginSignIn}>
               <ShieldCheck size={17} />
@@ -2425,16 +3117,32 @@ function App() {
             <p>Junior Workbench is verifying your identity before loading workspace data.</p>
           </div>
         </section>
-      ) : authBootstrapState === 'signin-required' || authBootstrapState === 'access-denied' ? (
+      ) : authBootstrapState === 'signin-required' || authBootstrapState === 'access-denied' || authBootstrapState === 'api-unavailable' ? (
         <section className="auth-gate-screen">
-          <div className="auth-gate-card">
-            <p className="eyebrow">Authentication</p>
-            <h2>{authBootstrapState === 'signin-required' ? `Sign in with ${authConfig?.providerName ?? 'Microsoft Entra ID'}` : 'Access to Junior Workbench is blocked'}</h2>
+          <div className={authBootstrapState === 'api-unavailable' ? 'auth-gate-card api-unavailable' : 'auth-gate-card'}>
+            <p className="eyebrow">{authBootstrapState === 'api-unavailable' ? 'Service availability' : 'Authentication'}</p>
+            <h2>{authBootstrapState === 'signin-required'
+              ? `Sign in with ${authConfig?.providerName ?? 'Microsoft Entra ID'}`
+              : authBootstrapState === 'api-unavailable'
+                ? 'Junior API is unavailable'
+                : 'Access to Junior Workbench is blocked'}</h2>
             <p>
               {authBootstrapState === 'signin-required'
                 ? `${authConfig?.providerName ?? 'Microsoft Entra ID'} is enabled for this application. Until sign-in succeeds, workspace data and agent actions stay locked.`
-                : 'Your account reached the app but does not have a Junior role that allows workspace access.'}
+                : authBootstrapState === 'api-unavailable'
+                  ? 'The app could not reach the Junior API or the API returned a server error. Your identity and permissions were not evaluated, so this is not an access-denied result.'
+                  : 'Your account reached the app but does not have a Junior role that allows workspace access.'}
             </p>
+            {authBootstrapState === 'api-unavailable' ? (
+              <div className="auth-gate-details service-unavailable-details">
+                <ServerCrash size={18} aria-hidden="true" />
+                <div>
+                  <strong>What to check</strong>
+                  <span>Verify the Junior API is running and reachable, then retry. If the problem continues, inspect the API or reverse-proxy logs.</span>
+                  {apiFailureMessage ? <span>Detail: {apiFailureMessage}</span> : null}
+                </div>
+              </div>
+            ) : null}
             {currentIdentity ? (
               <div className="auth-gate-details">
                 <strong>{currentIdentity.displayName}</strong>
@@ -2452,6 +3160,12 @@ function App() {
               </div>
             ) : null}
             <div className="auth-gate-actions">
+              {authBootstrapState === 'api-unavailable' ? (
+                <button type="button" onClick={retryAuthenticationBootstrap}>
+                  <RefreshCw size={16} />
+                  Retry connection
+                </button>
+              ) : null}
               {authBootstrapState === 'signin-required' && signInUrl ? (
                 <button type="button" onClick={beginSignIn}>
                   Sign in with {authConfig?.providerName ?? 'Microsoft Entra ID'}
@@ -2672,10 +3386,56 @@ function App() {
                         </div>
                       ) : <ul><li>None</li></ul>}
                     </div>
+                    <div>
+                      <strong>Workspace scaffold</strong>
+                      {(selectedWorkspaceTemplate?.directories?.length ?? 0) + (selectedWorkspaceTemplate?.files?.length ?? 0) > 0 ? (
+                        <ul>
+                          {(selectedWorkspaceTemplate?.directories ?? []).map((directory) => <li key={`directory-${directory}`}>{directory}/</li>)}
+                          {(selectedWorkspaceTemplate?.files ?? []).map((file) => <li key={`file-${file.path}`}>{file.path}</li>)}
+                        </ul>
+                      ) : <ul><li>No standard files or folders</li></ul>}
+                    </div>
                   </div>
                   <div className="wide-field config-item-row">
                     <strong>Selective import</strong>
-                    <span>Only the checked resources will be materialized into this workspace. The shared template remains a starting point, not a live binding.</span>
+                    <span>Only the checked resources are imported. Standard folders and starter files are also created when missing; existing workspace files are never overwritten.</span>
+                  </div>
+                  <div className="wide-field workspace-history-settings">
+                    <strong>Conversation history</strong>
+                    <span>Choose whether Junior keeps a human-readable archive of chat sessions in this workspace under the <code>conversation-history</code> folder.</span>
+                    <div className="config-radio-group" role="radiogroup" aria-label="Store chat history in workspace">
+                      <label className="radio-row">
+                        <input
+                          type="radio"
+                          name="workspace-history-enabled"
+                          checked={workspaceHistorySettings.enabled}
+                          onChange={() => saveWorkspaceHistorySettingsChange({ enabled: true })}
+                          disabled={busy || !activeWorkspace || activeWorkspaceId === 'current'}
+                        />
+                        <span>Store chat history in workspace</span>
+                      </label>
+                      <label className="radio-row">
+                        <input
+                          type="radio"
+                          name="workspace-history-enabled"
+                          checked={!workspaceHistorySettings.enabled}
+                          onChange={() => saveWorkspaceHistorySettingsChange({ enabled: false })}
+                          disabled={busy || !activeWorkspace || activeWorkspaceId === 'current'}
+                        />
+                        <span>Do not store chat history</span>
+                      </label>
+                    </div>
+                    {workspaceHistorySettings.enabled && (
+                      <label className="checklist-row">
+                        <input
+                          type="checkbox"
+                          checked={workspaceHistorySettings.includeReasoning}
+                          onChange={(event) => saveWorkspaceHistorySettingsChange({ includeReasoning: event.target.checked })}
+                          disabled={busy || !activeWorkspace || activeWorkspaceId === 'current'}
+                        />
+                        <span>Include agent reasoning output in the archive</span>
+                      </label>
+                    )}
                   </div>
                 </div>
                 <div className="config-header-actions">
@@ -3042,13 +3802,19 @@ function App() {
                       <strong>Workspace Templates</strong>
                       <span>{workspaceTemplates.length} configured</span>
                     </div>
+                    <button type="button" onClick={beginCreateWorkspaceTemplate}><Plus size={16} /> New</button>
                   </div>
                   <div className="config-item-list">
+                    <button type="button" className={selectedAdminWorkspaceTemplateId === 'new' ? 'config-item-row selected' : 'config-item-row'} onClick={beginCreateWorkspaceTemplate}>
+                      <strong>New workspace template</strong>
+                      <span>Compose a reusable workspace, resources, and starter scaffold</span>
+                    </button>
                     {workspaceTemplates.map((template) => (
-                      <div key={template.id} className="config-item-row selected">
+                      <button key={template.id} type="button" className={selectedAdminWorkspaceTemplateId === template.id ? 'config-item-row selected' : 'config-item-row'} onClick={() => selectWorkspaceTemplateForEditing(template.id)}>
                         <strong>{template.name}</strong>
                         <span>{template.description}</span>
-                      </div>
+                        <span>{template.directories?.length ?? 0} folders · {template.files?.length ?? 0} starter files</span>
+                      </button>
                     ))}
                   </div>
                 </>
@@ -3217,23 +3983,120 @@ function App() {
               <div className="config-panel">
                 <div className="config-header-row">
                   <div>
-                    <h2>Workspace Templates</h2>
-                    <p>These admin-managed templates can be selected when creating a new workspace.</p>
+                    <h2>{selectedAdminWorkspaceTemplateId === 'new' ? 'New Workspace Template' : adminWorkspaceTemplateNameDraft || 'Workspace Template'}</h2>
+                    <p>Configure the complete starter experience: reusable agents, MCP capabilities, connections, folders, and starter files.</p>
                   </div>
                   <div className="config-header-actions">
+                    {selectedAdminWorkspaceTemplateId !== 'new' && (
+                      <button type="button" className="danger" onClick={deleteSelectedWorkspaceTemplate} disabled={busy}><Trash2 size={16} /> Delete</button>
+                    )}
                     <button type="button" className="icon-only" onClick={closeAdminScreen} title="Close admin" aria-label="Close admin">
                       <X size={16} />
                     </button>
                   </div>
                 </div>
-                <div className="config-item-list">
-                  {workspaceTemplates.map((template) => (
-                    <div key={template.id} className="config-item-row">
-                      <strong>{template.name}</strong>
-                      <span>{template.description}</span>
+                <div className="config-form-grid workspace-template-editor">
+                  <label>
+                    <span>Template name</span>
+                    <input value={adminWorkspaceTemplateNameDraft} onChange={(event) => setAdminWorkspaceTemplateNameDraft(event.target.value)} placeholder="Security package review" />
+                  </label>
+                  <label>
+                    <span>Template ID</span>
+                    <input value={selectedAdminWorkspaceTemplateId === 'new' ? 'Generated from name when saved' : selectedAdminWorkspaceTemplateId} disabled />
+                  </label>
+                  <label className="wide-field">
+                    <span>Description</span>
+                    <textarea value={adminWorkspaceTemplateDescriptionDraft} onChange={(event) => setAdminWorkspaceTemplateDescriptionDraft(event.target.value)} rows={3} placeholder="Explain the workflow this template starts." />
+                  </label>
+
+                  <div className="wide-field template-resource-grid">
+                    <section>
+                      <strong>Agent templates</strong>
+                      <span>Attach reusable agent personas and instructions.</span>
+                      <div className="config-checklist">
+                        {agentTemplates.length > 0 ? agentTemplates.map((template) => (
+                          <label key={template.id} className="checklist-row">
+                            <input type="checkbox" checked={adminWorkspaceTemplateAgentIdsDraft.includes(template.id)} onChange={() => setAdminWorkspaceTemplateAgentIdsDraft((ids) => toggleSelection(ids, template.id))} />
+                            <span>{template.name}</span>
+                          </label>
+                        )) : <span className="template-empty-note">No agent templates are configured yet.</span>}
+                      </div>
+                      <small>Standalone skills do not have a server-side catalog yet. Use agent templates to package reusable instructions in this release.</small>
+                    </section>
+                    <section>
+                      <strong>Configured MCP servers</strong>
+                      <span>Copy existing shared MCP server definitions into new workspaces.</span>
+                      <div className="config-checklist">
+                        {mcpServers.length > 0 ? mcpServers.map((server) => (
+                          <label key={server.id} className="checklist-row">
+                            <input type="checkbox" checked={adminWorkspaceTemplateMcpServerIdsDraft.includes(server.id)} onChange={() => setAdminWorkspaceTemplateMcpServerIdsDraft((ids) => toggleSelection(ids, server.id))} />
+                            <span>{server.name}</span>
+                          </label>
+                        )) : <span className="template-empty-note">No MCP servers are configured yet.</span>}
+                      </div>
+                    </section>
+                    <section>
+                      <strong>MCP catalog entries</strong>
+                      <span>Offer server patterns that can be materialized for a workspace.</span>
+                      <div className="config-checklist">
+                        {mcpCatalog.length > 0 ? mcpCatalog.map((entry) => (
+                          <label key={entry.id} className="checklist-row">
+                            <input type="checkbox" checked={adminWorkspaceTemplateMcpCatalogIdsDraft.includes(entry.id)} onChange={() => setAdminWorkspaceTemplateMcpCatalogIdsDraft((ids) => toggleSelection(ids, entry.id))} />
+                            <span>{entry.name}</span>
+                          </label>
+                        )) : <span className="template-empty-note">No MCP catalog entries are configured yet.</span>}
+                      </div>
+                    </section>
+                    <section>
+                      <strong>Connections</strong>
+                      <span>Copy selected model and search connections into new workspaces.</span>
+                      <div className="config-checklist">
+                        {connections.length > 0 ? connections.map((connection) => (
+                          <label key={connection.id} className="checklist-row">
+                            <input type="checkbox" checked={adminWorkspaceTemplateConnectionIdsDraft.includes(connection.id)} onChange={() => setAdminWorkspaceTemplateConnectionIdsDraft((ids) => toggleSelection(ids, connection.id))} />
+                            <span>{connection.name}</span>
+                          </label>
+                        )) : <span className="template-empty-note">No connections are configured yet.</span>}
+                      </div>
+                    </section>
+                  </div>
+
+                  <label className="wide-field">
+                    <span>Standard folders</span>
+                    <textarea value={adminWorkspaceTemplateDirectoriesDraft} onChange={(event) => setAdminWorkspaceTemplateDirectoriesDraft(event.target.value)} rows={5} placeholder={'intake\narchitecture\nevidence'} />
+                    <p className="connector-hint">One relative folder per line. Missing folders are created when the template is applied.</p>
+                  </label>
+
+                  <div className="wide-field template-files-editor">
+                    <div className="template-files-header">
+                      <div>
+                        <strong>Starter files</strong>
+                        <span>Define file paths and their initial text. Existing workspace files are never overwritten.</span>
+                      </div>
+                      <button type="button" onClick={() => setAdminWorkspaceTemplateFilesDraft((files) => [...files, { path: '', content: '' }])}><Plus size={16} /> Add file</button>
                     </div>
-                  ))}
+                    {adminWorkspaceTemplateFilesDraft.length === 0 ? (
+                      <div className="template-empty-state">No starter files. Add a file to include a document template, README, or required checklist.</div>
+                    ) : adminWorkspaceTemplateFilesDraft.map((file, index) => (
+                      <section key={`${index}-${file.path}`} className="template-file-editor">
+                        <div className="template-file-editor-header">
+                          <label>
+                            <span>Relative file path</span>
+                            <input value={file.path} onChange={(event) => updateWorkspaceTemplateFile(index, { path: event.target.value })} placeholder="approval/summary.md" />
+                          </label>
+                          <button type="button" className="icon-only danger" onClick={() => setAdminWorkspaceTemplateFilesDraft((files) => files.filter((_, fileIndex) => fileIndex !== index))} title="Remove starter file" aria-label={`Remove ${file.path || 'starter file'}`}>
+                            <Trash2 size={16} />
+                          </button>
+                        </div>
+                        <label>
+                          <span>Initial content</span>
+                          <textarea className="prompt-editor" value={file.content} onChange={(event) => updateWorkspaceTemplateFile(index, { content: event.target.value })} rows={8} placeholder="# Starter document" />
+                        </label>
+                      </section>
+                    ))}
+                  </div>
                 </div>
+                <button type="button" className="primary config-save" onClick={saveWorkspaceTemplate} disabled={busy || !adminWorkspaceTemplateNameDraft.trim()}>{selectedAdminWorkspaceTemplateId === 'new' ? 'Create Workspace Template' : 'Save Workspace Template'}</button>
               </div>
             ) : configView === 'connectors' ? (
               <div className="config-panel">
@@ -3668,7 +4531,36 @@ function App() {
         )}
 
         <section className="editor-pane">
-          <>
+          {showWorkspaceHomeSurface ? (
+            <WorkspaceHomeSurface
+              activeWorkspace={activeWorkspace}
+              files={files}
+              workspaces={workspaces}
+              workspaceIndex={workspaceIndex}
+              onCreateWorkspace={createWorkspace}
+              onBrowseCatalog={openCatalogSurface}
+              onSelectWorkspace={(workspaceId) => setSelectedWorkspaceId(workspaceId)}
+              onOpenWorkspaceSettings={openWorkspaceSettings}
+            />
+          ) : showWorkspaceCatalogSurface ? (
+            <WorkspaceCatalogSurface
+              catalogSection={catalogSection}
+              agentTemplates={agentTemplates}
+              mcpCatalog={mcpCatalog}
+              workspaceSettingsAgents={workspaceSettingsAgents}
+              workspaceSettingsMcpServers={workspaceSettingsMcpServers}
+              selectedCatalogAgentTemplateId={selectedCatalogAgentTemplateId}
+              selectedCatalogMcpId={selectedCatalogMcpId}
+              onBrowseCatalog={openCatalogSurface}
+              onSelectAgentTemplate={setSelectedCatalogAgentTemplateId}
+              onSelectMcpCatalog={setSelectedCatalogMcpId}
+              onEditWorkspaceAgent={selectAgentForEditing}
+              onEditWorkspaceMcpServer={selectMcpServerForEditing}
+              onOpenWorkspaceSettings={openWorkspaceSettings}
+              onOpenHomeSurface={openHomeSurface}
+            />
+          ) : (
+            <>
               <div className="pane-toolbar">
                 <span>{currentFile?.path ?? 'No file selected'}</span>
                 <div className="editor-toolbar-actions">
@@ -3724,6 +4616,8 @@ function App() {
                     <div className="editor-surface">
                       <Editor
                         height="100%"
+                        path={currentFile?.path ?? 'workspace-file'}
+                        keepCurrentModel
                         language={languageForPath(currentFile?.path ?? '')}
                         value={editorValue}
                         theme={themeMode === 'dark' ? 'vs-dark' : 'vs'}
@@ -3774,6 +4668,8 @@ function App() {
                 <div className="editor-content editor-surface">
                   <Editor
                     height="100%"
+                    path={currentFile?.path ?? 'workspace-file'}
+                    keepCurrentModel
                     language={languageForPath(currentFile?.path ?? '')}
                     value={editorValue}
                     theme={themeMode === 'dark' ? 'vs-dark' : 'vs'}
@@ -3783,6 +4679,7 @@ function App() {
                 </div>
               )}
             </>
+          )}
         </section>
 
         {!isChatPaneCollapsed && (
@@ -3949,6 +4846,21 @@ function App() {
           )}
         </aside>
       </section>
+      )}
+
+      {isWorkspaceOnboardingOpen && (
+        <WorkspaceOnboardingDialog
+          name={newWorkspaceName}
+          description={newWorkspaceDescription}
+          templateId={newWorkspaceTemplateId}
+          templates={workspaceTemplates}
+          busy={busy}
+          onNameChange={setNewWorkspaceName}
+          onDescriptionChange={setNewWorkspaceDescription}
+          onTemplateChange={setNewWorkspaceTemplateId}
+          onClose={() => setIsWorkspaceOnboardingOpen(false)}
+          onCreate={() => { void submitWorkspaceOnboarding(); }}
+        />
       )}
 
       <footer className="status-bar" aria-label="Workbench status bar">

@@ -5,6 +5,7 @@ import path from 'node:path';
 import { HttpError } from './httpErrors.js';
 import type { AgentConfigStore } from './services/agentConfigStore.js';
 import { AdminConnectivityService } from './services/adminConnectivityService.js';
+import { materializeWorkspaceTemplate } from './services/workspaceTemplateMaterializer.js';
 import type { ClassificationBarSettingsSaveRequest, PendingChange, RequestIdentity, WorkspaceCreateRequest, WorkspaceTemplateImportRequest, WorkspaceUpdateRequest } from './types.js';
 import { LocalWorkspaceManager } from './services/localWorkspaceManager.js';
 import {
@@ -48,6 +49,10 @@ export function createWorkbenchApp(dependencies: WorkbenchAppDependencies, optio
       : request.params.workspaceId
   );
   const listChanges = async (workspace: WorkspaceRuntime): Promise<PendingChange[]> => workspace.changeManager.list();
+  const applyWorkspaceTemplate = async (workspace: WorkspaceRuntime, template: NonNullable<ReturnType<AgentConfigStore['getWorkspaceTemplate']>>) => {
+    await workspace.configStore.applyTemplate(template);
+    await materializeWorkspaceTemplate(template, workspace.storage, workspace.workspaceIndexer);
+  };
   const adminConnectivityService = new AdminConnectivityService(dependencies.agentConfigStore, dependencies.workspaceManager);
   const authRequired = identityOptions.mode !== 'local-fallback';
   const signInPath = process.env.JUNIOR_AUTH_SIGN_IN_PATH?.trim() || '/.auth/login/aad';
@@ -237,6 +242,18 @@ export function createWorkbenchApp(dependencies: WorkbenchAppDependencies, optio
       }
     });
 
+    app.get(`${basePath}/settings/history`, (request, response) => {
+      response.json(resolveWorkspace(request).configStore.getHistorySettings());
+    });
+
+    app.put(`${basePath}/settings/history`, async (request, response, next) => {
+      try {
+        response.json(await resolveWorkspace(request).configStore.saveHistorySettings(request.body));
+      } catch (error) {
+        next(error);
+      }
+    });
+
     app.post(`${basePath}/settings/template-import`, async (request, response, next) => {
       try {
         const body = request.body as WorkspaceTemplateImportRequest;
@@ -252,7 +269,10 @@ export function createWorkbenchApp(dependencies: WorkbenchAppDependencies, optio
           return;
         }
 
-        response.json(await resolveWorkspace(request).configStore.importTemplateSelection(template, body));
+        const workspace = resolveWorkspace(request);
+        const result = await workspace.configStore.importTemplateSelection(template, body);
+        await materializeWorkspaceTemplate(template, workspace.storage, workspace.workspaceIndexer);
+        response.json(result);
       } catch (error) {
         next(error);
       }
@@ -495,7 +515,7 @@ export function createWorkbenchApp(dependencies: WorkbenchAppDependencies, optio
       }, identity.userId);
 
       if (template) {
-        await dependencies.workspaceManager.resolve(identity.userId, workspace.id).configStore.applyTemplate(template);
+        await applyWorkspaceTemplate(dependencies.workspaceManager.resolve(identity.userId, workspace.id), template);
       }
 
       response.json(workspace);
@@ -526,7 +546,7 @@ export function createWorkbenchApp(dependencies: WorkbenchAppDependencies, optio
       }, identity.userId);
 
       if (template) {
-        await dependencies.workspaceManager.resolve(identity.userId, workspace.id).configStore.applyTemplate(template);
+        await applyWorkspaceTemplate(dependencies.workspaceManager.resolve(identity.userId, workspace.id), template);
       }
 
       response.json(workspace);
@@ -549,6 +569,33 @@ export function createWorkbenchApp(dependencies: WorkbenchAppDependencies, optio
 
   app.get('/api/admin/workspace-templates', (_request, response) => {
     response.json(dependencies.agentConfigStore.listWorkspaceTemplates());
+  });
+
+  app.post('/api/admin/workspace-templates', async (request, response, next) => {
+    try {
+      response.json(await dependencies.agentConfigStore.saveWorkspaceTemplate(request.body));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.put('/api/admin/workspace-templates/:id', async (request, response, next) => {
+    try {
+      response.json(await dependencies.agentConfigStore.saveWorkspaceTemplate({
+        ...request.body,
+        id: request.params.id
+      }));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.delete('/api/admin/workspace-templates/:id', async (request, response, next) => {
+    try {
+      response.json(await dependencies.agentConfigStore.deleteWorkspaceTemplate(request.params.id));
+    } catch (error) {
+      next(error);
+    }
   });
 
   app.get('/api/admin/classification-bar', (_request, response) => {

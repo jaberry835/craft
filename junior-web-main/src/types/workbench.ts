@@ -127,6 +127,16 @@ export interface ClassificationBarSettingsSaveRequest {
   color: string;
 }
 
+export interface WorkspaceHistorySettings {
+  enabled: boolean;
+  includeReasoning: boolean;
+}
+
+export interface WorkspaceHistorySettingsSaveRequest {
+  enabled?: boolean;
+  includeReasoning?: boolean;
+}
+
 export interface WorkspaceCreateRequest {
   name: string;
   description?: string;
@@ -145,6 +155,7 @@ export interface WorkspaceTemplateImportRequest {
   templateId: string;
   agentTemplateIds?: string[];
   mcpCatalogIds?: string[];
+  mcpServerIds?: string[];
   connectorIds?: string[];
 }
 
@@ -160,7 +171,27 @@ export interface WorkspaceTemplateDefinition {
   description: string;
   agentTemplateIds?: string[];
   mcpCatalogIds?: string[];
+  mcpServerIds?: string[];
   connectorIds?: string[];
+  directories?: string[];
+  files?: WorkspaceTemplateFile[];
+}
+
+export interface WorkspaceTemplateSaveRequest {
+  id?: string;
+  name: string;
+  description?: string;
+  agentTemplateIds?: string[];
+  mcpCatalogIds?: string[];
+  mcpServerIds?: string[];
+  connectorIds?: string[];
+  directories?: string[];
+  files?: WorkspaceTemplateFile[];
+}
+
+export interface WorkspaceTemplateFile {
+  path: string;
+  content: string;
 }
 
 export interface AgentTemplateDefinition {

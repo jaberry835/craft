@@ -15,6 +15,7 @@ import {
   type ChatToolDefinition
 } from '../services/azureOpenAiChatClient.js';
 import { ChangeManager } from '../services/changeManager.js';
+import { ConversationHistoryArchiver } from '../services/conversationHistoryArchiver.js';
 import { GroundingService } from '../services/groundingService.js';
 import { InMemoryPendingChangeStore } from '../services/inMemoryPendingChangeStore.js';
 import { LocalWorkspaceStorage } from '../services/localWorkspaceStorage.js';
@@ -131,7 +132,18 @@ export async function createHarness(chatClient: AzureOpenAiChatClient): Promise<
       description: 'Template for research and comparison workspaces.',
       agentTemplateIds: ['research-analyst'],
       mcpCatalogIds: ['azure-docs-mcp'],
-      connectorIds: ['default-azure-openai']
+      connectorIds: ['default-azure-openai'],
+      directories: ['research', 'sources'],
+      files: [
+        {
+          path: 'research/brief.md',
+          content: '# Research brief\n\n## Scope\n\n## Questions\n'
+        },
+        {
+          path: 'sources/README.md',
+          content: '# Sources\n\nCapture source references here.\n'
+        }
+      ]
     }
   ];
 
@@ -168,7 +180,18 @@ export async function createHarness(chatClient: AzureOpenAiChatClient): Promise<
     const nextPendingChangeStore = new InMemoryPendingChangeStore();
     const nextChangeManager = new ChangeManager(nextStorage, nextPendingChangeStore);
     const nextSessionStore = createChatSessionStore(workspace);
-    const nextAgent = new SimpleJuniorAgent(nextStorage, nextChangeManager, nextIndexer, nextConfigStore, groundingService, chatClient, nextSessionStore);
+    const nextHistoryArchiver = new ConversationHistoryArchiver(nextStorage);
+    const nextAgent = new SimpleJuniorAgent(
+      nextStorage,
+      nextChangeManager,
+      nextIndexer,
+      nextConfigStore,
+      groundingService,
+      chatClient,
+      nextSessionStore,
+      nextHistoryArchiver,
+      () => nextConfigStore.getHistorySettings()
+    );
 
     const runtime = {
       ...workspace,

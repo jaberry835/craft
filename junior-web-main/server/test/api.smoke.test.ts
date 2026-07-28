@@ -147,6 +147,16 @@ test('workspace creation adds a new workspace with isolated seeded files', async
   assert.equal(fileResponse.status, 200);
   const file = await fileResponse.json() as { content: string };
   assert.match(file.content, /Junior workspace/);
+
+  const templateFileResponse = await fetch(`${baseUrl}/api/workspaces/${encodeURIComponent(createdWorkspace.id)}/files?path=${encodeURIComponent('research/brief.md')}`);
+  assert.equal(templateFileResponse.status, 200);
+  const templateFile = await templateFileResponse.json() as { content: string };
+  assert.match(templateFile.content, /Research brief/);
+
+  const templateTreeResponse = await fetch(`${baseUrl}/api/workspaces/${encodeURIComponent(createdWorkspace.id)}/tree`);
+  assert.equal(templateTreeResponse.status, 200);
+  const templateTree = await templateTreeResponse.json() as Array<{ path: string }>;
+  assert.equal(templateTree.some((node) => node.path === 'sources'), true);
 });
 
 test('workspace settings can attach a shared template after creation', async (t) => {
@@ -492,6 +502,79 @@ test('workspace template import can selectively materialize chosen resources', a
   assert.equal(persistedMcpResponse.status, 200);
   const persistedMcpServers = await persistedMcpResponse.json() as Array<{ id: string }>;
   assert.equal(persistedMcpServers.length, 0);
+});
+
+test('admin can create, update, and delete full workspace templates', async (t) => {
+  const harness = await createHarness(new FakeAzureOpenAiChatClient());
+  const { server, baseUrl } = await startHarnessServer(harness);
+  t.after(async () => {
+    await stopHarnessServer(server);
+    await cleanupHarness(harness);
+  });
+
+  const mcpResponse = await fetch(`${baseUrl}/api/mcp-servers`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      id: 'template-docs-mcp',
+      name: 'Template Docs MCP',
+      transport: 'http',
+      endpoint: 'https://docs.example.test/mcp',
+      authMode: 'none'
+    })
+  });
+  assert.equal(mcpResponse.status, 200);
+
+  const createTemplateResponse = await fetch(`${baseUrl}/api/admin/workspace-templates`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: 'Editable Template',
+      description: 'Created from the admin editor.',
+      agentTemplateIds: ['research-analyst'],
+      mcpCatalogIds: ['azure-docs-mcp'],
+      mcpServerIds: ['template-docs-mcp'],
+      connectorIds: ['default-azure-openai'],
+      directories: ['intake', 'evidence'],
+      files: [{ path: 'intake/brief.md', content: '# Intake brief\n' }]
+    })
+  });
+  assert.equal(createTemplateResponse.status, 200);
+  const createdTemplate = await createTemplateResponse.json() as { id: string; directories?: string[]; files?: Array<{ path: string }>; mcpServerIds?: string[] };
+  assert.deepEqual(createdTemplate.directories, ['intake', 'evidence']);
+  assert.equal(createdTemplate.files?.[0]?.path, 'intake/brief.md');
+  assert.deepEqual(createdTemplate.mcpServerIds, ['template-docs-mcp']);
+
+  const updateTemplateResponse = await fetch(`${baseUrl}/api/admin/workspace-templates/${encodeURIComponent(createdTemplate.id)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: 'Editable Template Updated',
+      description: 'Updated from the admin editor.',
+      directories: ['intake', 'evidence', 'approval'],
+      files: [{ path: 'approval/summary.md', content: '# Approval summary\n' }]
+    })
+  });
+  assert.equal(updateTemplateResponse.status, 200);
+  const updatedTemplate = await updateTemplateResponse.json() as { id: string; name: string; files?: Array<{ path: string }> };
+  assert.equal(updatedTemplate.name, 'Editable Template Updated');
+  assert.equal(updatedTemplate.files?.[0]?.path, 'approval/summary.md');
+
+  const workspaceResponse = await fetch(`${baseUrl}/api/workspaces`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'Editable Template Workspace', templateId: updatedTemplate.id })
+  });
+  assert.equal(workspaceResponse.status, 200);
+  const workspace = await workspaceResponse.json() as { id: string };
+
+  const scaffoldFileResponse = await fetch(`${baseUrl}/api/workspaces/${encodeURIComponent(workspace.id)}/files?path=${encodeURIComponent('approval/summary.md')}`);
+  assert.equal(scaffoldFileResponse.status, 200);
+
+  const deleteTemplateResponse = await fetch(`${baseUrl}/api/admin/workspace-templates/${encodeURIComponent(updatedTemplate.id)}`, {
+    method: 'DELETE'
+  });
+  assert.equal(deleteTemplateResponse.status, 200);
 });
 
 test('admin catalog routes return agent templates and known MCP entries', async (t) => {
