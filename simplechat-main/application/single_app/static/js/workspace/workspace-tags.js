@@ -1,12 +1,12 @@
 // static/js/workspace/workspace-tags.js
 // Handles tag management for workspace documents
 
-import { escapeHtml } from "./workspace-utils.js";
+import { escapeHtml, getDocumentSyncBadgeHtml } from "./workspace-utils.js";
 import { showTagManagementModal } from "./workspace-tag-management.js";
 
 // ============= State Variables =============
 let workspaceTags = []; // All available workspace tags with colors
-let currentView = 'list'; // 'list' or 'grid'
+let currentView = 'list'; // 'list', 'cards', 'grid' (folders), or 'folders-cards'
 let selectedTagFilter = [];
 let currentFolder = null;    // null = folder overview, string = tag name being viewed
 let currentFolderType = null; // null | 'tag' | 'classification'
@@ -59,12 +59,23 @@ export function initializeTags() {
         });
     }
     
-    // Load saved view preference
-    const savedView = localStorage.getItem('personalWorkspaceViewPreference');
-    if (savedView === 'grid') {
-        document.getElementById('docs-view-grid').checked = true;
-        switchView('grid');
+    const preferredView = getPreferredWorkspaceView();
+    const cardsRadio = document.getElementById('docs-view-cards');
+    const gridRadio = document.getElementById('docs-view-grid');
+    const foldersCardsRadio = document.getElementById('docs-view-folders-cards');
+    const listRadio = document.getElementById('docs-view-list');
+
+    if (preferredView === 'cards' && cardsRadio) {
+        cardsRadio.checked = true;
+    } else if (preferredView === 'grid' && gridRadio) {
+        gridRadio.checked = true;
+    } else if (preferredView === 'folders-cards' && foldersCardsRadio) {
+        foldersCardsRadio.checked = true;
+    } else if (listRadio) {
+        listRadio.checked = true;
     }
+
+    switchView(preferredView);
 }
 
 // ============= Load Workspace Tags =============
@@ -84,7 +95,7 @@ export async function loadWorkspaceTags() {
             updateBulkTagSelect();
             
             // Update grid view if visible
-            if (currentView === 'grid') {
+            if (currentView === 'grid' || currentView === 'folders-cards') {
                 renderGridView();
             }
         } else {
@@ -99,12 +110,22 @@ export async function loadWorkspaceTags() {
 
 function setupViewSwitcher() {
     const listRadio = document.getElementById('docs-view-list');
+    const cardsRadio = document.getElementById('docs-view-cards');
     const gridRadio = document.getElementById('docs-view-grid');
+    const foldersCardsRadio = document.getElementById('docs-view-folders-cards');
     
     if (listRadio) {
         listRadio.addEventListener('change', () => {
             if (listRadio.checked) {
                 switchView('list');
+            }
+        });
+    }
+
+    if (cardsRadio) {
+        cardsRadio.addEventListener('change', () => {
+            if (cardsRadio.checked) {
+                switchView('cards');
             }
         });
     }
@@ -116,13 +137,57 @@ function setupViewSwitcher() {
             }
         });
     }
+
+    if (foldersCardsRadio) {
+        foldersCardsRadio.addEventListener('change', () => {
+            if (foldersCardsRadio.checked) {
+                switchView('folders-cards');
+            }
+        });
+    }
+}
+
+function getPreferredWorkspaceView() {
+    const savedView = localStorage.getItem('personalWorkspaceViewPreference');
+    if (savedView === 'cards' || savedView === 'grid' || savedView === 'folders-cards' || savedView === 'list') {
+        return savedView;
+    }
+
+    if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+        return window.matchMedia('(max-width: 991.98px)').matches ? 'cards' : 'list';
+    }
+
+    return 'list';
+}
+
+function showViewElement(element, displayClass = null) {
+    if (!element) {
+        return;
+    }
+
+    element.classList.remove('d-none');
+    if (displayClass) {
+        element.classList.add(displayClass);
+    }
+}
+
+function hideViewElement(element, displayClass = null) {
+    if (!element) {
+        return;
+    }
+
+    element.classList.add('d-none');
+    if (displayClass) {
+        element.classList.remove(displayClass);
+    }
 }
 
 function switchView(view) {
-    currentView = view;
-    localStorage.setItem('personalWorkspaceViewPreference', view);
+    currentView = ['grid', 'cards', 'folders-cards'].includes(view) ? view : 'list';
+    localStorage.setItem('personalWorkspaceViewPreference', currentView);
 
     const listView = document.getElementById('documents-list-view');
+    const cardView = document.getElementById('documents-card-view');
     const gridView = document.getElementById('documents-grid-view');
     const viewInfo = document.getElementById('docs-view-info');
     const listControls = document.getElementById('list-controls-bar');
@@ -130,8 +195,10 @@ function switchView(view) {
 
     const filterBtn = document.getElementById('docs-filters-toggle-btn');
     const filterCollapse = document.getElementById('docs-filters-collapse');
+    const selectionModeActive = document.getElementById('documents-table')?.classList.contains('selection-mode')
+        || document.getElementById('documents-card-view')?.classList.contains('selection-mode');
 
-    if (view === 'list') {
+    if (currentView === 'list' || currentView === 'cards') {
         // Reset folder drill-down state
         currentFolder = null;
         currentFolderType = null;
@@ -142,24 +209,53 @@ function switchView(view) {
         const tagContainer = document.getElementById('tag-folders-container');
         if (tagContainer) tagContainer.className = 'row g-2';
 
-        listView.style.display = 'block';
-        gridView.style.display = 'none';
-        if (listControls) listControls.style.display = 'flex';
-        if (gridControls) gridControls.style.display = 'none';
-        if (filterBtn) filterBtn.style.display = '';
-        if (viewInfo) viewInfo.textContent = '';
-        // Trigger reload of documents if needed
-        window.fetchUserDocuments?.();
+        if (currentView === 'list') {
+            showViewElement(listView);
+            hideViewElement(cardView);
+            if (viewInfo) {
+                viewInfo.textContent = '';
+            }
+        } else {
+            hideViewElement(listView);
+            showViewElement(cardView);
+            if (viewInfo) {
+                viewInfo.textContent = '';
+            }
+        }
+
+        hideViewElement(gridView);
+        showViewElement(listControls, 'd-flex');
+        hideViewElement(gridControls, 'd-flex');
+        if (filterBtn) {
+            filterBtn.classList.remove('d-none');
+        }
+
+        if (typeof window.renderWorkspaceDocumentView === 'function') {
+            window.renderWorkspaceDocumentView();
+        } else {
+            window.fetchUserDocuments?.();
+        }
     } else {
-        listView.style.display = 'none';
-        gridView.style.display = 'block';
-        if (listControls) listControls.style.display = 'none';
-        if (gridControls) gridControls.style.display = 'flex';
+        hideViewElement(listView);
+        hideViewElement(cardView);
+        showViewElement(gridView);
+        hideViewElement(listControls, 'd-flex');
+        showViewElement(gridControls, 'd-flex');
         // Hide list view filters in grid folder overview
-        if (filterBtn) filterBtn.style.display = 'none';
+        if (filterBtn) {
+            filterBtn.classList.add('d-none');
+        }
         if (filterCollapse) {
             const bsCollapse = bootstrap.Collapse.getInstance(filterCollapse);
             if (bsCollapse) bsCollapse.hide();
+        }
+        if (viewInfo) {
+            viewInfo.textContent = currentView === 'folders-cards'
+                ? ''
+                : '';
+        }
+        if (selectionModeActive && typeof window.toggleSelectionMode === 'function') {
+            window.toggleSelectionMode();
         }
         renderGridView();
     }
@@ -167,13 +263,34 @@ function switchView(view) {
 
 
 export function setWorkspaceView(view) {
-    const normalizedView = view === 'grid' ? 'grid' : 'list';
+    const normalizedView = ['grid', 'cards', 'folders-cards'].includes(view) ? view : 'list';
     const listRadio = document.getElementById('docs-view-list');
+    const cardsRadio = document.getElementById('docs-view-cards');
     const gridRadio = document.getElementById('docs-view-grid');
+    const foldersCardsRadio = document.getElementById('docs-view-folders-cards');
 
-    if (normalizedView === 'grid') {
+    if (normalizedView === 'grid' || normalizedView === 'folders-cards') {
         if (gridRadio) {
-            gridRadio.checked = true;
+            gridRadio.checked = normalizedView === 'grid';
+        }
+        if (foldersCardsRadio) {
+            foldersCardsRadio.checked = normalizedView === 'folders-cards';
+        }
+        if (cardsRadio) {
+            cardsRadio.checked = false;
+        }
+        if (listRadio) {
+            listRadio.checked = false;
+        }
+    } else if (normalizedView === 'cards') {
+        if (cardsRadio) {
+            cardsRadio.checked = true;
+        }
+        if (gridRadio) {
+            gridRadio.checked = false;
+        }
+        if (foldersCardsRadio) {
+            foldersCardsRadio.checked = false;
         }
         if (listRadio) {
             listRadio.checked = false;
@@ -182,8 +299,14 @@ export function setWorkspaceView(view) {
         if (listRadio) {
             listRadio.checked = true;
         }
+        if (cardsRadio) {
+            cardsRadio.checked = false;
+        }
         if (gridRadio) {
             gridRadio.checked = false;
+        }
+        if (foldersCardsRadio) {
+            foldersCardsRadio.checked = false;
         }
     }
 
@@ -494,12 +617,20 @@ function buildFolderDocumentsTable(docs) {
     const titleIcon = folderSortBy === 'title'
         ? (folderSortOrder === 'asc' ? 'bi-sort-alpha-down' : 'bi-sort-alpha-up')
         : 'bi-arrow-down-up text-muted';
+    const selectedDocuments = window.selectedDocuments || new Set();
+    const selectionModeClass = window.isDocumentSelectionModeActive?.() ? ' selection-mode' : '';
 
     let html = `
-        <table class="table table-striped table-sm" id="folder-docs-table">
+        <table class="table table-striped table-sm${selectionModeClass}" id="folder-docs-table">
             <thead>
                 <tr>
-                    <th style="width: 50px;"></th>
+                    <th style="width: 50px;">
+                        <input
+                            type="checkbox"
+                            class="form-check-input document-select-all-checkbox"
+                            aria-label="Select all visible folder documents"
+                        />
+                    </th>
                     <th class="folder-sortable-header" data-sort-field="file_name" style="cursor: pointer; user-select: none;">
                         File Name <i class="bi ${fnIcon} small sort-icon"></i>
                     </th>
@@ -523,18 +654,20 @@ function buildFolderDocumentsTable(docs) {
 
         const currentUserId = window.current_user_id;
         const isOwner = doc.user_id === currentUserId;
-
         // First column: expand/collapse or status indicator
         let firstColHtml = '';
         if (isComplete && !hasError) {
             firstColHtml = `
-                <button class="btn btn-link p-0" onclick="window.onEditDocument('${docId}')" title="View Metadata">
-                    <span class="bi bi-chevron-right"></span>
-                </button>`;
+                <input type="checkbox" class="form-check-input document-checkbox" data-document-id="${docId}"${selectedDocuments.has(docId) ? ' checked' : ''}>
+                <span class="expand-collapse-container">
+                    <button class="btn btn-link p-0" onclick="window.onEditDocument('${docId}')" title="View Metadata">
+                        <span class="bi bi-chevron-right"></span>
+                    </button>
+                </span>`;
         } else if (hasError) {
-            firstColHtml = `<span class="text-danger" title="Processing Error: ${escapeHtml(docStatus)}"><i class="bi bi-exclamation-triangle-fill"></i></span>`;
+            firstColHtml = `<input type="checkbox" class="form-check-input document-checkbox" data-document-id="${docId}"${selectedDocuments.has(docId) ? ' checked' : ''}><span class="expand-collapse-container"><span class="text-danger" title="Processing Error: ${escapeHtml(docStatus)}"><i class="bi bi-exclamation-triangle-fill"></i></span></span>`;
         } else {
-            firstColHtml = `<span class="text-muted" title="Processing: ${escapeHtml(docStatus)} (${pct.toFixed(0)}%)"><i class="bi bi-hourglass-split"></i></span>`;
+            firstColHtml = `<input type="checkbox" class="form-check-input document-checkbox" data-document-id="${docId}"${selectedDocuments.has(docId) ? ' checked' : ''}><span class="expand-collapse-container"><span class="text-muted" title="Processing: ${escapeHtml(docStatus)} (${pct.toFixed(0)}%)"><i class="bi bi-hourglass-split"></i></span></span>`;
         }
 
         // Chat button
@@ -560,6 +693,10 @@ function buildFolderDocumentsTable(docs) {
                         <i class="bi bi-three-dots-vertical"></i>
                     </button>
                     <ul class="dropdown-menu dropdown-menu-end">
+                        <li><a class="dropdown-item select-btn" href="#" onclick="window.toggleSelectionMode(); return false;">
+                            <i class="bi bi-check-square me-2"></i>Select
+                        </a></li>
+                        <li><hr class="dropdown-divider"></li>
                         <li><a class="dropdown-item" href="#" onclick="window.onEditDocument('${docId}'); return false;">
                             <i class="bi bi-pencil-fill me-2"></i>Edit Metadata
                         </a></li>`;
@@ -569,6 +706,10 @@ function buildFolderDocumentsTable(docs) {
                         <li><a class="dropdown-item" href="#" onclick="window.onExtractMetadata('${docId}', event); return false;">
                             <i class="bi bi-magic me-2"></i>Extract Metadata
                         </a></li>`;
+            }
+
+            if (isOwner) {
+                actionsDropdown += window.getWorkspaceDocumentReprocessDropdownItems?.(doc) || '';
             }
 
             actionsDropdown += `
@@ -611,10 +752,11 @@ function buildFolderDocumentsTable(docs) {
                 </div>`;
         }
 
+        // xss-check: ignore reviewed legacy document row shell; document fields are escaped and action fragments are built by local helpers.
         html += `
             <tr>
                 <td class="align-middle">${firstColHtml}</td>
-                <td class="align-middle" title="${escapeHtml(doc.file_name || '')}">${escapeHtml(doc.file_name || '')}</td>
+                <td class="align-middle" title="${escapeHtml(doc.file_name || '')}">${getDocumentSyncBadgeHtml(doc, true)}${escapeHtml(doc.file_name || '')}</td>
                 <td class="align-middle" title="${escapeHtml(doc.title || '')}">${escapeHtml(doc.title || 'N/A')}</td>
                 <td class="align-middle">${chatButton}${actionsDropdown}</td>
             </tr>`;
@@ -622,6 +764,19 @@ function buildFolderDocumentsTable(docs) {
 
     html += '</tbody></table>';
     return html;
+}
+
+function buildFolderDocumentsCardsHtml() {
+    return '<div id="folder-documents-card-view" class="row g-3"></div>';
+}
+
+function renderFolderDocumentCards(docs) {
+    const cardContainer = document.getElementById('folder-documents-card-view');
+    if (!cardContainer || typeof window.renderWorkspaceDocumentCardsInto !== 'function') {
+        return;
+    }
+
+    window.renderWorkspaceDocumentCardsInto(docs, cardContainer);
 }
 
 function renderFolderPagination(page, pageSize, totalCount) {
@@ -756,7 +911,7 @@ async function renderFolderContents(tagName) {
 
     // Update view info
     const viewInfo = document.getElementById('docs-view-info');
-    if (viewInfo) viewInfo.textContent = `Viewing: ${displayName}`;
+    //if (viewInfo) viewInfo.textContent = `Viewing: ${displayName}`;
 
     // Show breadcrumb + loading spinner
     container.innerHTML = buildBreadcrumbHtml(displayName, tagColor, currentFolderType || 'tag') +
@@ -863,6 +1018,8 @@ async function renderFolderContents(tagName) {
                     <option value="10"${folderPageSize === 10 ? ' selected' : ''}>10</option>
                     <option value="20"${folderPageSize === 20 ? ' selected' : ''}>20</option>
                     <option value="50"${folderPageSize === 50 ? ' selected' : ''}>50</option>
+                    <option value="100"${folderPageSize === 100 ? ' selected' : ''}>100</option>
+                    <option value="250"${folderPageSize === 250 ? ' selected' : ''}>250</option>
                 </select>
                 <span class="ms-1 small text-muted">items per page</span>
             </div>
@@ -875,12 +1032,18 @@ async function renderFolderContents(tagName) {
                     <p>No documents found in this folder.</p>
                 </div>`;
         } else {
-            html += buildFolderDocumentsTable(docs);
+            html += currentView === 'folders-cards'
+                ? buildFolderDocumentsCardsHtml()
+                : buildFolderDocumentsTable(docs);
             html += '<div id="folder-pagination" class="d-flex justify-content-center mt-3"></div>';
         }
 
         container.innerHTML = html;
         wireBackButton(container);
+        if (currentView === 'folders-cards' && docs.length > 0) {
+            renderFolderDocumentCards(docs);
+        }
+        window.syncDocumentSelectionUI?.();
 
         // Wire up folder page-size select
         const folderPageSizeSelect = document.getElementById('folder-page-size-select');
@@ -1030,10 +1193,56 @@ function setupBulkTagManagement() {
         
         if (bulkTagApplyBtn) {
             bulkTagApplyBtn.addEventListener('click', async () => {
-                await applyBulkTagChanges();
-                modalInstance.hide();
+                const didApply = await applyBulkTagChanges();
+                if (didApply) {
+                    modalInstance.hide();
+                }
             });
         }
+    }
+}
+
+function getBulkTagLoadingLabel(buttonLoading) {
+    const existingLabel = buttonLoading.querySelector('.button-loading-label');
+    if (existingLabel) {
+        return existingLabel;
+    }
+
+    const textNode = Array.from(buttonLoading.childNodes).find((node) => {
+        return node.nodeType === 3 && node.textContent.trim().length > 0;
+    });
+    if (textNode) {
+        return textNode;
+    }
+
+    const fallbackLabel = document.createElement('span');
+    fallbackLabel.className = 'button-loading-label';
+    fallbackLabel.textContent = 'Applying...';
+    buttonLoading.appendChild(fallbackLabel);
+    return fallbackLabel;
+}
+
+function setBulkTagButtonLoadingState(applyBtn, isLoading, current = 0, total = 0) {
+    const buttonText = applyBtn.querySelector('.button-text');
+    const buttonLoading = applyBtn.querySelector('.button-loading');
+    const loadingLabel = getBulkTagLoadingLabel(buttonLoading);
+    const loadingText = isLoading && total > 0
+        ? `Applying ${Math.min(current, total)}/${total}...`
+        : 'Applying...';
+
+    applyBtn.disabled = isLoading;
+    buttonText.classList.toggle('d-none', isLoading);
+    buttonLoading.classList.toggle('d-none', !isLoading);
+    loadingLabel.textContent = loadingText;
+}
+
+function mergeBulkTagResults(targetResults, result) {
+    if (Array.isArray(result?.success) && result.success.length > 0) {
+        targetResults.success.push(...result.success);
+    }
+
+    if (Array.isArray(result?.errors) && result.errors.length > 0) {
+        targetResults.errors.push(...result.errors);
     }
 }
 
@@ -1107,23 +1316,23 @@ async function applyBulkTagChanges() {
     if (documentIds.length === 0) {
         console.log('[Bulk Tag] ERROR: No documents selected');
         alert('No documents selected');
-        return;
+        return false;
     }
     
     if (selectedTags.length === 0) {
         console.log('[Bulk Tag] ERROR: No tags selected');
         alert('Please select at least one tag by clicking on it');
-        return;
+        return false;
     }
     
     // Show loading state
     const applyBtn = document.getElementById('bulk-tag-apply-btn');
-    const buttonText = applyBtn.querySelector('.button-text');
-    const buttonLoading = applyBtn.querySelector('.button-loading');
-    
-    applyBtn.disabled = true;
-    buttonText.classList.add('d-none');
-    buttonLoading.classList.remove('d-none');
+    const totalDocuments = documentIds.length;
+    const results = {
+        success: [],
+        errors: []
+    };
+    let processedCount = 0;
     
     console.log('[Bulk Tag] Preparing request with:', {
         document_ids: documentIds,
@@ -1132,62 +1341,83 @@ async function applyBulkTagChanges() {
     });
     
     try {
-        console.log('[Bulk Tag] Sending POST to /api/documents/bulk-tag...');
-        const response = await fetch('/api/documents/bulk-tag', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                document_ids: documentIds,
-                action: action,
-                tags: selectedTags
-            })
-        });
-        
-        console.log('[Bulk Tag] Response status:', response.status);
-        
-        const result = await response.json();
-        console.log('[Bulk Tag] Response data:', result);
-        
-        // Log error details if any
-        if (result.errors && result.errors.length > 0) {
-            console.error('[Bulk Tag] Error details:', result.errors);
-            result.errors.forEach((err, idx) => {
-                console.error(`[Bulk Tag] Error ${idx + 1}:`, err);
+        for (let index = 0; index < documentIds.length; index += 1) {
+            const documentId = documentIds[index];
+            setBulkTagButtonLoadingState(applyBtn, true, index + 1, totalDocuments);
+
+            console.log('[Bulk Tag] Sending POST to /api/documents/bulk-tag for document:', documentId);
+
+            const response = await fetch('/api/documents/bulk-tag', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    document_ids: [documentId],
+                    action: action,
+                    tags: selectedTags
+                })
             });
-        }
-        
-        if (response.ok) {
-            const successCount = result.success?.length || 0;
-            const errorCount = result.errors?.length || 0;
-            
-            console.log('[Bulk Tag] Success count:', successCount);
-            console.log('[Bulk Tag] Error count:', errorCount);
-            
-            let message = `Tags updated for ${successCount} document(s)`;
-            if (errorCount > 0) {
-                message += `\n${errorCount} document(s) had errors`;
+
+            const result = await response.json();
+            console.log('[Bulk Tag] Response status for document', documentId, ':', response.status);
+            console.log('[Bulk Tag] Response data for document', documentId, ':', result);
+
+            if (!response.ok) {
+                throw new Error(result.error || `Failed to update tags for document ${documentId}`);
             }
-            alert(message);
-            
-            // Reload workspace tags and documents
-            console.log('[Bulk Tag] Reloading tags and documents...');
-            await loadWorkspaceTags();
-            window.fetchUserDocuments?.();
-            
-            // Clear selection
-            window.selectedDocuments?.clear();
-            updateSelectionUI();
-        } else {
-            alert('Error: ' + (result.error || 'Failed to update tags'));
+
+            mergeBulkTagResults(results, result);
+            processedCount = index + 1;
         }
+
+        const successCount = results.success.length;
+        const errorCount = results.errors.length;
+
+        console.log('[Bulk Tag] Success count:', successCount);
+        console.log('[Bulk Tag] Error count:', errorCount);
+
+        let message = `Tags updated for ${successCount} document(s)`;
+        if (errorCount > 0) {
+            message += `\n${errorCount} document(s) had errors`;
+        }
+        alert(message);
+
+        // Reload workspace tags and documents
+        console.log('[Bulk Tag] Reloading tags and documents...');
+        await loadWorkspaceTags();
+        window.fetchUserDocuments?.();
+
+        // Clear selection
+        window.selectedDocuments?.clear();
+        updateSelectionUI();
+        return true;
     } catch (error) {
         console.error('Error applying bulk tag changes:', error);
-        alert('Error updating tags');
+
+        if (processedCount > 0) {
+            console.log('[Bulk Tag] Reloading tags and documents after partial progress...');
+            await loadWorkspaceTags();
+            window.fetchUserDocuments?.();
+        }
+
+        let errorMessage = 'Error updating tags';
+        if (processedCount > 0) {
+            errorMessage = `Stopped after ${processedCount}/${totalDocuments} document(s).`;
+
+            if (results.success.length > 0) {
+                errorMessage += `\nUpdated ${results.success.length} document(s) before the error.`;
+            }
+
+            if (results.errors.length > 0) {
+                errorMessage += `\n${results.errors.length} document(s) had errors before the stop.`;
+            }
+
+            errorMessage += `\n${error.message}`;
+        }
+
+        alert(errorMessage);
+        return false;
     } finally {
-        // Reset button state
-        applyBtn.disabled = false;
-        buttonText.classList.remove('d-none');
-        buttonLoading.classList.add('d-none');
+        setBulkTagButtonLoadingState(applyBtn, false);
     }
 }
 

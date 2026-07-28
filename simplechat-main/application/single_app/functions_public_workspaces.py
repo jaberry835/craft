@@ -1,14 +1,22 @@
 # functions_public_workspaces.py
 
 from config import *
-from functions_authentication import *
+import functions_authentication
+import functions_settings
 from functions_group import *
+from typing import Iterable
+
+from functions_workspace_branding import (
+    DEFAULT_WORKSPACE_HERO_COLOR,
+    get_workspace_logo_metadata,
+    normalize_workspace_hero_color,
+)
 
 def create_public_workspace(name: str, description: str) -> dict:
     """
     Creates a new public workspace. The creator becomes the Owner by default.
     """
-    user_info = get_current_user_info()
+    user_info = functions_authentication.get_current_user_info()
     if not user_info:
         raise Exception("No user in session")
 
@@ -19,6 +27,9 @@ def create_public_workspace(name: str, description: str) -> dict:
         "id": new_id,
         "name": name,
         "description": description,
+        "heroColor": DEFAULT_WORKSPACE_HERO_COLOR,
+        "logoBase64": "",
+        "logoVersion": 1,
         "owner": {
             "userId": user_info["userId"],
             "email": user_info["email"],
@@ -27,6 +38,7 @@ def create_public_workspace(name: str, description: str) -> dict:
         "admins": [],
         "documentManagers": [],
         "pendingDocumentManagers": [],
+        "disable_file_downloads": False,
         "createdDate": now_iso,
         "modifiedDate": now_iso
     }
@@ -69,6 +81,16 @@ def get_user_public_workspaces(user_id: str) -> list:
     ))
 
 
+def get_all_public_workspaces() -> list:
+    """
+    Fetch all public workspaces visible to authenticated users.
+    """
+    return list(cosmos_public_workspaces_container.query_items(
+        query="SELECT * FROM c",
+        enable_cross_partition_query=True
+    ))
+
+
 def search_public_workspaces(search_query: str, user_id: str) -> list:
     """
     Return the user's public workspaces matching the search term in name or description.
@@ -96,6 +118,24 @@ def search_public_workspaces(search_query: str, user_id: str) -> list:
     ))
 
 
+def search_all_public_workspaces(search_query: str) -> list:
+    """
+    Return all public workspaces matching the search term in name or description.
+    """
+    base_query = "SELECT * FROM c"
+    params = []
+
+    if search_query:
+        base_query += " WHERE CONTAINS(LOWER(c.name), @search) OR CONTAINS(LOWER(c.description), @search)"
+        params.append({"name": "@search", "value": search_query.lower()})
+
+    return list(cosmos_public_workspaces_container.query_items(
+        query=base_query,
+        parameters=params,
+        enable_cross_partition_query=True
+    ))
+
+
 def delete_public_workspace(ws_id: str) -> None:
     """
     Deletes a public workspace from Cosmos DB. Typically only the owner may call this.
@@ -108,17 +148,70 @@ def delete_public_workspace(ws_id: str) -> None:
 
 def get_user_role_in_public_workspace(ws_doc: dict, user_id: str) -> str | None:
     """
-    Determine the user's role in the given workspace doc.
+    Determine the user's effective role in the given public workspace doc.
     """
-    if not ws_doc:
+    if not ws_doc or not user_id:
         return None
     if ws_doc.get("owner", {}).get("userId") == user_id:
         return "Owner"
-    if user_id in ws_doc.get("admins", []):
-        return "Admin"
-    if any(dm["userId"] == user_id for dm in ws_doc.get("documentManagers", [])):
-        return "DocumentManager"
-    return None
+    for admin in ws_doc.get("admins", []):
+        if isinstance(admin, str) and admin == user_id:
+            return "Admin"
+        if isinstance(admin, dict) and admin.get("userId") == user_id:
+            return "Admin"
+    for manager in ws_doc.get("documentManagers", []):
+        if isinstance(manager, str) and manager == user_id:
+            return "DocumentManager"
+        if isinstance(manager, dict) and manager.get("userId") == user_id:
+            return "DocumentManager"
+    return "User"
+
+
+def build_public_workspace_public_summary(ws_doc: dict) -> dict:
+    """Return the non-sensitive workspace fields safe for any authenticated caller."""
+    owner = ws_doc.get("owner", {}) or {}
+    logo_metadata = get_workspace_logo_metadata(ws_doc)
+    return {
+        "id": ws_doc.get("id", ""),
+        "name": ws_doc.get("name", ""),
+        "description": ws_doc.get("description", ""),
+        "owner": {
+            "displayName": owner.get("displayName", ""),
+            "email": owner.get("email", ""),
+        },
+        "status": ws_doc.get("status", "active"),
+        "heroColor": normalize_workspace_hero_color(ws_doc.get("heroColor")),
+        **logo_metadata,
+        "userRole": None,
+        "isMember": False,
+    }
+
+
+def build_public_workspace_member_payload(ws_doc: dict, user_id: str) -> dict:
+    """Return the workspace fields required by member-facing workspace pages."""
+    role = get_user_role_in_public_workspace(ws_doc, user_id)
+    owner = ws_doc.get("owner", {}) or {}
+    logo_metadata = get_workspace_logo_metadata(ws_doc)
+    payload = {
+        "id": ws_doc.get("id", ""),
+        "name": ws_doc.get("name", ""),
+        "description": ws_doc.get("description", ""),
+        "owner": {
+            "displayName": owner.get("displayName", ""),
+            "email": owner.get("email", ""),
+        },
+        "status": ws_doc.get("status", "active"),
+        "heroColor": normalize_workspace_hero_color(ws_doc.get("heroColor")),
+        **logo_metadata,
+        "userRole": role,
+        "isMember": bool(role),
+        "disable_file_downloads": bool(ws_doc.get("disable_file_downloads", False)),
+    }
+
+    if role in ("Owner", "Admin") and "retention_policy" in ws_doc:
+        payload["retention_policy"] = ws_doc.get("retention_policy")
+
+    return payload
 
 
 def is_user_in_public_workspace(ws_doc: dict, user_id: str) -> bool:
@@ -224,25 +317,62 @@ def count_public_workspace_documents(ws_id: str) -> int:
 
 def update_active_public_workspace_for_user(user_id: str, ws_id: str) -> None:
     """
-    Persist the user's activePublicWorkspaceOid in their settings.
+    Persist the user's activePublicWorkspaceOid after validating the workspace.
     """
-    update_user_settings(user_id, {"activePublicWorkspaceOid": ws_id})
+    normalized_workspace_id = str(ws_id or "").strip()
+    if not normalized_workspace_id:
+        functions_settings.update_user_settings(user_id, {"activePublicWorkspaceOid": ""})
+        return
+
+    workspace_doc = find_public_workspace_by_id(normalized_workspace_id)
+    if not workspace_doc:
+        raise LookupError("Workspace not found")
+
+    functions_settings.update_user_settings(
+        user_id,
+        {"activePublicWorkspaceOid": normalized_workspace_id},
+    )
+
+
+def require_active_public_workspace(
+    user_id: str,
+    allowed_roles: Iterable[str] = ("Owner", "Admin", "DocumentManager"),
+) -> tuple[str, dict, str]:
+    """Return the active public workspace after validating it still exists and the user can access it."""
+    settings = functions_settings.get_user_settings(user_id)
+    active_workspace_id = str(settings.get("settings", {}).get("activePublicWorkspaceOid") or "").strip()
+    if not active_workspace_id:
+        raise ValueError("No active public workspace selected")
+
+    workspace_doc = find_public_workspace_by_id(active_workspace_id)
+    if not workspace_doc:
+        raise LookupError("Active public workspace not found")
+
+    role = get_user_role_in_public_workspace(workspace_doc, user_id)
+    if not role:
+        raise PermissionError("Access denied")
+
+    allowed = {allowed_role.lower() for allowed_role in allowed_roles}
+    if role.lower() not in allowed:
+        raise PermissionError("Access denied")
+
+    return active_workspace_id, workspace_doc, role
 
 
 def get_user_visible_public_workspaces(user_id: str) -> list:
     """
     Get the list of public workspace IDs that the user has marked as visible.
-    Returns all accessible workspaces if no visibility settings exist yet.
+    Returns all public workspaces if no visibility settings exist yet.
     """
     from functions_settings import get_user_settings
     
     user_settings = get_user_settings(user_id)
     visible_workspace_ids = user_settings.get("settings", {}).get("visiblePublicWorkspaceIds")
     
-    # If no visibility settings exist yet, return all accessible workspaces (backward compatibility)
+    # If no visibility settings exist yet, return all public workspaces (backward compatibility)
     if visible_workspace_ids is None:
-        accessible_workspaces = get_user_public_workspaces(user_id)
-        return [ws["id"] for ws in accessible_workspaces]
+        public_workspaces = get_all_public_workspaces()
+        return [ws["id"] for ws in public_workspaces]
     
     return visible_workspace_ids
 
@@ -318,18 +448,17 @@ def remove_visible_public_workspace(user_id: str, ws_id: str) -> None:
 
 def get_user_visible_public_workspace_docs(user_id: str) -> list:
     """
-    Get all public workspaces that the user has access to AND has marked as visible.
+    Get all public workspaces that the user has marked as visible.
     This replaces get_user_public_workspaces for visibility-filtered results.
     """
-    # Get all workspaces the user has access to
-    accessible_workspaces = get_user_public_workspaces(user_id)
+    public_workspaces = get_all_public_workspaces()
     
     # Get the user's visibility preferences
     visible_workspace_ids = get_user_visible_public_workspaces(user_id)
     
     # Filter to only include visible workspaces
     visible_workspaces = [
-        ws for ws in accessible_workspaces
+        ws for ws in public_workspaces
         if ws["id"] in visible_workspace_ids
     ]
     

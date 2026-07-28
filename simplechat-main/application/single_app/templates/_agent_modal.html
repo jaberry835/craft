@@ -1,6 +1,6 @@
 <!-- Dynamic Agent Modal -->
 <div class="modal fade" id="agentModal" tabindex="-1" aria-labelledby="agentModalLabel" aria-hidden="true" data-bwignore="true" data-1p-ignore="true" data-lpignore="true" autocomplete="off">
-  <div class="modal-dialog modal-lg">
+  <div class="modal-dialog modal-xl agent-modal-dialog">
     <div class="modal-content">
       <div class="modal-header flex-wrap gap-2 align-items-center justify-content-between">
         <div class="d-flex align-items-center gap-2">
@@ -34,6 +34,11 @@
               <label class="form-check-label" for="agent-type-new-foundry">New Foundry</label>
               <i class="bi bi-info-circle ms-2" data-bs-toggle="tooltip" title="New Foundry agents use the application-based experience and are invoked through the Responses protocol endpoint."></i>
             </div>
+            <div class="form-check form-check-inline">
+              <input class="form-check-input" type="radio" name="agent-type" id="agent-type-foundry-workflow" value="foundry_workflow">
+              <label class="form-check-label" for="agent-type-foundry-workflow">Foundry Workflow</label>
+              <i class="bi bi-info-circle ms-2" data-bs-toggle="tooltip" title="Foundry workflows are invoked by workflow name through the project OpenAI Responses agent reference path."></i>
+            </div>
           </div>
           <div class="form-text" id="agent-type-helper">Choose the provider for this agent. Foundry agents cannot attach local actions.</div>
         </div>
@@ -57,10 +62,14 @@
           </div>
           <div class="step-indicator" data-step="5">
             <div class="step-circle">5</div>
-            <div class="step-label">Advanced</div>
+            <div class="step-label">Knowledge</div>
           </div>
           <div class="step-indicator" data-step="6">
             <div class="step-circle">6</div>
+            <div class="step-label">Advanced</div>
+          </div>
+          <div class="step-indicator" data-step="7">
+            <div class="step-circle">7</div>
             <div class="step-label">Summary</div>
           </div>
         </div>
@@ -80,6 +89,47 @@
             <i class="bi bi-info-circle ms-2" data-bs-toggle="tooltip" title="A clear description helps teammates know exactly when to launch this agent during manual routing."></i>
             <textarea class="form-control" id="agent-description" rows="3" placeholder="Describe what this agent does and when to use it..."></textarea>
           </div>
+          <div class="row g-3">
+            <div class="col-md-6">
+              <label for="agent-tags" class="form-label">Tags</label>
+              <input type="text" class="form-control" id="agent-tags" placeholder="research, finance, planning" />
+            </div>
+            <div class="col-md-6">
+              <label class="form-label d-block" for="agent-icon-picker-search">Icon</label>
+              <input type="hidden" id="agent-icon-mode" value="bootstrap" />
+              <input type="hidden" id="agent-icon-class" value="" />
+              <input type="hidden" id="agent-icon-image-data" value="" />
+              <div class="agent-icon-editor border rounded p-2">
+                <div class="d-flex align-items-center gap-2 mb-2">
+                  <div class="agent-icon-preview" id="agent-icon-preview" aria-hidden="true">
+                    <i class="bi bi-robot"></i>
+                  </div>
+                  <div class="btn-group btn-group-sm" role="group" aria-label="Agent icon type">
+                    <input type="radio" class="btn-check" name="agent-icon-type" id="agent-icon-type-bootstrap" value="bootstrap" checked autocomplete="off" />
+                    <label class="btn btn-outline-secondary" for="agent-icon-type-bootstrap">Bootstrap Icon</label>
+                    <input type="radio" class="btn-check" name="agent-icon-type" id="agent-icon-type-image" value="image" autocomplete="off" />
+                    <label class="btn btn-outline-secondary" for="agent-icon-type-image">Image</label>
+                  </div>
+                </div>
+                <div id="agent-bootstrap-icon-controls">
+                  <div class="dropdown agent-icon-picker-dropdown">
+                    <button class="btn btn-outline-secondary btn-sm dropdown-toggle w-100 text-start" type="button" id="agent-icon-picker-button" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">
+                      <i class="bi bi-robot me-1" aria-hidden="true"></i><span id="agent-icon-picker-label">bi-robot</span>
+                    </button>
+                    <div class="dropdown-menu p-2 agent-icon-picker-menu" aria-labelledby="agent-icon-picker-button">
+                      <input type="search" class="form-control form-control-sm mb-2" id="agent-icon-picker-search" placeholder="Search icons" autocomplete="off" />
+                      <div class="agent-icon-picker-list" id="agent-icon-picker-list" role="listbox" aria-label="Bootstrap icons"></div>
+                    </div>
+                  </div>
+                </div>
+                <div id="agent-image-icon-controls" class="d-none">
+                  <input type="file" class="form-control form-control-sm" id="agent-icon-image-file" accept=".png,.jpg,.jpeg,image/png,image/jpeg" />
+                  <div class="form-text">PNG or JPEG. The image is resized and saved on the agent record.</div>
+                  <button type="button" class="btn btn-outline-secondary btn-sm mt-2" id="agent-icon-image-clear">Remove Image</button>
+                </div>
+              </div>
+            </div>
+          </div>
           <!-- Hidden field to store generated name -->
           <input type="hidden" id="agent-name" name="agent_name" />
         </div>
@@ -88,17 +138,17 @@
         <div class="agent-step d-none" id="agent-step-2">
           <h6 class="mb-3">Model & Connection</h6>
 
-          <!-- Foundry-specific fields (shown only when agent_type is classic or new Foundry) -->
+          <!-- Foundry-specific fields (shown only when agent_type is a Foundry runtime) -->
           <div id="agent-foundry-fields" class="d-none">
             <div class="alert alert-warning py-2 small" role="note" id="agent-foundry-mode-note">
-              Foundry-managed tools are used for this agent type and local actions are disabled.
+              Foundry agents and workflows run as the signed-in user and require that user to have access to the Foundry project. Local actions are disabled.
             </div>
             <div class="mb-3">
-              <label for="agent-foundry-endpoint-select" class="form-label">Foundry Endpoint</label>
+              <label for="agent-foundry-endpoint-select" class="form-label">Saved Foundry Connection (optional)</label>
               <select class="form-select" id="agent-foundry-endpoint-select">
-                <option value="">Select a configured endpoint...</option>
+                <option value="">Optional: select a saved connection...</option>
               </select>
-              <div class="form-text">Endpoints come from global and workspace configurations.</div>
+              <div class="form-text">Select a saved connection to reuse project details, or enter them manually. Fetch and runtime access use the signed-in user's Foundry permissions.</div>
             </div>
             <div class="mb-3 d-flex flex-wrap gap-2 align-items-center">
               <button type="button" class="btn btn-outline-primary btn-sm" id="agent-foundry-fetch-btn">
@@ -107,12 +157,13 @@
               <span class="text-muted small" id="agent-foundry-fetch-status"></span>
             </div>
             <div class="mb-3">
-              <label for="agent-foundry-agent-select" class="form-label" id="agent-foundry-select-label">Foundry Agent</label>
+              <label for="agent-foundry-agent-select" class="form-label" id="agent-foundry-select-label">Discovered Foundry Agent (optional)</label>
               <select class="form-select" id="agent-foundry-agent-select">
                 <option value="">Select an agent...</option>
               </select>
-              <div class="form-text" id="agent-foundry-select-help">Select a classic Foundry agent to import its identity.</div>
+              <div class="form-text" id="agent-foundry-select-help">Fetch requires a saved connection. If you already know the name or ID, enter it manually below.</div>
             </div>
+            <h6 class="mt-4 mb-3">Project Details</h6>
             <div class="mb-3">
               <label for="agent-foundry-endpoint" class="form-label">Foundry Project Endpoint <span class="text-danger" title="Required">*</span></label>
               <input type="text" class="form-control" id="agent-foundry-endpoint" placeholder="https://&lt;resource&gt;.services.ai.azure.com/ or full /api/projects/... endpoint" />
@@ -148,6 +199,27 @@
                 <label for="agent-new-foundry-activity-api-version" class="form-label">Activity Protocol API Version</label>
                 <input type="text" class="form-control" id="agent-new-foundry-activity-api-version" placeholder="Optional for phase 1" />
                 <div class="form-text">Optional for now. Phase 1 uses the Responses endpoint; activity polling can be added later.</div>
+              </div>
+            </div>
+            <div id="agent-foundry-workflow-only" class="d-none">
+              <div class="mb-3">
+                <label for="agent-foundry-workflow-name" class="form-label">Workflow Name <span class="text-danger" title="Required">*</span></label>
+                <input type="text" class="form-control" id="agent-foundry-workflow-name" placeholder="published-workflow-name" />
+              </div>
+              <div class="mb-3">
+                <label for="agent-foundry-workflow-responses-api-version" class="form-label">Workflow Responses API Version <span class="text-danger" title="Required">*</span></label>
+                <select class="form-select" id="agent-foundry-workflow-responses-api-version">
+                  <option value="v1" selected>v1</option>
+                </select>
+                <div class="form-text">Use <code>v1</code> for the OpenAI-compatible workflow REST API, even when the Foundry project itself is the newer Foundry experience.</div>
+              </div>
+              <div class="form-check form-switch mb-3">
+                <input class="form-check-input" type="checkbox" id="agent-foundry-workflow-include-document-context" checked />
+                <label class="form-check-label" for="agent-foundry-workflow-include-document-context">Include selected workspace and chat-upload context</label>
+              </div>
+              <div class="mb-3">
+                <label for="agent-foundry-workflow-max-context-chars" class="form-label">Maximum Context Characters</label>
+                <input type="number" class="form-control" id="agent-foundry-workflow-max-context-chars" min="1" step="1000" placeholder="24000" />
               </div>
             </div>
             <div class="mb-3">
@@ -263,6 +335,16 @@
           <div class="mb-3" id="agent-instructions-container">
             <label for="agent-instructions" class="form-label">Agent Instructions <span class="text-danger" title="Required">*</span></label>
             <i class="bi bi-info-circle ms-2" data-bs-toggle="tooltip" title="Well-crafted instructions guide the agent's behavior, ensuring it performs tasks correctly, consistently, and within scope. These are incredibly important and have a massive effect on how the agent operates."></i>
+            <div class="mb-3 mt-2" id="agent-instructions-draft-container">
+              <label for="agent-instruction-brief" class="form-label">Instruction Brief</label>
+              <textarea class="form-control" id="agent-instruction-brief" rows="3" placeholder="Describe the agent you want to build..."></textarea>
+              <div class="d-flex flex-wrap align-items-center gap-2 mt-2">
+                <button type="button" class="btn btn-outline-primary btn-sm" id="agent-draft-instructions-btn">
+                  <i class="bi bi-stars me-1"></i>Draft Instructions
+                </button>
+                <span class="text-muted small" id="agent-draft-instructions-status" aria-live="polite"></span>
+              </div>
+            </div>
             <textarea class="form-control" id="agent-instructions" rows="8" placeholder="Define how this agent should behave, what it should do, and any specific guidelines it should follow..."></textarea>
             <div class="form-text">
               <strong>Tips:</strong> Be specific about the agent's role, capabilities, and limitations. Include examples of good behavior if relevant.
@@ -371,10 +453,215 @@
               </div>
             </div>
           </div>
+
+          <div id="agent-simplechat-capabilities" class="mt-4 d-none">
+            <div class="card border-0 shadow-sm">
+              <div class="card-header bg-primary text-white">
+                <i class="bi bi-sliders me-2"></i>Simple Chat Action Capabilities
+              </div>
+              <div class="card-body">
+                <p class="text-muted small mb-3">Enable only the Simple Chat operations this agent should expose. These settings are saved per agent in additional settings.</p>
+                <div id="agent-simplechat-capabilities-list" class="d-grid gap-3"></div>
+              </div>
+            </div>
+          </div>
+
+          <div id="agent-msgraph-capabilities" class="mt-4 d-none">
+            <div class="card border-0 shadow-sm">
+              <div class="card-header bg-success text-white">
+                <i class="bi bi-calendar3 me-2"></i>Microsoft Graph Action Capabilities
+              </div>
+              <div class="card-body">
+                <p class="text-muted small mb-3">Enable only the Microsoft Graph operations this agent should expose. These settings are saved per agent in additional settings.</p>
+                <div id="agent-msgraph-capabilities-list" class="d-grid gap-3"></div>
+              </div>
+            </div>
+          </div>
+
+          <div id="agent-chart-capabilities" class="mt-4 d-none">
+            <div class="card border-0 shadow-sm">
+              <div class="card-header bg-warning text-dark">
+                <i class="bi bi-bar-chart-line me-2"></i>Chart Action Types
+              </div>
+              <div class="card-body">
+                <p class="text-muted small mb-3">Enable only the chart types this agent should expose from the selected chart action. These settings are saved per agent in additional settings.</p>
+                <div id="agent-chart-capabilities-list" class="d-grid gap-3"></div>
+              </div>
+            </div>
+          </div>
         </div>
 
-        <!-- Step 5: Advanced -->
+        <!-- Step 5: Assigned Knowledge -->
         <div class="agent-step d-none" id="agent-step-5">
+          <div class="d-flex justify-content-between align-items-start gap-2 mb-3">
+            <h6 class="mb-0">Assigned Knowledge</h6>
+            <button type="button" class="btn btn-outline-secondary btn-sm" id="agent-assigned-knowledge-help-toggle" data-bs-toggle="collapse" data-bs-target="#agent-assigned-knowledge-help" aria-expanded="false" aria-controls="agent-assigned-knowledge-help" title="How Assigned Knowledge works" aria-label="How Assigned Knowledge works">
+              <i class="bi bi-question-circle" aria-hidden="true"></i>
+            </button>
+          </div>
+          <div class="collapse mb-3" id="agent-assigned-knowledge-help">
+            <div class="alert alert-secondary py-2 small mb-0" role="note">
+              <div class="fw-semibold mb-1">Build the agent's knowledge in order.</div>
+              <ol class="mb-0 ps-3">
+                <li>Choose source workspaces to define the document pool.</li>
+                <li>Leave tag limits and specific documents empty to use every document from those sources.</li>
+                <li>Add tag limits or specific documents only when the agent should use a smaller active set.</li>
+                <li>Confirm Active Documents to see the final indexed documents the agent will use in chat.</li>
+              </ol>
+            </div>
+          </div>
+          <div class="form-check form-switch mb-3">
+            <input class="form-check-input" type="checkbox" id="agent-assigned-knowledge-enabled" />
+            <label class="form-check-label" for="agent-assigned-knowledge-enabled">Restrict this agent to assigned workspace knowledge</label>
+          </div>
+          <div id="agent-assigned-knowledge-controls" class="d-none">
+            <div class="alert alert-info py-2 small" role="note">
+              Assigned Knowledge uses indexed workspace documents only. Web search and deep research remain separate chat controls.
+            </div>
+            <div class="d-flex justify-content-between align-items-center mb-3">
+              <div class="text-muted small" id="agent-assigned-knowledge-scope-help">Choose source workspaces, optionally limit them with tags or specific documents, then confirm the active documents.</div>
+              <button type="button" class="btn btn-outline-secondary btn-sm" id="agent-assigned-knowledge-refresh">
+                <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+              </button>
+            </div>
+            <div class="agent-assigned-knowledge-active-summary border rounded px-3 py-2 small mb-3" id="agent-assigned-knowledge-active-summary" role="status" aria-live="polite">
+              Choose at least one source workspace to set this agent's active documents.
+            </div>
+            <div id="agent-assigned-knowledge-loading" class="text-center py-3 d-none">
+              <div class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></div>
+              <span class="text-muted small">Loading knowledge sources...</span>
+            </div>
+            <div class="agent-assigned-knowledge-builder d-grid gap-3">
+              <section class="agent-assigned-knowledge-section" aria-labelledby="agent-assigned-knowledge-user-context-heading">
+                <h6 class="mb-2" id="agent-assigned-knowledge-user-context-heading">User Workspace Context</h6>
+                <div class="form-check form-switch mb-2">
+                  <input class="form-check-input" type="checkbox" id="agent-assigned-knowledge-user-context-enabled" />
+                  <label class="form-check-label" for="agent-assigned-knowledge-user-context-enabled">Allow users to add their own workspace documents as task context</label>
+                </div>
+                <div id="agent-assigned-knowledge-user-action-controls" class="d-none">
+                  <div class="text-muted small mb-2">Choose which workspace actions users can run with their added context.</div>
+                  <div class="d-flex flex-wrap gap-3">
+                    <div class="form-check">
+                      <input class="form-check-input agent-assigned-knowledge-user-action" type="checkbox" id="agent-assigned-knowledge-user-action-search" value="search" checked />
+                      <label class="form-check-label" for="agent-assigned-knowledge-user-action-search">Search</label>
+                    </div>
+                    <div class="form-check">
+                      <input class="form-check-input agent-assigned-knowledge-user-action" type="checkbox" id="agent-assigned-knowledge-user-action-analyze" value="analyze" checked />
+                      <label class="form-check-label" for="agent-assigned-knowledge-user-action-analyze">Analyze</label>
+                    </div>
+                    <div class="form-check">
+                      <input class="form-check-input agent-assigned-knowledge-user-action" type="checkbox" id="agent-assigned-knowledge-user-action-compare" value="compare" checked />
+                      <label class="form-check-label" for="agent-assigned-knowledge-user-action-compare">Compare</label>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <section class="agent-assigned-knowledge-section" aria-labelledby="agent-assigned-knowledge-web-sources-heading">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                  <h6 class="mb-0" id="agent-assigned-knowledge-web-sources-heading">Web Sources</h6>
+                  <span class="badge text-bg-secondary" id="agent-assigned-knowledge-web-source-count">0 selected</span>
+                </div>
+                <div class="row g-2 align-items-end mb-2">
+                  <div class="col-lg-7">
+                    <label class="form-label small text-muted" for="agent-assigned-knowledge-web-source-input">Assigned URLs</label>
+                    <textarea class="form-control form-control-sm" id="agent-assigned-knowledge-web-source-input" rows="3" placeholder="Paste one or more URLs"></textarea>
+                  </div>
+                  <div class="col-lg-3">
+                    <label class="form-label small text-muted" for="agent-assigned-knowledge-web-source-mode">Review Mode</label>
+                    <select class="form-select form-select-sm" id="agent-assigned-knowledge-web-source-mode">
+                      <option value="url_review">Review URL</option>
+                      <option value="deep_research">Deep Research</option>
+                    </select>
+                  </div>
+                  <div class="col-lg-2 d-grid">
+                    <button type="button" class="btn btn-outline-primary btn-sm" id="agent-assigned-knowledge-web-source-add">
+                      <i class="bi bi-plus-lg me-1"></i>Add
+                    </button>
+                  </div>
+                </div>
+                <div class="text-muted small mb-2">Assigned URLs are reviewed from the trusted agent record at chat time and still follow admin URL and Deep Research policy.</div>
+                <div id="agent-assigned-knowledge-web-source-list" class="agent-assigned-knowledge-web-source-list border rounded p-2" aria-label="Selected assigned web sources"></div>
+              </section>
+
+              <section class="agent-assigned-knowledge-section" aria-labelledby="agent-assigned-knowledge-sources-heading">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                  <h6 class="mb-0" id="agent-assigned-knowledge-sources-heading">Source Workspaces</h6>
+                  <span class="badge text-bg-secondary" id="agent-assigned-knowledge-source-count">0 selected</span>
+                </div>
+                <div id="agent-assigned-knowledge-sources" class="agent-assigned-knowledge-transfer" data-category="source">
+                  <div class="row g-3">
+                    <div class="col-lg-6">
+                      <label class="form-label small text-muted" for="agent-assigned-knowledge-source-available-search">Available Source Workspaces</label>
+                      <input type="search" class="form-control form-control-sm mb-2" id="agent-assigned-knowledge-source-available-search" placeholder="Search available source workspaces" />
+                      <div id="agent-assigned-knowledge-source-available" class="agent-assigned-knowledge-transfer-list" data-category="source" data-list-role="available" aria-label="Available assigned knowledge source workspaces"></div>
+                    </div>
+                    <div class="col-lg-6">
+                      <label class="form-label small text-muted" for="agent-assigned-knowledge-source-selected-search">Selected Source Workspaces</label>
+                      <input type="search" class="form-control form-control-sm mb-2" id="agent-assigned-knowledge-source-selected-search" placeholder="Search selected source workspaces" />
+                      <div id="agent-assigned-knowledge-source-selected" class="agent-assigned-knowledge-transfer-list" data-category="source" data-list-role="selected" aria-label="Selected assigned knowledge source workspaces"></div>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <section class="agent-assigned-knowledge-section" aria-labelledby="agent-assigned-knowledge-tags-heading">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                  <h6 class="mb-0" id="agent-assigned-knowledge-tags-heading">Tag Limits</h6>
+                  <span class="badge text-bg-secondary" id="agent-assigned-knowledge-tag-count">0 selected</span>
+                </div>
+                <div id="agent-assigned-knowledge-tags" class="agent-assigned-knowledge-transfer" data-category="tag">
+                  <div class="row g-3">
+                    <div class="col-lg-6">
+                      <label class="form-label small text-muted" for="agent-assigned-knowledge-tag-available-search">Available Tags</label>
+                      <input type="search" class="form-control form-control-sm mb-2" id="agent-assigned-knowledge-tag-available-search" placeholder="Search available tags" />
+                      <div id="agent-assigned-knowledge-tag-available" class="agent-assigned-knowledge-transfer-list" data-category="tag" data-list-role="available" aria-label="Available assigned knowledge tags"></div>
+                    </div>
+                    <div class="col-lg-6">
+                      <label class="form-label small text-muted" for="agent-assigned-knowledge-tag-selected-search">Selected Tag Limits</label>
+                      <input type="search" class="form-control form-control-sm mb-2" id="agent-assigned-knowledge-tag-selected-search" placeholder="Search selected tag limits" />
+                      <div id="agent-assigned-knowledge-tag-selected" class="agent-assigned-knowledge-transfer-list" data-category="tag" data-list-role="selected" aria-label="Selected assigned knowledge tags"></div>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <section class="agent-assigned-knowledge-section" aria-labelledby="agent-assigned-knowledge-documents-heading">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                  <h6 class="mb-0" id="agent-assigned-knowledge-documents-heading">Limit to Specific Documents</h6>
+                  <span class="badge text-bg-secondary" id="agent-assigned-knowledge-document-count">0 specific</span>
+                </div>
+                <select class="form-select d-none" id="agent-assigned-knowledge-documents" multiple aria-hidden="true"></select>
+                <div id="agent-assigned-knowledge-document-transfer" class="agent-assigned-knowledge-transfer" data-category="document">
+                  <div class="row g-3">
+                    <div class="col-lg-6">
+                      <label class="form-label small text-muted" for="agent-assigned-knowledge-document-available-search">Available Documents</label>
+                      <input type="search" class="form-control form-control-sm mb-2" id="agent-assigned-knowledge-document-available-search" placeholder="Search available documents" />
+                      <div id="agent-assigned-knowledge-document-available" class="agent-assigned-knowledge-transfer-list agent-assigned-knowledge-transfer-list-tall" data-category="document" data-list-role="available" aria-label="Available assigned knowledge documents"></div>
+                    </div>
+                    <div class="col-lg-6">
+                      <label class="form-label small text-muted" for="agent-assigned-knowledge-document-selected-search">Specific Documents</label>
+                      <input type="search" class="form-control form-control-sm mb-2" id="agent-assigned-knowledge-document-selected-search" placeholder="Search specific documents" />
+                      <div id="agent-assigned-knowledge-document-selected" class="agent-assigned-knowledge-transfer-list agent-assigned-knowledge-transfer-list-tall" data-category="document" data-list-role="selected" aria-label="Specific assigned knowledge documents"></div>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <section class="agent-assigned-knowledge-section" aria-labelledby="agent-assigned-knowledge-resolved-heading">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                  <h6 class="mb-0" id="agent-assigned-knowledge-resolved-heading">Active Documents</h6>
+                  <span class="badge text-bg-info" id="agent-assigned-knowledge-resolved-count">0 active documents</span>
+                </div>
+                <div id="agent-assigned-knowledge-resolved-documents" class="agent-assigned-knowledge-resolved-list border rounded p-2" aria-label="Active assigned knowledge documents"></div>
+              </section>
+            </div>
+            <div id="agent-assigned-knowledge-empty" class="text-muted small mt-3 d-none">No knowledge sources are available for this agent scope.</div>
+          </div>
+        </div>
+
+        <!-- Step 6: Advanced -->
+        <div class="agent-step d-none" id="agent-step-6">
           <h6 class="mb-3">Advanced Settings</h6>
           <div class="alert alert-info d-none" id="agent-advanced-foundry-note" role="alert">
             Advanced options are managed by Foundry and are not available for Foundry agents.
@@ -407,8 +694,8 @@
           </div>
         </div>
 
-        <!-- Step 6: Summary -->
-        <div class="agent-step d-none" id="agent-step-6">
+        <!-- Step 7: Summary -->
+        <div class="agent-step d-none" id="agent-step-7">
           <h6 class="mb-3">Agent Summary</h6>
           
           <!-- Basic Information Section -->
@@ -418,13 +705,19 @@
             </div>
             <div class="card-body">
               <div class="row g-3">
-                <div class="col-md-6">
+                <div class="col-md-2">
+                  <div class="summary-item">
+                    <label class="fw-bold text-muted small">Icon:</label>
+                    <div id="summary-agent-icon" class="agent-view-icon" aria-hidden="true"></div>
+                  </div>
+                </div>
+                <div class="col-md-5">
                   <div class="summary-item">
                     <label class="fw-bold text-muted small">Display Name:</label>
                     <div id="summary-display-name" class="text-dark">-</div>
                   </div>
                 </div>
-                <div class="col-md-6">
+                <div class="col-md-5">
                   <div class="summary-item">
                     <label class="fw-bold text-muted small">Generated Name:</label>
                     <div id="summary-name" class="text-dark">-</div>
@@ -496,6 +789,16 @@
               <div id="summary-actions-list" class="row g-3" style="display: none;">
                 <!-- Action cards will be populated here -->
               </div>
+            </div>
+          </div>
+
+          <!-- Assigned Knowledge Section -->
+          <div class="card mb-3 border-0 shadow-sm" id="summary-assigned-knowledge-section">
+            <div class="card-header text-white" style="background: linear-gradient(135deg, #0d6efd, #6610f2);">
+              <i class="bi bi-journal-bookmark me-2"></i>Assigned Knowledge
+            </div>
+            <div class="card-body">
+              <div id="summary-assigned-knowledge" class="text-muted">No assigned knowledge configured</div>
             </div>
           </div>
           
@@ -686,6 +989,62 @@
   color: #9ec5fe;
 }
 
+.agent-modal-dialog {
+  max-width: min(96vw, 1180px);
+}
+
+.agent-icon-preview {
+  align-items: center;
+  background: var(--bs-tertiary-bg);
+  border: 1px solid var(--bs-border-color);
+  border-radius: 50%;
+  color: var(--bs-primary);
+  display: inline-flex;
+  flex: 0 0 42px;
+  height: 42px;
+  justify-content: center;
+  overflow: hidden;
+  width: 42px;
+}
+
+.agent-icon-preview img {
+  height: 100%;
+  object-fit: cover;
+  width: 100%;
+}
+
+.agent-icon-preview i {
+  font-size: 1.3rem;
+}
+
+.agent-icon-picker-menu {
+  max-height: 320px;
+  min-width: 280px;
+  overflow: hidden;
+}
+
+.agent-icon-picker-list {
+  display: grid;
+  gap: 0.25rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  max-height: 250px;
+  overflow-y: auto;
+}
+
+.agent-icon-picker-option {
+  align-items: center;
+  display: flex;
+  gap: 0.35rem;
+  min-width: 0;
+  text-align: left;
+}
+
+.agent-icon-picker-option span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .agent-action-card .action-type-badge {
   position: absolute;
   top: 0.5rem;
@@ -699,6 +1058,85 @@
 
 .agent-action-card.selected .card-text {
   color: #146c43;
+}
+
+.agent-assigned-knowledge-section {
+  border: 1px solid var(--bs-border-color);
+  border-radius: 0.5rem;
+  padding: 1rem;
+}
+
+.agent-assigned-knowledge-active-summary {
+  background-color: var(--bs-tertiary-bg);
+  color: var(--bs-body-color);
+}
+
+.agent-assigned-knowledge-transfer-list,
+.agent-assigned-knowledge-resolved-list,
+.agent-assigned-knowledge-web-source-list {
+  min-height: 10rem;
+  max-height: 14rem;
+  overflow-y: auto;
+  background-color: var(--bs-body-bg);
+}
+
+.agent-assigned-knowledge-transfer-list-tall {
+  min-height: 14rem;
+  max-height: 18rem;
+}
+
+.agent-assigned-knowledge-transfer-item,
+.agent-assigned-knowledge-resolved-item,
+.agent-assigned-knowledge-web-source-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.5rem 0.625rem;
+  border-bottom: 1px solid var(--bs-border-color-translucent);
+}
+
+.agent-assigned-knowledge-transfer-item:last-child,
+.agent-assigned-knowledge-resolved-item:last-child,
+.agent-assigned-knowledge-web-source-item:last-child {
+  border-bottom: 0;
+}
+
+.agent-assigned-knowledge-transfer-item[draggable="true"] {
+  cursor: grab;
+}
+
+.agent-assigned-knowledge-transfer-item.dragging {
+  opacity: 0.55;
+}
+
+.agent-assigned-knowledge-transfer-list.drag-over {
+  outline: 2px solid var(--bs-primary);
+  outline-offset: -2px;
+}
+
+.agent-assigned-knowledge-item-content {
+  min-width: 0;
+}
+
+.agent-assigned-knowledge-item-title,
+.agent-assigned-knowledge-item-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-assigned-knowledge-item-meta {
+  font-size: 0.8125rem;
+  color: var(--bs-secondary-color);
+}
+
+.agent-assigned-knowledge-empty-list {
+  display: flex;
+  align-items: center;
+  min-height: 4rem;
+  padding: 0.75rem;
+  color: var(--bs-secondary-color);
 }
 
 /* Selected actions summary */

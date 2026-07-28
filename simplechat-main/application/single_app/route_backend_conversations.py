@@ -1,17 +1,59 @@
 # route_backend_conversations.py
 
+import logging
+import math
+import re
+
+from collaboration_models import GROUP_MULTI_USER_CHAT_TYPE, PERSONAL_MULTI_USER_CHAT_TYPE
 from config import *
+from functions_appinsights import log_event
 from functions_authentication import *
+from functions_collaboration import (
+    assert_user_can_view_collaboration_conversation,
+    assert_user_can_participate_in_collaboration_conversation,
+    ensure_collaboration_source_conversation,
+    get_collaboration_conversation,
+    list_group_collaboration_conversations_for_user,
+    list_collaboration_messages,
+    list_personal_collaboration_conversations_for_user,
+    serialize_collaboration_conversation,
+)
 from functions_settings import *
+from functions_conversation_feed import (
+    CONVERSATION_FEED_SOURCE_COLLABORATION,
+    CONVERSATION_FEED_SOURCE_LEGACY,
+    build_conversation_feed_page,
+    decode_conversation_feed_cursor,
+    get_conversation_feed_source_offsets,
+    is_conversation_feed_cursor_compatible,
+    normalize_conversation_feed_page_size,
+    sort_conversation_feed_recent,
+    tag_conversation_feed_source,
+)
 from functions_conversation_metadata import get_conversation_metadata, update_conversation_with_metadata
 from functions_conversation_unread import clear_conversation_unread, normalize_conversation_unread_state
+from functions_image_messages import decode_image_content, get_complete_image_content, hydrate_image_messages, is_blob_backed_image_message, is_external_image_url
 from functions_notifications import mark_chat_response_notifications_read_for_conversation
-from flask import Response, request
+from flask import Response, request, stream_with_context
 from functions_debug import debug_print
-from functions_message_artifacts import filter_assistant_artifact_items
+from functions_documents import (
+    delete_chat_upload_workspace_documents_for_conversation,
+    serialize_chat_upload_workspace_documents_for_conversation,
+)
+from functions_message_artifacts import (
+    build_message_artifact_payload_map,
+    filter_assistant_artifact_items,
+    hydrate_agent_citations_from_artifacts,
+)
+from functions_simplechat_operations import (
+    create_personal_conversation_for_current_user,
+    delete_blob_backed_chat_message_files,
+    derive_conversation_title_from_message,
+)
 from swagger_wrapper import swagger_route, get_auth_security
 from functions_activity_logging import log_conversation_creation, log_conversation_deletion, log_conversation_archival
 from functions_thoughts import archive_thoughts_for_conversation, delete_thoughts_for_conversation
+from utils_cache import invalidate_personal_search_cache
 
 def normalize_chat_type(conversation_item):
     chat_type = conversation_item.get('chat_type')
@@ -37,6 +79,588 @@ def normalize_chat_type(conversation_item):
 
     conversation_item['chat_type'] = chat_type
     return chat_type, True
+
+
+SEARCH_MATCH_CONTAINS = 'contains'
+SEARCH_MATCH_ALL_WORDS = 'all_words'
+SEARCH_MATCH_ANY_WORD = 'any_word'
+SEARCH_MATCH_WHOLE_WORD = 'whole_word'
+SEARCH_MATCH_MODES = {
+    SEARCH_MATCH_CONTAINS,
+    SEARCH_MATCH_ALL_WORDS,
+    SEARCH_MATCH_ANY_WORD,
+    SEARCH_MATCH_WHOLE_WORD,
+}
+
+SEARCH_CHAT_TYPE_ALIASES = {
+    'personal': {'personal_single_user', PERSONAL_MULTI_USER_CHAT_TYPE},
+    'personal-single-user': {'personal_single_user'},
+    'personal_single_user': {'personal_single_user'},
+    'personal-multi-user': {PERSONAL_MULTI_USER_CHAT_TYPE},
+    PERSONAL_MULTI_USER_CHAT_TYPE: {PERSONAL_MULTI_USER_CHAT_TYPE},
+    'group': {'group-single-user', GROUP_MULTI_USER_CHAT_TYPE},
+    'group-single-user': {'group-single-user'},
+    'group_single_user': {'group-single-user'},
+    'group-multi-user': {GROUP_MULTI_USER_CHAT_TYPE},
+    GROUP_MULTI_USER_CHAT_TYPE: {GROUP_MULTI_USER_CHAT_TYPE},
+    'public': {'public'},
+}
+
+
+def _normalize_workspace_document_delete_ids(raw_document_ids):
+    if raw_document_ids is None:
+        return []
+    if not isinstance(raw_document_ids, list):
+        raise ValueError('delete_workspace_document_ids must be an array')
+
+    normalized_document_ids = []
+    seen_document_ids = set()
+    for raw_document_id in raw_document_ids:
+        document_id = str(raw_document_id or '').strip()
+        if not document_id or document_id in seen_document_ids:
+            continue
+        seen_document_ids.add(document_id)
+        normalized_document_ids.append(document_id)
+
+    return normalized_document_ids
+
+
+def _get_requested_workspace_document_delete_ids_for_conversation(payload, conversation_id):
+    if not isinstance(payload, dict):
+        return []
+
+    if 'delete_workspace_document_ids' in payload:
+        return _normalize_workspace_document_delete_ids(payload.get('delete_workspace_document_ids'))
+
+    delete_ids_by_conversation = payload.get('delete_workspace_document_ids_by_conversation')
+    if isinstance(delete_ids_by_conversation, dict):
+        return _normalize_workspace_document_delete_ids(delete_ids_by_conversation.get(conversation_id))
+
+    return []
+
+
+def _normalize_search_match_mode(match_mode):
+    normalized_mode = str(match_mode or SEARCH_MATCH_CONTAINS).strip().lower().replace('-', '_')
+    if normalized_mode in SEARCH_MATCH_MODES:
+        return normalized_mode
+    return SEARCH_MATCH_CONTAINS
+
+
+def _tokenize_search_terms(search_term):
+    return [term for term in re.split(r'\s+', str(search_term or '').strip()) if term]
+
+
+def _get_message_query_terms(search_term, match_mode):
+    normalized_mode = _normalize_search_match_mode(match_mode)
+    if normalized_mode in (SEARCH_MATCH_ALL_WORDS, SEARCH_MATCH_ANY_WORD):
+        return _tokenize_search_terms(search_term)
+    return [str(search_term or '').strip()]
+
+
+def _normalize_search_chat_type_value(chat_type):
+    normalized_type = str(chat_type or '').strip().lower()
+    if not normalized_type:
+        return 'personal_single_user'
+
+    if normalized_type == 'personal':
+        return 'personal_single_user'
+    if normalized_type == 'group':
+        return 'group-single-user'
+    if normalized_type == 'group-multi-user':
+        return GROUP_MULTI_USER_CHAT_TYPE
+    if normalized_type == 'group_single_user':
+        return 'group-single-user'
+    if normalized_type == 'personal-multi-user':
+        return PERSONAL_MULTI_USER_CHAT_TYPE
+    if normalized_type == 'personal-single-user':
+        return 'personal_single_user'
+    return normalized_type
+
+
+def _expand_search_chat_type_filters(chat_types):
+    normalized_filters = set()
+    for chat_type in chat_types or []:
+        normalized_key = str(chat_type or '').strip().lower()
+        if not normalized_key:
+            continue
+        normalized_filters.update(
+            SEARCH_CHAT_TYPE_ALIASES.get(
+                normalized_key,
+                {_normalize_search_chat_type_value(normalized_key)},
+            )
+        )
+    return normalized_filters
+
+
+def _get_search_conversation_chat_type(conversation_item):
+    raw_chat_type = str((conversation_item or {}).get('chat_type') or '').strip()
+    if raw_chat_type:
+        return _normalize_search_chat_type_value(raw_chat_type)
+
+    normalized_item = dict(conversation_item or {})
+    inferred_chat_type, _ = normalize_chat_type(normalized_item)
+    return _normalize_search_chat_type_value(inferred_chat_type)
+
+
+def _conversation_matches_selected_chat_types(conversation_item, selected_chat_types):
+    if not selected_chat_types:
+        return True
+    return _get_search_conversation_chat_type(conversation_item) in selected_chat_types
+
+
+def _conversation_matches_classifications(conversation_item, classifications):
+    if not classifications:
+        return True
+    conversation_classifications = conversation_item.get('classification', []) or []
+    return any(classification in conversation_classifications for classification in classifications)
+
+
+def _conversation_timestamp(conversation_item):
+    return (
+        conversation_item.get('last_updated')
+        or conversation_item.get('updated_at')
+        or conversation_item.get('last_message_at')
+        or conversation_item.get('created_at')
+        or ''
+    )
+
+
+def _conversation_matches_date_range(conversation_item, date_from='', date_to=''):
+    timestamp = _conversation_timestamp(conversation_item)
+    if date_from and (not timestamp or timestamp < date_from):
+        return False
+    if date_to and (not timestamp or timestamp > f'{date_to}T23:59:59'):
+        return False
+    return True
+
+
+def _matches_search_text(text, search_term, match_mode=SEARCH_MATCH_CONTAINS):
+    normalized_mode = _normalize_search_match_mode(match_mode)
+    text_value = str(text or '')
+    text_lower = text_value.lower()
+    normalized_search = str(search_term or '').strip()
+    search_lower = normalized_search.lower()
+
+    if not search_lower:
+        return False
+
+    if normalized_mode == SEARCH_MATCH_ALL_WORDS:
+        terms = [term.lower() for term in _tokenize_search_terms(normalized_search)]
+        return bool(terms) and all(term in text_lower for term in terms)
+
+    if normalized_mode == SEARCH_MATCH_ANY_WORD:
+        terms = [term.lower() for term in _tokenize_search_terms(normalized_search)]
+        return bool(terms) and any(term in text_lower for term in terms)
+
+    if normalized_mode == SEARCH_MATCH_WHOLE_WORD:
+        whole_word_pattern = re.compile(rf'(?<!\w){re.escape(normalized_search)}(?!\w)', re.IGNORECASE)
+        return whole_word_pattern.search(text_value) is not None
+
+    return search_lower in text_lower
+
+
+def _find_search_match(text, search_term, match_mode=SEARCH_MATCH_CONTAINS):
+    normalized_mode = _normalize_search_match_mode(match_mode)
+    text_value = str(text or '')
+    text_lower = text_value.lower()
+    normalized_search = str(search_term or '').strip()
+    search_lower = normalized_search.lower()
+
+    if not search_lower:
+        return -1, 0
+
+    if normalized_mode in (SEARCH_MATCH_ALL_WORDS, SEARCH_MATCH_ANY_WORD):
+        matches = []
+        for term in _tokenize_search_terms(normalized_search):
+            position = text_lower.find(term.lower())
+            if position != -1:
+                matches.append((position, len(term)))
+        if matches:
+            return min(matches, key=lambda item: item[0])
+        return -1, 0
+
+    if normalized_mode == SEARCH_MATCH_WHOLE_WORD:
+        whole_word_pattern = re.compile(rf'(?<!\w){re.escape(normalized_search)}(?!\w)', re.IGNORECASE)
+        match = whole_word_pattern.search(text_value)
+        if match:
+            return match.start(), match.end() - match.start()
+        return -1, 0
+
+    position = text_lower.find(search_lower)
+    return position, len(normalized_search) if position != -1 else 0
+
+
+def _build_message_search_query(search_term, match_mode):
+    query_terms = _get_message_query_terms(search_term, match_mode)
+    query_terms = [term for term in query_terms if term]
+    if not query_terms:
+        return None, []
+
+    operator = ' OR ' if _normalize_search_match_mode(match_mode) == SEARCH_MATCH_ANY_WORD else ' AND '
+    contains_conditions = []
+    parameters = []
+    for index, term in enumerate(query_terms):
+        parameter_name = f'@term{index}'
+        contains_conditions.append(f'CONTAINS(m.content, {parameter_name}, true)')
+        parameters.append({'name': parameter_name, 'value': term})
+
+    query = (
+        'SELECT * FROM m WHERE '
+        f'({operator.join(contains_conditions)}) '
+        "AND (m.role = 'user' OR m.role = 'assistant')"
+    )
+    return query, parameters
+
+
+def _query_matching_messages(container, search_term, match_mode):
+    query, parameters = _build_message_search_query(search_term, match_mode)
+    if not query:
+        return []
+
+    messages = list(container.query_items(
+        query=query,
+        parameters=parameters,
+        enable_cross_partition_query=True,
+        max_item_count=-1,
+    ))
+
+    return [
+        message for message in messages
+        if _matches_search_text(message.get('content', ''), search_term, match_mode)
+    ]
+
+
+def _message_is_in_active_thread(message_item):
+    thread_info = (message_item.get('metadata') or {}).get('thread_info', {})
+    return thread_info.get('active_thread') is not False
+
+
+def _message_matches_attachment_filters(message_item, has_files=False, has_images=False):
+    if not has_files and not has_images:
+        return True
+
+    metadata = message_item.get('metadata') or {}
+    if has_files and metadata.get('uploaded_files'):
+        return True
+    if has_images and metadata.get('generated_images'):
+        return True
+    return False
+
+
+def _build_message_snippets(matching_messages, search_term, match_mode, max_messages=5):
+    message_snippets = []
+    for message_item in matching_messages[:max_messages]:
+        content = str(message_item.get('content', '') or '')
+        match_pos, match_length = _find_search_match(content, search_term, match_mode)
+        if match_pos == -1:
+            continue
+
+        start = max(0, match_pos - 50)
+        end = min(len(content), match_pos + match_length + 50)
+        snippet = content[start:end]
+
+        if start > 0:
+            snippet = f'...{snippet}'
+        if end < len(content):
+            snippet = f'{snippet}...'
+
+        message_snippets.append({
+            'message_id': message_item.get('id'),
+            'content_snippet': snippet,
+            'timestamp': message_item.get('timestamp', ''),
+            'role': message_item.get('role', 'unknown'),
+        })
+    return message_snippets
+
+
+def _build_search_conversation_payload(conversation_item):
+    return {
+        'id': conversation_item.get('id'),
+        'title': conversation_item.get('title', 'Untitled'),
+        'last_updated': _conversation_timestamp(conversation_item),
+        'classification': conversation_item.get('classification', []) or [],
+        'chat_type': _get_search_conversation_chat_type(conversation_item),
+        'is_pinned': bool(conversation_item.get('is_pinned', False)),
+        'is_hidden': bool(conversation_item.get('is_hidden', False)),
+    }
+
+
+def _load_accessible_collaboration_search_conversations(user_id):
+    conversations = []
+    seen_conversation_ids = set()
+
+    for conversation_doc, user_state in list_personal_collaboration_conversations_for_user(user_id):
+        serialized = serialize_collaboration_conversation(
+            conversation_doc,
+            current_user_id=user_id,
+            user_state=user_state,
+        )
+        conversation_id = serialized.get('id')
+        if conversation_id and conversation_id not in seen_conversation_ids:
+            conversations.append(serialized)
+            seen_conversation_ids.add(conversation_id)
+
+    for conversation_doc, user_state in list_group_collaboration_conversations_for_user(user_id):
+        serialized = serialize_collaboration_conversation(
+            conversation_doc,
+            current_user_id=user_id,
+            user_state=user_state,
+        )
+        conversation_id = serialized.get('id')
+        if conversation_id and conversation_id not in seen_conversation_ids:
+            conversations.append(serialized)
+            seen_conversation_ids.add(conversation_id)
+
+    return conversations
+
+
+def _is_conversation_priority(conversation_item):
+    return bool(
+        (conversation_item or {}).get('is_pinned', False)
+        or (conversation_item or {}).get('has_unread_assistant_response', False)
+    )
+
+
+def _conversation_feed_matches_search(conversation_item, search_term):
+    normalized_search = str(search_term or '').strip()
+    if not normalized_search:
+        return True
+    return _matches_search_text((conversation_item or {}).get('title', ''), normalized_search)
+
+
+def _query_legacy_conversations_for_feed(
+    user_id,
+    include_hidden=False,
+    search_term='',
+    extra_conditions=None,
+    offset=0,
+    limit=None,
+):
+    query_parts = ['c.user_id = @user_id']
+    query_parameters = [{'name': '@user_id', 'value': user_id}]
+
+    if not include_hidden:
+        query_parts.append('(NOT IS_DEFINED(c.is_hidden) OR c.is_hidden = false)')
+
+    if search_term:
+        query_parts.append('(IS_STRING(c.title) AND CONTAINS(LOWER(c.title), @search_term))')
+        query_parameters.append({'name': '@search_term', 'value': str(search_term).lower()})
+
+    for condition in extra_conditions or []:
+        query_parts.append(condition)
+
+    normalized_offset = max(0, int(offset or 0))
+    normalized_limit = None
+    if limit is not None:
+        normalized_limit = max(1, int(limit))
+
+    query = f"SELECT * FROM c WHERE {' AND '.join(query_parts)} ORDER BY c.last_updated DESC"
+    if normalized_limit is not None:
+        query = f'{query} OFFSET {normalized_offset} LIMIT {normalized_limit}'
+
+    items = list(cosmos_conversations_container.query_items(
+        query=query,
+        parameters=query_parameters,
+        enable_cross_partition_query=True,
+    ))
+
+    return [
+        tag_conversation_feed_source(
+            normalize_conversation_unread_state(item),
+            CONVERSATION_FEED_SOURCE_LEGACY,
+        )
+        for item in items
+    ]
+
+
+def _count_hidden_legacy_conversations(user_id):
+    query = (
+        'SELECT VALUE COUNT(1) FROM c '
+        'WHERE c.user_id = @user_id AND c.is_hidden = true'
+    )
+    results = list(cosmos_conversations_container.query_items(
+        query=query,
+        parameters=[{'name': '@user_id', 'value': user_id}],
+        enable_cross_partition_query=True,
+    ))
+    return int(results[0]) if results else 0
+
+
+def _load_unread_collaboration_notification_map(user_id):
+    query = """
+        SELECT c.metadata.conversation_id AS conversation_id,
+               c.metadata.message_id AS message_id,
+               c.created_at AS created_at
+        FROM c
+        WHERE c.user_id = @user_id
+        AND c.notification_type = @notification_type
+        AND (NOT IS_DEFINED(c.read_by) OR NOT ARRAY_CONTAINS(c.read_by, @user_id))
+    """
+    notifications = list(cosmos_notifications_container.query_items(
+        query=query,
+        parameters=[
+            {'name': '@user_id', 'value': user_id},
+            {'name': '@notification_type', 'value': 'collaboration_message_received'},
+        ],
+        partition_key=user_id,
+    ))
+
+    unread_by_conversation = {}
+    for notification in notifications:
+        conversation_id = str(notification.get('conversation_id') or '').strip()
+        if not conversation_id:
+            continue
+
+        current_notification = unread_by_conversation.get(conversation_id)
+        if (
+            current_notification is None
+            or str(notification.get('created_at') or '') > str(current_notification.get('created_at') or '')
+        ):
+            unread_by_conversation[conversation_id] = notification
+
+    return unread_by_conversation
+
+
+def _load_collaboration_conversations_for_feed(user_id):
+    conversations = _load_accessible_collaboration_search_conversations(user_id)
+    try:
+        unread_by_conversation = _load_unread_collaboration_notification_map(user_id)
+    except Exception as exc:
+        log_event(
+            f'[ConversationFeed] Failed to load collaboration unread state: {exc}',
+            level=logging.WARNING,
+            exceptionTraceback=True,
+        )
+        unread_by_conversation = {}
+    feed_conversations = []
+
+    for conversation in conversations:
+        feed_conversation = tag_conversation_feed_source(
+            conversation,
+            CONVERSATION_FEED_SOURCE_COLLABORATION,
+        )
+        unread_notification = unread_by_conversation.get(str(feed_conversation.get('id') or ''))
+        if unread_notification:
+            feed_conversation['has_unread_assistant_response'] = True
+            feed_conversation['last_unread_assistant_message_id'] = unread_notification.get('message_id')
+            feed_conversation['last_unread_assistant_at'] = unread_notification.get('created_at')
+        feed_conversations.append(feed_conversation)
+
+    return feed_conversations
+
+
+def _filter_collaboration_conversations_for_feed(conversations, include_hidden=False, search_term=''):
+    filtered_conversations = []
+    for conversation in conversations or []:
+        if not include_hidden and conversation.get('is_hidden', False):
+            continue
+        if not _conversation_feed_matches_search(conversation, search_term):
+            continue
+        filtered_conversations.append(conversation)
+    return filtered_conversations
+
+
+def _filter_legacy_source_duplicates(conversations, collaboration_source_ids):
+    if not collaboration_source_ids:
+        return list(conversations or [])
+
+    return [
+        conversation for conversation in conversations or []
+        if str(conversation.get('id') or '').strip() not in collaboration_source_ids
+    ]
+
+
+def _build_conversation_feed(user_id, page_size, source_offsets, include_priority, include_hidden, search_term):
+    recent_fetch_limit = page_size + 1
+    hidden_count = _count_hidden_legacy_conversations(user_id)
+
+    try:
+        collaboration_conversations = _load_collaboration_conversations_for_feed(user_id)
+    except Exception as exc:
+        log_event(
+            f'[ConversationFeed] Failed to load collaborative conversations: {exc}',
+            level=logging.WARNING,
+            exceptionTraceback=True,
+        )
+        collaboration_conversations = []
+
+    hidden_count += sum(1 for conversation in collaboration_conversations if conversation.get('is_hidden', False))
+    collaboration_source_ids = {
+        str(conversation.get('source_conversation_id') or '').strip()
+        for conversation in collaboration_conversations
+        if conversation.get('source_conversation_id')
+    }
+
+    filtered_collaboration_conversations = _filter_collaboration_conversations_for_feed(
+        collaboration_conversations,
+        include_hidden=include_hidden,
+        search_term=search_term,
+    )
+    collaboration_priority_conversations = [
+        conversation for conversation in filtered_collaboration_conversations
+        if _is_conversation_priority(conversation)
+    ]
+    collaboration_recent_conversations = [
+        conversation for conversation in filtered_collaboration_conversations
+        if not _is_conversation_priority(conversation)
+    ]
+    collaboration_recent_conversations = sort_conversation_feed_recent(collaboration_recent_conversations)
+    collaboration_offset = source_offsets.get(CONVERSATION_FEED_SOURCE_COLLABORATION, 0)
+    collaboration_recent_window = collaboration_recent_conversations[
+        collaboration_offset:collaboration_offset + recent_fetch_limit
+    ]
+
+    priority_conversations = list(collaboration_priority_conversations) if include_priority else []
+    if include_priority:
+        legacy_pinned_conversations = _query_legacy_conversations_for_feed(
+            user_id,
+            include_hidden=include_hidden,
+            search_term=search_term,
+            extra_conditions=['c.is_pinned = true'],
+        )
+        legacy_unread_conversations = _query_legacy_conversations_for_feed(
+            user_id,
+            include_hidden=include_hidden,
+            search_term=search_term,
+            extra_conditions=[
+                'c.has_unread_assistant_response = true',
+                '(NOT IS_DEFINED(c.is_pinned) OR c.is_pinned = false)',
+            ],
+        )
+        priority_conversations.extend(_filter_legacy_source_duplicates(
+            legacy_pinned_conversations + legacy_unread_conversations,
+            collaboration_source_ids,
+        ))
+
+    legacy_recent_conversations = _query_legacy_conversations_for_feed(
+        user_id,
+        include_hidden=include_hidden,
+        search_term=search_term,
+        extra_conditions=[
+            '(NOT IS_DEFINED(c.is_pinned) OR c.is_pinned = false)',
+            '(NOT IS_DEFINED(c.has_unread_assistant_response) OR c.has_unread_assistant_response = false)',
+        ],
+        offset=source_offsets.get(CONVERSATION_FEED_SOURCE_LEGACY, 0),
+        limit=recent_fetch_limit,
+    )
+    legacy_recent_conversations = _filter_legacy_source_duplicates(
+        legacy_recent_conversations,
+        collaboration_source_ids,
+    )
+
+    return build_conversation_feed_page(
+        priority_conversations=priority_conversations,
+        recent_conversations_by_source={
+            CONVERSATION_FEED_SOURCE_LEGACY: legacy_recent_conversations,
+            CONVERSATION_FEED_SOURCE_COLLABORATION: collaboration_recent_window,
+        },
+        page_size=page_size,
+        source_offsets=source_offsets,
+        include_priority=include_priority,
+        hidden_count=hidden_count,
+        search_term=search_term,
+        include_hidden=include_hidden,
+    )
 
 
 def _collect_child_message_documents(conversation_id, root_message_ids):
@@ -72,6 +696,120 @@ def _collect_child_message_documents(conversation_id, root_message_ids):
 
     return child_docs
 
+
+def _authorize_personal_conversation_read(user_id, conversation_id):
+    """Load a personal conversation and ensure the caller owns it."""
+    try:
+        conversation_item = cosmos_conversations_container.read_item(
+            item=conversation_id,
+            partition_key=conversation_id,
+        )
+    except CosmosResourceNotFoundError as exc:
+        raise LookupError(f"Conversation {conversation_id} not found") from exc
+
+    if conversation_item.get('user_id') != user_id:
+        raise PermissionError('Forbidden')
+
+    return conversation_item
+
+
+def _authorize_image_conversation_read(user_id, conversation_id):
+    """Authorize image reads for either personal or collaborative conversations."""
+    try:
+        return _authorize_personal_conversation_read(user_id, conversation_id), 'personal'
+    except PermissionError:
+        raise
+    except LookupError:
+        pass
+
+    try:
+        conversation_item = get_collaboration_conversation(conversation_id)
+    except CosmosResourceNotFoundError as exc:
+        raise LookupError(f"Conversation {conversation_id} not found") from exc
+
+    assert_user_can_view_collaboration_conversation(user_id, conversation_item, allow_pending=True)
+    return conversation_item, 'collaboration'
+
+
+def _stream_blob_backed_image_message(message_doc):
+    """Stream a blob-backed image message through the authenticated image endpoint."""
+    blob_container = str(message_doc.get('blob_container') or '').strip()
+    blob_path = str(message_doc.get('blob_path') or '').strip()
+    mime_type = str(message_doc.get('mime_type') or '').strip() or 'image/png'
+    if not blob_container or not blob_path:
+        raise LookupError('Image not found')
+
+    blob_service_client = CLIENTS.get("storage_account_office_docs_client")
+    if not blob_service_client:
+        raise RuntimeError('Blob storage client not available')
+
+    blob_client = blob_service_client.get_blob_client(
+        container=blob_container,
+        blob=blob_path,
+    )
+
+    content_length = None
+    try:
+        blob_properties = blob_client.get_blob_properties()
+        content_length = getattr(blob_properties, 'size', None)
+    except Exception:
+        content_length = None
+
+    def stream_blob_chunks():
+        blob_stream = blob_client.download_blob()
+        for blob_chunk in blob_stream.chunks():
+            yield blob_chunk
+
+    headers = {
+        'Cache-Control': 'private, max-age=300',
+    }
+    if content_length is not None:
+        headers['Content-Length'] = str(content_length)
+
+    return Response(
+        stream_with_context(stream_blob_chunks()),
+        mimetype=mime_type,
+        headers=headers,
+    )
+
+
+def _load_scope_lock_conversation(conversation_id, user_id):
+    try:
+        conversation_item = cosmos_conversations_container.read_item(
+            item=conversation_id,
+            partition_key=conversation_id,
+        )
+        if conversation_item.get('user_id') != user_id:
+            raise PermissionError('Forbidden')
+        return conversation_item, 'personal'
+    except CosmosResourceNotFoundError:
+        pass
+
+    try:
+        conversation_item = get_collaboration_conversation(conversation_id)
+    except CosmosResourceNotFoundError as exc:
+        raise LookupError('Conversation not found') from exc
+
+    assert_user_can_participate_in_collaboration_conversation(user_id, conversation_item)
+    return conversation_item, 'collaboration'
+
+
+def _persist_scope_lock_update(conversation_item, conversation_kind, user_id, new_value):
+    timestamp = datetime.utcnow().isoformat()
+    conversation_item['scope_locked'] = new_value
+
+    if conversation_kind == 'collaboration':
+        conversation_item['updated_at'] = timestamp
+        cosmos_collaboration_conversations_container.upsert_item(conversation_item)
+        current_user = get_current_user_info() or {'userId': user_id}
+        _, conversation_item = ensure_collaboration_source_conversation(conversation_item, current_user)
+        return conversation_item
+
+    conversation_item['last_updated'] = timestamp
+    cosmos_conversations_container.upsert_item(conversation_item)
+    return conversation_item
+
+
 def register_route_backend_conversations(app):
 
     @app.route('/api/get_messages', methods=['GET'])
@@ -86,10 +824,7 @@ def register_route_backend_conversations(app):
         if not conversation_id:
             return jsonify({'error': 'No conversation_id provided'}), 400
         try:
-            conversation_item = cosmos_conversations_container.read_item(
-                item=conversation_id,
-                partition_key=conversation_id
-            )
+            _authorize_personal_conversation_read(user_id, conversation_id)
             # Query all messages in cosmos_messages_container
             # We'll filter for active_thread in Python since Cosmos DB boolean queries can be tricky
             message_query = f"""
@@ -104,6 +839,7 @@ def register_route_backend_conversations(app):
                 query=message_query,
                 partition_key=conversation_id
             ))
+            artifact_payload_map = build_message_artifact_payload_map(all_items)
             all_items = filter_assistant_artifact_items(all_items)
             
             debug_print(f"Query returned {len(all_items)} total items (before filtering)")
@@ -111,7 +847,12 @@ def register_route_backend_conversations(app):
             # Filter for active_thread = True OR active_thread is not defined (backwards compatibility)
             filtered_items = []
             for item in all_items:
-                thread_info = item.get('metadata', {}).get('thread_info', {})
+                metadata = item.get('metadata', {}) or {}
+                if metadata.get('is_generated_chat_artifact', False):
+                    debug_print(f"  🫥 Excluding hidden generated artifact: id={item.get('id')}")
+                    continue
+
+                thread_info = metadata.get('thread_info', {})
                 active = thread_info.get('active_thread')
                 debug_print(f"Evaluating item id={item.get('id')}, role={item.get('role')}, active_thread={active}, attempt={thread_info.get('thread_attempt', 'N/A')}")
                 
@@ -124,92 +865,18 @@ def register_route_backend_conversations(app):
             
             all_items = filtered_items
             debug_print(f"After filtering: {len(all_items)} items remaining")
-            
-            
-            # Process messages and reassemble chunked images
-            messages = []
-            chunked_images = {}  # Store image chunks by parent_message_id
-            
-            for item in all_items:
-                if item.get('role') == 'image_chunk':
-                    # This is a chunk, store it for reassembly
-                    parent_id = item.get('parent_message_id')
-                    if parent_id not in chunked_images:
-                        chunked_images[parent_id] = {}
-                    chunk_index = item.get('metadata', {}).get('chunk_index', 0)
-                    chunked_images[parent_id][chunk_index] = item.get('content', '')
-                else:
-                    # Regular message or main image document
-                    if item.get('role') == 'image' and item.get('metadata', {}).get('is_chunked'):
-                        # This is a chunked image main document
-                        image_id = item.get('id')
-                        total_chunks = item.get('metadata', {}).get('total_chunks', 1)
-                        
-                        # We'll reassemble after collecting all chunks
-                        messages.append(item)
-                    else:
-                        # Regular message
-                        messages.append(item)
-            
-            # Reassemble chunked images
-            for message in messages:
-                if (message.get('role') == 'image' and 
-                    message.get('metadata', {}).get('is_chunked')):
-                    
-                    image_id = message.get('id')
-                    total_chunks = message.get('metadata', {}).get('total_chunks', 1)
-                    
-                    debug_print(f"Reassembling chunked image {image_id} with {total_chunks} chunks")
-                    debug_print(f"Available chunks in chunked_images: {list(chunked_images.get(image_id, {}).keys())}")
-                    
-                    # Preserve extracted_text and vision_analysis from main message
-                    extracted_text = message.get('extracted_text')
-                    vision_analysis = message.get('vision_analysis')
-                    
-                    debug_print(f"Image has extracted_text: {bool(extracted_text)}, vision_analysis: {bool(vision_analysis)}")
-                    
-                    # Start with the content from the main message (chunk 0)
-                    complete_content = message.get('content', '')
-                    debug_print(f"Main message content length: {len(complete_content)} bytes")
-                    
-                    # Add remaining chunks in order (chunks 1, 2, 3, etc.)
-                    if image_id in chunked_images:
-                        chunks = chunked_images[image_id]
-                        for chunk_index in range(1, total_chunks):
-                            if chunk_index in chunks:
-                                chunk_content = chunks[chunk_index]
-                                complete_content += chunk_content
-                                debug_print(f"Added chunk {chunk_index}, length: {len(chunk_content)} bytes")
-                            else:
-                                print(f"WARNING: Missing chunk {chunk_index} for image {image_id}")
-                    else:
-                        print(f"WARNING: No chunks found for image {image_id} in chunked_images")
-                    
-                    debug_print(f"Final reassembled image total size: {len(complete_content)} bytes")
-                    
-                    # For large images (>1MB), use a URL reference instead of embedding in JSON
-                    if len(complete_content) > 1024 * 1024:  # 1MB threshold
-                        debug_print(f"Large image detected ({len(complete_content)} bytes), using URL reference")
-                        # Store the complete content temporarily and provide a URL reference
-                        message['content'] = f"/api/image/{image_id}"
-                        message['metadata']['is_large_image'] = True
-                        message['metadata']['image_size'] = len(complete_content)
-                        # Store the complete content in a way that can be retrieved by the image endpoint
-                        # For now, we'll modify the message in place but this could be optimized
-                        message['_complete_image_data'] = complete_content
-                    else:
-                        # Small enough to embed directly
-                        message['content'] = complete_content
-                    
-                    # IMPORTANT: Preserve extracted_text and vision_analysis in the final message
-                    # These fields are needed by the frontend to display the info drawer
-                    if extracted_text:
-                        message['extracted_text'] = extracted_text
-                    if vision_analysis:
-                        message['vision_analysis'] = vision_analysis
-            
+
+            all_items = hydrate_agent_citations_from_artifacts(all_items, artifact_payload_map)
+
+            messages = hydrate_image_messages(
+                all_items,
+                image_url_builder=lambda image_id: f"/api/image/{image_id}",
+            )
+
             return jsonify({'messages': messages})
-        except CosmosResourceNotFoundError:
+        except PermissionError:
+            return jsonify({'error': 'Forbidden'}), 403
+        except LookupError:
             return jsonify({'messages': []})
         except Exception as e:
             print(f"ERROR: Failed to get messages: {str(e)}")
@@ -220,10 +887,7 @@ def register_route_backend_conversations(app):
     @login_required
     @user_required
     def api_get_image(image_id):
-        """Serve large images that were stored in chunks"""
-        print(f"🔥 IMAGE ENDPOINT CALLED: {image_id}")
-        print(f"🔥 Request URL: {request.url}")
-        print(f"🔥 Request headers: {dict(request.headers)}")
+        """Serve chat images from blob storage or legacy chunked message content."""
         
         user_id = get_current_user_id()
         if not user_id:
@@ -240,101 +904,36 @@ def register_route_backend_conversations(app):
             conversation_id = '_'.join(parts[:-3])
             
             debug_print(f"Serving image {image_id} from conversation {conversation_id}")
-            
-            # Query for the main image document and chunks
-            message_query = f"SELECT * FROM c WHERE c.conversation_id = '{conversation_id}'"
-            all_items = list(cosmos_messages_container.query_items(
-                query=message_query,
-                partition_key=conversation_id
-            ))
-            
-            # Find the specific image and its chunks
-            main_image = None
-            chunks = {}
-            
-            debug_print(f"Searching through {len(all_items)} items for image {image_id}")
-            
-            for item in all_items:
-                item_id = item.get('id')
-                item_role = item.get('role')
-                debug_print(f"Checking item {item_id}, role: {item_role}")
-                
-                if item_id == image_id and item_role == 'image':
-                    main_image = item
-                    debug_print(f"✅ Found main image document: {item_id}")
-                    debug_print(f"Main image content length: {len(item.get('content', ''))} bytes")
-                    debug_print(f"Main image metadata: {item.get('metadata', {})}")
-                elif (item_role == 'image_chunk' and 
-                      item.get('parent_message_id') == image_id):
-                    chunk_index = item.get('metadata', {}).get('chunk_index', 0)
-                    chunk_content = item.get('content', '')
-                    chunks[chunk_index] = chunk_content
-                    debug_print(f"✅ Found chunk {chunk_index}: {len(chunk_content)} bytes")
-                    debug_print(f"Chunk {chunk_index} starts with: {chunk_content[:50]}...")
-                    debug_print(f"Chunk {chunk_index} ends with: ...{chunk_content[-20:]}")
-            
-            debug_print(f"Found main_image: {main_image is not None}")
-            debug_print(f"Found chunks: {list(chunks.keys())}")
-            
-            if not main_image:
-                print(f"ERROR: Main image not found for {image_id}")
-                return jsonify({'error': 'Image not found'}), 404
-            
-            # Reassemble the image
-            complete_content = main_image.get('content', '')
-            total_chunks = main_image.get('metadata', {}).get('total_chunks', 1)
-            
-            debug_print(f"Starting reassembly...")
-            debug_print(f"Main content length: {len(complete_content)} bytes")
-            debug_print(f"Expected total chunks: {total_chunks}")
-            debug_print(f"Available chunk indices: {list(chunks.keys())}")
-            debug_print(f"Main content starts with: {complete_content[:50]}...")
-            debug_print(f"Main content ends with: ...{complete_content[-20:]}")
-            
-            reassembly_log = []
-            original_length = len(complete_content)
-            
-            for chunk_index in range(1, total_chunks):
-                if chunk_index in chunks:
-                    chunk_content = chunks[chunk_index]
-                    complete_content += chunk_content
-                    reassembly_log.append(f"Added chunk {chunk_index}: {len(chunk_content)} bytes")
-                    debug_print(f"Added chunk {chunk_index}: {len(chunk_content)} bytes")
-                    debug_print(f"Total length now: {len(complete_content)} bytes")
-                else:
-                    error_msg = f"Missing chunk {chunk_index}"
-                    reassembly_log.append(f"❌ {error_msg}")
-                    print(f"WARNING: {error_msg}")
-            
-            final_length = len(complete_content)
-            debug_print(f"Reassembly complete!")
-            debug_print(f"Original length: {original_length} bytes")
-            debug_print(f"Final length: {final_length} bytes")
-            debug_print(f"Added: {final_length - original_length} bytes")
-            debug_print(f"Reassembly log: {reassembly_log}")
-            debug_print(f"Final content starts with: {complete_content[:50]}...")
-            debug_print(f"Final content ends with: ...{complete_content[-20:]}")
-            
-            # Return the image data with appropriate headers
-            if complete_content.startswith('data:image/'):
-                # Extract mime type and base64 data
-                header, base64_data = complete_content.split(',', 1)
-                mime_type = header.split(':')[1].split(';')[0]
-                
-                import base64
-                image_data = base64.b64decode(base64_data)
-                
-                return Response(
-                    image_data,
-                    mimetype=mime_type,
-                    headers={
-                        'Content-Length': len(image_data),
-                        'Cache-Control': 'public, max-age=3600'  # Cache for 1 hour
-                    }
-                )
-            else:
-                return jsonify({'error': 'Invalid image format'}), 400
-                
+
+            _authorize_image_conversation_read(user_id, conversation_id)
+            image_message, complete_content = get_complete_image_content(
+                cosmos_messages_container,
+                conversation_id,
+                image_id,
+            )
+
+            if is_blob_backed_image_message(image_message):
+                return _stream_blob_backed_image_message(image_message)
+
+            if is_external_image_url(complete_content):
+                return redirect(complete_content)
+
+            mime_type, image_data = decode_image_content(complete_content)
+            return Response(
+                image_data,
+                mimetype=mime_type,
+                headers={
+                    'Content-Length': len(image_data),
+                    'Cache-Control': 'public, max-age=3600'
+                }
+            )
+
+        except PermissionError:
+            return jsonify({'error': 'Forbidden'}), 403
+        except CosmosResourceNotFoundError:
+            return jsonify({'error': 'Image not found'}), 404
+        except LookupError:
+            return jsonify({'error': 'Image not found'}), 404
         except Exception as e:
             print(f"ERROR: Failed to serve image {image_id}: {str(e)}")
             import traceback
@@ -357,6 +956,48 @@ def register_route_backend_conversations(app):
         }), 200
 
 
+    @app.route('/api/conversations/feed', methods=['GET'])
+    @swagger_route(security=get_auth_security())
+    @login_required
+    @user_required
+    def get_conversations_feed():
+        user_id = get_current_user_id()
+        if not user_id:
+            return jsonify({'error': 'User not authenticated'}), 401
+
+        try:
+            search_term = str(request.args.get('search') or '').strip()
+            include_hidden = str(request.args.get('include_hidden', 'false')).strip().lower() in ('1', 'true', 'yes')
+            page_size = normalize_conversation_feed_page_size(request.args.get('page_size'))
+            cursor_data = decode_conversation_feed_cursor(request.args.get('cursor'))
+            cursor_is_compatible = is_conversation_feed_cursor_compatible(
+                cursor_data,
+                search_term=search_term,
+                include_hidden=include_hidden,
+            )
+            source_offsets = get_conversation_feed_source_offsets(cursor_data) if cursor_is_compatible else {}
+            include_priority = not cursor_is_compatible
+
+            feed_payload = _build_conversation_feed(
+                user_id=user_id,
+                page_size=page_size,
+                source_offsets=source_offsets,
+                include_priority=include_priority,
+                include_hidden=include_hidden,
+                search_term=search_term,
+            )
+            feed_payload['search_term'] = search_term
+            feed_payload['include_hidden'] = include_hidden
+            return jsonify(feed_payload), 200
+        except Exception as exc:
+            log_event(
+                f'[ConversationFeed] Failed to load feed: {exc}',
+                level=logging.ERROR,
+                exceptionTraceback=True,
+            )
+            return jsonify({'error': 'Failed to load conversations'}), 500
+
+
     @app.route('/api/create_conversation', methods=['POST'])
     @swagger_route(security=get_auth_security())
     @login_required
@@ -366,39 +1007,15 @@ def register_route_backend_conversations(app):
         if not user_id:
             return jsonify({'error': 'User not authenticated'}), 401
 
-        conversation_id = str(uuid.uuid4())
-        conversation_item = {
-            'id': conversation_id,
-            'user_id': user_id,
-            'last_updated': datetime.utcnow().isoformat(),
-            'title': 'New Conversation',
-            'context': [],
-            'tags': [],
-            'strict': False,
-            'is_pinned': False,
-            'is_hidden': False,
-            'chat_type': 'new',
-            'has_unread_assistant_response': False,
-            'last_unread_assistant_message_id': None,
-            'last_unread_assistant_at': None,
-        }
-        cosmos_conversations_container.upsert_item(conversation_item)
-        
-        # Log conversation creation
-        log_conversation_creation(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            title='New Conversation',
-            workspace_type='personal'
+        data = request.get_json(silent=True) or {}
+        initial_title = derive_conversation_title_from_message(
+            data.get('initial_message') or data.get('message') or data.get('title') or ''
         )
-        
-        # Mark as logged to activity logs to prevent duplicate migration
-        conversation_item['added_to_activity_log'] = True
-        cosmos_conversations_container.upsert_item(conversation_item)
+        conversation_item = create_personal_conversation_for_current_user(title=initial_title)
 
         return jsonify({
-            'conversation_id': conversation_id,
-            'title': 'New Conversation'
+            'conversation_id': conversation_item.get('id'),
+            'title': conversation_item.get('title', 'New Conversation')
         }), 200
     
     @app.route('/api/conversations/<conversation_id>', methods=['PUT'])
@@ -456,18 +1073,30 @@ def register_route_backend_conversations(app):
         """
         Delete a conversation. If archiving is enabled, copy it to archived_conversations first.
         """
+        user_id = get_current_user_id()
+        if not user_id:
+            return jsonify({'error': 'User not authenticated'}), 401
+
         settings = get_settings()
         archiving_enabled = settings.get('enable_conversation_archiving', False)
 
         try:
-            conversation_item = cosmos_conversations_container.read_item(
-                item=conversation_id,
-                partition_key=conversation_id
+            request_payload = request.get_json(silent=True) or {}
+            delete_workspace_document_ids = _get_requested_workspace_document_delete_ids_for_conversation(
+                request_payload,
+                conversation_id,
             )
-        except CosmosResourceNotFoundError:
+        except ValueError as validation_error:
+            return jsonify({'error': str(validation_error)}), 400
+
+        try:
+            conversation_item = _authorize_personal_conversation_read(user_id, conversation_id)
+        except LookupError:
             return jsonify({
                 "error": f"Conversation {conversation_id} not found."
             }), 404
+        except PermissionError:
+            return jsonify({'error': 'Forbidden'}), 403
         except Exception as e:
             return jsonify({
                 "error": str(e)
@@ -493,6 +1122,34 @@ def register_route_backend_conversations(app):
             query=message_query,
             partition_key=conversation_id
         ))
+
+        if delete_workspace_document_ids:
+            try:
+                workspace_delete_result = delete_chat_upload_workspace_documents_for_conversation(
+                    conversation_item.get('user_id'),
+                    conversation_id,
+                    selected_document_ids=delete_workspace_document_ids,
+                )
+                if workspace_delete_result.get('deleted_document_ids'):
+                    invalidate_personal_search_cache(conversation_item.get('user_id'))
+                if workspace_delete_result.get('failed_documents'):
+                    log_event(
+                        f"[ConversationDelete] Failed to delete some selected linked workspace documents for {conversation_id}",
+                        workspace_delete_result,
+                        level=logging.WARNING,
+                    )
+            except Exception as workspace_delete_error:
+                log_event(
+                    f"[ConversationDelete] Failed to delete selected linked workspace documents for {conversation_id}: {workspace_delete_error}",
+                    level=logging.WARNING,
+                    exceptionTraceback=True,
+                )
+                return jsonify({
+                    'error': 'Failed to delete selected workspace documents'
+                }), 500
+
+        if not archiving_enabled:
+            delete_blob_backed_chat_message_files(results)
 
         for doc in results:
             if archiving_enabled:
@@ -564,17 +1221,8 @@ def register_route_backend_conversations(app):
             try:
                 # Verify the conversation exists and belongs to the user
                 try:
-                    conversation_item = cosmos_conversations_container.read_item(
-                        item=conversation_id,
-                        partition_key=conversation_id
-                    )
-                    
-                    # Check if the conversation belongs to the current user
-                    if conversation_item.get('user_id') != user_id:
-                        failed_ids.append(conversation_id)
-                        continue
-                        
-                except CosmosResourceNotFoundError:
+                    conversation_item = _authorize_personal_conversation_read(user_id, conversation_id)
+                except (LookupError, PermissionError):
                     failed_ids.append(conversation_id)
                     continue
                 
@@ -600,6 +1248,9 @@ def register_route_backend_conversations(app):
                     query=message_query,
                     partition_key=conversation_id
                 ))
+
+                if not archiving_enabled:
+                    delete_blob_backed_chat_message_files(messages)
                 
                 for message in messages:
                     if archiving_enabled:
@@ -873,6 +1524,19 @@ def register_route_backend_conversations(app):
             if updated:
                 cosmos_conversations_container.upsert_item(conversation_item)
 
+            linked_workspace_documents = []
+            try:
+                linked_workspace_documents = serialize_chat_upload_workspace_documents_for_conversation(
+                    user_id,
+                    conversation_id,
+                )
+            except Exception as linked_documents_error:
+                log_event(
+                    f"[ConversationMetadata] Failed to list linked workspace documents for {conversation_id}: {linked_documents_error}",
+                    level=logging.WARNING,
+                    exceptionTraceback=True,
+                )
+
             # Return the full conversation metadata
             return jsonify({
                 "conversation_id": conversation_id,
@@ -891,7 +1555,9 @@ def register_route_backend_conversations(app):
                 "scope_locked": conversation_item.get('scope_locked'),
                 "locked_contexts": conversation_item.get('locked_contexts', []),
                 "chat_type": conversation_item.get('chat_type'),
-                "summary": conversation_item.get('summary')
+                "workflow_id": conversation_item.get('workflow_id'),
+                "summary": conversation_item.get('summary'),
+                "linked_workspace_documents": linked_workspace_documents,
             }), 200
             
         except CosmosResourceNotFoundError:
@@ -960,6 +1626,9 @@ def register_route_backend_conversations(app):
         if not user_id:
             return jsonify({'error': 'User not authenticated'}), 401
 
+        conversation_item = None
+        is_collaboration_summary = False
+
         try:
             conversation_item = cosmos_conversations_container.read_item(
                 item=conversation_id,
@@ -968,23 +1637,43 @@ def register_route_backend_conversations(app):
             if conversation_item.get('user_id') != user_id:
                 return jsonify({'error': 'Forbidden'}), 403
         except CosmosResourceNotFoundError:
-            return jsonify({'error': 'Conversation not found'}), 404
+            try:
+                conversation_item = get_collaboration_conversation(conversation_id)
+                assert_user_can_view_collaboration_conversation(
+                    user_id,
+                    conversation_item,
+                    allow_pending=True,
+                )
+                is_collaboration_summary = True
+            except CosmosResourceNotFoundError:
+                return jsonify({'error': 'Conversation not found'}), 404
+            except PermissionError as exc:
+                return jsonify({'error': str(exc)}), 403
+            except Exception as e:
+                debug_print(f"Error reading collaborative conversation for summary: {e}")
+                return jsonify({'error': 'Failed to read conversation'}), 500
         except Exception as e:
             debug_print(f"Error reading conversation for summary: {e}")
             return jsonify({'error': 'Failed to read conversation'}), 500
 
         body = request.get_json(silent=True) or {}
         model_deployment = body.get('model_deployment', '')
+        model_endpoint_id = body.get('model_endpoint_id', '')
+        model_id = body.get('model_id', '')
+        model_provider = body.get('model_provider', '')
 
         # Query messages for this conversation
         try:
-            query = "SELECT * FROM c WHERE c.conversation_id = @cid ORDER BY c.timestamp ASC"
-            params = [{"name": "@cid", "value": conversation_id}]
-            raw_messages = list(cosmos_messages_container.query_items(
-                query=query,
-                parameters=params,
-                enable_cross_partition_query=True
-            ))
+            if is_collaboration_summary:
+                raw_messages = list_collaboration_messages(conversation_id)
+            else:
+                query = "SELECT * FROM c WHERE c.conversation_id = @cid ORDER BY c.timestamp ASC"
+                params = [{"name": "@cid", "value": conversation_id}]
+                raw_messages = list(cosmos_messages_container.query_items(
+                    query=query,
+                    parameters=params,
+                    enable_cross_partition_query=True
+                ))
             raw_messages = filter_assistant_artifact_items(raw_messages)
         except Exception as e:
             debug_print(f"Error querying messages for summary: {e}")
@@ -1020,7 +1709,11 @@ def register_route_backend_conversations(app):
                 model_deployment=model_deployment,
                 message_time_start=message_time_start,
                 message_time_end=message_time_end,
-                conversation_id=conversation_id
+                conversation_id=conversation_id,
+                user_id=user_id,
+                model_endpoint_id=model_endpoint_id,
+                model_id=model_id,
+                model_provider=model_provider,
             )
             return jsonify({'success': True, 'summary': summary_data}), 200
 
@@ -1058,28 +1751,25 @@ def register_route_backend_conversations(app):
                 return jsonify({'error': 'Scope unlock is disabled by administrator'}), 403
 
         try:
-            conversation_item = cosmos_conversations_container.read_item(
-                item=conversation_id, partition_key=conversation_id
+            conversation_item, conversation_kind = _load_scope_lock_conversation(conversation_id, user_id)
+            conversation_item = _persist_scope_lock_update(
+                conversation_item,
+                conversation_kind,
+                user_id,
+                new_value,
             )
-            if conversation_item.get('user_id') != user_id:
-                return jsonify({'error': 'Forbidden'}), 403
-
-            conversation_item['scope_locked'] = new_value
-            # locked_contexts are PRESERVED regardless — needed for re-locking
-
-            from datetime import datetime
-            conversation_item['last_updated'] = datetime.utcnow().isoformat()
-            cosmos_conversations_container.upsert_item(conversation_item)
 
             return jsonify({
                 "success": True,
                 "scope_locked": new_value,
                 "locked_contexts": conversation_item.get('locked_contexts', [])
             }), 200
-        except CosmosResourceNotFoundError:
+        except PermissionError as exc:
+            return jsonify({'error': str(exc) or 'Forbidden'}), 403
+        except (CosmosResourceNotFoundError, LookupError):
             return jsonify({'error': 'Conversation not found'}), 404
         except Exception as e:
-            print(f"Error updating scope lock: {e}")
+            debug_print(f"Error updating scope lock: {e}")
             return jsonify({'error': 'Failed to update scope lock'}), 500
 
     @app.route('/api/conversations/classifications', methods=['GET'])
@@ -1136,8 +1826,9 @@ def register_route_backend_conversations(app):
             return jsonify({'error': 'User not authenticated'}), 401
         
         try:
-            data = request.get_json()
+            data = request.get_json(silent=True) or {}
             search_term = data.get('search_term', '').strip()
+            match_mode = _normalize_search_match_mode(data.get('match_mode'))
             date_from = data.get('date_from', '')
             date_to = data.get('date_to', '')
             chat_types = data.get('chat_types', [])
@@ -1154,97 +1845,106 @@ def register_route_backend_conversations(app):
                     'error': 'Search term must be at least 3 characters'
                 }), 400
             
-            # Build conversation query with filters
-            # Find conversations where user is a participant (supports multi-user conversations)
-            # Check both old schema (user_id at root) and new schema (participant tag)
+            selected_chat_types = _expand_search_chat_type_filters(chat_types)
+
+            # Build conversation query with filters. Find conversations where user is a participant
+            # and keep a Python-side pass for collaboration records that live in separate containers.
             query_parts = [
-                f"(c.user_id = '{user_id}' OR EXISTS(SELECT VALUE t FROM t IN c.tags WHERE t.category = 'participant' AND t.user_id = '{user_id}'))"
+                "(c.user_id = @user_id OR EXISTS(SELECT VALUE t FROM t IN c.tags WHERE t.category = 'participant' AND t.user_id = @user_id))"
+            ]
+            query_parameters = [
+                {'name': '@user_id', 'value': user_id},
             ]
             
-            debug_print(f"🔍 Search parameters:")
+            debug_print("🔍 Search parameters:")
             debug_print(f"  user_id: {user_id}")
             debug_print(f"  search_term: {search_term}")
+            debug_print(f"  match_mode: {match_mode}")
             debug_print(f"  date_from: {date_from}")
             debug_print(f"  date_to: {date_to}")
             debug_print(f"  chat_types: {chat_types}")
             debug_print(f"  classifications: {classifications}")
             
             if date_from:
-                query_parts.append(f"c.last_updated >= '{date_from}'")
+                query_parts.append("c.last_updated >= @date_from")
+                query_parameters.append({'name': '@date_from', 'value': date_from})
             if date_to:
-                query_parts.append(f"c.last_updated <= '{date_to}T23:59:59'")
+                query_parts.append("c.last_updated <= @date_to")
+                query_parameters.append({'name': '@date_to', 'value': f'{date_to}T23:59:59'})
             
             conversation_query = f"SELECT * FROM c WHERE {' AND '.join(query_parts)}"
             debug_print(f"\n📋 Conversation query: {conversation_query}")
             
             conversations = list(cosmos_conversations_container.query_items(
                 query=conversation_query,
+                parameters=query_parameters,
                 enable_cross_partition_query=True,
                 max_item_count=-1  # Get all items, no pagination limit
             ))
-            
-            debug_print(f"Found {len(conversations)} conversations from query")
-            
-            # Check if target conversation is in the results
-            target_conv_id = "2712dbad-560d-4d2e-a354-b8f67fcf9429"
-            target_conv = next((c for c in conversations if c['id'] == target_conv_id), None)
-            if target_conv:
-                debug_print(f"\n🎯 Found target conversation {target_conv_id}")
-                debug_print(f"   chat_type: {target_conv.get('chat_type')}")
-                debug_print(f"   title: {target_conv.get('title', 'N/A')}")
-            else:
-                debug_print(f"\n❌ Target conversation {target_conv_id} NOT in query results")
+
+            collaboration_conversations = _load_accessible_collaboration_search_conversations(user_id)
+            collaboration_conversations = [
+                conversation for conversation in collaboration_conversations
+                if _conversation_matches_date_range(conversation, date_from, date_to)
+            ]
+            conversations.extend(collaboration_conversations)
+
+            debug_print(f"Found {len(conversations)} conversations from legacy and collaboration stores")
             
             # Filter by chat types if specified
-            if chat_types:
+            if selected_chat_types:
                 before_count = len(conversations)
                 filtered_out = []
                 filtered_in = []
                 
-                for c in conversations:
-                    # Default to 'personal_single_user' if chat_type is not defined (legacy conversations)
-                    chat_type = c.get('chat_type', 'personal_single_user')
-                    if chat_type in chat_types:
-                        filtered_in.append(c)
+                for conversation in conversations:
+                    if _conversation_matches_selected_chat_types(conversation, selected_chat_types):
+                        filtered_in.append(conversation)
                     else:
-                        filtered_out.append(c)
+                        filtered_out.append(conversation)
                 
                 conversations = filtered_in
                 debug_print(f"After chat_type filter: {len(conversations)} (removed {before_count - len(conversations)})")
                 
                 # Show some examples of filtered out chat types
                 if filtered_out:
-                    unique_types = set(c.get('chat_type', 'None/personal_single_user') for c in filtered_out[:10])
+                    unique_types = set(_get_search_conversation_chat_type(c) for c in filtered_out[:10])
                     debug_print(f"   Filtered out chat_types (sample): {unique_types}")
             
             # Filter by classifications if specified
             if classifications:
                 before_count = len(conversations)
-                conversations = [c for c in conversations if any(
-                    cls in (c.get('classification', []) or []) for cls in classifications
-                )]
+                conversations = [
+                    conversation for conversation in conversations
+                    if _conversation_matches_classifications(conversation, classifications)
+                ]
                 debug_print(f"After classification filter: {len(conversations)} (removed {before_count - len(conversations)})")
-            
-            # Search messages in each conversation
-            results = []
-            search_lower = search_term.lower()
             
             debug_print(f"🔍 Starting search for term: '{search_term}'")
             debug_print(f"Found {len(conversations)} conversations to search")
             
             # Create a set of conversation IDs for fast lookup
-            conversation_ids = set(c['id'] for c in conversations)
-            conversation_map = {c['id']: c for c in conversations}
+            conversation_ids = {conversation['id'] for conversation in conversations if conversation.get('id')}
+            conversation_map = {
+                conversation['id']: conversation
+                for conversation in conversations
+                if conversation.get('id')
+            }
             
-            # Do a single cross-partition query for all matching messages
-            # This is much faster than querying each conversation individually
-            message_query = f"SELECT * FROM m WHERE CONTAINS(m.content, '{search_term}', true) AND (m.role = 'user' OR m.role = 'assistant')"
+            # Do cross-partition message searches in both legacy and collaboration stores,
+            # then filter to the user's authorized conversation set.
+            message_query, _ = _build_message_search_query(search_term, match_mode)
             debug_print(f"\n📋 Cross-partition message query: {message_query}")
-            
-            all_matching_messages = list(cosmos_messages_container.query_items(
-                query=message_query,
-                enable_cross_partition_query=True,
-                max_item_count=-1
+
+            all_matching_messages = _query_matching_messages(
+                cosmos_messages_container,
+                search_term,
+                match_mode,
+            )
+            all_matching_messages.extend(_query_matching_messages(
+                cosmos_collaboration_messages_container,
+                search_term,
+                match_mode,
             ))
             
             debug_print(f"Found {len(all_matching_messages)} total messages across all conversations")
@@ -1258,80 +1958,37 @@ def register_route_backend_conversations(app):
                 if conv_id not in conversation_ids:
                     continue
                 
-                # Filter out inactive threads
-                thread_info = msg.get('metadata', {}).get('thread_info', {})
-                active = thread_info.get('active_thread')
-                
                 # Include all messages where active_thread is not explicitly False
-                if active is not False:
-                    if conv_id not in messages_by_conversation:
-                        messages_by_conversation[conv_id] = []
-                    messages_by_conversation[conv_id].append(msg)
+                if _message_is_in_active_thread(msg):
+                    messages_by_conversation.setdefault(conv_id, []).append(msg)
             
             debug_print(f"After filtering: {len(messages_by_conversation)} conversations have matching messages")
             
-            # Build results for each conversation with matches
-            for conv_id, matching_messages in messages_by_conversation.items():
+            results = []
+
+            # Build results for conversations with matching titles or messages.
+            for conv_id, conversation in conversation_map.items():
+                matching_messages = messages_by_conversation.get(conv_id, [])
+                title_match = _matches_search_text(conversation.get('title', ''), search_term, match_mode)
                 
                 # Apply file/image filters if specified
                 if has_files or has_images:
-                    filtered_messages = []
-                    for msg in matching_messages:
-                        metadata = msg.get('metadata', {})
-                        if has_files and metadata.get('uploaded_files'):
-                            filtered_messages.append(msg)
-                        elif has_images and metadata.get('generated_images'):
-                            filtered_messages.append(msg)
-                        elif not has_files and not has_images:
-                            filtered_messages.append(msg)
-                    matching_messages = filtered_messages
+                    matching_messages = [
+                        message for message in matching_messages
+                        if _message_matches_attachment_filters(message, has_files, has_images)
+                    ]
                 
-                if matching_messages:
-                    # Get conversation details
-                    conversation = conversation_map.get(conv_id)
-                    if not conversation:
-                        continue
-                    
-                    # Build message snippets
-                    message_snippets = []
-                    for msg in matching_messages[:5]:  # Limit to 5 messages per conversation
-                        content = msg.get('content', '')
-                        content_lower = content.lower()
-                        
-                        # Find match position
-                        match_pos = content_lower.find(search_lower)
-                        if match_pos != -1:
-                            # Extract 50 chars before and after
-                            start = max(0, match_pos - 50)
-                            end = min(len(content), match_pos + len(search_term) + 50)
-                            snippet = content[start:end]
-                            
-                            # Add ellipsis if truncated
-                            if start > 0:
-                                snippet = '...' + snippet
-                            if end < len(content):
-                                snippet = snippet + '...'
-                            
-                            message_snippets.append({
-                                'message_id': msg.get('id'),
-                                'content_snippet': snippet,
-                                'timestamp': msg.get('timestamp', ''),
-                                'role': msg.get('role', 'unknown')
-                            })
-                    
-                    results.append({
-                        'conversation': {
-                            'id': conversation['id'],
-                            'title': conversation.get('title', 'Untitled'),
-                            'last_updated': conversation.get('last_updated', ''),
-                            'classification': conversation.get('classification', []),
-                            'chat_type': conversation.get('chat_type', 'personal_single_user'),
-                            'is_pinned': conversation.get('is_pinned', False),
-                            'is_hidden': conversation.get('is_hidden', False)
-                        },
-                        'messages': message_snippets,
-                        'match_count': len(matching_messages)
-                    })
+                include_title_only_match = title_match and not (has_files or has_images)
+                if not matching_messages and not include_title_only_match:
+                    continue
+
+                results.append({
+                    'conversation': _build_search_conversation_payload(conversation),
+                    'messages': _build_message_snippets(matching_messages, search_term, match_mode),
+                    'match_count': len(matching_messages),
+                    'title_match': title_match,
+                    'match_mode': match_mode,
+                })
             
             # Sort by last_updated (most recent first)
             results.sort(key=lambda x: x['conversation']['last_updated'], reverse=True)
@@ -1353,9 +2010,11 @@ def register_route_backend_conversations(app):
             }), 200
             
         except Exception as e:
-            print(f"Error searching conversations: {e}")
-            import traceback
-            traceback.print_exc()
+            log_event(
+                f'[ConversationSearch] Failed to search conversations: {e}',
+                level=logging.ERROR,
+                exceptionTraceback=True,
+            )
             return jsonify({'error': 'Failed to search conversations'}), 500
     
     @app.route('/api/user-settings/search-history', methods=['GET'])

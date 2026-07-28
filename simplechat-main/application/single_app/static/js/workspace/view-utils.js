@@ -39,9 +39,9 @@ export function truncateDescription(text, maxLen = 100) {
  * Escape HTML entities to prevent XSS.
  */
 export function escapeHtml(str) {
-    if (!str) return "";
-    return str.replace(/[&<>"']/g, (c) =>
-        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
+    if (str === null || str === undefined) return "";
+    return String(str).replace(/[&<>"']/g, (character) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[character])
     );
 }
 
@@ -52,10 +52,17 @@ export function getTypeIcon(type) {
     if (!type) return "bi-lightning-charge";
     const t = type.toLowerCase();
     if (t.includes("sql")) return "bi-database";
+    if (t.includes("cosmos")) return "bi-database-fill-gear";
+    if (t.includes("chart")) return "bi-bar-chart-line";
+    if (t.includes("simplechat")) return "bi-chat-square-dots";
+    if (t === "mcp" || t.includes("model_context_protocol")) return "bi-diagram-3";
     if (t.includes("openapi")) return "bi-globe";
     if (t.includes("log_analytics")) return "bi-graph-up";
     if (t.includes("msgraph")) return "bi-microsoft";
+    if (t.includes("azure_maps") || t.includes("openlayers")) return "bi-geo-alt";
     if (t.includes("databricks")) return "bi-bricks";
+    if (t.includes("snowflake")) return "bi-snow2";
+    if (t.includes("tableau")) return "bi-bar-chart";
     if (t.includes("http") || t.includes("smart_http")) return "bi-cloud-arrow-up";
     if (t.includes("azure_function")) return "bi-lightning";
     if (t.includes("blob")) return "bi-file-earmark";
@@ -93,34 +100,69 @@ export function createViewToggleHtml(prefix) {
  * @param {string} storageKey - localStorage key for persistence
  * @param {function} onSwitch - Callback receiving 'list' or 'grid'
  */
-export function setupViewToggle(prefix, storageKey, onSwitch) {
+export function setupViewToggle(prefix, storageKey, onSwitch, options = {}) {
     const listRadio = document.getElementById(`${prefix}-view-list`);
     const gridRadio = document.getElementById(`${prefix}-view-grid`);
     if (!listRadio || !gridRadio) return;
 
+    const mobileQuery = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+        ? window.matchMedia(options.mobileQuery || '(max-width: 991.98px)')
+        : null;
+
+    function getPreferredMode() {
+        const saved = localStorage.getItem(storageKey);
+        if (options.mobileDefault && mobileQuery && mobileQuery.matches) {
+            return options.mobileDefault;
+        }
+
+        return saved === 'grid' ? 'grid' : 'list';
+    }
+
+    function applyMode(mode, persistPreference) {
+        const resolvedMode = mode === 'grid' ? 'grid' : 'list';
+        listRadio.checked = resolvedMode === 'list';
+        gridRadio.checked = resolvedMode === 'grid';
+
+        if (persistPreference) {
+            localStorage.setItem(storageKey, resolvedMode);
+        }
+
+        onSwitch(resolvedMode);
+    }
+
+    if (listRadio.dataset.viewToggleBound === 'true' && gridRadio.dataset.viewToggleBound === 'true') {
+        applyMode(getPreferredMode(), false);
+        return;
+    }
+
+    listRadio.dataset.viewToggleBound = 'true';
+    gridRadio.dataset.viewToggleBound = 'true';
+
     listRadio.addEventListener("change", () => {
         if (listRadio.checked) {
-            localStorage.setItem(storageKey, "list");
-            onSwitch("list");
+            applyMode('list', true);
         }
     });
 
     gridRadio.addEventListener("change", () => {
         if (gridRadio.checked) {
-            localStorage.setItem(storageKey, "grid");
-            onSwitch("grid");
+            applyMode('grid', true);
         }
     });
 
-    // Restore saved preference
-    const saved = localStorage.getItem(storageKey);
-    if (saved === "grid") {
-        gridRadio.checked = true;
-        listRadio.checked = false;
-        onSwitch("grid");
-    } else {
-        onSwitch("list");
+    const syncPreferredMode = () => {
+        applyMode(getPreferredMode(), false);
+    };
+
+    if (mobileQuery) {
+        if (typeof mobileQuery.addEventListener === 'function') {
+            mobileQuery.addEventListener('change', syncPreferredMode);
+        } else if (typeof mobileQuery.addListener === 'function') {
+            mobileQuery.addListener(syncPreferredMode);
+        }
     }
+
+    syncPreferredMode();
 }
 
 /**
@@ -143,23 +185,36 @@ export function switchViewContainers(mode, listContainer, gridContainer) {
 // ============================================================================
 
 /**
- * Open a read-only view modal for an agent or action.
+ * Open a read-only view modal for an agent, action, or prompt.
  * @param {object} item - The agent or action data object
- * @param {'agent'|'action'} type - What kind of item this is
+ * @param {'agent'|'action'|'prompt'} type - What kind of item this is
  * @param {object} [callbacks] - Optional action callbacks { onChat, onEdit, onDelete }
  */
 export function openViewModal(item, type, callbacks = {}) {
     const modalEl = document.getElementById("item-view-modal");
     if (!modalEl) return;
 
+    const dialogEl = modalEl.querySelector(".modal-dialog");
     const titleEl = modalEl.querySelector(".modal-title");
     const bodyEl = modalEl.querySelector(".modal-body");
     const footerEl = modalEl.querySelector(".modal-footer");
     if (!titleEl || !bodyEl || !footerEl) return;
 
+    if (dialogEl) {
+        dialogEl.className = type === "prompt"
+            ? "modal-dialog modal-dialog-scrollable"
+            : "modal-dialog modal-lg modal-dialog-scrollable";
+    }
+
     if (type === "agent") {
         titleEl.textContent = "Agent Details";
-        bodyEl.innerHTML = buildAgentViewHtml(item);
+        bodyEl.innerHTML = buildAgentViewHtml(item, {
+            showInstructions: callbacks.showInstructions !== false,
+        });
+        hydrateAgentViewIcons(bodyEl, item);
+    } else if (type === "prompt") {
+        titleEl.textContent = "Prompt Details";
+        bodyEl.innerHTML = buildPromptViewHtml(item);
     } else {
         titleEl.textContent = "Action Details";
         bodyEl.innerHTML = buildActionViewHtml(item);
@@ -173,7 +228,7 @@ export function openViewModal(item, type, callbacks = {}) {
         const chatBtn = document.createElement('button');
         chatBtn.type = 'button';
         chatBtn.className = 'btn btn-primary';
-        chatBtn.innerHTML = '<i class="bi bi-chat-dots me-1"></i>Chat';
+        chatBtn.innerHTML = '<i class="bi bi-chat-dots-fill me-1"></i>Chat';
         chatBtn.addEventListener('click', () => {
             bootstrap.Modal.getInstance(modalEl)?.hide();
             onChat(item);
@@ -216,25 +271,197 @@ export function openViewModal(item, type, callbacks = {}) {
     modal.show();
 }
 
-function buildAgentViewHtml(agent) {
+function normalizeDetailText(value) {
+    return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function normalizeDetailList(value) {
+    if (!Array.isArray(value)) return [];
+    return value
+        .map(item => {
+            if (item && typeof item === "object") {
+                return normalizeDetailText(item.display_name || item.displayName || item.name || item.label);
+            }
+            return normalizeDetailText(item);
+        })
+        .filter(Boolean);
+}
+
+function hasAgentValue(agent, propertyName) {
+    return Object.prototype.hasOwnProperty.call(agent, propertyName)
+        && agent[propertyName] !== null
+        && agent[propertyName] !== undefined
+        && agent[propertyName] !== "";
+}
+
+function getAgentModelLabel(agent) {
+    return normalizeDetailText(
+        agent.azure_openai_gpt_deployment
+        || agent.model_label
+        || agent.model
+        || agent.model_id
+        || agent.azure_openai_gpt_model
+        || "Default"
+    );
+}
+
+function formatAgentType(agent) {
+    const rawType = normalizeDetailText(agent.agent_type || agent.type).toLowerCase();
+    const typeLabels = {
+        aifoundry: "Foundry (classic)",
+        foundry_workflow: "Foundry Workflow",
+        local: "Local (Semantic Kernel)",
+        new_foundry: "New Foundry",
+    };
+    return typeLabels[rawType] || (rawType ? humanizeName(rawType) : "Local (Semantic Kernel)");
+}
+
+function getAgentScopeBadgeHtml(agent) {
+    const scopeType = normalizeDetailText(agent.scope_type || agent.scopeType).toLowerCase();
+    if (agent.is_group || scopeType === "group") {
+        const groupLabel = normalizeDetailText(agent.scope_label || agent.group_name || agent.scope_name || "Group");
+        return `<span class="badge bg-primary">${escapeHtml(groupLabel)}</span>`;
+    }
+
+    if (agent.is_global || scopeType === "global" || scopeType === "enterprise") {
+        const defaultGlobalLabel = scopeType === "enterprise" ? "Enterprise" : "Global";
+        const globalLabel = normalizeDetailText(agent.scope_label || agent.scope_name || defaultGlobalLabel);
+        return `<span class="badge bg-info text-dark">${escapeHtml(globalLabel)}</span>`;
+    }
+
+    const personalLabel = normalizeDetailText(agent.scope_label || agent.scope_name || "Personal");
+    return `<span class="badge bg-secondary">${escapeHtml(personalLabel)}</span>`;
+}
+
+function getAgentActionLabels(agent) {
+    const actionLabels = normalizeDetailList(agent.action_labels);
+    if (actionLabels.length || Array.isArray(agent.action_labels)) {
+        return actionLabels;
+    }
+
+    return normalizeDetailList(agent.actions_to_load || agent.actions || agent.plugins);
+}
+
+function buildBadgeListHtml(values, fallbackText) {
+    if (!values.length) {
+        return `<span class="text-muted">${escapeHtml(fallbackText)}</span>`;
+    }
+
+    return values
+        .map(value => `<span class="badge bg-light text-dark border me-1 mb-1">${escapeHtml(value)}</span>`)
+        .join("");
+}
+
+function normalizeAgentIconPayload(iconPayload) {
+    if (!iconPayload || typeof iconPayload !== "object" || Array.isArray(iconPayload)) {
+        return null;
+    }
+
+    const kind = normalizeDetailText(iconPayload.kind).toLowerCase();
+    const value = normalizeDetailText(iconPayload.value);
+    if (kind === "bootstrap" && /^bi-[a-z0-9][a-z0-9-]{0,80}$/.test(value)) {
+        return { kind, value };
+    }
+    if (kind === "image" && /^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/.test(value) && value.length <= 350000) {
+        return { kind, value };
+    }
+    return null;
+}
+
+function appendAgentIconContent(container, agent, className = "agent-view-icon") {
+    if (!container) return;
+
+    container.textContent = "";
+    container.className = className;
+    const icon = normalizeAgentIconPayload(agent?.icon);
+    if (icon?.kind === "image") {
+        const image = document.createElement("img");
+        image.src = icon.value;
+        image.alt = "";
+        container.appendChild(image);
+        return;
+    }
+
+    const iconElement = document.createElement("i");
+    iconElement.className = `bi ${icon?.kind === "bootstrap" ? icon.value : "bi-robot"}`;
+    iconElement.setAttribute("aria-hidden", "true");
+    container.appendChild(iconElement);
+}
+
+function hydrateAgentViewIcons(container, agent) {
+    container
+        ?.querySelectorAll("[data-agent-view-icon]")
+        .forEach(iconContainer => appendAgentIconContent(iconContainer, agent, "agent-view-icon"));
+}
+
+function buildAgentCapabilitiesHtml(agent) {
+    const hasDetailedUsage = hasAgentValue(agent, "usage_count_all_time") || hasAgentValue(agent, "usage_count_30_days");
+    const hasUsage = hasDetailedUsage || hasAgentValue(agent, "usage_count");
+    const hasActions = Array.isArray(agent.action_labels)
+        || Array.isArray(agent.actions_to_load)
+        || Array.isArray(agent.actions)
+        || Array.isArray(agent.plugins);
+    const hasTags = Array.isArray(agent.tags);
+    if (!hasUsage && !hasActions && !hasTags) {
+        return "";
+    }
+
+    const actionLabels = getAgentActionLabels(agent);
+    const tagLabels = normalizeDetailList(agent.tags);
+    const usageAllTimeNumber = Number(agent.usage_count_all_time ?? agent.usage_count ?? 0);
+    const usageRecentNumber = Number(agent.usage_count_30_days ?? agent.usage_count ?? 0);
+    const usageLegacyNumber = Number(agent.usage_count || 0);
+    const usageAllTimeText = Number.isFinite(usageAllTimeNumber) ? String(usageAllTimeNumber) : normalizeDetailText(agent.usage_count_all_time);
+    const usageRecentText = Number.isFinite(usageRecentNumber) ? String(usageRecentNumber) : normalizeDetailText(agent.usage_count_30_days);
+    const usageLegacyText = Number.isFinite(usageLegacyNumber) ? String(usageLegacyNumber) : normalizeDetailText(agent.usage_count);
+    const actionsColumnClass = hasDetailedUsage ? "col-md-4" : "col-md-8";
+
+    const usageHtml = hasDetailedUsage ? `
+                    <div class="col-md-4">
+                        <label class="text-muted small mb-1 d-block">Times Used All Time</label>
+                        <span class="fw-medium">${escapeHtml(usageAllTimeText || "0")}</span>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="text-muted small mb-1 d-block">Times Used Last 30 Days</label>
+                        <span class="fw-medium">${escapeHtml(usageRecentText || "0")}</span>
+                    </div>` : hasUsage ? `
+                    <div class="col-md-4">
+                        <label class="text-muted small mb-1 d-block">Times Used</label>
+                        <span class="fw-medium">${escapeHtml(usageLegacyText || "0")}</span>
+                    </div>` : "";
+    const actionsHtml = hasActions ? `
+                    <div class="${actionsColumnClass}">
+                        <label class="text-muted small mb-1 d-block">Actions</label>
+                        <div>${buildBadgeListHtml(actionLabels, "No actions assigned")}</div>
+                    </div>` : "";
+    const tagsHtml = hasTags ? `
+                    <div class="col-12">
+                        <label class="text-muted small mb-1 d-block">Tags</label>
+                        <div>${buildBadgeListHtml(tagLabels, "No tags assigned")}</div>
+                    </div>` : "";
+
+    return `
+        <div class="card mb-3 border-0 shadow-sm">
+            <div class="card-header text-white py-2" style="background: linear-gradient(135deg, #6f42c1 0%, #4c2c92 100%);">
+                <i class="bi bi-lightning-charge me-2"></i><strong>Capabilities</strong>
+            </div>
+            <div class="card-body">
+                <div class="row g-3">
+${usageHtml}${actionsHtml}${tagsHtml}
+                </div>
+            </div>
+        </div>`;
+}
+
+function buildAgentViewHtml(agent, options = {}) {
     const displayName = escapeHtml(agent.display_name || agent.displayName || agent.name || "");
     const name = escapeHtml(agent.name || "");
     const description = escapeHtml(agent.description || "No description available.");
-    const model = escapeHtml(agent.azure_openai_gpt_deployment || agent.model || "Default");
-    const agentType = agent.agent_type === "new_foundry"
-        ? "New Foundry"
-        : agent.agent_type === "aifoundry"
-            ? "Foundry (classic)"
-            : "Local (Semantic Kernel)";
-    const rawInstructions = agent.instructions || "No instructions defined.";
-    // Render instructions as Markdown (marked + DOMPurify are loaded globally in base.html)
-    const renderedInstructions = (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined')
-        ? DOMPurify.sanitize(marked.parse(rawInstructions))
-        : escapeHtml(rawInstructions);
-    const isGlobal = agent.is_global;
-    const scopeBadge = isGlobal
-        ? '<span class="badge bg-info text-dark">Global</span>'
-        : '<span class="badge bg-secondary">Personal</span>';
+    const model = escapeHtml(getAgentModelLabel(agent));
+    const agentType = escapeHtml(formatAgentType(agent));
+    const showInstructions = options.showInstructions !== false;
+    const instructionsHtml = showInstructions ? buildAgentInstructionsHtml(agent) : "";
+    const scopeBadge = getAgentScopeBadgeHtml(agent);
 
     return `
         <div class="card mb-3 border-0 shadow-sm">
@@ -243,11 +470,15 @@ function buildAgentViewHtml(agent) {
             </div>
             <div class="card-body">
                 <div class="row g-3">
-                    <div class="col-md-6">
+                    <div class="col-md-2">
+                        <label class="text-muted small mb-1 d-block">Icon</label>
+                        <div class="agent-view-icon" data-agent-view-icon aria-hidden="true"></div>
+                    </div>
+                    <div class="col-md-5">
                         <label class="text-muted small mb-1 d-block">Display Name</label>
                         <span class="fw-medium">${displayName}</span>
                     </div>
-                    <div class="col-md-6">
+                    <div class="col-md-5">
                         <label class="text-muted small mb-1 d-block">Generated Name</label>
                         <span class="fw-medium font-monospace">${name}</span>
                     </div>
@@ -257,7 +488,7 @@ function buildAgentViewHtml(agent) {
                     </div>
                     <div class="col-md-6">
                         <label class="text-muted small mb-1 d-block">Agent Type</label>
-                        <span class="badge bg-info text-dark">${escapeHtml(agentType)}</span>
+                        <span class="badge bg-info text-dark">${agentType}</span>
                     </div>
                     <div class="col-12">
                         <label class="text-muted small mb-1 d-block">Description</label>
@@ -279,6 +510,17 @@ function buildAgentViewHtml(agent) {
                 </div>
             </div>
         </div>
+        ${buildAgentCapabilitiesHtml(agent)}
+        ${instructionsHtml}`;
+}
+
+function buildAgentInstructionsHtml(agent) {
+    const rawInstructions = String(agent.instructions || "No instructions defined.");
+    const renderedInstructions = (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined')
+        ? DOMPurify.sanitize(marked.parse(rawInstructions))
+        : escapeHtml(rawInstructions);
+
+    return `
         <div class="card mb-3 border-0 shadow-sm">
             <div class="card-header text-white py-2" style="background: linear-gradient(135deg, #28a745 0%, #1e7e34 100%);">
                 <i class="bi bi-file-text me-2"></i><strong>Instructions</strong>
@@ -359,6 +601,30 @@ function buildActionViewHtml(action) {
         ${configHtml}`;
 }
 
+function buildPromptViewHtml(prompt) {
+    const promptName = escapeHtml(prompt.name || "Untitled Prompt");
+    const promptContent = escapeHtml(prompt.content || "No prompt content available.");
+
+    return `
+        <div class="card mb-3 border-0 shadow-sm">
+            <div class="card-header text-white py-2" style="background: linear-gradient(135deg, #007bff 0%, #0056b3 100%);">
+                <i class="bi bi-file-earmark-text me-2"></i><strong>Prompt</strong>
+            </div>
+            <div class="card-body">
+                <label class="text-muted small mb-1 d-block">Prompt Name</label>
+                <span class="fw-medium">${promptName}</span>
+            </div>
+        </div>
+        <div class="card border-0 shadow-sm">
+            <div class="card-header text-white py-2" style="background: linear-gradient(135deg, #28a745 0%, #1e7e34 100%);">
+                <i class="bi bi-card-text me-2"></i><strong>Prompt Content</strong>
+            </div>
+            <div class="card-body">
+                <pre class="mb-0 p-3 bg-body-tertiary border rounded" style="white-space: pre-wrap; word-break: break-word; max-height: 360px; overflow-y: auto; font-size: 0.9rem;">${promptContent}</pre>
+            </div>
+        </div>`;
+}
+
 function formatAuthType(type) {
     if (!type) return "";
     const map = {
@@ -400,7 +666,7 @@ export function createAgentCard(agent, options = {}) {
 
     let buttonsHtml = `
         <button class="btn btn-sm btn-primary item-card-chat-btn me-1" title="Chat with this agent">
-            <i class="bi bi-chat-dots me-1"></i>Chat
+            <i class="bi bi-chat-dots-fill me-1"></i>Chat
         </button>
         <button class="btn btn-sm btn-outline-info item-card-view-btn me-1" title="View details">
             <i class="bi bi-eye"></i>
@@ -419,9 +685,7 @@ export function createAgentCard(agent, options = {}) {
     col.innerHTML = `
         <div class="card item-card h-100">
             <div class="card-body d-flex flex-column">
-                <div class="item-card-icon mb-2">
-                    <i class="bi bi-robot" style="font-size: 1.75rem;"></i>
-                </div>
+                <div class="item-card-icon mb-2" data-agent-card-icon></div>
                 <h6 class="card-title mb-1">${escapeHtml(displayName)}${badgeHtml}</h6>
                 <p class="card-text small text-muted flex-grow-1">${escapeHtml(truncateDescription(description, 120))}</p>
                 <div class="item-card-buttons mt-2 d-flex flex-wrap gap-1">
@@ -429,6 +693,8 @@ export function createAgentCard(agent, options = {}) {
                 </div>
             </div>
         </div>`;
+
+    appendAgentIconContent(col.querySelector("[data-agent-card-icon]"), agent, "item-card-icon mb-2");
 
     // Bind button events
     const chatBtn = col.querySelector(".item-card-chat-btn");

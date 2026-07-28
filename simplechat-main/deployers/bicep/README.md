@@ -36,15 +36,18 @@ The following variables will be used within this document:
 
 Before deploying, ensure you have:
 
-1. **Azure Subscription** with Owner or Contributor permissions
+1. **Azure Subscription** with Owner or Contributor permissions. Managed identity deployments also require permission to create role assignments and custom role definitions at the target scopes.
 2. **Azure CLI** (version 2.50.0 or later)
   Install: https://learn.microsoft.com/cli/azure/install-azure-cli
 3. **Azure Developer CLI (azd)** (version 1.5.0 or later)
   Install: https://learn.microsoft.com/azure/developer/azure-developer-cli/install-azd
-4. **Access to Azure Container Registry Tasks** so `azd up` can build the image in ACR with `az acr build`
-5. **PowerShell 7** (for the Entra app registration script on Windows, Linux, or macOS)
+4. **Python 3.12** with `python` available on Windows and `python3` available on Linux/macOS
+  Install: https://www.python.org/downloads/
+  The AZD hooks in `deployers/azure.yaml` run Python during `preprovision` and `postprovision` for prerequisite validation, dependency installation, and post-provision configuration.
+5. **Access to Azure Container Registry Tasks** so `azd up` can build the image in ACR with `az acr build`
+6. **PowerShell 7** (for the Entra app registration script on Windows, Linux, or macOS)
   Install: https://learn.microsoft.com/powershell/scripting/install/installing-powershell
-6. **Permissions to create an Entra ID Application Registration** (or coordinate with your Entra admin)
+7. **Permissions to create an Entra ID Application Registration** (or coordinate with your Entra admin)
 
 Platform note:
 
@@ -116,11 +119,19 @@ pwsh ./Initialize-EntraApplication.ps1 -AppName "$appName" -Environment "$enviro
 
 This script will create an Entra Enterprise Application, with an App Registration named *\<appName\>*-*\<environment\>*-ar for the web service called *\<appName\>*-*\<environment\>*-app.  The web service name may be overriden with the `-AppServceName` parameter. A user can also specify a different expiration date for the secret which defaults to 180 days with the `-SecretExpirationDays` parameter.
 
+By default, the script also saves the generated app registration values into the resolved AZD environment using `azd env set`:
+
+- `ENTERPRISE_APP_CLIENT_ID`
+- `ENTERPRISE_APP_SERVICE_PRINCIPAL_ID`
+- `ENTERPRISE_APP_CLIENT_SECRET`
+
+The script resolves the target AZD environment from `AZURE_ENV_NAME`, then `.azure/config.json` `defaultEnvironment`, then the `-Environment` value. Use `-AzdEnvironmentName <name>` to target a specific AZD environment, or `-SkipAzdEnvironmentUpdate` when the script is being run as a standalone/manual registration workflow.
+
 >**Note**: If the script was provided to a different administrator, the -AppRolesJsonPath will need to be edited to the location of the appRegistrationRoles.json file.
 
 The powershell script will report the following information on successful completion.  
 
->**Be sure to save this information as it will not be available after the window is closed.**
+>**If the AZD environment update fails, save this information and set it later with `azd env set`.**
 
 ```========================================
 App Registration Created Successfully!
@@ -278,9 +289,9 @@ During `azd up`, the predeploy hook now builds the application image in Azure Co
 - Enter a value for the 'existingAppServiceSubnetId' infrastructure parameter: *\<optional subnet resource ID for App Service VNet integration\>*
 - Enter a value for the 'existingPrivateEndpointSubnetId' infrastructure parameter: *\<optional subnet resource ID for private endpoints\>*
 - Enter a value for the 'privateDnsZoneConfigs' infrastructure parameter: *\<optional JSON object for reusing private DNS zones or suppressing VNet link creation\>*
-- Enter a value for the 'enterpriseAppClientId' infrastructure parameter: *\<clientID\>*
-- Enter a value for the 'enterpriseAppClientSecret' infrastructure secured parameter: *\<clientSecret\>*
-- Enter a value for the 'enterpriseAppServicePrincipalId' infrastructure parameter: *\<servicePrincipalId\>*
+- Enter a value for the 'enterpriseAppClientId' infrastructure parameter: *\<clientID\>* (not prompted when `ENTERPRISE_APP_CLIENT_ID` is already saved in the AZD environment)
+- Enter a value for the 'enterpriseAppClientSecret' infrastructure secured parameter: *\<clientSecret\>* (not prompted when `ENTERPRISE_APP_CLIENT_SECRET` is already saved in the AZD environment)
+- Enter a value for the 'enterpriseAppServicePrincipalId' infrastructure parameter: *\<servicePrincipalId\>* (not prompted when `ENTERPRISE_APP_SERVICE_PRINCIPAL_ID` is already saved in the AZD environment)
 - Enter a value for the 'environment' infrastructure parameter: *\<environment\>*
 - Enter a value for the 'imageName' infrastructure parameter: *\<optional imageName\>*
 - Enter a value for the 'location' infrastructure parameter: *\<select from the list provided\>*
@@ -288,6 +299,8 @@ During `azd up`, the predeploy hook now builds the application image in Azure Co
 `allowedIpAddresses` is optional. Leave it blank when the machine running `azd up` already has private connectivity to the deployed services through your corporate network, VPN, jump host, or build agent and can resolve the private DNS names.
 
 `imageName` defaults to `simplechat:latest`. Most deployments can accept that default without entering a custom value.
+
+When `authenticationType` is `managed_identity`, the AZD preprovision hook validates that the current Azure identity can create the role assignments and custom role definitions needed by the deployment. If the identity does not have Owner, Role Based Access Control Administrator, or an equivalent custom role at the target scopes, deployment stops before provisioning continues. You can rerun with an identity that has the required permissions, ask an Azure administrator to complete the RBAC setup, or switch the AZD environment to key-based authentication with `azd env set AUTHENTICATION_TYPE key` if that security model is acceptable.
 
 `openAIDeploymentType` controls the default Azure OpenAI model deployment type used when this deployment creates the GPT and embedding model deployments for you. In Azure Commercial, choose `Standard`, `DatazoneStandard`, or `GlobalStandard` based on your quota and regional availability. In Azure Government, choose `Standard`.
 
@@ -309,7 +322,7 @@ On the completion of the deployment, a URL will be presented, the user may use t
 
 Once logged in to the newly deployed application with admin credentials, review the application configuration in the Admin Settings:
 
-1. Admin Settings > AI Models > GPT Configuration & Embeddings Configuration.  Application is pre-configured with the chosen security model (key / managed identity).  Select "Test GPT Connection" and "Test Embedding Connection" to verify connection.
+1. Admin Settings > AI Models > Chat Model & Embeddings Configuration.  Application is pre-configured with the chosen security model (key / managed identity).  Select "Test GPT Connection" and "Test Embedding Connection" to verify connection.
 
 1. Admin Settings > Scale > Redis Cache (if enabled) - Select "Test Redis Connection"
 
@@ -425,9 +438,9 @@ az resource update --name <appName>-<environment>-app --resource-group <appName>
 | Service | Azure Commercial | Azure Government | Notes |
 |---------|------------------|------------------|-------|
 | App Service | ✅ | ✅ | Premium V3 tier |
-| Cosmos DB | ✅ | ✅ | Serverless mode |
+| Cosmos DB | ✅ | ✅ | Provisioned dedicated container autoscale throughput by default |
 | Azure OpenAI | ✅ | ✅ | Standard SKU only in USGov |
-| Azure AI Search | ✅ | ✅ | Basic tier |
+| Azure AI Search | ✅ | ✅ | Standard S1 tier with standard Semantic Ranker by default |
 | Document Intelligence | ✅ | ✅ | Limited regions |
 | Storage Account | ✅ | ✅ | Standard LRS |
 | Key Vault | ✅ | ✅ | Standard tier |
@@ -457,13 +470,22 @@ The deployment automatically handles the following endpoint differences:
 A: Initial deployment typically takes 15-40 minutes depending on options selected. Subsequent deployments are faster.
 
 **Q: What Azure permissions do I need?**
-A: You need Owner or Contributor role on the target subscription, plus ability to create Entra ID app registrations (or work with your Entra admin).
+A: Key-based deployments generally need Owner or Contributor on the target subscription, plus ability to create Entra ID app registrations (or work with your Entra admin). Managed identity deployments also need permission to create role assignments and custom role definitions at the target scopes, such as Owner, Role Based Access Control Administrator, or an equivalent custom role.
 
 **Q: Can I deploy to an existing resource group?**
 A: No, the deployment creates a new resource group named `<appName>-<environment>-rg`.
 
 **Q: What is the default authentication type?**
 A: You can choose between `key` (API keys stored in Key Vault) or `managed_identity` (recommended for production).
+
+**Q: Why does managed identity deployment stop before provisioning?**
+A: Managed identity deployment must create RBAC role assignments for the App Service identity and related resources. If the signed-in Azure identity cannot perform `Microsoft.Authorization/roleAssignments/write` and `Microsoft.Authorization/roleDefinitions/write` at the target scopes, the preprovision hook fails fast instead of letting deployment appear successful while runtime access is broken. Use Owner, Role Based Access Control Administrator, or an equivalent custom role, then rerun `azd up`. To continue with key-based authentication instead, run `azd env set AUTHENTICATION_TYPE key` and rerun the deployment.
+
+**Q: What capacity defaults does the deployer use?**
+A: The Bicep and AZD path defaults to Azure AI Search Standard S1 with standard Semantic Ranker and Cosmos DB provisioned autoscale throughput on each SimpleChat container. These defaults avoid the limited free semantic query quota, avoid the 25-container limit for shared-throughput databases, and make document search and ingestion more reliable after first deployment.
+
+**Q: Can I use Free Search or serverless Cosmos DB for an MVP?**
+A: Yes, but treat those as short-lived MVP or evaluation settings. Set `searchSkuName` and `searchSemanticSearchSku` to `free`, or set `cosmosCapacityMode` to `serverless`, only when you understand the service limits and do not need production-grade document search throughput. The repository defaults remain Standard S1 Search and provisioned Cosmos DB.
 
 ### Model Configuration
 
@@ -508,9 +530,9 @@ A: Only when the DNS zone is already linked to the target VNet or when a central
 **Q: What's the estimated monthly cost?**
 A: Base infrastructure (without optional services) costs approximately:
 - App Service Plan (P1v3): ~$150/month
-- Cosmos DB (Serverless): Pay-per-request
+- Cosmos DB (Provisioned autoscale): Varies by configured max RU/s; default dedicated container autoscale max is 1000 RU/s per container
 - Azure OpenAI: Pay-per-token
-- Azure AI Search (Basic): ~$70/month
+- Azure AI Search (Standard S1): Varies by region and replica/partition count
 - Other services: Variable based on usage
 
 ### Upgrading

@@ -1,13 +1,22 @@
 # functions_documents.py that has some changes I need to merge into Development
 
+import re
+import shutil
 import traceback
+import zipfile
+from io import BytesIO
+from flask import make_response
 from config import *
+from functions_appinsights import log_event
+from functions_visio import build_visio_page_markdown, parse_vsdx_pages
 from functions_content import *
 from functions_settings import *
 from functions_search import *
 from functions_logging import *
 from functions_authentication import *
 from functions_debug import *
+from functions_keyvault import SecretReturnType, keyvault_model_endpoint_get_helper
+from functions_model_endpoint_runtime import MODEL_ENDPOINT_PROVIDER_ALLOWLIST, build_model_endpoint_sync_chat_client
 import azure.cognitiveservices.speech as speechsdk
 
 def allowed_file(filename, allowed_extensions=None):
@@ -17,9 +26,218 @@ def allowed_file(filename, allowed_extensions=None):
            filename.rsplit('.', 1)[1].lower() in allowed_extensions
 
 
+def _normalize_model_endpoint_selection(selection):
+    if not isinstance(selection, dict):
+        selection = {}
+
+    return {
+        "endpoint_id": str(selection.get("endpoint_id") or "").strip(),
+        "model_id": str(selection.get("model_id") or "").strip(),
+        "provider": str(selection.get("provider") or "").strip().lower(),
+    }
+
+
+def _resolve_model_endpoint_authority(auth_settings):
+    management_cloud = str(auth_settings.get("management_cloud") or "public").lower()
+    if management_cloud == "government":
+        return "https://login.microsoftonline.us"
+    if management_cloud == "custom":
+        custom_authority = auth_settings.get("custom_authority") or ""
+        return custom_authority.strip() or None
+    return None
+
+
+def _resolve_model_endpoint_scope(provider, auth_settings, endpoint=None):
+    custom_scope = str(auth_settings.get("foundry_scope") or "").strip()
+    if custom_scope:
+        return custom_scope
+
+    normalized_provider = str(provider or "aoai").lower()
+    if normalized_provider not in ("aifoundry", "new_foundry"):
+        return cognitive_services_scope
+
+    management_cloud = str(auth_settings.get("management_cloud") or "public").lower()
+    if management_cloud in ("government", "usgovernment", "usgov"):
+        return "https://ai.azure.us/.default"
+    if management_cloud == "china":
+        return "https://ai.azure.cn/.default"
+    if management_cloud == "germany":
+        return "https://ai.azure.de/.default"
+
+    endpoint_value = str(endpoint or "").lower()
+    if "azure.us" in endpoint_value:
+        return "https://ai.azure.us/.default"
+    if "azure.cn" in endpoint_value:
+        return "https://ai.azure.cn/.default"
+    if "azure.de" in endpoint_value:
+        return "https://ai.azure.de/.default"
+
+    return "https://ai.azure.com/.default"
+
+
+def _build_model_endpoint_client(auth_settings, provider, endpoint, api_version, deployment_name):
+    client, _ = build_model_endpoint_sync_chat_client(
+        auth_settings,
+        provider,
+        endpoint,
+        api_version,
+        deployment_name=deployment_name,
+    )
+    return client
+
+
+def _resolve_metadata_extraction_client(settings):
+    selection = _normalize_model_endpoint_selection(settings.get("metadata_extraction_model_selection"))
+
+    if (
+        settings.get("enable_multi_model_endpoints", False)
+        and selection["endpoint_id"]
+        and selection["model_id"]
+    ):
+        endpoints, _ = normalize_model_endpoints(settings.get("model_endpoints", []) or [])
+        endpoint_cfg = next((e for e in endpoints if e.get("id") == selection["endpoint_id"]), None)
+        if not endpoint_cfg:
+            raise LookupError("Selected metadata extraction endpoint could not be found.")
+        if not endpoint_cfg.get("enabled", True):
+            raise ValueError("Selected metadata extraction endpoint is disabled.")
+
+        endpoint_cfg = keyvault_model_endpoint_get_helper(
+            endpoint_cfg,
+            endpoint_cfg.get("id") or selection["endpoint_id"],
+            scope="global",
+            return_type=SecretReturnType.VALUE,
+        )
+
+        models = endpoint_cfg.get("models", []) or []
+        model_cfg = next((m for m in models if m.get("id") == selection["model_id"]), None)
+        if not model_cfg:
+            raise LookupError("Selected metadata extraction model could not be found on the endpoint.")
+        if not model_cfg.get("enabled", True):
+            raise ValueError("Selected metadata extraction model is disabled.")
+
+        provider = str(endpoint_cfg.get("provider") or selection["provider"] or "aoai").lower()
+        connection = endpoint_cfg.get("connection", {}) or {}
+        auth_settings = endpoint_cfg.get("auth", {}) or {}
+        deployment = str(model_cfg.get("deploymentName") or model_cfg.get("deployment") or "").strip()
+        endpoint = str(connection.get("endpoint") or "").strip()
+        api_version = str(connection.get("openai_api_version") or connection.get("api_version") or "").strip()
+
+        if provider not in MODEL_ENDPOINT_PROVIDER_ALLOWLIST:
+            raise ValueError(f"Selected metadata extraction provider '{provider}' is not supported.")
+        if not endpoint or not api_version or not deployment:
+            raise ValueError("Selected metadata extraction endpoint is missing endpoint, API version, or deployment configuration.")
+
+        return _build_model_endpoint_client(auth_settings, provider, endpoint, api_version, deployment), deployment
+
+    gpt_model = settings.get('metadata_extraction_model')
+    if not gpt_model:
+        raise ValueError("No metadata extraction model is selected.")
+
+    if settings.get('enable_gpt_apim', False):
+        return AzureOpenAI(
+            api_version=settings.get('azure_apim_gpt_api_version'),
+            azure_endpoint=settings.get('azure_apim_gpt_endpoint'),
+            api_key=settings.get('azure_apim_gpt_subscription_key')
+        ), gpt_model
+
+    if settings.get('azure_openai_gpt_authentication_type') == 'managed_identity':
+        token_provider = get_bearer_token_provider(
+            DefaultAzureCredential(),
+            cognitive_services_scope
+        )
+        return AzureOpenAI(
+            api_version=settings.get('azure_openai_gpt_api_version'),
+            azure_endpoint=settings.get('azure_openai_gpt_endpoint'),
+            azure_ad_token_provider=token_provider
+        ), gpt_model
+
+    return AzureOpenAI(
+        api_version=settings.get('azure_openai_gpt_api_version'),
+        azure_endpoint=settings.get('azure_openai_gpt_endpoint'),
+        api_key=settings.get('azure_openai_gpt_key')
+    ), gpt_model
+
+
 ARCHIVED_SCOPE_PREFIX = "__archived__::"
 CURRENT_ALIAS_BLOB_PATH_MODE = "current_alias"
 ARCHIVED_REVISION_BLOB_PATH_MODE = "archived_revision"
+CHAT_UPLOAD_WORKSPACE_TAG = "conversations"
+TAG_COLOR_PATTERN = re.compile(r'^#?(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$')
+DI_SELECTION_MARK_PATTERNS = (
+    "Selection marks detected:",
+    "\u2612",
+    "\u2610",
+    ":selected:",
+    ":unselected:",
+    "selected selection mark",
+    "unselected selection mark",
+)
+DI_MARKDOWN_TABLE_SEPARATOR_PATTERN = re.compile(r'(?m)^\s*\|(?:\s*:?-{3,}:?\s*\|)+\s*$')
+DI_MARKDOWN_TABLE_ROW_PATTERN = re.compile(r'(?m)^\s*\|.+\|\s*$')
+
+
+def is_pdf_file_name(file_name):
+    """Return True when the file name points to a PDF document."""
+    return str(file_name or '').lower().endswith('.pdf')
+
+
+def is_pdf_or_image_file_name(file_name):
+    """Return True when the file name points to a PDF or configured image type."""
+    normalized_file_name = str(file_name or '').lower()
+    if normalized_file_name.endswith('.pdf'):
+        return True
+    return any(normalized_file_name.endswith(f'.{ext}') for ext in IMAGE_EXTENSIONS)
+
+
+def _build_document_intelligence_page_range(sample_pages, total_pages=0):
+    sample_count = normalize_document_intelligence_auto_sample_pages(sample_pages)
+    if total_pages and total_pages > 0:
+        sample_count = min(sample_count, total_pages)
+    return "1" if sample_count == 1 else f"1-{sample_count}"
+
+
+def _get_document_intelligence_auto_layout_reason(sampled_pages):
+    sampled_text = "\n\n".join(
+        str(page.get('content', '') or '')
+        for page in sampled_pages or []
+        if isinstance(page, dict)
+    )
+    if not sampled_text.strip():
+        return ''
+
+    sampled_text_lower = sampled_text.lower()
+    if any(marker.lower() in sampled_text_lower for marker in DI_SELECTION_MARK_PATTERNS):
+        return 'selection marks or checkbox states detected in the sampled pages'
+    if DI_MARKDOWN_TABLE_ROW_PATTERN.search(sampled_text) and DI_MARKDOWN_TABLE_SEPARATOR_PATTERN.search(sampled_text):
+        return 'table structure detected in the sampled pages'
+    return ''
+
+
+def _resolve_document_intelligence_auto_mode(temp_file_path, is_pdf, is_image, page_count, sample_pages, update_callback):
+    if is_image:
+        return 'layout', 'image input benefits from Enhanced extraction for spatial structure and selection marks'
+
+    if not is_pdf:
+        return 'read', 'Auto mode is only evaluated for PDFs and images'
+
+    page_range = _build_document_intelligence_page_range(sample_pages, page_count)
+    update_callback(status=f"Auto mode sampling PDF pages {page_range} with Enhanced extraction...")
+
+    try:
+        sampled_pages = extract_content_with_azure_di(
+            temp_file_path,
+            extraction_mode='layout',
+            pages=page_range
+        )
+    except Exception as e:
+        log_event(f"[document_intelligence_auto] Layout sampling failed; falling back to Read: {e}", level=logging.WARNING)
+        return 'read', 'Layout sampling failed, so Auto fell back to Read'
+
+    layout_reason = _get_document_intelligence_auto_layout_reason(sampled_pages)
+    if layout_reason:
+        return 'layout', layout_reason
+
+    return 'read', 'no tables or selection marks detected in the sampled pages'
 
 
 def _get_blob_container_name(group_id=None, public_workspace_id=None):
@@ -92,6 +310,100 @@ def get_document_blob_storage_info(document_item, user_id=None, group_id=None, p
         group_id=group_id or document_item.get("group_id"),
         public_workspace_id=public_workspace_id or document_item.get("public_workspace_id"),
     )
+
+
+def _sanitize_download_file_name(file_name, fallback='document'):
+    normalized_name = str(file_name or '').replace('\\', '/').split('/')[-1].strip()
+    safe_name = secure_filename(normalized_name)
+    if safe_name:
+        return safe_name
+    return secure_filename(str(fallback or 'document').strip()) or 'document'
+
+
+def _get_download_content_type(file_name):
+    return mimetypes.guess_type(str(file_name or ''))[0] or 'application/octet-stream'
+
+
+def _get_document_download_entry(document_item, user_id=None, group_id=None, public_workspace_id=None):
+    if not document_item:
+        raise FileNotFoundError('Document not found.')
+
+    container_name, blob_path = get_document_blob_storage_info(
+        document_item,
+        user_id=user_id,
+        group_id=group_id,
+        public_workspace_id=public_workspace_id,
+    )
+    if not container_name or not blob_path:
+        raise FileNotFoundError('Document source file is unavailable.')
+
+    blob_service_client = _get_blob_service_client()
+    blob_client = blob_service_client.get_blob_client(container=container_name, blob=blob_path)
+    try:
+        file_bytes = blob_client.download_blob().readall()
+    except Exception as exc:
+        raise FileNotFoundError('Document source file was not found in Blob Storage.') from exc
+
+    file_name = _sanitize_download_file_name(
+        document_item.get('file_name') or document_item.get('title') or document_item.get('id'),
+        fallback=document_item.get('id') or 'document',
+    )
+    return {
+        'file_name': file_name,
+        'content_type': _get_download_content_type(file_name),
+        'content': file_bytes,
+    }
+
+
+def build_document_download_response(document_item, user_id=None, group_id=None, public_workspace_id=None):
+    """Build an attachment response for a single authorized document source file."""
+    entry = _get_document_download_entry(
+        document_item,
+        user_id=user_id,
+        group_id=group_id,
+        public_workspace_id=public_workspace_id,
+    )
+    response = make_response(entry['content'])
+    response.headers['Content-Type'] = entry['content_type']
+    response.headers['Content-Disposition'] = f'attachment; filename="{entry["file_name"]}"'
+    return response
+
+
+def build_documents_zip_download_response(documents, archive_name, user_id=None, group_id=None, public_workspace_id=None):
+    """Build a ZIP attachment for multiple authorized document source files."""
+    buffer = BytesIO()
+    used_names = set()
+    document_count = 0
+
+    with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
+        for document_item in documents or []:
+            entry = _get_document_download_entry(
+                document_item,
+                user_id=user_id,
+                group_id=group_id,
+                public_workspace_id=public_workspace_id,
+            )
+            base_name, extension = os.path.splitext(entry['file_name'])
+            candidate_name = entry['file_name']
+            suffix = 2
+            while candidate_name.lower() in used_names:
+                candidate_name = f'{base_name or "document"}_{suffix}{extension}'
+                suffix += 1
+            used_names.add(candidate_name.lower())
+            archive.writestr(candidate_name, entry['content'])
+            document_count += 1
+
+    if document_count == 0:
+        raise FileNotFoundError('No documents were available for download.')
+
+    buffer.seek(0)
+    safe_archive_name = _sanitize_download_file_name(archive_name, fallback='documents.zip')
+    if not safe_archive_name.lower().endswith('.zip'):
+        safe_archive_name = f'{safe_archive_name}.zip'
+    response = make_response(buffer.read())
+    response.headers['Content-Type'] = 'application/zip'
+    response.headers['Content-Disposition'] = f'attachment; filename="{safe_archive_name}"'
+    return response
 
 
 def _has_persisted_blob_reference(document_item):
@@ -572,7 +884,7 @@ def _build_carried_forward_metadata(document_item, is_group=False):
         carried_forward["shared_user_ids"] = document_item.get("shared_user_ids", [])
 
     return carried_forward
-    
+
 def create_document(file_name, user_id, document_id, num_file_chunks, status, group_id=None, public_workspace_id=None):
     current_time = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     is_group = group_id is not None
@@ -588,9 +900,9 @@ def create_document(file_name, user_id, document_id, num_file_chunks, status, gr
 
     if is_public_workspace:
         query = """
-            SELECT * 
+            SELECT *
             FROM c
-            WHERE c.file_name = @file_name 
+            WHERE c.file_name = @file_name
                 AND c.public_workspace_id = @public_workspace_id
         """
         parameters = [
@@ -599,9 +911,9 @@ def create_document(file_name, user_id, document_id, num_file_chunks, status, gr
         ]
     elif is_group:
         query = """
-            SELECT * 
+            SELECT *
             FROM c
-            WHERE c.file_name = @file_name 
+            WHERE c.file_name = @file_name
                 AND c.group_id = @group_id
         """
         parameters = [
@@ -610,9 +922,9 @@ def create_document(file_name, user_id, document_id, num_file_chunks, status, gr
         ]
     else:
         query = """
-            SELECT * 
+            SELECT *
             FROM c
-            WHERE c.file_name = @file_name 
+            WHERE c.file_name = @file_name
                 AND c.user_id = @user_id
         """
         parameters = [
@@ -671,7 +983,7 @@ def create_document(file_name, user_id, document_id, num_file_chunks, status, gr
 
             if update_existing_document:
                 cosmos_container.upsert_item(existing_document)
-        
+
         if is_public_workspace:
             document_metadata = {
                 "id": document_id,
@@ -786,7 +1098,7 @@ def create_document(file_name, user_id, document_id, num_file_chunks, status, gr
 def get_document_metadata(document_id, user_id, group_id=None, public_workspace_id=None):
     is_group = group_id is not None
     is_public_workspace = public_workspace_id is not None
-    
+
     if is_public_workspace:
         cosmos_container = cosmos_public_documents_container
     elif is_group:
@@ -796,9 +1108,9 @@ def get_document_metadata(document_id, user_id, group_id=None, public_workspace_
 
     if is_public_workspace:
         query = """
-            SELECT * 
+            SELECT *
             FROM c
-            WHERE c.id = @document_id 
+            WHERE c.id = @document_id
                 AND c.public_workspace_id = @public_workspace_id
             ORDER BY c.version DESC
         """
@@ -811,30 +1123,40 @@ def get_document_metadata(document_id, user_id, group_id=None, public_workspace_
             SELECT *
             FROM c
             WHERE c.id = @document_id
-                AND (c.group_id = @group_id OR ARRAY_CONTAINS(c.shared_group_ids, @group_id))
+                AND (
+                    c.group_id = @group_id
+                    OR ARRAY_CONTAINS(c.shared_group_ids, @group_id)
+                    OR EXISTS(SELECT VALUE s FROM s IN c.shared_group_ids WHERE STARTSWITH(s, @group_id_prefix))
+                )
             ORDER BY c.version DESC
         """
         parameters = [
             {"name": "@document_id", "value": document_id},
-            {"name": "@group_id", "value": group_id}
+            {"name": "@group_id", "value": group_id},
+            {"name": "@group_id_prefix", "value": f"{group_id},"}
         ]
     else:
         query = """
             SELECT *
             FROM c
             WHERE c.id = @document_id
-                AND (c.user_id = @user_id OR ARRAY_CONTAINS(c.shared_user_ids, @user_id))
+                AND (
+                    c.user_id = @user_id
+                    OR ARRAY_CONTAINS(c.shared_user_ids, @user_id)
+                    OR EXISTS(SELECT VALUE s FROM s IN c.shared_user_ids WHERE STARTSWITH(s, @user_id_prefix))
+                )
             ORDER BY c.version DESC
         """
         parameters = [
             {"name": "@document_id", "value": document_id},
-            {"name": "@user_id", "value": user_id}
+            {"name": "@user_id", "value": user_id},
+            {"name": "@user_id_prefix", "value": f"{user_id},"}
         ]
 
     add_file_task_to_file_processing_log(
-        document_id=document_id, 
+        document_id=document_id,
         user_id=public_workspace_id if is_public_workspace else (group_id if is_group else user_id),
-        content=f"Query is {query}, parameters are {parameters}."
+        content=f"Document metadata lookup started with {len(parameters)} query parameters."
     )
     try:
         document_items = list(
@@ -847,7 +1169,7 @@ def get_document_metadata(document_id, user_id, group_id=None, public_workspace_
         add_file_task_to_file_processing_log(
             document_id=document_id,
             user_id=public_workspace_id if is_public_workspace else (group_id if is_group else user_id),
-            content=f"Document metadata retrieved: {document_items}."
+            content=f"Document metadata lookup returned {len(document_items)} item(s)."
         )
         return _normalize_document_enhanced_citations(document_items[0]) if document_items else None
 
@@ -862,40 +1184,42 @@ def save_video_chunk(
     file_name,
     user_id,
     document_id,
-    group_id
+    group_id,
+    public_workspace_id=None
 ):
     """
     Saves one 30-second video chunk to the search index, with separate fields for transcript and OCR.
-    Video Indexer insights (keywords, labels, topics, audio effects, emotions, sentiments) are 
+    Video Indexer insights (keywords, labels, topics, audio effects, emotions, sentiments) are
     already appended to page_text_content for searchability.
     The chunk_id is built from document_id and the integer second offset to ensure a valid key.
     """
     from functions_debug import debug_print
-    
+
     debug_print(f"[VIDEO CHUNK] Saving video chunk for document: {document_id}, start_time: {start_time}")
     debug_print(f"[VIDEO CHUNK] Transcript length: {len(page_text_content)}, OCR length: {len(ocr_chunk_text)}")
-    
+
     try:
         current_time = datetime.now(timezone.utc).isoformat()
         is_group = group_id is not None
+        is_public_workspace = public_workspace_id is not None
 
         # Convert start_time "HH:MM:SS.mmm" to integer seconds
         h, m, s = start_time.split(':')
         seconds = int(h) * 3600 + int(m) * 60 + int(float(s))
-        
+
         debug_print(f"[VIDEO CHUNK] Converted start_time {start_time} to {seconds} seconds")
 
         # 1) generate embedding on the transcript text
         try:
             debug_print(f"[VIDEO CHUNK] Generating embedding for transcript text")
             result = generate_embedding(page_text_content)
-            
+
             # Handle both tuple (new) and single value (backward compatibility)
             if isinstance(result, tuple):
                 embedding, _ = result  # Ignore token_usage for now
             else:
                 embedding = result
-                
+
             debug_print(f"[VIDEO CHUNK] Embedding generated successfully")
             print(f"[VideoChunk] EMBEDDING OK for {document_id}@{start_time}", flush=True)
         except Exception as e:
@@ -906,7 +1230,23 @@ def save_video_chunk(
         # 2) build chunk document
         try:
             debug_print(f"[VIDEO CHUNK] Retrieving document metadata")
-            meta = get_document_metadata(document_id, user_id, group_id)
+            if is_public_workspace:
+                meta = get_document_metadata(
+                    document_id=document_id,
+                    user_id=user_id,
+                    public_workspace_id=public_workspace_id
+                )
+            elif is_group:
+                meta = get_document_metadata(
+                    document_id=document_id,
+                    user_id=user_id,
+                    group_id=group_id
+                )
+            else:
+                meta = get_document_metadata(
+                    document_id=document_id,
+                    user_id=user_id
+                )
             version = meta.get("version", 1) if meta else 1
             debug_print(f"[VIDEO CHUNK] Document version: {version}")
 
@@ -928,7 +1268,11 @@ def save_video_chunk(
                 "document_tags":        meta.get('tags', []) if meta else []
             }
 
-            if is_group:
+            if is_public_workspace:
+                chunk["public_workspace_id"] = public_workspace_id
+                client = CLIENTS["search_client_public"]
+                debug_print(f"[VIDEO CHUNK] Using public search client for public_workspace_id: {public_workspace_id}")
+            elif is_group:
                 chunk["group_id"] = group_id
                 client = CLIENTS["search_client_group"]
                 debug_print(f"[VIDEO CHUNK] Using group search client for group_id: {group_id}")
@@ -969,14 +1313,15 @@ def process_video_document(
     original_filename,
     update_callback,
     group_id,
-    public_workspace_id=None
+    public_workspace_id=None,
+    auto_extract_metadata=True
 ):
     """
     Processes a video by dividing transcript into 30-second chunks,
     extracting OCR separately, and saving each as a chunk with safe IDs.
     """
     from functions_debug import debug_print
-    
+
     debug_print(f"[VIDEO INDEXER] Starting video processing for file: {original_filename}")
     debug_print(f"[VIDEO INDEXER] Document ID: {document_id}, User ID: {user_id}, Group ID: {group_id}, Public Workspace ID: {public_workspace_id}")
     debug_print(f"[VIDEO INDEXER] Temp file path: {temp_file_path}")
@@ -997,9 +1342,9 @@ def process_video_document(
         print("[VIDEO] indexing disabled in settings", flush=True)
         update_callback(status="VIDEO: indexing disabled")
         return 0
-    
+
     debug_print("[VIDEO INDEXER] Video file support is enabled, proceeding with indexing")
-    
+
     if settings.get("enable_enhanced_citations", False):
         debug_print("[VIDEO INDEXER] Enhanced citations enabled, uploading to blob storage")
         update_callback(status="Uploading video for enhanced citations...")
@@ -1026,7 +1371,7 @@ def process_video_document(
         settings["video_indexer_location"],
         settings["video_indexer_account_id"]
     )
-    
+
     debug_print(f"[VIDEO INDEXER] Configuration - Endpoint: {vi_ep}, Location: {vi_loc}, Account ID: {vi_acc}")
 
     # Validate required settings for managed identity authentication
@@ -1038,9 +1383,9 @@ def process_video_document(
         "video_indexer_subscription_id": settings.get("video_indexer_subscription_id"),
         "video_indexer_account_name": settings.get("video_indexer_account_name")
     }
-    
+
     debug_print(f"[VIDEO INDEXER] Managed identity authentication requires: endpoint, location, account_id, resource_group, subscription_id, account_name")
-    
+
     missing_settings = [key for key, value in required_settings.items() if not value]
     if missing_settings:
         debug_print(f"[VIDEO INDEXER] ERROR: Missing required settings: {missing_settings}")
@@ -1063,43 +1408,43 @@ def process_video_document(
     # 2) Upload video to Indexer
     try:
         url = f"{vi_ep}/{vi_loc}/Accounts/{vi_acc}/Videos"
-        
+
         # Use the access token in the URL parameters
         headers = {}
         # Request comprehensive indexing including audio transcript
         params = {
-            "accessToken": token, 
+            "accessToken": token,
             "name": original_filename,
             "indexingPreset": "Default",  # Includes video + audio insights
             "streamingPreset": "NoStreaming"
         }
         debug_print(f"[VIDEO INDEXER] Using managed identity access token authentication")
-        
+
         debug_print(f"[VIDEO INDEXER] Upload URL: {url}")
         debug_print(f"[VIDEO INDEXER] Upload params: {params}")
         debug_print(f"[VIDEO INDEXER] Starting file upload for: {original_filename}")
-        
+
         with open(temp_file_path, "rb") as f:
             resp = requests.post(url, params=params, headers=headers, files={"file": f})
-        
+
         debug_print(f"[VIDEO INDEXER] Upload response status: {resp.status_code}")
-        
+
         if resp.status_code != 200:
             debug_print(f"[VIDEO INDEXER] Upload response text: {resp.text}")
-            
+
         resp.raise_for_status()
         response_data = resp.json()
         debug_print(f"[VIDEO INDEXER] Upload response keys: {list(response_data.keys())}")
-        
+
         vid = response_data.get("id")
         if not vid:
             debug_print(f"[VIDEO INDEXER] ERROR: No video ID in response: {response_data}")
             raise ValueError("no video ID returned")
-            
+
         debug_print(f"[VIDEO INDEXER] Upload successful, video ID: {vid}")
         print(f"[VIDEO] UPLOAD OK, videoId={vid}", flush=True)
         update_callback(status=f"VIDEO: uploaded id={vid}")
-        
+
         try:
             # Update the document's metadata with the video indexer ID
             debug_print(f"[VIDEO INDEXER] Updating document metadata with video_indexer_id: {vid}")
@@ -1107,6 +1452,7 @@ def process_video_document(
                 document_id=document_id,
                 user_id=user_id,
                 group_id=group_id,
+                public_workspace_id=public_workspace_id,
                 video_indexer_id=vid
             )
             debug_print(f"[VIDEO INDEXER] Document metadata updated successfully")
@@ -1137,21 +1483,21 @@ def process_video_document(
     poll_headers = {}
     debug_print(f"[VIDEO INDEXER] Using managed identity access token for polling")
     debug_print(f"[VIDEO INDEXER] Requesting full insights (no filtering)")
-    
+
     debug_print(f"[VIDEO INDEXER] Index polling URL: {index_url}")
     debug_print(f"[VIDEO INDEXER] Starting processing polling for video ID: {vid}")
-    
+
     poll_count = 0
     max_polls = 180  # 90 minutes maximum (30 second intervals)
-    
+
     while True:
         poll_count += 1
         debug_print(f"[VIDEO INDEXER] Polling attempt {poll_count}/{max_polls}")
-        
+
         try:
             r = requests.get(index_url, headers=poll_headers)
             debug_print(f"[VIDEO INDEXER] Poll response status: {r.status_code}")
-            
+
             if r.status_code in (401, 404):
                 debug_print(f"[VIDEO INDEXER] Poll returned {r.status_code}, waiting 30s and retrying")
                 time.sleep(30)
@@ -1165,11 +1511,11 @@ def process_video_document(
                 debug_print(f"[VIDEO INDEXER] Timeout received, waiting 30s and retrying")
                 time.sleep(30)
                 continue
-                
+
             r.raise_for_status()
             data = r.json()
             debug_print(f"[VIDEO INDEXER] Poll response keys: {list(data.keys())}")
-            
+
         except requests.exceptions.RequestException as e:
             debug_print(f"[VIDEO INDEXER] Poll request failed: {str(e)}")
             if hasattr(e, 'response') and e.response is not None:
@@ -1191,10 +1537,10 @@ def process_video_document(
         info = data.get("videos", [{}])[0]
         prog = info.get("processingProgress", "0%").rstrip("%")
         state = info.get("state", "").lower()
-        
+
         debug_print(f"[VIDEO INDEXER] Processing progress: {prog}%, State: {state}")
         update_callback(status=f"VIDEO: {prog}%")
-        
+
         if state == "failed":
             debug_print(f"[VIDEO INDEXER] Processing failed for video ID: {vid}")
             update_callback(status="VIDEO: indexing failed")
@@ -1202,29 +1548,29 @@ def process_video_document(
         if prog == "100":
             debug_print(f"[VIDEO INDEXER] Processing completed for video ID: {vid}")
             break
-            
+
         if poll_count >= max_polls:
             debug_print(f"[VIDEO INDEXER] Maximum polling attempts reached for video ID: {vid}")
             update_callback(status="VIDEO: processing timeout")
             return 0
-            
+
         time.sleep(30)
 
     # 4) Extract transcript & OCR
     debug_print(f"[VIDEO INDEXER] Starting insights extraction for video ID: {vid}")
     debug_print(f"[VIDEO INDEXER] Extracting insights from completed video")
-    
+
     insights = info.get("insights", {})
     if not insights:
         debug_print(f"[VIDEO INDEXER] ERROR: No insights object in response")
         debug_print(f"[VIDEO INDEXER] Response info keys: {list(info.keys())}")
         return 0
-    
+
     # Get video duration from insights (primary) or info (fallback)
     video_duration = insights.get("duration") or info.get("duration", "00:00:00")
     video_duration_seconds = to_seconds(video_duration) if video_duration else 0
     debug_print(f"[VIDEO INDEXER] Video duration: {video_duration} ({video_duration_seconds} seconds)")
-    
+
     # Log raw insights JSON for complete visibility (debug only)
     import json
     print(f"\n[VIDEO] ===== RAW INSIGHTS JSON =====", flush=True)
@@ -1238,79 +1584,79 @@ def process_video_document(
     except Exception as e:
         print(f"[VIDEO] Could not serialize insights to JSON: {e}", flush=True)
     print(f"[VIDEO] ===== END RAW INSIGHTS =====\n", flush=True)
-    
+
     debug_print(f"[VIDEO INDEXER] Insights keys available: {list(insights.keys())}")
     print(f"[VIDEO] Available insight types: {', '.join(list(insights.keys())[:15])}...", flush=True)
-    
+
     # Debug: Show sample structures for all insight types
     print(f"\n[VIDEO] ===== SAMPLE DATA STRUCTURES =====", flush=True)
-    
+
     transcript_data = insights.get("transcript", [])
     if transcript_data:
         print(f"[VIDEO] TRANSCRIPT sample: {transcript_data[0]}", flush=True)
-    
+
     ocr_data = insights.get("ocr", [])
     if ocr_data:
         print(f"[VIDEO] OCR sample: {ocr_data[0]}", flush=True)
-    
+
     keywords_data_debug = insights.get("keywords", [])
     if keywords_data_debug:
         print(f"[VIDEO] KEYWORDS sample: {keywords_data_debug[0]}", flush=True)
-    
+
     labels_data_debug = insights.get("labels", [])
     if labels_data_debug:
         debug_print(f"[VIDEO INDEXER] LABELS sample: {labels_data_debug[0]}")
-    
+
     topics_data_debug = insights.get("topics", [])
     if topics_data_debug:
         debug_print(f"[VIDEO INDEXER] TOPICS sample: {topics_data_debug[0]}")
-    
+
     audio_effects_data_debug = insights.get("audioEffects", [])
     if audio_effects_data_debug:
         debug_print(f"[VIDEO INDEXER] AUDIO_EFFECTS sample: {audio_effects_data_debug[0]}")
-    
+
     emotions_data_debug = insights.get("emotions", [])
     if emotions_data_debug:
         debug_print(f"[VIDEO INDEXER] EMOTIONS sample: {emotions_data_debug[0]}")
-    
+
     sentiments_data_debug = insights.get("sentiments", [])
     if sentiments_data_debug:
         debug_print(f"[VIDEO INDEXER] SENTIMENTS sample: {sentiments_data_debug[0]}")
-    
+
     scenes_data_debug = insights.get("scenes", [])
     if scenes_data_debug:
         debug_print(f"[VIDEO INDEXER] SCENES sample: {scenes_data_debug[0]}")
-    
+
     shots_data_debug = insights.get("shots", [])
     if shots_data_debug:
         debug_print(f"[VIDEO INDEXER] SHOTS sample: {shots_data_debug[0]}")
-    
+
     faces_data_debug = insights.get("faces", [])
     if faces_data_debug:
         debug_print(f"[VIDEO INDEXER] FACES sample: {faces_data_debug[0]}")
-    
+
     namedLocations_data_debug = insights.get("namedLocations", [])
     if namedLocations_data_debug:
         debug_print(f"[VIDEO INDEXER] NAMED_LOCATIONS sample: {namedLocations_data_debug[0]}")
-    
+
     # Check for other potential label sources
     brands_data_debug = insights.get("brands", [])
     if brands_data_debug:
         debug_print(f"[VIDEO INDEXER] BRANDS sample: {brands_data_debug[0]}")
-    
+
     visualContentModeration_debug = insights.get("visualContentModeration", [])
     if visualContentModeration_debug:
         debug_print(f"[VIDEO INDEXER] VISUAL_MODERATION sample: {visualContentModeration_debug[0]}")
-    
+
     # Show total counts for all available insights
     print(f"[VIDEO] COUNTS:", flush=True)
     for key in insights.keys():
         value = insights.get(key, [])
         if isinstance(value, list):
             print(f"  {key}: {len(value)} items", flush=True)
-    
+
     print(f"[VIDEO] ===== END SAMPLE DATA =====\n", flush=True)
-    
+
     transcript = insights.get("transcript", [])
     ocr_blocks = insights.get("ocr", [])
     keywords_data = insights.get("keywords", [])
@@ -1323,7 +1669,7 @@ def process_video_document(
     named_locations_data = insights.get("namedLocations", [])
     speakers_data = insights.get("speakers", [])
     detected_objects_data = insights.get("detectedObjects", [])
-    
+
     debug_print(f"[VIDEO INDEXER] Transcript segments found: {len(transcript)}")
     debug_print(f"[VIDEO INDEXER] OCR blocks found: {len(ocr_blocks)}")
     debug_print(f"[VIDEO INDEXER] Keywords found: {len(keywords_data)}")
@@ -1337,7 +1683,7 @@ def process_video_document(
     debug_print(f"[VIDEO INDEXER] Speakers found: {len(speakers_data)}")
     debug_print(f"[VIDEO INDEXER] Detected objects found: {len(detected_objects_data)}")
     debug_print(f"[VIDEO INDEXER] Insights extracted - Transcript: {len(transcript)}, OCR: {len(ocr_blocks)}, Keywords: {len(keywords_data)}, Labels: {len(labels_data)}, Topics: {len(topics_data)}, Audio: {len(audio_effects_data)}, Emotions: {len(emotions_data)}, Sentiments: {len(sentiments_data)}, People: {len(named_people_data)}, Locations: {len(named_locations_data)}, Objects: {len(detected_objects_data)}")
-    
+
     if len(transcript) == 0:
         debug_print(f"[VIDEO INDEXER] WARNING: No transcript data available")
         debug_print(f"[VIDEO INDEXER] Available insights keys: {list(insights.keys())}")
@@ -1353,7 +1699,7 @@ def process_video_document(
         for block in ocr_blocks if block.get("text", "").strip()
         for inst in block.get("instances", [])
     ]
-    
+
     # Build context lists for additional insights
     keywords_context = [
         {"text": kw.get("name", ""), "start": inst["start"]}
@@ -1413,7 +1759,7 @@ def process_video_document(
     debug_print(f"[VIDEO INDEXER] Named locations context items: {len(named_locations_context)}")
     debug_print(f"[VIDEO INDEXER] Detected objects context items: {len(detected_objects_context)}")
     debug_print(f"[VIDEO INDEXER] Context built - Speech: {len(speech_context)}, OCR: {len(ocr_context)}, Keywords: {len(keywords_context)}, Labels: {len(labels_context)}, People: {len(named_people_context)}, Locations: {len(named_locations_context)}, Objects: {len(detected_objects_context)}")
-    
+
     if len(speech_context) > 0:
         debug_print(f"[VIDEO INDEXER] First speech item: {speech_context[0]}")
 
@@ -1433,15 +1779,15 @@ def process_video_document(
     debug_print(f"[VIDEO INDEXER] Starting 30-second chunk processing")
     debug_print(f"[VIDEO INDEXER] Starting time-based chunk processing - Video duration: {video_duration_seconds}s")
     debug_print(f"[VIDEO INDEXER] Available insights - Speech: {len(speech_context)}, OCR: {len(ocr_context)}, Keywords: {len(keywords_context)}, Labels: {len(labels_context)}")
-    
+
     # Check if we have any content at all
     total_insights = len(speech_context) + len(ocr_context) + len(keywords_context) + len(labels_context) + len(topics_context) + len(audio_effects_context) + len(emotions_context) + len(sentiments_context) + len(named_people_context) + len(named_locations_context) + len(detected_objects_context)
-    
+
     if total_insights == 0 and video_duration_seconds == 0:
         debug_print(f"[VIDEO INDEXER] ERROR: No insights and no duration information available")
         update_callback(status="VIDEO: no data available")
         return 0
-    
+
     # Use video duration to create time-based chunks, even without speech
     if video_duration_seconds == 0:
         debug_print(f"[VIDEO INDEXER] WARNING: No video duration available, estimating from insights")
@@ -1453,11 +1799,11 @@ def process_video_document(
                 max_timestamp = max(max_timestamp, max_ts)
         video_duration_seconds = max_timestamp + 30  # Add buffer
         debug_print(f"[VIDEO INDEXER] Estimated duration: {video_duration_seconds}s")
-    
+
     # Create chunks based on time intervals (30 seconds each)
     num_chunks = int(video_duration_seconds / 30) + (1 if video_duration_seconds % 30 > 0 else 0)
     debug_print(f"[VIDEO INDEXER] Will create {num_chunks} time-based chunks")
-    
+
     total = 0
     idx_s = 0
     n_s = len(speech_context)
@@ -1481,12 +1827,12 @@ def process_video_document(
     n_locations = len(named_locations_context)
     idx_objects = 0
     n_objects = len(detected_objects_context)
-    
+
     # Process chunks in 30-second intervals based on video duration
     for chunk_num in range(num_chunks):
         window_start = chunk_num * 30.0
         window_end = min((chunk_num + 1) * 30.0, video_duration_seconds)
-        
+
         debug_print(f"[VIDEO INDEXER] Chunk {chunk_num + 1} window: {window_start}s to {window_end}s")
 
         # Collect speech for this time window
@@ -1497,13 +1843,13 @@ def process_video_document(
             idx_s += 1
             if idx_s < n_s and to_seconds(speech_context[idx_s]["start"]) >= window_end:
                 break
-        
+
         # Reset idx_s if we went past window_end
         while idx_s > 0 and idx_s < n_s and to_seconds(speech_context[idx_s]["start"]) >= window_end:
             idx_s -= 1
         if idx_s < n_s and to_seconds(speech_context[idx_s]["start"]) < window_end:
             idx_s += 1
-        
+
         debug_print(f"[VIDEO INDEXER] Chunk {chunk_num + 1} speech lines collected: {len(speech_lines)}")
 
         # Collect OCR for this time window
@@ -1514,14 +1860,14 @@ def process_video_document(
             idx_o += 1
             if idx_o < n_o and to_seconds(ocr_context[idx_o]["start"]) >= window_end:
                 break
-        
+
         while idx_o > 0 and idx_o < n_o and to_seconds(ocr_context[idx_o]["start"]) >= window_end:
             idx_o -= 1
         if idx_o < n_o and to_seconds(ocr_context[idx_o]["start"]) < window_end:
             idx_o += 1
-        
+
         debug_print(f"[VIDEO INDEXER] Chunk {chunk_num + 1} OCR lines collected: {len(ocr_lines)}")
-        
+
         # Collect keywords for this time window
         chunk_keywords = []
         while idx_kw < n_kw and to_seconds(keywords_context[idx_kw]["start"]) < window_end:
@@ -1534,7 +1880,7 @@ def process_video_document(
             idx_kw -= 1
         if idx_kw < n_kw and to_seconds(keywords_context[idx_kw]["start"]) < window_end:
             idx_kw += 1
-        
+
         # Collect labels for this time window
         chunk_labels = []
         while idx_lbl < n_lbl and to_seconds(labels_context[idx_lbl]["start"]) < window_end:
@@ -1547,7 +1893,7 @@ def process_video_document(
             idx_lbl -= 1
         if idx_lbl < n_lbl and to_seconds(labels_context[idx_lbl]["start"]) < window_end:
             idx_lbl += 1
-        
+
         # Collect topics for this time window
         chunk_topics = []
         while idx_top < n_top and to_seconds(topics_context[idx_top]["start"]) < window_end:
@@ -1560,7 +1906,7 @@ def process_video_document(
             idx_top -= 1
         if idx_top < n_top and to_seconds(topics_context[idx_top]["start"]) < window_end:
             idx_top += 1
-        
+
         # Collect audio effects for this time window
         chunk_audio_effects = []
         while idx_ae < n_ae and to_seconds(audio_effects_context[idx_ae]["start"]) < window_end:
@@ -1573,7 +1919,7 @@ def process_video_document(
             idx_ae -= 1
         if idx_ae < n_ae and to_seconds(audio_effects_context[idx_ae]["start"]) < window_end:
             idx_ae += 1
-        
+
         # Collect emotions for this time window
         chunk_emotions = []
         while idx_emo < n_emo and to_seconds(emotions_context[idx_emo]["start"]) < window_end:
@@ -1586,7 +1932,7 @@ def process_video_document(
             idx_emo -= 1
         if idx_emo < n_emo and to_seconds(emotions_context[idx_emo]["start"]) < window_end:
             idx_emo += 1
-        
+
         # Collect sentiments for this time window
         chunk_sentiments = []
         while idx_sent < n_sent and to_seconds(sentiments_context[idx_sent]["start"]) < window_end:
@@ -1599,7 +1945,7 @@ def process_video_document(
             idx_sent -= 1
         if idx_sent < n_sent and to_seconds(sentiments_context[idx_sent]["start"]) < window_end:
             idx_sent += 1
-        
+
         # Collect named people for this time window
         chunk_people = []
         while idx_people < n_people and to_seconds(named_people_context[idx_people]["start"]) < window_end:
@@ -1612,7 +1958,7 @@ def process_video_document(
             idx_people -= 1
         if idx_people < n_people and to_seconds(named_people_context[idx_people]["start"]) < window_end:
             idx_people += 1
-        
+
         # Collect named locations for this time window
         chunk_locations = []
         while idx_locations < n_locations and to_seconds(named_locations_context[idx_locations]["start"]) < window_end:
@@ -1625,7 +1971,7 @@ def process_video_document(
             idx_locations -= 1
         if idx_locations < n_locations and to_seconds(named_locations_context[idx_locations]["start"]) < window_end:
             idx_locations += 1
-        
+
         # Collect detected objects for this time window
         chunk_objects = []
         while idx_objects < n_objects and to_seconds(detected_objects_context[idx_objects]["start"]) < window_end:
@@ -1644,10 +1990,10 @@ def process_video_document(
         minutes = int((window_start % 3600) // 60)
         seconds = int(window_start % 60)
         start_ts = f"{hours:02d}:{minutes:02d}:{seconds:02d}.000"
-        
+
         chunk_text = " ".join(speech_lines).strip()
         ocr_text = " ".join(ocr_lines).strip()
-        
+
         # Build enhanced chunk text with insights appended
         if chunk_text:
             # Has speech - append insights to it
@@ -1670,7 +2016,7 @@ def process_video_document(
                 insight_parts.append(f"Locations: {', '.join(chunk_locations)}")
             if chunk_objects:
                 insight_parts.append(f"Objects: {', '.join(chunk_objects)}")
-            
+
             if insight_parts:
                 chunk_text = f"{chunk_text}\n\n{' | '.join(insight_parts)}"
                 debug_print(f"[VIDEO INDEXER] Chunk {chunk_num + 1} enhanced with {len(insight_parts)} insight types")
@@ -1697,7 +2043,7 @@ def process_video_document(
                 insight_parts.append(f"Locations: {', '.join(chunk_locations)}")
             if chunk_objects:
                 insight_parts.append(f"Objects: {', '.join(chunk_objects)}")
-            
+
             chunk_text = ". ".join(insight_parts) if insight_parts else "[No content detected]"
             debug_print(f"[VIDEO INDEXER] Chunk {chunk_num + 1} has no speech, using insights as text: {chunk_text[:100]}...")
 
@@ -1705,14 +2051,14 @@ def process_video_document(
         debug_print(f"[VIDEO INDEXER] Chunk {chunk_num + 1} text length: {len(chunk_text)}, OCR text length: {len(ocr_text)}")
         debug_print(f"[VIDEO INDEXER] Chunk {chunk_num + 1} insights - Keywords: {len(chunk_keywords)}, Labels: {len(chunk_labels)}, Topics: {len(chunk_topics)}, Audio: {len(chunk_audio_effects)}, Emotions: {len(chunk_emotions)}, Sentiments: {len(chunk_sentiments)}, People: {len(chunk_people)}, Locations: {len(chunk_locations)}, Objects: {len(chunk_objects)}")
         debug_print(f"[VIDEO INDEXER] Chunk {chunk_num + 1}: timestamp={start_ts}, text_len={len(chunk_text)}, ocr_len={len(ocr_text)}, insights={len(chunk_keywords)}kw/{len(chunk_labels)}lbl/{len(chunk_topics)}top")
-        
+
         # Skip truly empty chunks (no content at all)
         if chunk_text == "[No content detected]" and not any([chunk_keywords, chunk_labels, chunk_topics, chunk_audio_effects, chunk_emotions, chunk_sentiments, chunk_people, chunk_locations, chunk_objects]):
             debug_print(f"[VIDEO INDEXER] Chunk {chunk_num + 1} is completely empty, skipping")
             continue
-        
+
         update_callback(current_file_chunk=chunk_num+1, status=f"VIDEO: saving chunk @ {start_ts}")
-        
+
         try:
             debug_print(f"[VIDEO INDEXER] Calling save_video_chunk for chunk {chunk_num + 1}")
             save_video_chunk(
@@ -1722,20 +2068,21 @@ def process_video_document(
                 file_name=original_filename,
                 user_id=user_id,
                 document_id=document_id,
-                group_id=group_id
+                group_id=group_id,
+                public_workspace_id=public_workspace_id
             )
             debug_print(f"[VIDEO INDEXER] Chunk {chunk_num + 1} saved successfully")
             total += 1
         except Exception as e:
             debug_print(f"[VIDEO INDEXER] Failed to save chunk {chunk_num + 1}: {str(e)}")
             debug_print(f"[VIDEO INDEXER] Chunk save traceback: {traceback.format_exc()}")
-    
+
     debug_print(f"[VIDEO INDEXER] Chunk processing complete - Total chunks saved: {total}")
 
     # Extract metadata if enabled and chunks were processed
     settings = get_settings()
     enable_extract_meta_data = settings.get('enable_extract_meta_data', False)
-    if enable_extract_meta_data and total > 0:
+    if auto_extract_metadata and enable_extract_meta_data and total > 0:
         try:
             update_callback(status="Extracting final metadata...")
             args = {
@@ -1749,7 +2096,7 @@ def process_video_document(
                 args["group_id"] = group_id
 
             document_metadata = extract_document_metadata(**args)
-            
+
             if document_metadata:
                 update_fields = {k: v for k, v in document_metadata.items() if v is not None and v != ""}
                 if update_fields:
@@ -1782,7 +2129,7 @@ def calculate_processing_percentage(doc_metadata):
         status = status.decode('utf-8').lower()
     elif isinstance(status, dict):
         status = json.dumps(status).lower()
-        
+
 
     current_pct = doc_metadata.get('percentage_complete', 0)
     estimated_pages = doc_metadata.get('number_of_pages', 0)
@@ -1873,9 +2220,9 @@ def update_document(**kwargs):
 
     if is_public_workspace:
         query = """
-            SELECT * 
+            SELECT *
             FROM c
-            WHERE c.id = @document_id 
+            WHERE c.id = @document_id
                 AND c.public_workspace_id = @public_workspace_id
         """
         parameters = [
@@ -1884,9 +2231,9 @@ def update_document(**kwargs):
         ]
     elif is_group:
         query = """
-            SELECT * 
+            SELECT *
             FROM c
-            WHERE c.id = @document_id 
+            WHERE c.id = @document_id
                 AND c.group_id = @group_id
         """
         parameters = [
@@ -1895,16 +2242,16 @@ def update_document(**kwargs):
         ]
     else:
         query = """
-            SELECT * 
+            SELECT *
             FROM c
-            WHERE c.id = @document_id 
+            WHERE c.id = @document_id
                 AND c.user_id = @user_id
         """
         parameters = [
             {"name": "@document_id", "value": document_id},
             {"name": "@user_id", "value": user_id}
         ]
-    
+
     add_file_task_to_file_processing_log(
         document_id=document_id,
         user_id=public_workspace_id if is_public_workspace else (group_id if is_group else user_id),
@@ -1914,8 +2261,8 @@ def update_document(**kwargs):
     try:
         existing_documents = list(
             cosmos_container.query_items(
-                query=query, 
-                parameters=parameters, 
+                query=query,
+                parameters=parameters,
                 enable_cross_partition_query=True
             )
         )
@@ -1981,7 +2328,7 @@ def update_document(**kwargs):
             # Calculate new percentage based on the *updated* existing_document state
             # This now includes the potentially incremented num_chunks
             new_percentage = calculate_processing_percentage(existing_document)
-            
+
             # Handle final state overrides for percentage
 
             status_lower = existing_document.get('status', '')
@@ -2010,7 +2357,12 @@ def update_document(**kwargs):
         # However, it's better to only do this if the relevant fields *actually* changed.
         if update_occurred and updated_fields_requiring_chunk_sync:
             try:
-                chunks_to_update = get_all_chunks(document_id, user_id)
+                chunks_to_update = get_all_chunks(
+                    document_id,
+                    user_id,
+                    group_id=group_id,
+                    public_workspace_id=public_workspace_id
+                )
                 for chunk in chunks_to_update:
                     chunk_updates = {}
                     if 'title' in updated_fields_requiring_chunk_sync:
@@ -2032,13 +2384,14 @@ def update_document(**kwargs):
                             'user_id': user_id,
                             'document_id': document_id,
                             'group_id': group_id,
+                            'public_workspace_id': public_workspace_id,
                             **chunk_updates
                         }
-                        
-                        # Only include shared_group_ids for group workspaces 
+
+                        # Only include shared_group_ids for group workspaces
                         if is_group and 'shared_group_ids' in updated_fields_requiring_chunk_sync:
                             update_params['shared_group_ids'] = existing_document.get('shared_group_ids')
-                        
+
                         update_chunk_metadata(**update_params)
                 add_file_task_to_file_processing_log(
                     document_id=document_id,
@@ -2105,38 +2458,42 @@ def save_chunks(page_text_content, page_number, file_name, user_id, document_id,
         #num_chunks = 1  # because we only have one chunk (page) here
         #status = f"Processing 1 chunk (page {page_number})"
         #update_document(document_id=document_id, user_id=user_id, status=status)
-        
+
         add_file_task_to_file_processing_log(
-            document_id=document_id, 
-            user_id=public_workspace_id if is_public_workspace else (group_id if is_group else user_id), 
-            content=f"Saving chunk, cosmos_container:{cosmos_container}, page_text_content:{page_text_content}, page_number:{page_number}, file_name:{file_name}, user_id:{user_id}, document_id:{document_id}, group_id:{group_id}, public_workspace_id:{public_workspace_id}"
+            document_id=document_id,
+            user_id=public_workspace_id if is_public_workspace else (group_id if is_group else user_id),
+            content=(
+                f"Saving chunk page_number:{page_number}, file_name:{file_name}, "
+                f"text_length:{len(page_text_content or '')}, document_id:{document_id}, "
+                f"group_scope:{bool(group_id)}, public_workspace_scope:{bool(public_workspace_id)}"
+            )
         )
 
         if is_public_workspace:
             metadata = get_document_metadata(
-                document_id=document_id, 
-                user_id=user_id, 
+                document_id=document_id,
+                user_id=user_id,
                 public_workspace_id=public_workspace_id
             )
         elif is_group:
             metadata = get_document_metadata(
-                document_id=document_id, 
-                user_id=user_id, 
+                document_id=document_id,
+                user_id=user_id,
                 group_id=group_id
             )
         else:
             metadata = get_document_metadata(
-                document_id=document_id, 
+                document_id=document_id,
                 user_id=user_id
             )
 
         if not metadata:
             raise ValueError(f"No metadata found for document {document_id} (group: {is_group})")
 
-        version = metadata.get("version") if metadata.get("version") else 1 
+        version = metadata.get("version") if metadata.get("version") else 1
         if version is None:
             raise ValueError(f"Metadata for document {document_id} missing 'version' field")
-        
+
     except Exception as e:
         print(f"Error updating document status or retrieving metadata for document {document_id}: {repr(e)}\nTraceback:\n{traceback.format_exc()}")
         raise
@@ -2158,37 +2515,37 @@ def save_chunks(page_text_content, page_number, file_name, user_id, document_id,
         author = ensure_list(metadata.get('authors')) if metadata else []
         title = metadata.get('title', '') if metadata else ''
         document_classification = metadata.get('document_classification', 'None') if metadata else 'None'
-        
+
         # Check if this document has vision analysis and append it to chunk_text
         vision_analysis = metadata.get('vision_analysis')
         enhanced_chunk_text = page_text_content
-        
+
         if vision_analysis:
             debug_print(f"[SAVE_CHUNKS] Document {document_id} has vision analysis, appending to chunk_text")
             # Format vision analysis as structured text for better searchability
             vision_text_parts = []
             vision_text_parts.append("\n\n=== AI Vision Analysis ===")
             vision_text_parts.append(f"Model: {vision_analysis.get('model', 'unknown')}")
-            
+
             if vision_analysis.get('description'):
                 vision_text_parts.append(f"\nDescription: {vision_analysis['description']}")
-            
+
             if vision_analysis.get('objects'):
                 objects_list = vision_analysis['objects']
                 if isinstance(objects_list, list):
                     vision_text_parts.append(f"\nObjects Detected: {', '.join(objects_list)}")
                 else:
                     vision_text_parts.append(f"\nObjects Detected: {objects_list}")
-            
+
             if vision_analysis.get('text'):
                 vision_text_parts.append(f"\nVisible Text: {vision_analysis['text']}")
-            
+
             if vision_analysis.get('analysis'):
                 vision_text_parts.append(f"\nContextual Analysis: {vision_analysis['analysis']}")
-            
+
             vision_text = "\n".join(vision_text_parts)
             enhanced_chunk_text = page_text_content + vision_text
-            
+
             debug_print(f"[SAVE_CHUNKS] Enhanced chunk_text length: {len(enhanced_chunk_text)} (original: {len(page_text_content)}, vision: {len(vision_text)})")
         else:
             debug_print(f"[SAVE_CHUNKS] No vision analysis found for document {document_id}")
@@ -2239,7 +2596,7 @@ def save_chunks(page_text_content, page_number, file_name, user_id, document_id,
         else:
             # Get shared_user_ids from document metadata for personal documents
             shared_user_ids = metadata.get('shared_user_ids', []) if metadata else []
-            
+
             chunk_document = {
                 "id": chunk_id,
                 "document_id": document_id,
@@ -2281,7 +2638,7 @@ def save_chunks(page_text_content, page_number, file_name, user_id, document_id,
     except Exception as e:
         print(f"Error uploading chunk document for document {document_id}: {e}")
         raise
-    
+
     # Return token usage information for accumulation
     return token_usage
 
@@ -2474,19 +2831,19 @@ def get_document_metadata_for_citations(document_id, user_id=None, group_id=None
     """
     Retrieve keywords and abstract from a document for creating metadata citations.
     Used to enhance search results with additional context from document metadata.
-    
+
     Args:
         document_id: The document's unique identifier
         user_id: User ID (for personal documents)
-        group_id: Group ID (for group documents) 
+        group_id: Group ID (for group documents)
         public_workspace_id: Public workspace ID (for public documents)
-        
+
     Returns:
         dict: Dictionary with 'keywords' and 'abstract' fields, or None if document not found
     """
     is_group = group_id is not None
     is_public_workspace = public_workspace_id is not None
-    
+
     # Determine the correct container
     if is_public_workspace:
         cosmos_container = cosmos_public_documents_container
@@ -2501,11 +2858,11 @@ def get_document_metadata_for_citations(document_id, user_id=None, group_id=None
             item=document_id,
             partition_key=document_id
         )
-        
+
         # Extract keywords and abstract
         keywords = document_item.get('keywords', [])
         abstract = document_item.get('abstract', '')
-        
+
         # Return only if we have actual content
         if keywords or abstract:
             return {
@@ -2513,9 +2870,9 @@ def get_document_metadata_for_citations(document_id, user_id=None, group_id=None
                 'abstract': abstract if abstract else '',
                 'file_name': document_item.get('file_name', 'Unknown')
             }
-        
+
         return None
-        
+
     except Exception as e:
         # Document not found or error reading - return None silently
         # This is expected for documents without metadata
@@ -2525,19 +2882,19 @@ def get_document_metadata_for_citations(document_id, user_id=None, group_id=None
     """
     Retrieve keywords and abstract from a document for creating metadata citations.
     Used to enhance search results with additional context from document metadata.
-    
+
     Args:
         document_id: The document's unique identifier
         user_id: User ID (for personal documents)
-        group_id: Group ID (for group documents) 
+        group_id: Group ID (for group documents)
         public_workspace_id: Public workspace ID (for public documents)
-        
+
     Returns:
         dict: Dictionary with 'keywords' and 'abstract' fields, or None if document not found
     """
     is_group = group_id is not None
     is_public_workspace = public_workspace_id is not None
-    
+
     # Determine the correct container
     if is_public_workspace:
         cosmos_container = cosmos_public_documents_container
@@ -2552,11 +2909,11 @@ def get_document_metadata_for_citations(document_id, user_id=None, group_id=None
             item=document_id,
             partition_key=document_id
         )
-        
+
         # Extract keywords and abstract
         keywords = document_item.get('keywords', [])
         abstract = document_item.get('abstract', '')
-        
+
         # Return only if we have actual content
         if keywords or abstract:
             return {
@@ -2564,58 +2921,22 @@ def get_document_metadata_for_citations(document_id, user_id=None, group_id=None
                 'abstract': abstract if abstract else '',
                 'file_name': document_item.get('file_name', 'Unknown')
             }
-        
+
         return None
-        
+
     except Exception as e:
         # Document not found or error reading - return None silently
         # This is expected for documents without metadata
         return None
 
 def get_all_chunks(document_id, user_id, group_id=None, public_workspace_id=None):
-    is_group = group_id is not None
-    is_public_workspace = public_workspace_id is not None
-
-    # For personal documents, first check if user has access (owner or shared)
-    if not is_group and not is_public_workspace:
-        # Check if user has access to this document
-        if not is_document_shared_with_user(document_id, user_id):
-            print(f"User {user_id} does not have access to document {document_id}")
-            return []
-    elif is_group:
-        # For group documents, check if group has access (owner or shared)
-        if not is_document_shared_with_group(document_id, group_id):
-            print(f"Group {group_id} does not have access to document {document_id}")
-            return []
-
-    search_client = CLIENTS["search_client_public"] if is_public_workspace else CLIENTS["search_client_group"] if is_group else CLIENTS["search_client_user"]
-    filter_expr = (
-        f"document_id eq '{document_id}' and public_workspace_id eq '{public_workspace_id}'"
-        if is_public_workspace else
-        f"document_id eq '{document_id}' and (group_id eq '{group_id}' or shared_group_ids/any(g: g eq '{group_id}'))"
-        if is_group else
-        f"document_id eq '{document_id}'"  # For personal documents, just filter by document_id since access is already verified
-    )
-
-    select_fields = [
-        "id",
-        "chunk_text",
-        "chunk_id",
-        "file_name",
-        "public_workspace_id" if is_public_workspace else ("group_id" if is_group else "user_id"),
-        "version",
-        "chunk_sequence",
-        "upload_date"
-    ]
-
     try:
-        results = search_client.search(
-            search_text="*",
-            filter=filter_expr,
-            select=",".join(select_fields)
+        return get_ordered_document_chunks(
+            document_id=document_id,
+            user_id=user_id,
+            group_id=group_id,
+            public_workspace_id=public_workspace_id,
         )
-        return results
-
     except Exception as e:
         print(f"Error retrieving chunks for document {document_id}: {e}")
         raise
@@ -2655,11 +2976,11 @@ def update_chunk_metadata(chunk_id, user_id, group_id=None, public_workspace_id=
             'document_tags',
             'shared_user_ids'
         ]
-        
+
         # Only include shared_group_ids for group workspaces where it exists in the schema
         if is_group:
             updatable_fields.append('shared_group_ids')
-            
+
         for field in updatable_fields:
             if field in kwargs:
                 if field == 'author':
@@ -2696,25 +3017,25 @@ def chunk_pdf(input_pdf_path: str, max_pages: int = 500) -> list:
             total_pages = doc.page_count
             current_page = 0
             chunk_index = 1
-            
+
             base_name, ext = os.path.splitext(input_pdf_path)
-            
+
             # Loop through the PDF in increments of `max_pages`
             while current_page < total_pages:
                 end_page = min(current_page + max_pages, total_pages)
-                
+
                 # Create a new, empty document for this chunk
                 chunk_doc = fitz.open()
-                
+
                 # Insert the range of pages in one go
                 chunk_doc.insert_pdf(doc, from_page=current_page, to_page=end_page - 1)
-                
+
                 chunk_pdf_path = f"{base_name}_chunk_{chunk_index}{ext}"
                 chunk_doc.save(chunk_pdf_path)
                 chunk_doc.close()
-                
+
                 chunks.append(chunk_pdf_path)
-                
+
                 current_page = end_page
                 chunk_index += 1
 
@@ -2723,8 +3044,135 @@ def chunk_pdf(input_pdf_path: str, max_pages: int = 500) -> list:
 
     return chunks
 
+
+def get_document_record(user_id, document_id, group_id=None, public_workspace_id=None):
+    """Return a document record when the caller has access to it, otherwise None."""
+    is_group = group_id is not None
+    is_public_workspace = public_workspace_id is not None
+
+    cosmos_container = _get_documents_container(
+        group_id=group_id,
+        public_workspace_id=public_workspace_id,
+    )
+
+    try:
+        document_item = cosmos_container.read_item(
+            item=document_id,
+            partition_key=document_id,
+        )
+    except CosmosResourceNotFoundError:
+        return None
+    except Exception as e:
+        print(f"Error retrieving document record {document_id}: {e}")
+        return None
+
+    if is_public_workspace:
+        if document_item.get('public_workspace_id') != public_workspace_id:
+            return None
+        return _normalize_document_enhanced_citations(document_item)
+
+    if is_group:
+        shared_group_ids = document_item.get('shared_group_ids', [])
+        if (
+            document_item.get('group_id') != group_id
+            and not any(str(entry).startswith(f"{group_id},") for entry in shared_group_ids)
+        ):
+            return None
+        return _normalize_document_enhanced_citations(document_item)
+
+    shared_user_ids = document_item.get('shared_user_ids', [])
+    if (
+        document_item.get('user_id') != user_id
+        and not any(str(entry).startswith(f"{user_id},") for entry in shared_user_ids)
+    ):
+        return None
+
+    return _normalize_document_enhanced_citations(document_item)
+
+
+def get_ordered_document_chunks(document_id, user_id, group_id=None, public_workspace_id=None, max_chunks=None):
+    """Return ordered chunk records for a document after access has been verified."""
+    document_item = get_document_record(
+        user_id=user_id,
+        document_id=document_id,
+        group_id=group_id,
+        public_workspace_id=public_workspace_id,
+    )
+
+    if not document_item:
+        return []
+
+    search_client = _get_search_client(
+        group_id=group_id,
+        public_workspace_id=public_workspace_id,
+    )
+    scope_field = 'public_workspace_id' if public_workspace_id is not None else ('group_id' if group_id is not None else 'user_id')
+    select_fields = [
+        'id',
+        'document_id',
+        'chunk_text',
+        'chunk_id',
+        'file_name',
+        scope_field,
+        'version',
+        'chunk_sequence',
+        'page_number',
+        'upload_date',
+        'document_classification',
+        'document_tags',
+        'author',
+        'chunk_keywords',
+        'title',
+        'chunk_summary',
+    ]
+    search_kwargs = {
+        'search_text': '*',
+        'filter': f"document_id eq '{document_id}'",
+        'select': ','.join(select_fields),
+    }
+    if max_chunks is not None:
+        search_kwargs['top'] = max(1, int(max_chunks))
+
+    try:
+        results = list(search_client.search(**search_kwargs))
+    except Exception as e:
+        print(f"Error retrieving chunks for document {document_id}: {e}")
+        raise
+
+    ordered_chunks = []
+    for result in results:
+        ordered_chunks.append({
+            'id': result.get('id'),
+            'document_id': result.get('document_id'),
+            'chunk_text': result.get('chunk_text', ''),
+            'chunk_id': result.get('chunk_id'),
+            'file_name': result.get('file_name'),
+            'user_id': result.get('user_id') if scope_field == 'user_id' else document_item.get('user_id'),
+            'group_id': result.get('group_id') if scope_field == 'group_id' else document_item.get('group_id'),
+            'public_workspace_id': result.get('public_workspace_id') if scope_field == 'public_workspace_id' else document_item.get('public_workspace_id'),
+            'version': result.get('version'),
+            'chunk_sequence': result.get('chunk_sequence', 0),
+            'page_number': result.get('page_number'),
+            'upload_date': result.get('upload_date'),
+            'document_classification': result.get('document_classification'),
+            'document_tags': result.get('document_tags', []),
+            'author': result.get('author'),
+            'chunk_keywords': result.get('chunk_keywords'),
+            'title': result.get('title'),
+            'chunk_summary': result.get('chunk_summary'),
+        })
+
+    ordered_chunks.sort(
+        key=lambda chunk: (
+            _safe_int(chunk.get('page_number')) if chunk.get('page_number') is not None else 10**9,
+            _safe_int(chunk.get('chunk_sequence')),
+            str(chunk.get('id') or ''),
+        )
+    )
+    return ordered_chunks
+
 def get_documents(user_id, group_id=None, public_workspace_id=None):
-    try:       
+    try:
         documents = _query_accessible_documents(
             user_id=user_id,
             group_id=group_id,
@@ -2736,72 +3184,18 @@ def get_documents(user_id, group_id=None, public_workspace_id=None):
         return jsonify({'error': f'Error retrieving documents: {str(e)}'}), 500
 
 def get_document(user_id, document_id, group_id=None, public_workspace_id=None):
-    is_group = group_id is not None
-    is_public_workspace = public_workspace_id is not None
-
-    # Choose the correct cosmos_container and query parameters
-    if is_public_workspace:
-        cosmos_container = cosmos_public_documents_container
-    elif is_group:
-        cosmos_container = cosmos_group_documents_container
-    else:
-        cosmos_container = cosmos_user_documents_container
-
-    if is_public_workspace:
-        query = """
-            SELECT TOP 1 * 
-            FROM c
-            WHERE c.id = @document_id 
-                AND c.public_workspace_id = @public_workspace_id
-            ORDER BY c.version DESC
-        """
-        parameters = [
-            {"name": "@document_id", "value": document_id},
-            {"name": "@public_workspace_id", "value": public_workspace_id}
-        ]
-    elif is_group:
-        query = """
-            SELECT TOP 1 *
-            FROM c
-            WHERE c.id = @document_id
-                AND (c.group_id = @group_id OR ARRAY_CONTAINS(c.shared_group_ids, @group_id))
-            ORDER BY c.version DESC
-        """
-        parameters = [
-            {"name": "@document_id", "value": document_id},
-            {"name": "@group_id", "value": group_id}
-        ]
-    else:
-        query = """
-            SELECT TOP 1 *
-            FROM c
-            WHERE c.id = @document_id
-                AND (
-                    c.user_id = @user_id
-                    OR ARRAY_CONTAINS(c.shared_user_ids, @user_id)
-                    OR EXISTS(SELECT VALUE s FROM s IN c.shared_user_ids WHERE STARTSWITH(s, @user_id_prefix))
-                )
-            ORDER BY c.version DESC
-        """
-        parameters = [
-            {"name": "@document_id", "value": document_id},
-            {"name": "@user_id", "value": user_id},
-            {"name": "@user_id_prefix", "value": f"{user_id},"}
-        ]
-
     try:
-        document_results = list(
-            cosmos_container.query_items(
-                query=query, 
-                parameters=parameters, 
-                enable_cross_partition_query=True
-            )
+        document_record = get_document_record(
+            user_id=user_id,
+            document_id=document_id,
+            group_id=group_id,
+            public_workspace_id=public_workspace_id,
         )
 
-        if not document_results:
+        if not document_record:
             return jsonify({'error': 'Document not found or access denied'}), 404
 
-        return jsonify(_normalize_document_enhanced_citations(document_results[0])), 200
+        return jsonify(document_record), 200
 
     except Exception as e:
         return jsonify({'error': f'Error retrieving document: {str(e)}'}), 500
@@ -2836,7 +3230,7 @@ def get_document_version(user_id, document_id, version, group_id=None, public_wo
 
     if is_public_workspace:
         query = """
-            SELECT * 
+            SELECT *
             FROM c
             WHERE c.id = @document_id
                 AND c.version = @version
@@ -2880,8 +3274,8 @@ def get_document_version(user_id, document_id, version, group_id=None, public_wo
     try:
         document_results = list(
             cosmos_container.query_items(
-                query=query, 
-                parameters=parameters, 
+                query=query,
+                parameters=parameters,
                 enable_cross_partition_query=True
             )
         )
@@ -2933,12 +3327,12 @@ def delete_from_blob_storage(document_item, user_id=None, group_id=None, public_
 def delete_document(user_id, document_id, group_id=None, public_workspace_id=None):
     """Delete a document from the user's documents in Cosmos DB and blob storage if enhanced citations are enabled."""
     from functions_debug import debug_print
-    
+
     debug_print(f"[DELETE DOCUMENT] Starting deletion for document: {document_id}, user: {user_id}, group: {group_id}, public_workspace: {public_workspace_id}")
-    
+
     is_group = group_id is not None
     is_public_workspace = public_workspace_id is not None
-    
+
     if is_public_workspace:
         cosmos_container = cosmos_public_documents_container
     elif is_group:
@@ -2951,11 +3345,11 @@ def delete_document(user_id, document_id, group_id=None, public_workspace_id=Non
             item=document_id,
             partition_key=document_id
         )
-        
+
         # Log document deletion transaction before deletion
         try:
             from functions_activity_logging import log_document_deletion_transaction
-            
+
             # Determine workspace type
             if public_workspace_id:
                 workspace_type = 'public'
@@ -2963,11 +3357,11 @@ def delete_document(user_id, document_id, group_id=None, public_workspace_id=Non
                 workspace_type = 'group'
             else:
                 workspace_type = 'personal'
-            
+
             # Extract file extension from filename
             file_name = document_item.get('file_name', '')
             file_ext = os.path.splitext(file_name)[-1].lower() if file_name else None
-            
+
             # Log the deletion transaction with document metadata
             log_document_deletion_transaction(
                 user_id=user_id,
@@ -2996,7 +3390,7 @@ def delete_document(user_id, document_id, group_id=None, public_workspace_id=Non
             # For personal documents, only the owner can delete (not shared users)
             if document_item.get('user_id') != user_id:
                 raise Exception("Unauthorized access to document - only document owner can delete")
-            
+
         # Delete from blob storage
         try:
             delete_from_blob_storage(
@@ -3008,7 +3402,7 @@ def delete_document(user_id, document_id, group_id=None, public_workspace_id=Non
         except Exception as blob_error:
             # Log the error but continue with Cosmos DB deletion
             print(f"Error deleting from blob storage (continuing with document deletion): {str(blob_error)}")
-        
+
         # Then delete from Cosmos DB
         cosmos_container.delete_item(
             item=document_id,
@@ -3095,6 +3489,359 @@ def delete_document_revision(user_id, document_id, delete_mode="all_versions", g
         'promoted_document_id': promoted_document_id,
     }
 
+
+def get_chat_upload_workspace_documents_for_conversation(user_id, conversation_id):
+    normalized_conversation_id = str(conversation_id or '').strip()
+    if not user_id or not normalized_conversation_id:
+        return []
+
+    query = """
+        SELECT *
+        FROM c
+        WHERE c.conversation_id = @conversation_id
+            AND c.created_from_chat_upload = true
+            AND (
+                c.user_id = @user_id
+                OR ARRAY_CONTAINS(c.shared_user_ids, @user_id)
+                OR ARRAY_CONTAINS(c.shared_user_ids, @user_id_approved)
+            )
+    """
+    parameters = [
+        {"name": "@user_id", "value": user_id},
+        {"name": "@user_id_approved", "value": f"{user_id},approved"},
+        {"name": "@conversation_id", "value": normalized_conversation_id},
+    ]
+
+    personal_documents = list(
+        cosmos_user_documents_container.query_items(
+            query=query,
+            parameters=parameters,
+            enable_cross_partition_query=True,
+        )
+    )
+    for document_item in personal_documents:
+        document_item.setdefault('workspace_scope', 'personal')
+
+    group_query = """
+        SELECT *
+        FROM c
+        WHERE c.conversation_id = @conversation_id
+            AND c.created_from_chat_upload = true
+    """
+    group_documents = list(
+        cosmos_group_documents_container.query_items(
+            query=group_query,
+            parameters=[{"name": "@conversation_id", "value": normalized_conversation_id}],
+            enable_cross_partition_query=True,
+        )
+    )
+    visible_group_documents = []
+    if group_documents:
+        try:
+            from functions_group import find_group_by_id, get_user_role_in_group
+
+            group_docs_by_id = {}
+            for document_item in group_documents:
+                group_id = str(document_item.get('group_id') or '').strip()
+                if not group_id:
+                    continue
+                if group_id not in group_docs_by_id:
+                    group_docs_by_id[group_id] = find_group_by_id(group_id)
+                if get_user_role_in_group(group_docs_by_id.get(group_id), user_id):
+                    document_item['workspace_scope'] = 'group'
+                    visible_group_documents.append(document_item)
+        except Exception as group_visibility_error:
+            debug_print(f"[ChatUploadWorkspaceContext] Failed to resolve group chat uploads: {group_visibility_error}")
+
+    documents = personal_documents + visible_group_documents
+    return sort_documents(select_current_documents(documents))
+
+
+def get_chat_upload_workspace_documents_for_collaboration(conversation_doc):
+    normalized_collaboration_conversation_id = str((conversation_doc or {}).get('id') or '').strip()
+    normalized_source_conversation_id = str((conversation_doc or {}).get('source_conversation_id') or '').strip()
+    if not normalized_collaboration_conversation_id and not normalized_source_conversation_id:
+        return []
+
+    query = """
+        SELECT *
+        FROM c
+        WHERE c.created_from_chat_upload = true
+            AND (
+                c.chat_upload_collaboration_conversation_id = @collaboration_conversation_id
+                OR c.collaboration_conversation_id = @collaboration_conversation_id
+                OR c.conversation_id = @source_conversation_id
+            )
+    """
+    parameters = [
+        {"name": "@collaboration_conversation_id", "value": normalized_collaboration_conversation_id},
+        {"name": "@source_conversation_id", "value": normalized_source_conversation_id},
+    ]
+
+    documents = list(
+        cosmos_user_documents_container.query_items(
+            query=query,
+            parameters=parameters,
+            enable_cross_partition_query=True,
+        )
+    )
+    return sort_documents(select_current_documents(documents))
+
+
+def _get_shared_user_entry_user_id(shared_user_entry):
+    normalized_entry = str(shared_user_entry or '').strip()
+    if not normalized_entry:
+        return ''
+    return normalized_entry.split(',', 1)[0].strip()
+
+
+def _merge_approved_shared_user_ids(existing_shared_user_ids, target_user_ids):
+    shared_user_ids = []
+    entry_indexes_by_user_id = {}
+    changed = False
+
+    for shared_user_entry in ensure_list(existing_shared_user_ids):
+        normalized_entry = str(shared_user_entry or '').strip()
+        shared_user_id = _get_shared_user_entry_user_id(normalized_entry)
+        if not shared_user_id:
+            continue
+        if shared_user_id in entry_indexes_by_user_id:
+            changed = True
+            continue
+        entry_indexes_by_user_id[shared_user_id] = len(shared_user_ids)
+        shared_user_ids.append(normalized_entry)
+
+    for target_user_id in target_user_ids:
+        normalized_target_user_id = str(target_user_id or '').strip()
+        if not normalized_target_user_id:
+            continue
+
+        approved_entry = f"{normalized_target_user_id},approved"
+        existing_index = entry_indexes_by_user_id.get(normalized_target_user_id)
+        if existing_index is None:
+            entry_indexes_by_user_id[normalized_target_user_id] = len(shared_user_ids)
+            shared_user_ids.append(approved_entry)
+            changed = True
+            continue
+
+        if shared_user_ids[existing_index] != approved_entry:
+            shared_user_ids[existing_index] = approved_entry
+            changed = True
+
+    return shared_user_ids, changed
+
+
+def _remove_shared_user_ids(existing_shared_user_ids, target_user_ids):
+    target_user_id_set = {
+        str(target_user_id or '').strip()
+        for target_user_id in ensure_list(target_user_ids)
+        if str(target_user_id or '').strip()
+    }
+    if not target_user_id_set:
+        return ensure_list(existing_shared_user_ids), False
+
+    shared_user_ids = []
+    changed = False
+    for shared_user_entry in ensure_list(existing_shared_user_ids):
+        shared_user_id = _get_shared_user_entry_user_id(shared_user_entry)
+        if shared_user_id in target_user_id_set:
+            changed = True
+            continue
+        shared_user_ids.append(str(shared_user_entry or '').strip())
+
+    return shared_user_ids, changed
+
+
+def sync_chat_upload_workspace_document_sharing_for_collaboration(conversation_doc):
+    normalized_collaboration_conversation_id = str((conversation_doc or {}).get('id') or '').strip()
+    if not normalized_collaboration_conversation_id:
+        return {
+            'updated_document_ids': [],
+            'affected_user_ids': [],
+            'shared_user_ids': [],
+            'revoked_user_ids': [],
+        }
+
+    accepted_participant_ids = [
+        str(participant_user_id or '').strip()
+        for participant_user_id in list((conversation_doc or {}).get('accepted_participant_ids', []) or [])
+        if str(participant_user_id or '').strip()
+    ]
+    accepted_participant_id_set = set(accepted_participant_ids)
+    normalized_source_conversation_id = str((conversation_doc or {}).get('source_conversation_id') or '').strip()
+    current_time = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    updated_document_ids = []
+    shared_user_ids = set()
+    revoked_user_ids = set()
+
+    for document_item in get_chat_upload_workspace_documents_for_collaboration(conversation_doc):
+        document_id = str(document_item.get('id') or '').strip()
+        owner_user_id = str(document_item.get('user_id') or '').strip()
+        if not document_id or not owner_user_id:
+            continue
+
+        target_user_ids = [
+            participant_user_id
+            for participant_user_id in accepted_participant_ids
+            if participant_user_id and participant_user_id != owner_user_id
+        ]
+        previous_auto_shared_user_ids = {
+            str(participant_user_id or '').strip()
+            for participant_user_id in ensure_list(document_item.get('chat_upload_auto_shared_user_ids'))
+            if str(participant_user_id or '').strip()
+        }
+        target_user_id_set = set(target_user_ids)
+        user_ids_to_revoke = sorted(previous_auto_shared_user_ids - target_user_id_set - {owner_user_id})
+
+        merged_shared_user_ids, share_changed = _merge_approved_shared_user_ids(
+            document_item.get('shared_user_ids', []),
+            target_user_ids,
+        )
+        merged_shared_user_ids, revoke_changed = _remove_shared_user_ids(
+            merged_shared_user_ids,
+            user_ids_to_revoke,
+        )
+
+        metadata_changed = False
+        metadata_updates = {
+            'shared_user_ids': merged_shared_user_ids,
+            'chat_upload_collaboration_conversation_id': normalized_collaboration_conversation_id,
+            'chat_upload_collaboration_source_conversation_id': normalized_source_conversation_id,
+            'chat_upload_auto_shared_user_ids': target_user_ids,
+            'chat_upload_last_share_sync_at': current_time,
+        }
+        for field_name, field_value in metadata_updates.items():
+            if document_item.get(field_name) != field_value:
+                document_item[field_name] = field_value
+                metadata_changed = True
+
+        if not (share_changed or revoke_changed or metadata_changed):
+            continue
+
+        document_item['last_updated'] = current_time
+        cosmos_user_documents_container.upsert_item(document_item)
+        try:
+            set_document_chunk_visibility(
+                document_item,
+                active=str(document_item.get('search_visibility_state') or 'active').strip().lower() != 'archived',
+            )
+        except Exception as chunk_sync_error:
+            log_event(
+                f"[ChatUploadCollaborationSharing] Failed to sync search chunks for document {document_id}: {chunk_sync_error}",
+                extra={
+                    'document_id': document_id,
+                    'collaboration_conversation_id': normalized_collaboration_conversation_id,
+                },
+                level=logging.WARNING,
+                exceptionTraceback=True,
+            )
+
+        updated_document_ids.append(document_id)
+        shared_user_ids.update(target_user_id_set - previous_auto_shared_user_ids)
+        revoked_user_ids.update(user_ids_to_revoke)
+
+    affected_user_ids = sorted(
+        accepted_participant_id_set
+        | shared_user_ids
+        | revoked_user_ids
+    )
+    return {
+        'updated_document_ids': updated_document_ids,
+        'affected_user_ids': affected_user_ids,
+        'shared_user_ids': sorted(shared_user_ids),
+        'revoked_user_ids': sorted(revoked_user_ids),
+    }
+
+
+def serialize_chat_upload_workspace_documents_for_conversation(user_id, conversation_id):
+    documents = get_chat_upload_workspace_documents_for_conversation(user_id, conversation_id)
+    serialized_documents = []
+
+    for document_item in documents:
+        shared_user_ids = ensure_list(document_item.get('shared_user_ids'))
+        serialized_documents.append({
+            'id': document_item.get('id'),
+            'file_name': document_item.get('file_name'),
+            'title': document_item.get('title'),
+            'status': document_item.get('status'),
+            'percentage_complete': document_item.get('percentage_complete', 0),
+            'number_of_pages': document_item.get('number_of_pages', 0),
+            'upload_date': document_item.get('upload_date'),
+            'conversation_id': document_item.get('conversation_id'),
+            'chat_message_id': document_item.get('chat_message_id'),
+            'workspace_scope': document_item.get('workspace_scope') or ('group' if document_item.get('group_id') else 'personal'),
+            'group_id': document_item.get('group_id'),
+            'group_name': document_item.get('chat_upload_group_name'),
+            'tags': ensure_list(document_item.get('tags')),
+            'can_delete_with_conversation': document_item.get('chat_upload_delete_with_conversation') is not False,
+            'is_shared': len(shared_user_ids) > 0,
+        })
+
+    return serialized_documents
+
+
+def delete_chat_upload_workspace_documents_for_conversation(user_id, conversation_id, selected_document_ids=None):
+    documents = get_chat_upload_workspace_documents_for_conversation(user_id, conversation_id)
+    selected_document_id_set = {
+        str(document_id).strip()
+        for document_id in ensure_list(selected_document_ids)
+        if str(document_id or '').strip()
+    }
+    deleted_document_ids = []
+    skipped_document_ids = []
+    retained_document_ids = []
+    failed_documents = []
+    processed_families = set()
+
+    if not selected_document_id_set:
+        return {
+            'deleted_document_ids': [],
+            'skipped_document_ids': [],
+            'retained_document_ids': [doc.get('id') for doc in documents if doc.get('id')],
+            'failed_documents': [],
+        }
+
+    for document_item in documents:
+        document_id = document_item.get('id')
+        if not document_id:
+            continue
+        normalized_document_id = str(document_id).strip()
+
+        if normalized_document_id not in selected_document_id_set:
+            retained_document_ids.append(document_id)
+            continue
+
+        family_id = document_item.get('revision_family_id') or document_id
+        if family_id in processed_families:
+            continue
+        processed_families.add(family_id)
+
+        if document_item.get('chat_upload_delete_with_conversation') is False:
+            skipped_document_ids.append(document_id)
+            continue
+
+        try:
+            delete_result = delete_document_revision(
+                user_id,
+                document_id,
+                delete_mode='all_versions',
+                group_id=document_item.get('group_id'),
+                public_workspace_id=document_item.get('public_workspace_id'),
+            )
+            deleted_document_ids.extend(delete_result.get('deleted_document_ids', []))
+        except Exception as delete_error:
+            failed_documents.append({
+                'document_id': document_id,
+                'error': str(delete_error),
+            })
+
+    return {
+        'deleted_document_ids': deleted_document_ids,
+        'skipped_document_ids': skipped_document_ids,
+        'retained_document_ids': retained_document_ids,
+        'failed_documents': failed_documents,
+    }
+
 def delete_document_chunks(document_id, group_id=None, public_workspace_id=None):
     """Delete document chunks from Azure Cognitive Search index."""
 
@@ -3130,7 +3877,7 @@ def delete_document_version_chunks(document_id, version, group_id=None, public_w
 
     search_client.delete_documents(
         actions=[
-            {"@search.action": "delete", "id": chunk['id']} for chunk in 
+            {"@search.action": "delete", "id": chunk['id']} for chunk in
             search_client.search(
                 search_text="*",
                 filter=f"document_id eq '{document_id}' and version eq {version}",
@@ -3150,20 +3897,30 @@ def get_document_versions(user_id, document_id, group_id=None, public_workspace_
             public_workspace_id=public_workspace_id,
         )
         sorted_family = sorted(family_documents, key=_document_revision_sort_key, reverse=True)
+        current_document = _choose_current_document(family_documents)
+        current_document_id = current_document.get('id') if current_document else None
+        revision_family_id = (
+            target_document.get('revision_family_id')
+            or (current_document.get('revision_family_id') if current_document else None)
+            or current_document_id
+            or document_id
+        )
         return [
             {
                 'id': doc.get('id'),
                 'file_name': doc.get('file_name'),
+                'title': doc.get('title'),
                 'version': doc.get('version'),
                 'upload_date': doc.get('upload_date'),
-                'is_current_version': doc.get('id') == _choose_current_document(family_documents).get('id'),
+                'revision_family_id': doc.get('revision_family_id') or revision_family_id,
+                'is_current_version': doc.get('id') == current_document_id,
             }
             for doc in sorted_family
         ]
 
     except Exception as e:
         return []
-    
+
 def detect_doc_type(document_id, user_id=None):
     """
     Check Cosmos to see if this doc belongs to the user's docs (has user_id),
@@ -3306,7 +4063,7 @@ def process_metadata_extraction_background(document_id, user_id, group_id=None, 
             args["group_id"] = group_id
 
         update_document(**args)
-      
+
 def extract_document_metadata(document_id, user_id, group_id=None, public_workspace_id=None):
     """
     Extract metadata from a document stored in Cosmos DB.
@@ -3316,13 +4073,12 @@ def extract_document_metadata(document_id, user_id, group_id=None, public_worksp
     """
 
     settings = get_settings()
-    enable_gpt_apim = settings.get('enable_gpt_apim', False)
     enable_user_workspace = settings.get('enable_user_workspace', False)
     enable_group_workspaces = settings.get('enable_group_workspaces', False)
 
     is_group = group_id is not None
     is_public_workspace = public_workspace_id is not None
-    
+
     if is_public_workspace:
         cosmos_container = cosmos_public_documents_container
         id_key = "public_workspace_id"
@@ -3337,11 +4093,11 @@ def extract_document_metadata(document_id, user_id, group_id=None, public_worksp
         id_value = user_id
 
     add_file_task_to_file_processing_log(
-        document_id=document_id, 
+        document_id=document_id,
         user_id=public_workspace_id if is_public_workspace else (group_id if is_group else user_id),
         content=f"Querying metadata for document {document_id} and user {user_id}"
     )
-    
+
     # Example structure for reference
     meta_data_example = {
         "title": "Title here",
@@ -3351,7 +4107,7 @@ def extract_document_metadata(document_id, user_id, group_id=None, public_worksp
         "keywords": ["keyword1", "keyword2", "keyword3", "keyword4", "keyword5"],
         "abstract": "two sentence abstract"
     }
-    
+
     # Pre-initialize metadata dictionary
     meta_data = {
         "title": "",
@@ -3400,8 +4156,8 @@ def extract_document_metadata(document_id, user_id, group_id=None, public_worksp
     try:
         document_items = list(
             cosmos_container.query_items(
-                query=query, 
-                parameters=parameters, 
+                query=query,
+                parameters=parameters,
                 enable_cross_partition_query=True
             )
         )
@@ -3421,13 +4177,13 @@ def extract_document_metadata(document_id, user_id, group_id=None, public_worksp
 
 
         add_file_task_to_file_processing_log(
-            document_id=document_id, 
+            document_id=document_id,
             user_id=group_id if is_group else user_id,
             content=f"Retrieved document items for document {document_id}: {document_items}"
         )
     except Exception as e:
         add_file_task_to_file_processing_log(
-            document_id=document_id, 
+            document_id=document_id,
             user_id=group_id if is_group else user_id,
             content=f"Error querying document items for document {document_id}: {e}"
         )
@@ -3437,7 +4193,7 @@ def extract_document_metadata(document_id, user_id, group_id=None, public_worksp
         return None
 
     document_metadata = document_items[0]
-    
+
     # --- Step 2: Populate meta_data from DB ---
     # Convert the DB fields to the correct structure
     if "title" in document_metadata:
@@ -3454,7 +4210,7 @@ def extract_document_metadata(document_id, user_id, group_id=None, public_worksp
         meta_data["abstract"] = document_metadata["abstract"]
 
     add_file_task_to_file_processing_log(
-        document_id=document_id, 
+        document_id=document_id,
         user_id=group_id if is_group else user_id,
         content=f"Extracted metadata for document {document_id}, metadata: {meta_data}"
     )
@@ -3508,10 +4264,10 @@ def extract_document_metadata(document_id, user_id, group_id=None, public_worksp
             if blocklist_matches:
                 blocked = True
                 block_reasons.append("Blocklist match")
-            
+
             if blocked:
                 add_file_task_to_file_processing_log(
-                    document_id=document_id, 
+                    document_id=document_id,
                     user_id=group_id if is_group else user_id,
                     content=f"Blocked document metadata: {document_metadata}, reasons: {block_reasons}"
                 )
@@ -3520,7 +4276,7 @@ def extract_document_metadata(document_id, user_id, group_id=None, public_worksp
 
         except Exception as e:
             add_file_task_to_file_processing_log(
-                document_id=document_id, 
+                document_id=document_id,
                 user_id=group_id if is_group else user_id,
                 content=f"Error checking content safety for document metadata: {e}"
             )
@@ -3530,9 +4286,9 @@ def extract_document_metadata(document_id, user_id, group_id=None, public_worksp
     try:
         if enable_user_workspace or enable_group_workspaces:
             add_file_task_to_file_processing_log(
-                document_id=document_id, 
+                document_id=document_id,
                 user_id=group_id if is_group else user_id,
-                content=f"Processing Hybrid search for document {document_id} using json dump of metadata {json.dumps(meta_data)}"
+                content=f"Processing Hybrid search for document {document_id} using {len(meta_data or {})} metadata fields."
             )
 
             args = {
@@ -3599,56 +4355,39 @@ def extract_document_metadata(document_id, user_id, group_id=None, public_worksp
             search_results = "No Hybrid results"
     except Exception as e:
         add_file_task_to_file_processing_log(
-            document_id=document_id, 
+            document_id=document_id,
             user_id=group_id if is_group else user_id,
             content=f"Error processing Hybrid search for document {document_id}: {e}"
         )
         print(f"Error processing Hybrid search for document {document_id}: {e}")
         search_results = "No Hybrid results"
 
-    gpt_model = settings.get('metadata_extraction_model')
-
     # --- Step 5: Prepare GPT Client ---
-    if enable_gpt_apim:
-        # APIM-based GPT client
-        gpt_client = AzureOpenAI(
-            api_version=settings.get('azure_apim_gpt_api_version'),
-            azure_endpoint=settings.get('azure_apim_gpt_endpoint'),
-            api_key=settings.get('azure_apim_gpt_subscription_key')
+    try:
+        gpt_client, gpt_model = _resolve_metadata_extraction_client(settings)
+    except Exception as e:
+        add_file_task_to_file_processing_log(
+            document_id=document_id,
+            user_id=group_id if is_group else user_id,
+            content=f"Error resolving metadata extraction model for document {document_id}: {e}"
         )
-    else:
-        # Standard Azure OpenAI approach
-        if settings.get('azure_openai_gpt_authentication_type') == 'managed_identity':
-            token_provider = get_bearer_token_provider(
-                DefaultAzureCredential(), 
-                cognitive_services_scope
-            )
-            gpt_client = AzureOpenAI(
-                api_version=settings.get('azure_openai_gpt_api_version'),
-                azure_endpoint=settings.get('azure_openai_gpt_endpoint'),
-                azure_ad_token_provider=token_provider
-            )
-        else:
-            gpt_client = AzureOpenAI(
-                api_version=settings.get('azure_openai_gpt_api_version'),
-                azure_endpoint=settings.get('azure_openai_gpt_endpoint'),
-                api_key=settings.get('azure_openai_gpt_key')
-            )
+        print(f"Error resolving metadata extraction model for document {document_id}: {e}")
+        return meta_data
 
     # --- Step 6: GPT Prompt and JSON Parsing ---
     try:
         add_file_task_to_file_processing_log(
-            document_id=document_id, 
+            document_id=document_id,
             user_id=group_id if is_group else user_id,
             content=f"Sending search results to AI to generate metadata {document_id}"
         )
         messages = [
             {
-                "role": "system", 
+                "role": "system",
                 "content": "You are an AI assistant that extracts metadata. Return valid JSON."
             },
             {
-                "role": "user", 
+                "role": "user",
                 "content": (
                     f"Search results from AI search index:\n{search_results}\n\n"
                     f"Current known metadata:\n{json.dumps(meta_data, indent=2)}\n\n"
@@ -3661,25 +4400,25 @@ def extract_document_metadata(document_id, user_id, group_id=None, public_worksp
         ]
 
         response = gpt_client.chat.completions.create(
-            model=gpt_model, 
+            model=gpt_model,
             messages=messages
         )
-        
+
     except Exception as e:
         add_file_task_to_file_processing_log(
-            document_id=document_id, 
+            document_id=document_id,
             user_id=group_id if is_group else user_id,
             content=f"Error processing GPT request for document {document_id}: {e}"
         )
         print(f"Error processing GPT request for document {document_id}: {e}")
         return meta_data  # Return what we have so far
-    
+
     if not response:
         return meta_data  # or None, depending on your logic
 
     response_content = response.choices[0].message.content
     add_file_task_to_file_processing_log(
-        document_id=document_id, 
+        document_id=document_id,
         user_id=group_id if is_group else user_id,
         content=f"GPT response for document {document_id}: {response_content}"
     )
@@ -3687,7 +4426,7 @@ def extract_document_metadata(document_id, user_id, group_id=None, public_worksp
     # --- Step 7: Clean and parse the GPT JSON output ---
     try:
         add_file_task_to_file_processing_log(
-            document_id=document_id, 
+            document_id=document_id,
             user_id=group_id if is_group else user_id,
             content=f"Decoding JSON from GPT response for document {document_id}"
         )
@@ -3695,15 +4434,15 @@ def extract_document_metadata(document_id, user_id, group_id=None, public_worksp
         cleaned_str = clean_json_codeFence(response_content)
 
         add_file_task_to_file_processing_log(
-            document_id=document_id, 
-            user_id=group_id if is_group else user_id, 
+            document_id=document_id,
+            user_id=group_id if is_group else user_id,
             content=f"Cleaned JSON from GPT response for document {document_id}: {cleaned_str}"
         )
 
         gpt_output = json.loads(cleaned_str)
 
         add_file_task_to_file_processing_log(
-            document_id=document_id, 
+            document_id=document_id,
             user_id=group_id if is_group else user_id,
             content=f"Decoded JSON from GPT response for document {document_id}: {gpt_output}"
         )
@@ -3714,7 +4453,7 @@ def extract_document_metadata(document_id, user_id, group_id=None, public_worksp
 
     except (json.JSONDecodeError, TypeError) as e:
         add_file_task_to_file_processing_log(
-            document_id=document_id, 
+            document_id=document_id,
             user_id=group_id if is_group else user_id,
             content=f"Error decoding JSON from GPT response for document {document_id}: {e}"
         )
@@ -3723,7 +4462,7 @@ def extract_document_metadata(document_id, user_id, group_id=None, public_worksp
 
     # --- Step 8: Merge GPT Output with Existing Metadata ---
     #
-    # If the DB’s version is effectively empty/worthless, then overwrite 
+    # If the DB’s version is effectively empty/worthless, then overwrite
     # with the GPT’s version if GPT has something non-empty.
     # Otherwise keep the DB’s version.
     #
@@ -3754,7 +4493,7 @@ def extract_document_metadata(document_id, user_id, group_id=None, public_worksp
         meta_data["abstract"] = gpt_output.get("abstract", meta_data["abstract"])
 
     add_file_task_to_file_processing_log(
-        document_id=document_id, 
+        document_id=document_id,
         user_id=group_id if is_group else user_id,
         content=f"Final metadata for document {document_id}: {meta_data}"
     )
@@ -3845,13 +4584,13 @@ def estimate_word_count(text):
 def analyze_image_with_vision_model(image_path, user_id, document_id, settings):
     """
     Analyze image using GPT-4 Vision or similar multimodal model.
-    
+
     Args:
         image_path: Path to image file
         user_id: User ID for logging
         document_id: Document ID for tracking
         settings: Application settings
-        
+
     Returns:
         dict: {
             'description': 'AI-generated image description',
@@ -3862,43 +4601,43 @@ def analyze_image_with_vision_model(image_path, user_id, document_id, settings):
     """
     debug_print(f"[VISION_ANALYSIS_V2] Function entry - document_id: {document_id}, user_id: {user_id}")
 
-        
+
     try:
         # Convert image to base64
         with open(image_path, 'rb') as img_file:
             image_bytes = img_file.read()
             base64_image = base64.b64encode(image_bytes).decode('utf-8')
-        
+
         image_size = len(image_bytes)
         base64_size = len(base64_image)
         debug_print(f"[VISION_ANALYSIS] Image conversion for {document_id}:")
         debug_print(f"  Image path: {image_path}")
         debug_print(f"  Original size: {image_size:,} bytes ({image_size / 1024 / 1024:.2f} MB)")
         debug_print(f"  Base64 size: {base64_size:,} characters")
-        
+
         # Determine image mime type
         mime_type = mimetypes.guess_type(image_path)[0] or 'image/jpeg'
         debug_print(f"  MIME type: {mime_type}")
-        
+
         # Get vision model settings
         vision_model = settings.get('multimodal_vision_model', 'gpt-4o')
         debug_print(f"[VISION_ANALYSIS] Vision model selected: {vision_model}")
-        
+
         if not vision_model:
             print(f"Warning: Multi-modal vision enabled but no model selected")
             return None
-        
-        # Initialize client (reuse GPT configuration)
+
+        # Initialize client (reuse Chat Model)
         enable_gpt_apim = settings.get('enable_gpt_apim', False)
         debug_print(f"[VISION_ANALYSIS] Using APIM: {enable_gpt_apim}")
-        
+
         if enable_gpt_apim:
             api_version = settings.get('azure_apim_gpt_api_version')
             endpoint = settings.get('azure_apim_gpt_endpoint')
             debug_print(f"[VISION_ANALYSIS] APIM Configuration:")
             debug_print(f"  Endpoint: {endpoint}")
             debug_print(f"  API Version: {api_version}")
-            
+
             gpt_client = AzureOpenAI(
                 api_version=api_version,
                 azure_endpoint=endpoint,
@@ -3909,15 +4648,15 @@ def analyze_image_with_vision_model(image_path, user_id, document_id, settings):
             auth_type = settings.get('azure_openai_gpt_authentication_type', 'key')
             api_version = settings.get('azure_openai_gpt_api_version')
             endpoint = settings.get('azure_openai_gpt_endpoint')
-            
+
             debug_print(f"[VISION_ANALYSIS] Direct Azure OpenAI Configuration:")
             debug_print(f"  Endpoint: {endpoint}")
             debug_print(f"  API Version: {api_version}")
             debug_print(f"  Auth Type: {auth_type}")
-            
+
             if auth_type == 'managed_identity':
                 token_provider = get_bearer_token_provider(
-                    DefaultAzureCredential(), 
+                    DefaultAzureCredential(),
                     cognitive_services_scope
                 )
                 gpt_client = AzureOpenAI(
@@ -3931,22 +4670,22 @@ def analyze_image_with_vision_model(image_path, user_id, document_id, settings):
                     azure_endpoint=endpoint,
                     api_key=settings.get('azure_openai_gpt_key')
                 )
-        
+
         # Create vision prompt
         print(f"Analyzing image with vision model: {vision_model}")
-        
+
         # Determine which token parameter to use based on model type
         # o-series and gpt-5 models require max_completion_tokens instead of max_tokens
         vision_model_lower = vision_model.lower()
-        
+
         debug_print(f"[VISION_ANALYSIS] Building API request parameters:")
         debug_print(f"  Model (lowercase): {vision_model_lower}")
-        
+
         # Check which parameter will be used
         uses_completion_tokens = ('o1' in vision_model_lower or 'o3' in vision_model_lower or 'gpt-5' in vision_model_lower)
         debug_print(f"  Uses max_completion_tokens: {uses_completion_tokens}")
         debug_print(f"  Detection: o1={('o1' in vision_model_lower)}, o3={('o3' in vision_model_lower)}, gpt-5={('gpt-5' in vision_model_lower)}")
-        
+
         # Build prompt - GPT-5/reasoning models need explicit JSON instruction when using response_format
         if uses_completion_tokens:
             prompt_text = """Analyze this image and respond in JSON format with the following structure:
@@ -3972,7 +4711,7 @@ Format your response as JSON with these keys:
   "text": "...",
   "analysis": "..."
 }"""
-        
+
         api_params = {
             "model": vision_model,
             "messages": [
@@ -3993,23 +4732,23 @@ Format your response as JSON with these keys:
                 }
             ]
         }
-        
+
         debug_print(f"[VISION_ANALYSIS_V2] ⚡ About to send request to Azure OpenAI with {vision_model}")
         debug_print(f"[VISION_ANALYSIS_V2] ⚡ Using parameter: {'max_completion_tokens' if uses_completion_tokens else 'max_tokens'} = 1000")
         debug_print(f"[VISION_ANALYSIS] Sending request to Azure OpenAI...")
         debug_print(f"  Message content types: text + image_url")
         debug_print(f"  Image data URL prefix: data:{mime_type};base64,... ({base64_size} chars)")
-        
+
         response = gpt_client.chat.completions.create(**api_params)
-        
+
         debug_print(f"[VISION_ANALYSIS_V2] ⚡ Response received successfully from {vision_model}")
-        
+
         debug_print(f"[VISION_ANALYSIS] Response received from {vision_model}")
         debug_print(f"  Response ID: {response.id if hasattr(response, 'id') else 'N/A'}")
         debug_print(f"  Model used: {response.model if hasattr(response, 'model') else 'N/A'}")
         if hasattr(response, 'usage'):
             debug_print(f"  Token usage: prompt={response.usage.prompt_tokens if hasattr(response.usage, 'prompt_tokens') else 'N/A'}, completion={response.usage.completion_tokens if hasattr(response.usage, 'completion_tokens') else 'N/A'}, total={response.usage.total_tokens if hasattr(response.usage, 'total_tokens') else 'N/A'}")
-        
+
         # Debug the response structure to understand why content might be empty
         debug_print(f"[VISION_ANALYSIS] Response object inspection:")
         debug_print(f"  Response type: {type(response)}")
@@ -4028,10 +4767,10 @@ Format your response as JSON with these keys:
                 # Check finish reason
                 if hasattr(response.choices[0], 'finish_reason'):
                     debug_print(f"  Finish reason: {response.choices[0].finish_reason}")
-        
+
         # Parse response
         content = response.choices[0].message.content
-        
+
         # Handle None content
         if content is None:
             print(f"[VISION_ANALYSIS_V2] ⚠️ Response content is None!")
@@ -4040,28 +4779,25 @@ Format your response as JSON with these keys:
                 error_msg = f"Model refused to respond: {response.choices[0].message.refusal}"
             else:
                 error_msg = "Model returned empty content with no refusal message"
-            
+
             return {
                 'description': error_msg,
                 'error': error_msg,
                 'model': vision_model,
                 'parse_failed': True
             }
-        
+
         # Additional debugging for empty string case
-        print(f"[VISION_ANALYSIS_V2] ⚡ Content length: {len(content)}, repr: {repr(content[:200])}")
+        print(f"[VISION_ANALYSIS_V2] Content length: {len(content)}")
         debug_print(f"[VISION_ANALYSIS] Raw response received:")
         debug_print(f"  Length: {len(content)} characters")
-        debug_print(f"  Content repr: {repr(content)}")
-        debug_print(f"  First 500 chars: {content[:500]}...")
-        debug_print(f"  Last 100 chars: ...{content[-100:] if len(content) > 100 else content}")
-        
+
         # Check if response looks like JSON
         is_json_like = content.strip().startswith('{') or content.strip().startswith('[')
         has_code_fence = '```' in content
         debug_print(f"  Starts with JSON bracket: {is_json_like}")
         debug_print(f"  Contains code fence: {has_code_fence}")
-        
+
         # Try to parse as JSON, fallback to raw text
         try:
             # Clean up potential markdown code fences
@@ -4069,19 +4805,19 @@ Format your response as JSON with these keys:
             content_cleaned = clean_json_codeFence(content)
             debug_print(f"  Cleaned length: {len(content_cleaned)} characters")
             debug_print(f"  Cleaned first 200 chars: {content_cleaned[:200]}...")
-            
+
             debug_print(f"[VISION_ANALYSIS] Attempting to parse as JSON...")
             vision_analysis = json.loads(content_cleaned)
             debug_print(f"[VISION_ANALYSIS] ✅ Successfully parsed JSON response!")
             debug_print(f"  JSON keys: {list(vision_analysis.keys())}")
-            
+
         except Exception as parse_error:
             debug_print(f"[VISION_ANALYSIS] ❌ JSON parsing failed!")
             debug_print(f"  Error type: {type(parse_error).__name__}")
             debug_print(f"  Error message: {str(parse_error)}")
             debug_print(f"  Content that failed to parse (first 1000 chars): {content[:1000]}")
             print(f"Vision response not valid JSON, using raw text")
-            
+
             vision_analysis = {
                 'description': content,
                 'raw_response': content,
@@ -4089,41 +4825,41 @@ Format your response as JSON with these keys:
                 'parse_failed': True
             }
             debug_print(f"[VISION_ANALYSIS] Created fallback structure with raw response")
-        
+
         # Add model info to analysis
         vision_analysis['model'] = vision_model
-        
+
         debug_print(f"[VISION_ANALYSIS] Final analysis structure for {document_id}:")
         debug_print(f"  Model: {vision_model}")
         debug_print(f"  Has 'description': {'description' in vision_analysis}")
         debug_print(f"  Has 'objects': {'objects' in vision_analysis}")
         debug_print(f"  Has 'text': {'text' in vision_analysis}")
         debug_print(f"  Has 'analysis': {'analysis' in vision_analysis}")
-        
+
         if 'description' in vision_analysis:
             desc = vision_analysis['description']
             debug_print(f"  Description length: {len(desc)} chars")
             debug_print(f"  Description preview: {desc[:200]}...")
-        
+
         if 'objects' in vision_analysis:
             objs = vision_analysis['objects']
             debug_print(f"  Objects count: {len(objs) if isinstance(objs, list) else 'not a list'}")
             debug_print(f"  Objects: {objs}")
-        
+
         if 'text' in vision_analysis:
             txt = vision_analysis['text']
             debug_print(f"  Text length: {len(txt) if txt else 0} chars")
             debug_print(f"  Text preview: {txt[:100] if txt else 'None'}...")
-        
+
         print(f"Vision analysis completed for document: {document_id}")
         return vision_analysis
-        
+
     except Exception as e:
         print(f"Error in vision analysis for {document_id}: {str(e)}")
         traceback.print_exc()
         return None
 
-def upload_to_blob(temp_file_path, user_id, document_id, blob_filename, update_callback, group_id=None, public_workspace_id=None):
+def upload_to_blob(temp_file_path, user_id, document_id, blob_filename, update_callback, group_id=None, public_workspace_id=None, mark_enhanced_citations=True):
     """Uploads the file to Azure Blob Storage."""
 
     try:
@@ -4171,7 +4907,8 @@ def upload_to_blob(temp_file_path, user_id, document_id, blob_filename, update_c
         metadata = {
             "document_id": str(document_id),
             "group_id": str(group_id) if group_id is not None else None,
-            "user_id": str(user_id) if group_id is None else None
+            "public_workspace_id": str(public_workspace_id) if public_workspace_id is not None else None,
+            "user_id": str(user_id) if group_id is None and public_workspace_id is None else None
         }
 
         metadata = {k: v for k, v in metadata.items() if v is not None}
@@ -4184,7 +4921,8 @@ def upload_to_blob(temp_file_path, user_id, document_id, blob_filename, update_c
         current_document["blob_container"] = storage_account_container_name
         current_document["blob_path"] = blob_path
         current_document["blob_path_mode"] = CURRENT_ALIAS_BLOB_PATH_MODE
-        current_document["enhanced_citations"] = True
+        current_document["source_file_available"] = True
+        current_document["enhanced_citations"] = bool(mark_enhanced_citations)
         if current_document.get("archived_blob_path") is None:
             current_document["archived_blob_path"] = None
         cosmos_container.upsert_item(current_document)
@@ -4258,7 +4996,7 @@ def process_txt(document_id, user_id, temp_file_path, original_filename, enable_
 
                 token_usage = save_chunks(**args)
                 total_chunks_saved += 1
-                
+
                 # Accumulate embedding tokens
                 if token_usage:
                     total_embedding_tokens += token_usage.get('total_tokens', 0)
@@ -4348,7 +5086,7 @@ def process_xml(document_id, user_id, temp_file_path, original_filename, enable_
 
             token_usage = save_chunks(**args)
             total_chunks_saved += 1
-            
+
             # Accumulate embedding tokens
             if token_usage:
                 total_embedding_tokens += token_usage.get('total_tokens', 0)
@@ -4444,7 +5182,7 @@ def process_yaml(document_id, user_id, temp_file_path, original_filename, enable
 
             token_usage = save_chunks(**args)
             total_chunks_saved += 1
-            
+
             # Accumulate embedding tokens
             if token_usage:
                 total_embedding_tokens += token_usage.get('total_tokens', 0)
@@ -4496,7 +5234,7 @@ def process_log(document_id, user_id, temp_file_path, original_filename, enable_
 
         # Split by lines to maintain log record integrity
         lines = content.splitlines(keepends=True)  # Keep line endings
-        
+
         if not lines:
             raise Exception(f"LOG file {original_filename} is empty")
 
@@ -4507,7 +5245,7 @@ def process_log(document_id, user_id, temp_file_path, original_filename, enable_
 
         for line in lines:
             line_word_count = len(line.split())
-            
+
             # If adding this line exceeds target AND we already have content
             if current_chunk_word_count + line_word_count > target_words_per_chunk and current_chunk_lines:
                 # Finalize current chunk
@@ -4548,7 +5286,7 @@ def process_log(document_id, user_id, temp_file_path, original_filename, enable_
 
                 token_usage = save_chunks(**args)
                 total_chunks_saved += 1
-                
+
                 # Accumulate embedding tokens
                 if token_usage:
                     total_embedding_tokens += token_usage.get('total_tokens', 0)
@@ -4637,7 +5375,7 @@ def process_doc(document_id, user_id, temp_file_path, original_filename, enable_
 
                 token_usage = save_chunks(**args)
                 total_chunks_saved += 1
-                
+
                 # Accumulate embedding tokens
                 if token_usage:
                     total_embedding_tokens += token_usage.get('total_tokens', 0)
@@ -4856,7 +5594,7 @@ def process_log(document_id, user_id, temp_file_path, original_filename, enable_
 
         # Split by lines to maintain log record integrity
         lines = content.splitlines(keepends=True)  # Keep line endings
-        
+
         if not lines:
             raise Exception(f"LOG file {original_filename} is empty")
 
@@ -4867,7 +5605,7 @@ def process_log(document_id, user_id, temp_file_path, original_filename, enable_
 
         for line in lines:
             line_word_count = len(line.split())
-            
+
             # If adding this line exceeds target AND we already have content
             if current_chunk_word_count + line_word_count > target_words_per_chunk and current_chunk_lines:
                 # Finalize current chunk
@@ -5002,7 +5740,99 @@ def process_doc(document_id, user_id, temp_file_path, original_filename, enable_
 
     return total_chunks_saved, total_embedding_tokens, embedding_model_name
 
-def process_html(document_id, user_id, temp_file_path, original_filename, enable_enhanced_citations, update_callback, group_id=None, public_workspace_id=None):
+def process_msg(document_id, user_id, temp_file_path, original_filename, enable_enhanced_citations, update_callback, group_id=None, public_workspace_id=None, auto_extract_metadata=True):
+    """Processes Outlook .msg files into searchable plain-text chunks."""
+    is_group = group_id is not None
+    is_public_workspace = public_workspace_id is not None
+
+    update_callback(status="Processing Outlook MSG file...")
+    total_chunks_saved = 0
+    total_embedding_tokens = 0
+    embedding_model_name = None
+    settings = get_settings()
+    chunk_config = get_chunk_size_config(settings)
+    target_words_per_chunk = max(1, int(chunk_config.get('msg', {}).get('value', 400)))
+
+    if enable_enhanced_citations:
+        args = {
+            "temp_file_path": temp_file_path,
+            "user_id": user_id,
+            "document_id": document_id,
+            "blob_filename": original_filename,
+            "update_callback": update_callback
+        }
+
+        if is_public_workspace:
+            args["public_workspace_id"] = public_workspace_id
+        elif is_group:
+            args["group_id"] = group_id
+
+        upload_to_blob(**args)
+
+    try:
+        try:
+            text_content = extract_outlook_msg_text(temp_file_path)
+        except Exception as e:
+            raise Exception(f"Error extracting text from {original_filename}: {e}")
+
+        words = text_content.split()
+        if not words:
+            raise Exception(f"No text content found in {original_filename}")
+
+        final_chunks = []
+        for i in range(0, len(words), target_words_per_chunk):
+            chunk_words = words[i:i + target_words_per_chunk]
+            chunk_text = " ".join(chunk_words)
+            final_chunks.append(chunk_text)
+
+        num_chunks = len(final_chunks)
+        update_callback(number_of_pages=num_chunks)
+
+        for idx, chunk_content in enumerate(final_chunks, start=1):
+            if chunk_content.strip():
+                update_callback(
+                    current_file_chunk=idx,
+                    status=f"Saving chunk {idx}/{num_chunks}..."
+                )
+                args = {
+                    "page_text_content": chunk_content,
+                    "page_number": idx,
+                    "file_name": original_filename,
+                    "user_id": user_id,
+                    "document_id": document_id
+                }
+
+                if is_public_workspace:
+                    args["public_workspace_id"] = public_workspace_id
+                elif is_group:
+                    args["group_id"] = group_id
+
+                token_usage = save_chunks(**args)
+                total_chunks_saved += 1
+
+                if token_usage:
+                    total_embedding_tokens += token_usage.get('total_tokens', 0)
+                    if not embedding_model_name:
+                        embedding_model_name = token_usage.get('model_deployment_name')
+
+    except Exception as e:
+        raise Exception(f"Failed processing Outlook MSG file {original_filename}: {e}")
+
+    enable_extract_meta_data = settings.get('enable_extract_meta_data', False)
+    if auto_extract_metadata and enable_extract_meta_data and total_chunks_saved > 0:
+        _run_final_metadata_extraction(
+            document_id,
+            user_id,
+            total_chunks_saved,
+            enable_extract_meta_data,
+            update_callback,
+            group_id=group_id,
+            public_workspace_id=public_workspace_id
+        )
+
+    return total_chunks_saved, total_embedding_tokens, embedding_model_name
+
+def process_html(document_id, user_id, temp_file_path, original_filename, enable_enhanced_citations, update_callback, group_id=None, public_workspace_id=None, auto_extract_metadata=True):
     """Processes HTML files."""
     is_group = group_id is not None
     is_public_workspace = public_workspace_id is not None
@@ -5091,7 +5921,7 @@ def process_html(document_id, user_id, temp_file_path, original_filename, enable
 
             token_usage = save_chunks(**args)
             total_chunks_saved += 1
-            
+
             # Accumulate embedding tokens
             if token_usage:
                 total_embedding_tokens += token_usage.get('total_tokens', 0)
@@ -5105,7 +5935,7 @@ def process_html(document_id, user_id, temp_file_path, original_filename, enable
     # Extract metadata if enabled and chunks were processed
     settings = get_settings()
     enable_extract_meta_data = settings.get('enable_extract_meta_data', False)
-    if enable_extract_meta_data and total_chunks_saved > 0:
+    if auto_extract_metadata and enable_extract_meta_data and total_chunks_saved > 0:
         try:
             update_callback(status="Extracting final metadata...")
             args = {
@@ -5119,7 +5949,7 @@ def process_html(document_id, user_id, temp_file_path, original_filename, enable
                 args["group_id"] = group_id
 
             document_metadata = extract_document_metadata(**args)
-            
+
             if document_metadata:
                 update_fields = {k: v for k, v in document_metadata.items() if v is not None and v != ""}
                 if update_fields:
@@ -5133,7 +5963,7 @@ def process_html(document_id, user_id, temp_file_path, original_filename, enable
 
     return total_chunks_saved, total_embedding_tokens, embedding_model_name
 
-def process_md(document_id, user_id, temp_file_path, original_filename, enable_enhanced_citations, update_callback, group_id=None, public_workspace_id=None):
+def process_md(document_id, user_id, temp_file_path, original_filename, enable_enhanced_citations, update_callback, group_id=None, public_workspace_id=None, auto_extract_metadata=True):
     """Processes Markdown files."""
     is_group = group_id is not None
     is_public_workspace = public_workspace_id is not None
@@ -5229,7 +6059,7 @@ def process_md(document_id, user_id, temp_file_path, original_filename, enable_e
 
             token_usage = save_chunks(**args)
             total_chunks_saved += 1
-            
+
             # Accumulate embedding tokens
             if token_usage:
                 total_embedding_tokens += token_usage.get('total_tokens', 0)
@@ -5242,7 +6072,7 @@ def process_md(document_id, user_id, temp_file_path, original_filename, enable_e
     # Extract metadata if enabled and chunks were processed
     settings = get_settings()
     enable_extract_meta_data = settings.get('enable_extract_meta_data', False)
-    if enable_extract_meta_data and total_chunks_saved > 0:
+    if auto_extract_metadata and enable_extract_meta_data and total_chunks_saved > 0:
         try:
             update_callback(status="Extracting final metadata...")
             args = {
@@ -5256,7 +6086,7 @@ def process_md(document_id, user_id, temp_file_path, original_filename, enable_e
                 args["group_id"] = group_id
 
             document_metadata = extract_document_metadata(**args)
-            
+
             if document_metadata:
                 update_fields = {k: v for k, v in document_metadata.items() if v is not None and v != ""}
                 if update_fields:
@@ -5270,7 +6100,7 @@ def process_md(document_id, user_id, temp_file_path, original_filename, enable_e
 
     return total_chunks_saved, total_embedding_tokens, embedding_model_name
 
-def process_json(document_id, user_id, temp_file_path, original_filename, enable_enhanced_citations, update_callback, group_id=None, public_workspace_id=None):
+def process_json(document_id, user_id, temp_file_path, original_filename, enable_enhanced_citations, update_callback, group_id=None, public_workspace_id=None, auto_extract_metadata=True):
     """Processes JSON files using RecursiveJsonSplitter."""
     is_group = group_id is not None
     is_public_workspace = public_workspace_id is not None
@@ -5355,7 +6185,7 @@ def process_json(document_id, user_id, temp_file_path, original_filename, enable
 
             token_usage = save_chunks(**args)
             total_chunks_saved += 1 # Increment only when a chunk is actually saved
-            
+
             # Accumulate embedding tokens
             if token_usage:
                 total_embedding_tokens += token_usage.get('total_tokens', 0)
@@ -5379,7 +6209,7 @@ def process_json(document_id, user_id, temp_file_path, original_filename, enable
     # Extract metadata if enabled and chunks were processed
     settings = get_settings()
     enable_extract_meta_data = settings.get('enable_extract_meta_data', False)
-    if enable_extract_meta_data and total_chunks_saved > 0:
+    if auto_extract_metadata and enable_extract_meta_data and total_chunks_saved > 0:
         try:
             update_callback(status="Extracting final metadata...")
             args = {
@@ -5393,7 +6223,7 @@ def process_json(document_id, user_id, temp_file_path, original_filename, enable
                 args["group_id"] = group_id
 
             document_metadata = extract_document_metadata(**args)
-            
+
             if document_metadata:
                 update_fields = {k: v for k, v in document_metadata.items() if v is not None and v != ""}
                 if update_fields:
@@ -5456,15 +6286,15 @@ def _build_compact_tabular_preview(df_preview):
             lambda value: _compact_tabular_schema_value(value)
         )
 
-    preview_text = preview_df.to_string(index=False)
+    panalysis_text = preview_df.to_string(index=False)
     omitted_column_count = max(len(df_preview.columns) - TABULAR_SCHEMA_SUMMARY_MAX_COLUMNS, 0)
     if omitted_column_count:
-        preview_text += (
+        panalysis_text += (
             f"\n[Preview truncated to the first {TABULAR_SCHEMA_SUMMARY_MAX_COLUMNS} columns; "
             f"{omitted_column_count} additional columns omitted.]"
         )
 
-    return preview_text
+    return panalysis_text
 
 
 def _build_minimal_tabular_summary(temp_file_path, original_filename, file_ext):
@@ -5659,7 +6489,7 @@ def process_single_tabular_sheet(df, document_id, user_id, file_name, update_cal
 
     return total_chunks_saved, total_embedding_tokens, embedding_model_name
 
-def process_tabular(document_id, user_id, temp_file_path, original_filename, file_ext, enable_enhanced_citations, update_callback, group_id=None, public_workspace_id=None):
+def process_tabular(document_id, user_id, temp_file_path, original_filename, file_ext, enable_enhanced_citations, update_callback, group_id=None, public_workspace_id=None, auto_extract_metadata=True):
     """Processes CSV, XLSX, or XLS files using pandas."""
     is_group = group_id is not None
     is_public_workspace = public_workspace_id is not None
@@ -5833,7 +6663,7 @@ def process_tabular(document_id, user_id, temp_file_path, original_filename, fil
 
     settings = get_settings()
     enable_extract_meta_data = settings.get('enable_extract_meta_data', False)
-    if enable_extract_meta_data and total_chunks_saved > 0:
+    if auto_extract_metadata and enable_extract_meta_data and total_chunks_saved > 0:
         try:
             update_callback(status="Extracting final metadata...")
             args = {
@@ -5861,15 +6691,109 @@ def process_tabular(document_id, user_id, temp_file_path, original_filename, fil
 
     return total_chunks_saved, total_embedding_tokens, embedding_model_name
 
-def process_di_document(document_id, user_id, temp_file_path, original_filename, file_ext, enable_enhanced_citations, update_callback, group_id=None, public_workspace_id=None):
+def process_visio(document_id, user_id, temp_file_path, original_filename, enable_enhanced_citations, update_callback, group_id=None, public_workspace_id=None, auto_extract_metadata=True):
+    """Processes Visio VSDX files as one searchable chunk per page."""
+    is_group = group_id is not None
+    is_public_workspace = public_workspace_id is not None
+
+    update_callback(status="Processing Visio file...")
+    total_chunks_saved = 0
+    total_embedding_tokens = 0
+    embedding_model_name = None
+
+    if enable_enhanced_citations:
+        args = {
+            "temp_file_path": temp_file_path,
+            "user_id": user_id,
+            "document_id": document_id,
+            "blob_filename": original_filename,
+            "update_callback": update_callback
+        }
+
+        if is_public_workspace:
+            args["public_workspace_id"] = public_workspace_id
+        elif is_group:
+            args["group_id"] = group_id
+
+        upload_to_blob(**args)
+        update_callback(enhanced_citations=True, status="Enhanced citations enabled for Visio file")
+
+    try:
+        pages = parse_vsdx_pages(temp_file_path)
+    except Exception as parse_error:
+        raise Exception(f"Failed parsing Visio file {original_filename}: {parse_error}") from parse_error
+
+    if not pages:
+        update_callback(number_of_pages=0, status="Processing complete - no Visio pages found")
+        return total_chunks_saved, total_embedding_tokens, embedding_model_name
+
+    all_chunks = []
+    for page in pages:
+        all_chunks.append({
+            "page_text_content": build_visio_page_markdown(original_filename, page),
+            "page_number": page.get("page_number") or len(all_chunks) + 1,
+            "file_name": original_filename,
+        })
+
+    update_callback(
+        number_of_pages=len(all_chunks),
+        current_file_chunk=1,
+        status=f"Indexing {len(all_chunks)} Visio page(s)..."
+    )
+
+    batch_token_usage = save_chunks_batch(
+        all_chunks,
+        user_id,
+        document_id,
+        group_id=group_id,
+        public_workspace_id=public_workspace_id
+    )
+    total_chunks_saved = len(all_chunks)
+    if batch_token_usage:
+        total_embedding_tokens = batch_token_usage.get('total_tokens', 0)
+        embedding_model_name = batch_token_usage.get('model_deployment_name')
+
+    settings = get_settings()
+    enable_extract_meta_data = settings.get('enable_extract_meta_data', False)
+    if auto_extract_metadata and enable_extract_meta_data and total_chunks_saved > 0:
+        try:
+            update_callback(status="Extracting final metadata...")
+            args = {
+                "document_id": document_id,
+                "user_id": user_id
+            }
+
+            if public_workspace_id:
+                args["public_workspace_id"] = public_workspace_id
+            elif group_id:
+                args["group_id"] = group_id
+
+            document_metadata = extract_document_metadata(**args)
+            if document_metadata:
+                update_fields = {key: value for key, value in document_metadata.items() if value is not None and value != ""}
+                if update_fields:
+                    update_fields['status'] = "Final metadata extracted"
+                    update_callback(**update_fields)
+                else:
+                    update_callback(status="Final metadata extraction yielded no new info")
+        except Exception as metadata_error:
+            log_event(
+                f"[process_visio] Error extracting final metadata for Visio document {document_id}: {metadata_error}",
+                level=logging.WARNING,
+            )
+            update_callback(status="Processing complete (metadata extraction warning)")
+
+    return total_chunks_saved, total_embedding_tokens, embedding_model_name
+
+def process_di_document(document_id, user_id, temp_file_path, original_filename, file_ext, enable_enhanced_citations, update_callback, group_id=None, public_workspace_id=None, auto_extract_metadata=True, extraction_mode_override=None):
     """Processes documents supported by Azure Document Intelligence (PDF, Word, PPT, Image)."""
     is_group = group_id is not None
     is_public_workspace = public_workspace_id is not None
-    
+
     # --- Token tracking initialization ---
     total_embedding_tokens = 0
     embedding_model_name = None
-    
+
     # --- Extracted Metadata logic ---
     doc_title, doc_author, doc_subject, doc_keywords = '', '', None, None
     doc_authors_list = []
@@ -5909,6 +6833,36 @@ def process_di_document(document_id, user_id, temp_file_path, original_filename,
     # --- DI Processing Logic ---
     settings = get_settings() # Assuming get_settings is accessible
     chunk_config = get_chunk_size_config(settings)
+    document_intelligence_extraction_mode = 'read'
+    document_intelligence_requested_mode = 'read'
+    document_intelligence_auto_sample_pages = get_document_intelligence_auto_sample_pages(settings)
+    document_intelligence_auto_reason = ''
+    if is_pdf or is_image:
+        if extraction_mode_override:
+            document_intelligence_requested_mode = normalize_document_intelligence_manual_extraction_mode(extraction_mode_override)
+        else:
+            document_intelligence_requested_mode = get_document_intelligence_pdf_image_extraction_mode(settings)
+
+        if document_intelligence_requested_mode == 'auto':
+            document_intelligence_extraction_mode, document_intelligence_auto_reason = _resolve_document_intelligence_auto_mode(
+                temp_file_path=temp_file_path,
+                is_pdf=is_pdf,
+                is_image=is_image,
+                page_count=page_count,
+                sample_pages=document_intelligence_auto_sample_pages,
+                update_callback=update_callback,
+            )
+        else:
+            document_intelligence_extraction_mode = document_intelligence_requested_mode
+            document_intelligence_auto_reason = ''
+
+        update_callback(
+            document_intelligence_extraction_mode=document_intelligence_extraction_mode,
+            document_intelligence_extraction_mode_requested=document_intelligence_requested_mode,
+            document_intelligence_auto_sample_pages=document_intelligence_auto_sample_pages,
+            document_intelligence_auto_reason=document_intelligence_auto_reason,
+        )
+
     di_limit_bytes = 500 * 1024 * 1024
     di_page_limit = 2000
     file_size = os.path.getsize(temp_file_path)
@@ -5926,6 +6880,23 @@ def process_di_document(document_id, user_id, temp_file_path, original_filename,
             needs_pdf_file_chunking = True
     else:
         update_callback(enhanced_citations=False, status="Enhanced citations disabled")
+
+        if is_pdf or is_image:
+            args = {
+                "temp_file_path": temp_file_path,
+                "user_id": user_id,
+                "document_id": document_id,
+                "blob_filename": original_filename,
+                "update_callback": update_callback,
+                "mark_enhanced_citations": False,
+            }
+
+            if is_public_workspace:
+                args["public_workspace_id"] = public_workspace_id
+            elif is_group:
+                args["group_id"] = group_id
+
+            upload_to_blob(**args)
 
     if needs_pdf_file_chunking:
         try:
@@ -5997,7 +6968,10 @@ def process_di_document(document_id, user_id, temp_file_path, original_filename,
             # Send chunk to Azure DI
             update_callback(status=f"Sending {chunk_effective_filename} to Azure Document Intelligence...")
             try:
-                di_extracted_pages = extract_content_with_azure_di(chunk_path)
+                di_extracted_pages = extract_content_with_azure_di(
+                    chunk_path,
+                    extraction_mode=document_intelligence_extraction_mode
+                )
                 num_di_pages = len(di_extracted_pages)
                 conceptual_pages = num_di_pages if not is_image else 1 # Image is one conceptual item
 
@@ -6021,17 +6995,17 @@ def process_di_document(document_id, user_id, temp_file_path, original_filename,
             if enable_multimodal_vision:
                 try:
                     update_callback(status="Performing AI vision analysis...")
-                    
+
                     vision_analysis = analyze_image_with_vision_model(
                         chunk_path,
                         user_id,
                         document_id,
                         settings
                     )
-                    
+
                     if vision_analysis:
                         print(f"Vision analysis completed for image: {chunk_effective_filename}")
-                        
+
                         # Update document with vision analysis results BEFORE saving chunks
                         # This allows save_chunks() to append vision data to chunk_text for AI Search
                         update_fields = {
@@ -6046,7 +7020,7 @@ def process_di_document(document_id, user_id, temp_file_path, original_filename,
                     else:
                         print(f"Vision analysis returned no results for: {chunk_effective_filename}")
                         update_callback(status="Vision analysis completed (no results)")
-                        
+
                 except Exception as e:
                     print(f"Warning: Error in vision analysis for {document_id}: {str(e)}")
                     traceback.print_exc()
@@ -6136,7 +7110,7 @@ def process_di_document(document_id, user_id, temp_file_path, original_filename,
                         number_of_pages=estimated_total_items,
                         status=f"Saving page/chunk {chunk_index}/{estimated_total_items} of {chunk_effective_filename}..."
                     )
-                    
+
                     args = {
                         "page_text_content": chunk_content,
                         "page_number": chunk_index,
@@ -6151,7 +7125,7 @@ def process_di_document(document_id, user_id, temp_file_path, original_filename,
                         args["group_id"] = group_id
 
                     token_usage = save_chunks(**args)
-                    
+
                     # Accumulate embedding tokens
                     if token_usage:
                         total_embedding_tokens += token_usage.get('total_tokens', 0)
@@ -6174,7 +7148,7 @@ def process_di_document(document_id, user_id, temp_file_path, original_filename,
     # --- Final Metadata Extraction (Optional, moved outside loop) ---
     settings = get_settings() # Re-get in case it changed? Or pass it down.
     enable_extract_meta_data = settings.get('enable_extract_meta_data')
-    if enable_extract_meta_data and total_final_chunks_processed > 0:
+    if auto_extract_metadata and enable_extract_meta_data and total_final_chunks_processed > 0:
         try:
             update_callback(status="Extracting final metadata...")
             args = {
@@ -6204,6 +7178,169 @@ def process_di_document(document_id, user_id, temp_file_path, original_filename,
     # This ensures vision_analysis is available in metadata when chunks are being saved
 
     return total_final_chunks_processed, total_embedding_tokens, embedding_model_name
+
+
+def validate_document_reprocess_source(document_item, user_id=None, group_id=None, public_workspace_id=None):
+    """Validate that a PDF has a stored source blob available for DI extraction changes."""
+    if not document_item:
+        return False, "Document not found."
+
+    if not is_pdf_file_name(document_item.get('file_name')):
+        return False, "Only PDF documents can change extraction between Standard and Enhanced."
+
+    container_name, blob_path = get_document_blob_storage_info(
+        document_item,
+        user_id=user_id,
+        group_id=group_id,
+        public_workspace_id=public_workspace_id,
+    )
+    if not container_name or not blob_path:
+        return False, "Source PDF is unavailable. Re-upload this PDF before changing extraction."
+
+    try:
+        if not _blob_exists(container_name, blob_path):
+            return False, "Stored source PDF was not found in Blob Storage. Re-upload this PDF before changing extraction."
+    except Exception as e:
+        return False, f"Unable to validate stored source PDF: {str(e)}"
+
+    return True, ""
+
+
+def _download_document_source_to_temp_file(document_item, user_id=None, group_id=None, public_workspace_id=None):
+    container_name, blob_path = get_document_blob_storage_info(
+        document_item,
+        user_id=user_id,
+        group_id=group_id,
+        public_workspace_id=public_workspace_id,
+    )
+    if not container_name or not blob_path:
+        raise FileNotFoundError("Source PDF is unavailable.")
+
+    blob_service_client = _get_blob_service_client()
+    blob_client = blob_service_client.get_blob_client(container=container_name, blob=blob_path)
+    temp_file_path = None
+
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
+            temp_file_path = temp_file.name
+            download_stream = blob_client.download_blob()
+            for chunk in download_stream.chunks():
+                temp_file.write(chunk)
+        return temp_file_path
+    except Exception:
+        if temp_file_path and os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+        raise
+
+
+def process_document_reprocess_extraction_background(document_id, user_id, target_extraction_mode, group_id=None, public_workspace_id=None):
+    """Extract a stored PDF again with an explicit Standard/Enhanced mode."""
+    is_group = group_id is not None
+    is_public_workspace = public_workspace_id is not None
+    target_mode = normalize_document_intelligence_manual_extraction_mode(target_extraction_mode)
+    target_mode_label = "Enhanced" if target_mode == "layout" else "Standard"
+    temp_file_path = None
+
+    def update_doc_callback(**kwargs):
+        args = {
+            "document_id": document_id,
+            "user_id": user_id,
+            **kwargs,
+        }
+        if is_public_workspace:
+            args["public_workspace_id"] = public_workspace_id
+        elif is_group:
+            args["group_id"] = group_id
+        update_document(**args)
+
+    try:
+        document_item = get_document_metadata(
+            document_id=document_id,
+            user_id=user_id,
+            group_id=group_id,
+            public_workspace_id=public_workspace_id,
+        )
+        is_valid, validation_message = validate_document_reprocess_source(
+            document_item,
+            user_id=user_id,
+            group_id=group_id,
+            public_workspace_id=public_workspace_id,
+        )
+        if not is_valid:
+            raise ValueError(validation_message)
+
+        original_filename = document_item.get('file_name') or f'{document_id}.pdf'
+        update_doc_callback(
+            status=f"Queued to extract again with {target_mode_label}",
+            percentage_complete=0,
+            current_file_chunk=0,
+            num_chunks=0,
+            number_of_pages=0,
+            document_intelligence_extraction_mode=target_mode,
+            document_intelligence_extraction_mode_requested=target_mode,
+            document_intelligence_auto_sample_pages=get_document_intelligence_auto_sample_pages(get_settings()),
+            document_intelligence_auto_reason='Manual extraction change requested',
+        )
+
+        temp_file_path = _download_document_source_to_temp_file(
+            document_item,
+            user_id=user_id,
+            group_id=group_id,
+            public_workspace_id=public_workspace_id,
+        )
+
+        update_doc_callback(status=f"Deleting existing chunks before extracting again with {target_mode_label}...")
+        delete_document_chunks(document_id, group_id=group_id, public_workspace_id=public_workspace_id)
+
+        update_doc_callback(status=f"Extracting PDF again with Document Intelligence {target_mode_label}...")
+        result = process_di_document(
+            document_id=document_id,
+            user_id=user_id,
+            temp_file_path=temp_file_path,
+            original_filename=original_filename,
+            file_ext='.pdf',
+            enable_enhanced_citations=bool(document_item.get('enhanced_citations')),
+            update_callback=update_doc_callback,
+            group_id=group_id,
+            public_workspace_id=public_workspace_id,
+            auto_extract_metadata=False,
+            extraction_mode_override=target_mode,
+        )
+        if isinstance(result, tuple) and len(result) == 3:
+            total_chunks_saved, total_embedding_tokens, embedding_model_name = result
+        else:
+            total_chunks_saved = result
+            total_embedding_tokens = 0
+            embedding_model_name = None
+
+        final_update_args = {
+            "number_of_pages": total_chunks_saved,
+            "status": _resolve_processing_complete_status(total_chunks_saved, '.pdf', tuple('.' + ext for ext in IMAGE_EXTENSIONS), tuple('.' + ext for ext in TABULAR_EXTENSIONS), 'disabled'),
+            "percentage_complete": 100,
+            "current_file_chunk": None,
+        }
+        if total_embedding_tokens > 0:
+            final_update_args["embedding_tokens"] = total_embedding_tokens
+        if embedding_model_name:
+            final_update_args["embedding_model_deployment_name"] = embedding_model_name
+        update_doc_callback(**final_update_args)
+
+        print(f"Document {document_id} extracted again successfully with Document Intelligence {target_mode}.")
+    except Exception as e:
+        print(f"Error extracting document {document_id} again: {repr(e)}\nTraceback:\n{traceback.format_exc()}")
+        try:
+            update_doc_callback(
+                status=f"Error changing extraction: {str(e)}",
+                percentage_complete=0,
+            )
+        except Exception as update_error:
+            print(f"Failed to update extraction change error status for {document_id}: {update_error}")
+    finally:
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+            except Exception as cleanup_error:
+                print(f"Warning: Failed to clean up reprocess temp file {temp_file_path}: {cleanup_error}")
 
 def _get_content_type(path: str) -> str:
     ext = os.path.splitext(path)[1].lower()
@@ -6304,7 +7441,8 @@ def process_audio_document(
     original_filename: str,
     update_callback,
     group_id=None,
-    public_workspace_id=None
+    public_workspace_id=None,
+    auto_extract_metadata=True
 ) -> int:
     """Transcribe an audio file via Azure Speech, splitting >10 min into WAV chunks."""
 
@@ -6372,12 +7510,12 @@ def process_audio_document(
             done = False
             error_occurred = False
             error_message = None
-            
+
             def stop_cb(evt):
                 nonlocal done
                 print(f"[Debug] Session stopped for chunk {idx}")
                 done = True
-            
+
             def recognized_cb(evt):
                 try:
                     if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
@@ -6388,35 +7526,35 @@ def process_audio_document(
                 except Exception as e:
                     print(f"[Error] Error in recognized callback: {e}")
                     # Don't fail on individual recognition errors
-            
+
             def canceled_cb(evt):
                 nonlocal done, error_occurred, error_message
                 print(f"[Debug] Recognition canceled for chunk {idx}: {evt.cancellation_details.reason}")
-                
+
                 if evt.cancellation_details.reason == speechsdk.CancellationReason.Error:
                     error_occurred = True
                     error_message = evt.cancellation_details.error_details
                     print(f"[Error] Recognition error: {error_message}")
                 elif evt.cancellation_details.reason == speechsdk.CancellationReason.EndOfStream:
                     print(f"[Debug] End of audio stream reached")
-                
+
                 done = True
-            
+
             try:
                 # Connect callbacks
                 speech_recognizer.recognized.connect(recognized_cb)
                 speech_recognizer.session_stopped.connect(stop_cb)
                 speech_recognizer.canceled.connect(canceled_cb)
-                
+
                 # Start continuous recognition
                 print(f"[Debug] Starting continuous recognition for chunk {idx}")
                 speech_recognizer.start_continuous_recognition()
-                
+
                 # Wait for completion with timeout
                 import time
                 timeout_seconds = 600  # 10 minutes max per chunk
                 start_time = time.time()
-                
+
                 while not done:
                     if time.time() - start_time > timeout_seconds:
                         print(f"[Error] Recognition timeout for chunk {idx}")
@@ -6424,7 +7562,7 @@ def process_audio_document(
                         error_message = f"Recognition timed out after {timeout_seconds} seconds"
                         break
                     time.sleep(0.5)
-                
+
                 # Stop recognition
                 try:
                     speech_recognizer.stop_continuous_recognition()
@@ -6432,11 +7570,11 @@ def process_audio_document(
                 except Exception as e:
                     print(f"[Warning] Error stopping recognition for chunk {idx}: {e}")
                     # Continue even if stop fails
-                
+
                 # Check for errors after completion
                 if error_occurred:
                     raise RuntimeError(f"Recognition failed for chunk {idx}: {error_message}")
-                
+
                 # Add all recognized phrases to the overall list
                 if all_results:
                     all_phrases.extend(all_results)
@@ -6444,7 +7582,7 @@ def process_audio_document(
                 else:
                     print(f"[Warning] No speech recognized in {chunk_path}")
                     # Continue to next chunk - empty result is not necessarily an error
-                    
+
             except RuntimeError as e:
                 # Re-raise runtime errors (these are our custom errors)
                 raise
@@ -6498,7 +7636,7 @@ def process_audio_document(
                 else:
                     key = settings.get("speech_service_key", "")
                     headers = {'Ocp-Apim-Subscription-Key': key}
-                
+
                 resp = requests.post(url, headers=headers, files=files)
             try:
                 resp.raise_for_status()
@@ -6536,13 +7674,14 @@ def process_audio_document(
             file_name=original_filename,
             user_id=user_id,
             document_id=document_id,
-            group_id=group_id
+            group_id=group_id,
+            public_workspace_id=public_workspace_id
         )
 
     # Extract metadata if enabled and chunks were processed
     settings = get_settings()
     enable_extract_meta_data = settings.get('enable_extract_meta_data', False)
-    if enable_extract_meta_data and total_pages > 0:
+    if auto_extract_metadata and enable_extract_meta_data and total_pages > 0:
         try:
             update_callback(status="Extracting final metadata...")
             args = {
@@ -6556,7 +7695,7 @@ def process_audio_document(
                 args["group_id"] = group_id
 
             document_metadata = extract_document_metadata(**args)
-            
+
             if document_metadata:
                 update_fields = {k: v for k, v in document_metadata.items() if v is not None and v != ""}
                 if update_fields:
@@ -6573,7 +7712,536 @@ def process_audio_document(
     print("[Info] Audio transcription complete")
     return total_pages
 
-def process_document_upload_background(document_id, user_id, temp_file_path, original_filename, group_id=None, public_workspace_id=None):
+def _build_document_scope_args(document_id, user_id, group_id=None, public_workspace_id=None):
+    args = {
+        "document_id": document_id,
+        "user_id": user_id
+    }
+
+    if public_workspace_id:
+        args["public_workspace_id"] = public_workspace_id
+    elif group_id:
+        args["group_id"] = group_id
+
+    return args
+
+
+def build_chat_upload_workspace_tags(conversation_id):
+    return [CHAT_UPLOAD_WORKSPACE_TAG]
+
+
+def _copy_workspace_upload_source(temp_file_path, original_filename):
+    file_ext = os.path.splitext(str(original_filename or ''))[-1]
+    suffix = file_ext if file_ext else None
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as workspace_temp_file:
+        workspace_temp_file_path = workspace_temp_file.name
+    shutil.copyfile(temp_file_path, workspace_temp_file_path)
+    return workspace_temp_file_path
+
+
+def _workspace_file_name_exists(cosmos_container, scope_field, scope_id, file_name):
+    query = """
+        SELECT TOP 1 VALUE c.id
+        FROM c
+        WHERE c.file_name = @file_name
+            AND c.{scope_field} = @scope_id
+    """.format(scope_field=scope_field)
+    matches = list(
+        cosmos_container.query_items(
+            query=query,
+            parameters=[
+                {"name": "@file_name", "value": file_name},
+                {"name": "@scope_id", "value": scope_id},
+            ],
+            enable_cross_partition_query=True,
+        )
+    )
+    return bool(matches)
+
+
+def _personal_workspace_file_name_exists(user_id, file_name):
+    return _workspace_file_name_exists(
+        cosmos_user_documents_container,
+        'user_id',
+        user_id,
+        file_name,
+    )
+
+
+def _group_workspace_file_name_exists(group_id, file_name):
+    return _workspace_file_name_exists(
+        cosmos_group_documents_container,
+        'group_id',
+        group_id,
+        file_name,
+    )
+
+
+def _resolve_unique_workspace_file_name(file_name_exists_callback, requested_file_name, identity_suffix=None):
+    normalized_file_name = str(requested_file_name or '').strip()
+    if not normalized_file_name:
+        raise ValueError("requested_file_name is required")
+
+    base_name, file_ext = os.path.splitext(normalized_file_name)
+    if not base_name:
+        base_name = "uploaded-file"
+
+    if not file_name_exists_callback(normalized_file_name):
+        return normalized_file_name
+
+    normalized_identity_suffix = str(identity_suffix or '').strip()
+    if normalized_identity_suffix:
+        identity_candidate = f"{base_name} ({normalized_identity_suffix}){file_ext}"
+        if not file_name_exists_callback(identity_candidate):
+            return identity_candidate
+
+    for suffix_number in range(1, 1000):
+        candidate_file_name = f"{base_name} ({suffix_number}){file_ext}"
+        if not file_name_exists_callback(candidate_file_name):
+            return candidate_file_name
+
+    fallback_suffix = str(uuid.uuid4())[:8]
+    return f"{base_name} ({fallback_suffix}){file_ext}"
+
+
+def resolve_unique_personal_workspace_file_name(user_id, requested_file_name, identity_suffix=None):
+    return _resolve_unique_workspace_file_name(
+        lambda candidate_file_name: _personal_workspace_file_name_exists(user_id, candidate_file_name),
+        requested_file_name,
+        identity_suffix=identity_suffix,
+    )
+
+
+def resolve_unique_group_workspace_file_name(group_id, requested_file_name, identity_suffix=None):
+    return _resolve_unique_workspace_file_name(
+        lambda candidate_file_name: _group_workspace_file_name_exists(group_id, candidate_file_name),
+        requested_file_name,
+        identity_suffix=identity_suffix,
+    )
+
+
+def _merge_document_tags(existing_tags, new_tags):
+    merged_tags = []
+    seen_tags = set()
+    for tag in ensure_list(existing_tags) + ensure_list(new_tags):
+        normalized_tag = normalize_tag(tag)
+        if not normalized_tag or normalized_tag in seen_tags:
+            continue
+        seen_tags.add(normalized_tag)
+        merged_tags.append(normalized_tag)
+
+    is_valid, error_message, normalized_tags = validate_tags(merged_tags)
+    if not is_valid:
+        raise ValueError(error_message)
+
+    return normalized_tags
+
+
+def sync_chat_upload_workspace_attachment_status(document_metadata):
+    if not isinstance(document_metadata, dict) or not document_metadata.get('created_from_chat_upload'):
+        return False
+
+    conversation_id = str(document_metadata.get('conversation_id') or '').strip()
+    chat_message_id = str(document_metadata.get('chat_message_id') or '').strip()
+    document_id = str(document_metadata.get('id') or '').strip()
+    if not conversation_id or not chat_message_id or not document_id:
+        return False
+
+    try:
+        message_item = cosmos_messages_container.read_item(
+            item=chat_message_id,
+            partition_key=conversation_id,
+        )
+        if str(message_item.get('workspace_document_id') or '').strip() != document_id:
+            message_attachment = (message_item.get('metadata') or {}).get('workspace_attachment') or {}
+            if str(message_attachment.get('document_id') or '').strip() != document_id:
+                return False
+
+        message_metadata = message_item.setdefault('metadata', {})
+        workspace_attachment = message_metadata.setdefault('workspace_attachment', {})
+        workspace_attachment.update({
+            'document_id': document_id,
+            'file_name': document_metadata.get('file_name'),
+            'status': document_metadata.get('status', 'Queued for processing'),
+            'percentage_complete': document_metadata.get('percentage_complete', 0),
+            'tags': document_metadata.get('tags', []),
+            'workspace_url': f"/workspace?document_id={document_id}",
+            'conversation_url': f"/chats?conversation_id={conversation_id}",
+            'scope': 'personal',
+            'link_state': document_metadata.get('chat_upload_link_state', 'linked'),
+        })
+        message_metadata['workspace_attachment'] = workspace_attachment
+        message_item['metadata'] = message_metadata
+        message_item['workspace_document_id'] = document_id
+        message_item['file_content_source'] = 'workspace'
+        cosmos_messages_container.upsert_item(message_item)
+        return True
+    except Exception as sync_error:
+        log_event(
+            f"[ChatUpload] Unable to sync workspace attachment status for document {document_id}: {sync_error}",
+            level=logging.WARNING,
+            exceptionTraceback=True,
+        )
+        return False
+
+
+def queue_personal_workspace_upload_from_temp_file(
+    *,
+    user_id,
+    temp_file_path,
+    original_filename,
+    document_id=None,
+    tags=None,
+    source_metadata=None,
+    copy_source_file=False,
+    extraction_mode_override=None,
+    ensure_unique_file_name=False,
+    unique_file_name_suffix=None,
+):
+    if not user_id:
+        raise ValueError("user_id is required")
+    if not temp_file_path or not os.path.exists(temp_file_path):
+        raise ValueError("temp_file_path must point to an existing file")
+
+    safe_original_filename = str(original_filename or '').strip()
+    if not safe_original_filename:
+        raise ValueError("original_filename is required")
+    if not allowed_file(safe_original_filename):
+        raise ValueError(f"Unsupported workspace file type for {safe_original_filename}")
+
+    workspace_document_id = document_id or str(uuid.uuid4())
+    workspace_file_name = safe_original_filename
+    if ensure_unique_file_name:
+        workspace_file_name = resolve_unique_personal_workspace_file_name(
+            user_id,
+            safe_original_filename,
+            identity_suffix=unique_file_name_suffix or workspace_document_id[:8],
+        )
+
+    workspace_temp_file_path = temp_file_path
+    temp_file_queued = False
+    document_created = False
+
+    if copy_source_file:
+        workspace_temp_file_path = _copy_workspace_upload_source(temp_file_path, workspace_file_name)
+
+    try:
+        create_document(
+            workspace_file_name,
+            user_id,
+            workspace_document_id,
+            num_file_chunks=0,
+            status="Queued for processing"
+        )
+        document_created = True
+
+        document_metadata = get_document_metadata(workspace_document_id, user_id) or {}
+        merged_tags = _merge_document_tags(document_metadata.get('tags', []), tags or [])
+        for tag in merged_tags:
+            get_or_create_tag_definition(user_id, tag, workspace_type='personal')
+
+        update_fields = {
+            **(source_metadata or {}),
+            "tags": merged_tags,
+            "status": "Queued for processing",
+            "percentage_complete": 0,
+        }
+        if ensure_unique_file_name:
+            update_fields["source_original_file_name"] = safe_original_filename
+            update_fields["chat_upload_workspace_filename"] = workspace_file_name
+        update_document(
+            document_id=workspace_document_id,
+            user_id=user_id,
+            **update_fields
+        )
+
+        executor = current_app.extensions.get('executor')
+        if not executor:
+            executor = getattr(current_app, 'executor', None)
+        if not executor:
+            raise RuntimeError("Background executor is not configured")
+
+        task_kwargs = {
+            'document_id': workspace_document_id,
+            'user_id': user_id,
+            'temp_file_path': workspace_temp_file_path,
+            'original_filename': workspace_file_name,
+            'extraction_mode_override': extraction_mode_override,
+        }
+        if hasattr(executor, 'submit_stored'):
+            executor.submit_stored(
+                workspace_document_id,
+                process_document_upload_background,
+                **task_kwargs,
+            )
+        elif hasattr(executor, 'submit'):
+            executor.submit(
+                process_document_upload_background,
+                **task_kwargs,
+            )
+        else:
+            raise RuntimeError("Background executor does not support task submission")
+        temp_file_queued = True
+
+        try:
+            from functions_activity_logging import log_document_upload
+
+            file_size = os.path.getsize(workspace_temp_file_path)
+            file_ext = os.path.splitext(workspace_file_name)[-1].lower()
+            log_document_upload(
+                user_id=user_id,
+                document_id=workspace_document_id,
+                container_type='personal',
+                file_size=file_size,
+                file_type=file_ext,
+            )
+        except Exception as log_error:
+            debug_print(f"Activity logging error for chat workspace upload: {log_error}")
+
+        return {
+            'document_id': workspace_document_id,
+            'file_name': workspace_file_name,
+            'original_file_name': safe_original_filename,
+            'tags': merged_tags,
+            'status': 'Queued for processing',
+            'percentage_complete': 0,
+        }
+    except Exception:
+        if document_created and not temp_file_queued:
+            try:
+                cosmos_user_documents_container.delete_item(
+                    item=workspace_document_id,
+                    partition_key=workspace_document_id,
+                )
+            except Exception as cleanup_error:
+                debug_print(f"Failed to clean up queued workspace document metadata: {cleanup_error}")
+        if workspace_temp_file_path and os.path.exists(workspace_temp_file_path) and not temp_file_queued:
+            try:
+                os.remove(workspace_temp_file_path)
+            except Exception as cleanup_error:
+                debug_print(f"Failed to clean up queued workspace temp file: {cleanup_error}")
+        raise
+
+
+def queue_group_workspace_upload_from_temp_file(
+    *,
+    user_id,
+    group_id,
+    temp_file_path,
+    original_filename,
+    document_id=None,
+    tags=None,
+    source_metadata=None,
+    copy_source_file=False,
+    extraction_mode_override=None,
+    ensure_unique_file_name=False,
+    unique_file_name_suffix=None,
+):
+    if not user_id:
+        raise ValueError("user_id is required")
+    if not group_id:
+        raise ValueError("group_id is required")
+    if not temp_file_path or not os.path.exists(temp_file_path):
+        raise ValueError("temp_file_path must point to an existing file")
+
+    safe_original_filename = str(original_filename or '').strip()
+    if not safe_original_filename:
+        raise ValueError("original_filename is required")
+    if not allowed_file(safe_original_filename):
+        raise ValueError(f"Unsupported workspace file type for {safe_original_filename}")
+
+    workspace_document_id = document_id or str(uuid.uuid4())
+    workspace_file_name = safe_original_filename
+    if ensure_unique_file_name:
+        workspace_file_name = resolve_unique_group_workspace_file_name(
+            group_id,
+            safe_original_filename,
+            identity_suffix=unique_file_name_suffix or workspace_document_id[:8],
+        )
+
+    workspace_temp_file_path = temp_file_path
+    temp_file_queued = False
+    document_created = False
+
+    if copy_source_file:
+        workspace_temp_file_path = _copy_workspace_upload_source(temp_file_path, workspace_file_name)
+
+    try:
+        create_document(
+            workspace_file_name,
+            user_id,
+            workspace_document_id,
+            num_file_chunks=0,
+            status="Queued for processing",
+            group_id=group_id,
+        )
+        document_created = True
+
+        document_metadata = get_document_metadata(workspace_document_id, user_id, group_id=group_id) or {}
+        merged_tags = _merge_document_tags(document_metadata.get('tags', []), tags or [])
+        for tag in merged_tags:
+            get_or_create_tag_definition(
+                user_id,
+                tag,
+                workspace_type='group',
+                group_id=group_id,
+            )
+
+        update_fields = {
+            **(source_metadata or {}),
+            "tags": merged_tags,
+            "status": "Queued for processing",
+            "percentage_complete": 0,
+        }
+        if ensure_unique_file_name:
+            update_fields["source_original_file_name"] = safe_original_filename
+            update_fields["chat_upload_workspace_filename"] = workspace_file_name
+        update_document(
+            document_id=workspace_document_id,
+            user_id=user_id,
+            group_id=group_id,
+            **update_fields,
+        )
+
+        executor = current_app.extensions.get('executor')
+        if not executor:
+            executor = getattr(current_app, 'executor', None)
+        if not executor:
+            raise RuntimeError("Background executor is not configured")
+
+        task_kwargs = {
+            'document_id': workspace_document_id,
+            'user_id': user_id,
+            'group_id': group_id,
+            'temp_file_path': workspace_temp_file_path,
+            'original_filename': workspace_file_name,
+            'extraction_mode_override': extraction_mode_override,
+        }
+        if hasattr(executor, 'submit_stored'):
+            executor.submit_stored(
+                workspace_document_id,
+                process_document_upload_background,
+                **task_kwargs,
+            )
+        elif hasattr(executor, 'submit'):
+            executor.submit(
+                process_document_upload_background,
+                **task_kwargs,
+            )
+        else:
+            raise RuntimeError("Background executor does not support task submission")
+        temp_file_queued = True
+
+        try:
+            from functions_activity_logging import log_document_upload
+
+            file_size = os.path.getsize(workspace_temp_file_path)
+            file_ext = os.path.splitext(workspace_file_name)[-1].lower()
+            log_document_upload(
+                user_id=user_id,
+                document_id=workspace_document_id,
+                container_type='group',
+                file_size=file_size,
+                file_type=file_ext,
+            )
+        except Exception as log_error:
+            debug_print(f"Activity logging error for group chat workspace upload: {log_error}")
+
+        return {
+            'document_id': workspace_document_id,
+            'file_name': workspace_file_name,
+            'original_file_name': safe_original_filename,
+            'group_id': group_id,
+            'tags': merged_tags,
+            'status': 'Queued for processing',
+            'percentage_complete': 0,
+        }
+    except Exception:
+        if document_created and not temp_file_queued:
+            try:
+                cosmos_group_documents_container.delete_item(
+                    item=workspace_document_id,
+                    partition_key=workspace_document_id,
+                )
+            except Exception as cleanup_error:
+                debug_print(f"Failed to clean up queued group workspace document metadata: {cleanup_error}")
+        if workspace_temp_file_path and os.path.exists(workspace_temp_file_path) and not temp_file_queued:
+            try:
+                os.remove(workspace_temp_file_path)
+            except Exception as cleanup_error:
+                debug_print(f"Failed to clean up queued group workspace temp file: {cleanup_error}")
+        raise
+
+
+def _run_final_metadata_extraction(document_id, user_id, total_chunks_saved, enable_extract_meta_data, update_callback, group_id=None, public_workspace_id=None):
+    if total_chunks_saved <= 0:
+        return "skipped_no_chunks"
+
+    if not enable_extract_meta_data:
+        return "disabled"
+
+    try:
+        update_callback(status="Extracting final metadata...")
+        args = _build_document_scope_args(
+            document_id,
+            user_id,
+            group_id=group_id,
+            public_workspace_id=public_workspace_id
+        )
+        document_metadata = extract_document_metadata(**args)
+
+        if not document_metadata:
+            update_callback(status="Metadata extraction returned empty or failed")
+            return "returned_empty"
+
+        update_fields = {
+            key: value
+            for key, value in document_metadata.items()
+            if value is not None and value != ""
+        }
+
+        if update_fields:
+            update_fields['status'] = "Final metadata extracted"
+            update_callback(**update_fields)
+            return "extracted"
+
+        update_callback(status="Final metadata extraction yielded no new info")
+        return "no_new_info"
+    except Exception as metadata_error:
+        log_event(
+            f"[DocumentMetadataExtraction] Error extracting final metadata for document {document_id}: {metadata_error}",
+            extra={
+                "document_id": document_id,
+                "group_id": group_id,
+                "public_workspace_id": public_workspace_id
+            },
+            level=logging.WARNING,
+            exceptionTraceback=True
+        )
+        update_callback(status="Processing complete (metadata extraction warning)")
+        return "warning"
+
+
+def _resolve_processing_complete_status(total_chunks_saved, file_ext, image_extensions, tabular_extensions, metadata_extraction_result):
+    if total_chunks_saved == 0:
+        if file_ext in image_extensions:
+            return "Processing complete - no text found in image"
+        if file_ext in tabular_extensions:
+            return "Processing complete - no data rows found or file empty"
+        return "Processing complete - no content indexed"
+
+    if metadata_extraction_result == "extracted":
+        return "Processing complete - final metadata extracted"
+    if metadata_extraction_result == "no_new_info":
+        return "Processing complete - metadata extraction yielded no new info"
+    if metadata_extraction_result == "returned_empty":
+        return "Processing complete - metadata extraction returned empty or failed"
+    if metadata_extraction_result == "warning":
+        return "Processing complete (metadata extraction warning)"
+
+    return "Processing complete"
+
+def process_document_upload_background(document_id, user_id, temp_file_path, original_filename, group_id=None, public_workspace_id=None, extraction_mode_override=None):
     """
     Main background task dispatcher for document processing.
     Handles various file types with specific chunking and processing logic.
@@ -6592,6 +8260,8 @@ def process_document_upload_background(document_id, user_id, temp_file_path, ori
     di_supported_extensions = tuple('.' + ext for ext in DOCUMENT_EXTENSIONS | IMAGE_EXTENSIONS)
     video_extensions = tuple('.' + ext for ext in VIDEO_EXTENSIONS)
     audio_extensions = tuple('.' + ext for ext in AUDIO_EXTENSIONS)
+    visio_extensions = tuple('.' + ext for ext in VISIO_EXTENSIONS)
+    email_extensions = tuple('.' + ext for ext in EMAIL_EXTENSIONS)
 
     # --- Define update_document callback wrapper ---
     # This makes it easier to pass the update function to helpers without repeating args
@@ -6653,6 +8323,11 @@ def process_document_upload_background(document_id, user_id, temp_file_path, ori
         elif is_group:
             args["group_id"] = group_id
 
+        processor_args_without_auto_metadata = {
+            **args,
+            "auto_extract_metadata": False
+        }
+
         if file_ext == '.txt':
             result = process_txt(**{k: v for k, v in args.items() if k != "file_ext"})
             # Handle tuple return (chunks, tokens, model_name)
@@ -6685,25 +8360,37 @@ def process_document_upload_background(document_id, user_id, temp_file_path, ori
             else:
                 total_chunks_saved = result
         elif file_ext == '.html':
-            result = process_html(**{k: v for k, v in args.items() if k != "file_ext"})
+            result = process_html(**{k: v for k, v in processor_args_without_auto_metadata.items() if k != "file_ext"})
             if isinstance(result, tuple) and len(result) == 3:
                 total_chunks_saved, total_embedding_tokens, embedding_model_name = result
             else:
                 total_chunks_saved = result
         elif file_ext == '.md':
-            result = process_md(**{k: v for k, v in args.items() if k != "file_ext"})
+            result = process_md(**{k: v for k, v in processor_args_without_auto_metadata.items() if k != "file_ext"})
             if isinstance(result, tuple) and len(result) == 3:
                 total_chunks_saved, total_embedding_tokens, embedding_model_name = result
             else:
                 total_chunks_saved = result
         elif file_ext == '.json':
-            result = process_json(**{k: v for k, v in args.items() if k != "file_ext"})
+            result = process_json(**{k: v for k, v in processor_args_without_auto_metadata.items() if k != "file_ext"})
             if isinstance(result, tuple) and len(result) == 3:
                 total_chunks_saved, total_embedding_tokens, embedding_model_name = result
             else:
                 total_chunks_saved = result
         elif file_ext in tabular_extensions:
-            result = process_tabular(**args)
+            result = process_tabular(**processor_args_without_auto_metadata)
+            if isinstance(result, tuple) and len(result) == 3:
+                total_chunks_saved, total_embedding_tokens, embedding_model_name = result
+            else:
+                total_chunks_saved = result
+        elif file_ext in visio_extensions:
+            result = process_visio(**{k: v for k, v in processor_args_without_auto_metadata.items() if k != "file_ext"})
+            if isinstance(result, tuple) and len(result) == 3:
+                total_chunks_saved, total_embedding_tokens, embedding_model_name = result
+            else:
+                total_chunks_saved = result
+        elif file_ext in email_extensions:
+            result = process_msg(**{k: v for k, v in processor_args_without_auto_metadata.items() if k != "file_ext"})
             if isinstance(result, tuple) and len(result) == 3:
                 total_chunks_saved, total_embedding_tokens, embedding_model_name = result
             else:
@@ -6716,7 +8403,8 @@ def process_document_upload_background(document_id, user_id, temp_file_path, ori
                 original_filename=original_filename,
                 update_callback=update_doc_callback,
                 group_id=group_id,
-                public_workspace_id=public_workspace_id
+                public_workspace_id=public_workspace_id,
+                auto_extract_metadata=False
             )
         elif file_ext in audio_extensions:
             total_chunks_saved = process_audio_document(
@@ -6726,10 +8414,14 @@ def process_document_upload_background(document_id, user_id, temp_file_path, ori
                 original_filename=original_filename,
                 update_callback=update_doc_callback,
                 group_id=group_id,
-                public_workspace_id=public_workspace_id
+                public_workspace_id=public_workspace_id,
+                auto_extract_metadata=False
             )
         elif file_ext in di_supported_extensions or file_ext == '.doc':
-            result = process_di_document(**args)
+            result = process_di_document(
+                **processor_args_without_auto_metadata,
+                extraction_mode_override=extraction_mode_override
+            )
             # Handle tuple return (chunks, tokens, model_name)
             if isinstance(result, tuple) and len(result) == 3:
                 total_chunks_saved, total_embedding_tokens, embedding_model_name = result
@@ -6739,16 +8431,24 @@ def process_document_upload_background(document_id, user_id, temp_file_path, ori
             raise ValueError(f"Unsupported file type for processing: {file_ext}")
 
 
-        # --- 2. Final Status Update ---
-        final_status = "Processing complete"
-        if total_chunks_saved == 0:
-             # Provide more specific status if no chunks were saved
-             if file_ext in image_extensions:
-                 final_status = "Processing complete - no text found in image"
-             elif file_ext in tabular_extensions:
-                 final_status = "Processing complete - no data rows found or file empty"
-             else:
-                 final_status = "Processing complete - no content indexed"
+        # --- 2. Final Metadata Extraction and Status Update ---
+        metadata_extraction_result = _run_final_metadata_extraction(
+            document_id,
+            user_id,
+            total_chunks_saved,
+            enable_extract_meta_data,
+            update_doc_callback,
+            group_id=group_id,
+            public_workspace_id=public_workspace_id
+        )
+
+        final_status = _resolve_processing_complete_status(
+            total_chunks_saved,
+            file_ext,
+            image_extensions,
+            tabular_extensions,
+            metadata_extraction_result
+        )
 
         # Final update uses the total chunks saved across all steps/sheets
         # For DI types, number_of_pages might have been updated during DI processing,
@@ -6760,21 +8460,29 @@ def process_document_upload_background(document_id, user_id, temp_file_path, ori
              "percentage_complete": 100,
              "current_file_chunk": None # Clear current chunk tracking
         }
-        
+
         # Add embedding token data if available
         if total_embedding_tokens > 0:
             final_update_args["embedding_tokens"] = total_embedding_tokens
         if embedding_model_name:
             final_update_args["embedding_model_deployment_name"] = embedding_model_name
-            
+
         update_doc_callback(**final_update_args)
 
+        final_document_metadata = get_document_metadata(
+            document_id=document_id,
+            user_id=user_id,
+            group_id=group_id,
+            public_workspace_id=public_workspace_id
+        )
+        sync_chat_upload_workspace_attachment_status(final_document_metadata)
+
         print(f"Document {document_id} ({original_filename}) processed successfully with {total_chunks_saved} chunks saved and {total_embedding_tokens} embedding tokens used.")
-        
+
         # Log document creation transaction to activity_logs container
         try:
             from functions_activity_logging import log_document_creation_transaction, log_token_usage
-            
+
             # Retrieve final document metadata to capture all extracted fields
             doc_metadata = get_document_metadata(
                 document_id=document_id,
@@ -6782,7 +8490,7 @@ def process_document_upload_background(document_id, user_id, temp_file_path, ori
                 group_id=group_id,
                 public_workspace_id=public_workspace_id
             )
-            
+
             # Determine workspace type
             if public_workspace_id:
                 workspace_type = 'public'
@@ -6790,7 +8498,7 @@ def process_document_upload_background(document_id, user_id, temp_file_path, ori
                 workspace_type = 'group'
             else:
                 workspace_type = 'personal'
-            
+
             # Log the transaction with all available metadata
             log_document_creation_transaction(
                 user_id=user_id,
@@ -6821,7 +8529,7 @@ def process_document_upload_background(document_id, user_id, temp_file_path, ori
                     'document_classification': doc_metadata.get('document_classification') if doc_metadata else None
                 }
             )
-            
+
             # Log embedding token usage separately for easy reporting
             if total_embedding_tokens > 0 and embedding_model_name:
                 log_token_usage(
@@ -6839,7 +8547,7 @@ def process_document_upload_background(document_id, user_id, temp_file_path, ori
                         'page_count': total_chunks_saved
                     }
                 )
-            
+
             # Mark document as logged to activity logs to prevent duplicate migration
             try:
                 # All document containers use /id as partition key
@@ -6849,31 +8557,31 @@ def process_document_upload_background(document_id, user_id, temp_file_path, ori
                     doc_container = cosmos_group_documents_container
                 else:
                     doc_container = cosmos_user_documents_container
-                
+
                 # All document containers use document_id (/id) as partition key
                 partition_key = document_id
-                
+
                 # Read, update, and upsert the document with the flag
                 doc_record = doc_container.read_item(item=document_id, partition_key=partition_key)
                 doc_record['added_to_activity_log'] = True
                 doc_container.upsert_item(doc_record)
                 print(f"✅ Set added_to_activity_log flag for document {document_id}")
-                
+
             except Exception as flag_error:
                 print(f"⚠️  Warning: Failed to set added_to_activity_log flag: {flag_error}")
                 # Don't fail if flag setting fails
-                
+
         except Exception as log_error:
             print(f"Error logging document creation transaction: {log_error}")
             # Don't fail the entire process if logging fails
-        
+
         # Create notification for document processing completion
         try:
             from functions_notifications import create_notification, create_group_notification, create_public_workspace_notification
-            
+
             notification_title = f"Document ready: {original_filename}"
             notification_message = f"Your document has been processed successfully with {total_chunks_saved} chunks."
-            
+
             # Determine workspace type and create appropriate notification
             if public_workspace_id:
                 # Notification for all public workspace members
@@ -6895,13 +8603,13 @@ def process_document_upload_background(document_id, user_id, temp_file_path, ori
                     }
                 )
                 print(f"📢 Created notification for public workspace {public_workspace_id}")
-                
+
             elif group_id:
                 # Notification for all group members - get group name
                 from functions_group import find_group_by_id
                 group = find_group_by_id(group_id)
                 group_name = group.get('name', 'Unknown Group') if group else 'Unknown Group'
-                
+
                 create_group_notification(
                     group_id=group_id,
                     notification_type='document_processing_complete',
@@ -6922,7 +8630,7 @@ def process_document_upload_background(document_id, user_id, temp_file_path, ori
                     }
                 )
                 print(f"📢 Created notification for group {group_id} ({group_name})")
-                
+
             else:
                 # Personal notification for the uploader
                 create_notification(
@@ -6942,7 +8650,7 @@ def process_document_upload_background(document_id, user_id, temp_file_path, ori
                     }
                 )
                 print(f"📢 Created notification for user {user_id}")
-                
+
         except Exception as notif_error:
             print(f"⚠️  Warning: Failed to create notification: {notif_error}")
             # Don't fail the entire process if notification creation fails
@@ -6958,6 +8666,13 @@ def process_document_upload_background(document_id, user_id, temp_file_path, ori
                 status=f"Error: {error_msg[:250]}", # Limit error message length
                 percentage_complete=0 # Indicate failure
             )
+            failed_document_metadata = get_document_metadata(
+                document_id=document_id,
+                user_id=user_id,
+                group_id=group_id,
+                public_workspace_id=public_workspace_id
+            )
+            sync_chat_upload_workspace_attachment_status(failed_document_metadata)
         except Exception as update_e:
             print(f"Critical Error: Failed to update document status to error for {document_id}: {update_e}")
 
@@ -7089,24 +8804,24 @@ def share_document_with_user(document_id, owner_user_id, target_user_id):
             item=document_id,
             partition_key=document_id
         )
-        
+
         # Verify the requesting user is the owner
         if document_item.get('user_id') != owner_user_id:
             raise Exception("Only document owner can share documents")
-        
+
         # Initialize shared_user_ids if it doesn't exist
         shared_user_ids = document_item.get('shared_user_ids', [])
-        
+
         # Check if already shared (by OID, regardless of approval status)
         already_shared = any(entry.startswith(f"{target_user_id},") for entry in shared_user_ids)
         if not already_shared:
             shared_user_ids.append(f"{target_user_id},not_approved")
             document_item['shared_user_ids'] = shared_user_ids
             document_item['last_updated'] = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-            
+
             # Update the document
             cosmos_user_documents_container.upsert_item(document_item)
-            
+
             # Update all chunks with the new shared_user_ids
             try:
                 chunks = get_all_chunks(document_id, owner_user_id)
@@ -7128,11 +8843,11 @@ def share_document_with_user(document_id, owner_user_id, target_user_id):
             except Exception as e:
                 print(f"Warning: Failed to update chunks for document {document_id}: {e}")
                 # Don't fail the whole operation if chunk update fails
-            
+
             return True
-        
+
         return True  # Already shared
-        
+
     except CosmosResourceNotFoundError:
         return False
     except Exception as e:
@@ -7151,18 +8866,18 @@ def unshare_document_from_user(document_id, owner_user_id, target_user_id):
             item=document_id,
             partition_key=document_id
         )
-        
+
         # Verify the requesting user is the owner OR the user is removing themselves
         actual_owner_id = document_item.get('user_id')
         is_owner = actual_owner_id == owner_user_id
         is_self_removal = owner_user_id == target_user_id
-        
+
         if not is_owner and not is_self_removal:
             raise Exception("Only document owner can unshare documents, or users can remove themselves")
-        
+
         # Get current shared_user_ids
         shared_user_ids = document_item.get('shared_user_ids', [])
-        
+
         # Remove all entries for the target user (by oid prefix)
         new_shared_user_ids = [entry for entry in shared_user_ids if not entry.startswith(f"{target_user_id},")]
         if len(new_shared_user_ids) != len(shared_user_ids):
@@ -7170,17 +8885,17 @@ def unshare_document_from_user(document_id, owner_user_id, target_user_id):
             document_item['last_updated'] = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
             # Update the document
             cosmos_user_documents_container.upsert_item(document_item)
-            
+
             # Update all chunks with the new shared_user_ids
             try:
-                chunks = get_all_chunks(document_id, owner_user_id)
+                chunks = get_all_chunks(document_id, actual_owner_id)
                 for chunk in chunks:
                     chunk_id = chunk.get('id')
                     if chunk_id:
                         try:
                             update_chunk_metadata(
                                 chunk_id=chunk_id,
-                                user_id=owner_user_id,
+                                user_id=actual_owner_id,
                                 group_id=None,
                                 public_workspace_id=None,
                                 document_id=document_id,
@@ -7194,7 +8909,7 @@ def unshare_document_from_user(document_id, owner_user_id, target_user_id):
                 # Don't fail the whole operation if chunk update fails
 
         return True
-        
+
     except CosmosResourceNotFoundError:
         return False
     except Exception as e:
@@ -7213,11 +8928,11 @@ def get_shared_users_for_document(document_id, owner_user_id):
             item=document_id,
             partition_key=document_id
         )
-        
+
         # Verify the requesting user is the owner
         if document_item.get('user_id') != owner_user_id:
             return None
-        
+
         shared_user_ids = document_item.get('shared_user_ids', [])
         result = []
         for entry in shared_user_ids:
@@ -7227,7 +8942,7 @@ def get_shared_users_for_document(document_id, owner_user_id):
             else:
                 result.append({'id': entry, 'approval_status': 'unknown'})
         return result
-        
+
     except CosmosResourceNotFoundError:
         return None
     except Exception as e:
@@ -7245,15 +8960,15 @@ def is_document_shared_with_user(document_id, user_id):
             item=document_id,
             partition_key=document_id
         )
-        
+
         # Check if user is owner
         if document_item.get('user_id') == user_id:
             return True
-        
+
         # Check if user is in shared list with approved status
         shared_user_ids = document_item.get('shared_user_ids', [])
         return any(entry == f"{user_id},approved" for entry in shared_user_ids)
-        
+
     except CosmosResourceNotFoundError:
         return False
     except Exception as e:
@@ -7275,7 +8990,7 @@ def get_documents_shared_with_user(user_id):
         parameters = [
             {"name": "@user_id", "value": user_id}
         ]
-        
+
         documents = list(
             cosmos_user_documents_container.query_items(
                 query=query,
@@ -7283,23 +8998,23 @@ def get_documents_shared_with_user(user_id):
                 enable_cross_partition_query=True
             )
         )
-        
+
         # Only include docs where shared_user_ids contains "{user_id},approved"
         filtered_docs = []
         for doc in documents:
             shared_user_ids = doc.get('shared_user_ids', [])
             if any(entry == f"{user_id},approved" for entry in shared_user_ids):
                 filtered_docs.append(doc)
-        
+
         # Get latest versions only
         latest_documents = {}
         for doc in filtered_docs:
             file_name = doc['file_name']
             if file_name not in latest_documents or doc['version'] > latest_documents[file_name]['version']:
                 latest_documents[file_name] = doc
-                
+
         return list(latest_documents.values())
-        
+
     except Exception as e:
         print(f"Error getting documents shared with user {user_id}: {e}")
         return []
@@ -7316,27 +9031,27 @@ def share_document_with_group(document_id, owner_group_id, target_group_id):
             item=document_id,
             partition_key=document_id
         )
-        
+
         # Verify the requesting group is the owner
         if document_item.get('group_id') != owner_group_id:
             raise Exception("Only document owning group can share documents")
-        
+
         # Initialize shared_group_ids if it doesn't exist
         shared_group_ids = document_item.get('shared_group_ids', [])
-        
+
         # Check if already shared (by group OID, regardless of approval status)
         already_shared = any(entry.startswith(f"{target_group_id},") for entry in shared_group_ids)
         if not already_shared:
             shared_group_ids.append(f"{target_group_id},not_approved")
             document_item['shared_group_ids'] = shared_group_ids
             document_item['last_updated'] = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-            
+
             # Update the document
             cosmos_group_documents_container.upsert_item(document_item)
             return True
 
         return True  # Already shared
-        
+
     except CosmosResourceNotFoundError:
         return False
     except Exception as e:
@@ -7355,26 +9070,26 @@ def unshare_document_from_group(document_id, owner_group_id, target_group_id):
             item=document_id,
             partition_key=document_id
         )
-        
+
         # Verify the requesting group is the owner
         if document_item.get('group_id') != owner_group_id:
             raise Exception("Only document owning group can unshare documents")
-        
+
         # Get current shared_group_ids
         shared_group_ids = document_item.get('shared_group_ids', [])
-        
+
         # Remove target group if they are in the list
         # Remove all entries for the target group (by oid prefix)
         new_shared_group_ids = [entry for entry in shared_group_ids if not entry.startswith(f"{target_group_id},")]
         if len(new_shared_group_ids) != len(shared_group_ids):
             document_item['shared_group_ids'] = new_shared_group_ids
             document_item['last_updated'] = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-            
+
             # Update the document
             cosmos_group_documents_container.upsert_item(document_item)
-        
+
         return True
-        
+
     except CosmosResourceNotFoundError:
         return False
     except Exception as e:
@@ -7393,13 +9108,13 @@ def get_shared_groups_for_document(document_id, owner_group_id):
             item=document_id,
             partition_key=document_id
         )
-        
+
         # Verify the requesting group is the owner
         if document_item.get('group_id') != owner_group_id:
             return None
-        
+
         return document_item.get('shared_group_ids', [])
-        
+
     except CosmosResourceNotFoundError:
         return None
     except Exception as e:
@@ -7417,17 +9132,17 @@ def is_document_shared_with_group(document_id, group_id):
             item=document_id,
             partition_key=document_id
         )
-        
+
         # Check if group is owner
         if document_item.get('group_id') == group_id:
             return True
-        
+
         # Check if group is in shared list
         shared_group_ids = document_item.get('shared_group_ids', [])
-        
+
         # Only allow access if group is owner or in shared_group_ids as approved
         return any(entry == f"{group_id},approved" for entry in shared_group_ids)
-        
+
     except CosmosResourceNotFoundError:
         return False
     except Exception as e:
@@ -7443,13 +9158,17 @@ def get_documents_shared_with_group(group_id):
         query = """
             SELECT *
             FROM c
-            WHERE ARRAY_CONTAINS(c.shared_group_ids, @group_id)
+            WHERE (
+                    ARRAY_CONTAINS(c.shared_group_ids, @group_id)
+                    OR ARRAY_CONTAINS(c.shared_group_ids, @group_id_approved)
+                )
                 AND c.group_id != @group_id
         """
         parameters = [
-            {"name": "@group_id", "value": group_id}
+            {"name": "@group_id", "value": group_id},
+            {"name": "@group_id_approved", "value": f"{group_id},approved"}
         ]
-        
+
         documents = list(
             cosmos_group_documents_container.query_items(
                 query=query,
@@ -7457,16 +9176,16 @@ def get_documents_shared_with_group(group_id):
                 enable_cross_partition_query=True
             )
         )
-        
+
         # Get latest versions only
         latest_documents = {}
         for doc in documents:
             file_name = doc['file_name']
             if file_name not in latest_documents or doc['version'] > latest_documents[file_name]['version']:
                 latest_documents[file_name] = doc
-                
+
         return list(latest_documents.values())
-        
+
     except Exception as e:
         print(f"Error getting documents shared with group {group_id}: {e}")
         return []
@@ -7488,7 +9207,7 @@ def validate_tags(tags):
     """
     Validate an array of tags.
     Returns (is_valid, error_message, normalized_tags)
-    
+
     Rules:
     - Max 50 characters per tag
     - Alphanumeric + hyphens/underscores only
@@ -7497,34 +9216,34 @@ def validate_tags(tags):
     """
     if not isinstance(tags, list):
         return False, "Tags must be an array", []
-    
+
     normalized = []
     seen = set()
-    
+
     for tag in tags:
         if not isinstance(tag, str):
             return False, "All tags must be strings", []
-        
+
         normalized_tag = normalize_tag(tag)
-        
+
         if not normalized_tag:
             continue  # Skip empty tags
-        
+
         if len(normalized_tag) > 50:
             return False, f"Tag '{normalized_tag}' exceeds 50 characters", []
-        
+
         # Check alphanumeric + hyphens/underscores
         import re
         if not re.match(r'^[a-z0-9_-]+$', normalized_tag):
             return False, f"Tag '{normalized_tag}' contains invalid characters (only alphanumeric, hyphens, and underscores allowed)", []
-        
+
         # Check for duplicates
         if normalized_tag in seen:
             continue  # Skip duplicate
-        
+
         seen.add(normalized_tag)
         normalized.append(normalized_tag)
-    
+
     return True, None, normalized
 
 
@@ -7566,16 +9285,68 @@ def sanitize_tags_for_filter(raw_tags):
     return valid_tags
 
 
+def normalize_tag_color(color):
+    """
+    Normalize a tag color to a canonical 6-digit lowercase hex code.
+    Returns None for invalid values.
+    """
+    if not isinstance(color, str):
+        return None
+
+    normalized_color = color.strip()
+    if not normalized_color:
+        return None
+
+    if not TAG_COLOR_PATTERN.fullmatch(normalized_color):
+        return None
+
+    if not normalized_color.startswith('#'):
+        normalized_color = f'#{normalized_color}'
+
+    if len(normalized_color) == 4:
+        normalized_color = '#' + ''.join(component * 2 for component in normalized_color[1:])
+
+    return normalized_color.lower()
+
+
+def get_safe_tag_color(color, tag_name):
+    """
+    Return a normalized tag color or the deterministic default for the tag.
+    """
+    normalized_color = normalize_tag_color(color)
+    if normalized_color:
+        return normalized_color
+
+    safe_tag_name = normalize_tag(tag_name) or str(tag_name or '')
+    return get_default_tag_color(safe_tag_name)
+
+
+def validate_tag_color(color, tag_name):
+    """
+    Validate a requested tag color.
+    Returns (is_valid, error_message, normalized_color).
+    Missing colors resolve to the deterministic default for the tag.
+    """
+    if color is None:
+        return True, None, get_safe_tag_color(None, tag_name)
+
+    normalized_color = normalize_tag_color(color)
+    if not normalized_color:
+        return False, 'Tag color must be a valid 3- or 6-digit hex color', None
+
+    return True, None, normalized_color
+
+
 def get_workspace_tags(user_id, group_id=None, public_workspace_id=None):
     """
     Get all unique tags used in a workspace with document counts.
     Returns: [{'name': 'tag1', 'count': 5, 'color': '#3b82f6'}, ...]
     """
     from functions_settings import get_user_settings
-    
+
     is_group = group_id is not None
     is_public_workspace = public_workspace_id is not None
-    
+
     # Choose the correct container
     if is_public_workspace:
         cosmos_container = cosmos_public_documents_container
@@ -7589,7 +9360,7 @@ def get_workspace_tags(user_id, group_id=None, public_workspace_id=None):
         cosmos_container = cosmos_user_documents_container
         partition_key = user_id
         workspace_type = 'personal'
-    
+
     try:
         # Query documents with enough metadata to collapse revisions to the current version.
         if is_public_workspace:
@@ -7616,9 +9387,9 @@ def get_workspace_tags(user_id, group_id=None, public_workspace_id=None):
                     AND IS_DEFINED(c.tags)
                     AND ARRAY_LENGTH(c.tags) > 0
             """
-        
+
         parameters = [{"name": "@partition_key", "value": partition_key}]
-        
+
         documents = list(
             cosmos_container.query_items(
                 query=query,
@@ -7626,7 +9397,7 @@ def get_workspace_tags(user_id, group_id=None, public_workspace_id=None):
                 enable_cross_partition_query=True
             )
         )
-        
+
         documents = select_current_documents(documents)
 
         # Count tag occurrences on current revisions only.
@@ -7636,7 +9407,7 @@ def get_workspace_tags(user_id, group_id=None, public_workspace_id=None):
                 normalized_tag = normalize_tag(tag)
                 if normalized_tag:
                     tag_counts[normalized_tag] = tag_counts.get(normalized_tag, 0) + 1
-        
+
         # Get tag definitions (colors) from the appropriate source
         if is_public_workspace:
             # Read from public workspace record (shared across all users)
@@ -7662,23 +9433,23 @@ def get_workspace_tags(user_id, group_id=None, public_workspace_id=None):
             results.append({
                 'name': tag_name,
                 'count': count,
-                'color': tag_def.get('color', get_default_tag_color(tag_name))
+                'color': get_safe_tag_color(tag_def.get('color'), tag_name)
             })
-        
+
         # Add defined tags that haven't been used yet (count = 0)
         for tag_name, tag_def in workspace_tag_defs.items():
             if tag_name not in tag_counts:
                 results.append({
                     'name': tag_name,
                     'count': 0,
-                    'color': tag_def.get('color', get_default_tag_color(tag_name))
+                    'color': get_safe_tag_color(tag_def.get('color'), tag_name)
                 })
 
         # Sort by count descending, then name ascending
         results.sort(key=lambda x: (-x['count'], x['name']))
-        
+
         return results
-        
+
     except Exception as e:
         print(f"Error getting workspace tags: {e}")
         return []
@@ -7701,7 +9472,7 @@ def get_default_tag_color(tag_name):
         '#f97316',  # orange
         '#6366f1',  # indigo
     ]
-    
+
     # Simple hash function to pick color consistently
     hash_val = sum(ord(c) for c in tag_name)
     color_index = hash_val % len(color_palette)
@@ -7728,34 +9499,40 @@ def get_or_create_tag_definition(user_id, tag_name, workspace_type='personal', c
     """
     from datetime import datetime, timezone
 
+    safe_color = get_safe_tag_color(color, tag_name)
+
     if workspace_type == 'group' and group_id:
         from functions_group import find_group_by_id
         group_doc = find_group_by_id(group_id)
         if not group_doc:
-            return {'color': color or get_default_tag_color(tag_name)}
+            return {'color': safe_color}
         tag_defs = group_doc.get('tag_definitions', {})
         if tag_name not in tag_defs:
             tag_defs[tag_name] = {
-                'color': color if color else get_default_tag_color(tag_name),
+                'color': safe_color,
                 'created_at': datetime.now(timezone.utc).isoformat()
             }
             group_doc['tag_definitions'] = tag_defs
             cosmos_groups_container.upsert_item(group_doc)
-        return tag_defs[tag_name]
+        stored_tag_def = dict(tag_defs[tag_name])
+        stored_tag_def['color'] = get_safe_tag_color(stored_tag_def.get('color'), tag_name)
+        return stored_tag_def
     elif workspace_type == 'public' and public_workspace_id:
         from functions_public_workspaces import find_public_workspace_by_id
         ws_doc = find_public_workspace_by_id(public_workspace_id)
         if not ws_doc:
-            return {'color': color or get_default_tag_color(tag_name)}
+            return {'color': safe_color}
         tag_defs = ws_doc.get('tag_definitions', {})
         if tag_name not in tag_defs:
             tag_defs[tag_name] = {
-                'color': color if color else get_default_tag_color(tag_name),
+                'color': safe_color,
                 'created_at': datetime.now(timezone.utc).isoformat()
             }
             ws_doc['tag_definitions'] = tag_defs
             cosmos_public_workspaces_container.upsert_item(ws_doc)
-        return tag_defs[tag_name]
+        stored_tag_def = dict(tag_defs[tag_name])
+        stored_tag_def['color'] = get_safe_tag_color(stored_tag_def.get('color'), tag_name)
+        return stored_tag_def
     else:
         # Personal: store in user settings
         from functions_settings import get_user_settings, update_user_settings
@@ -7771,12 +9548,14 @@ def get_or_create_tag_definition(user_id, tag_name, workspace_type='personal', c
 
         if tag_name not in workspace_tags:
             workspace_tags[tag_name] = {
-                'color': color if color else get_default_tag_color(tag_name),
+                'color': safe_color,
                 'created_at': datetime.now(timezone.utc).isoformat()
             }
             update_user_settings(user_id, {'tag_definitions': tag_definitions})
 
-        return workspace_tags[tag_name]
+        stored_tag_def = dict(workspace_tags[tag_name])
+        stored_tag_def['color'] = get_safe_tag_color(stored_tag_def.get('color'), tag_name)
+        return stored_tag_def
 
 
 def propagate_tags_to_blob_metadata(document_id, tags, user_id, group_id=None, public_workspace_id=None):
@@ -7849,7 +9628,7 @@ def propagate_tags_to_chunks(document_id, tags, user_id, group_id=None, public_w
     """
     Update all chunks for a document with new tags.
     This is called immediately after tag updates.
-    
+
     Args:
         document_id: Document ID
         tags: Array of normalized tag names
@@ -7860,11 +9639,11 @@ def propagate_tags_to_chunks(document_id, tags, user_id, group_id=None, public_w
     try:
         # Get all chunks for this document
         chunks = get_all_chunks(document_id, user_id, group_id, public_workspace_id)
-        
+
         if not chunks:
             print(f"No chunks found for document {document_id}")
             return
-        
+
         # Update each chunk with new tags
         chunk_count = 0
         for chunk in chunks:

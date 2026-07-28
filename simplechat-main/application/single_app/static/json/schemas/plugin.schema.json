@@ -47,6 +47,15 @@
         "description": {
           "type": "string"
         },
+        "is_enabled": {
+          "type": "boolean",
+          "description": "False when the action is hidden from runtime use but retained for admin management.",
+          "default": true
+        },
+        "identity_id": {
+          "type": "string",
+          "description": "Workspace identity reference used by this action. Credentials are resolved server-side within the action scope."
+        },
         "endpoint": {
           "type": "string"
         },

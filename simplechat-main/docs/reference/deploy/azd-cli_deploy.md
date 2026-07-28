@@ -1,13 +1,65 @@
 ---
-layout: page
+layout: showcase-page
 title: "Azure Developer CLI Deployment"
-description: "Deploy Simple Chat with azd up"
-section: "Reference"
+permalink: /reference/deploy/azd-cli_deploy/
+menubar: docs_menu
+accent: emerald
+eyebrow: "Deployment Reference"
+description: "Deploy Simple Chat with Azure Developer CLI when you want the repo's most current, end-to-end supported rollout path."
+hero_icons:
+  - bi-rocket-takeoff
+  - bi-cloud-arrow-up
+  - bi-box-seam
+hero_pills:
+  - Recommended deployment path
+  - Provision and deploy together
+  - Container-based runtime
+hero_links:
+  - label: "Getting Started"
+    url: /setup_instructions/
+    style: primary
+  - label: "Upgrade paths"
+    url: /how-to/upgrade_paths/
+    style: secondary
+nav_links:
+  prev:
+    title: "Deployment Reference"
+    url: /reference/deploy/
+  next:
+    title: "Azure CLI with PowerShell"
+    url: /reference/deploy/azurecli_powershell_deploy/
+show_nav: true
 ---
 
-# Azure Developer CLI Deployment
+Azure Developer CLI handles the cleanest end-to-end deployment flow in this repo. Use it when you want infrastructure provisioning, environment configuration, and application deployment to stay in one documented path.
 
-Azure Developer CLI (azd) provides the fastest and most automated way to deploy Simple Chat. This method handles resource provisioning, configuration, and application deployment with minimal manual steps.
+<section class="latest-release-card-grid">
+    <article class="latest-release-card">
+        <div class="latest-release-card-icon"><i class="bi bi-diagram-3"></i></div>
+        <h2>Provision infrastructure</h2>
+        <p>AZD drives the Bicep templates for the required Azure resources instead of making you stitch together the provisioning steps manually.</p>
+    </article>
+    <article class="latest-release-card">
+        <div class="latest-release-card-icon"><i class="bi bi-sliders2"></i></div>
+        <h2>Capture environment choices</h2>
+        <p>Subscription, region, environment naming, and optional environment settings all stay tied to the AZD environment instead of scattered across ad hoc scripts.</p>
+    </article>
+    <article class="latest-release-card">
+        <div class="latest-release-card-icon"><i class="bi bi-box-seam"></i></div>
+        <h2>Deploy the app</h2>
+        <p>The current path is container-based App Service, so the image runtime and startup behavior are handled by the deployment model rather than a native Python startup command.</p>
+    </article>
+    <article class="latest-release-card">
+        <div class="latest-release-card-icon"><i class="bi bi-graph-up-arrow"></i></div>
+        <h2>Inspect and iterate</h2>
+        <p>Use AZD commands for logs, monitoring, environment inspection, and upgrade decisions without switching to a separate deployment toolset midstream.</p>
+    </article>
+</section>
+
+<div class="latest-release-note-panel">
+    <h2>Startup command rule for this path</h2>
+    <p>The repo's AZD workflow deploys a container-based App Service. Do not add a native Python App Service startup command unless you intentionally move away from the container runtime later.</p>
+</div>
 
 ## Overview
 
@@ -23,6 +75,7 @@ This is the primary recommended deployment path for the repo.
 
 ### Required Software
 - **Azure Developer CLI** ([install guide](https://learn.microsoft.com/en-us/azure/developer/azure-developer-cli/install-azd))
+- **Python 3.12** ([download](https://www.python.org/downloads/)) with `python` available on Windows and `python3` available on Linux/macOS. The `deployers/azure.yaml` `preprovision` and `postprovision` hooks call Python for prerequisite validation, dependency installation, and post-provision configuration.
 - **Git** for repository cloning
 - **Azure CLI** (usually installed with azd)
 
@@ -154,17 +207,8 @@ azd env set ENVIRONMENT_TYPE "dev|staging|prod"
 ```
 
 **Service Configuration:**
-```bash
-# Enable specific features
-azd env set ENABLE_CONTENT_SAFETY "true"
-azd env set ENABLE_IMAGE_GENERATION "true"
-azd env set ENABLE_REDIS_CACHE "true"
 
-# Set service tiers
-azd env set APP_SERVICE_SKU "P1v3"
-azd env set COSMOS_DB_THROUGHPUT "1000"
-azd env set SEARCH_SKU "standard"
-```
+The AZD path uses the Bicep defaults: App Service P1v3, Azure AI Search Standard S1 with standard Semantic Ranker, and Cosmos DB provisioned shared autoscale throughput for the `SimpleChat` database. Free Search and serverless Cosmos DB are available only as explicit Bicep parameter customizations for short-lived MVP or evaluation phases.
 
 **Azure Government:**
 ```bash
@@ -175,24 +219,13 @@ azd env set AZURE_LOCATION "USGov Virginia"
 ### Resource Sizing
 
 **Development/Testing:**
-```bash
-azd env set ENVIRONMENT_TYPE "dev"
-# Uses: B1 App Service, 400 RU/s Cosmos, Basic Search
-```
+Use the default Bicep sizing unless you are intentionally running a short-lived MVP. The default uses provisioned Cosmos DB and Azure AI Search Standard S1 so workspace search can use standard Semantic Ranker capacity.
 
 **Production:**  
-```bash
-azd env set ENVIRONMENT_TYPE "prod"
-# Uses: P1v3 App Service, 1000 RU/s Cosmos, Standard Search
-```
+The default AZD/Bicep path is the production-leaning baseline: P1v3 App Service, Cosmos DB provisioned shared autoscale throughput, and Azure AI Search Standard S1.
 
 **Custom Sizing:**
-```bash
-azd env set APP_SERVICE_SKU "P2v3"
-azd env set COSMOS_DB_THROUGHPUT "4000" 
-azd env set SEARCH_SKU "standard2"
-azd env set OPENAI_SKU "S0"
-```
+Customize Bicep parameters such as `cosmosDatabaseAutoscaleMaxThroughput`, `searchSkuName`, and `searchSemanticSearchSku` only when your cost, quota, or scale model requires it.
 
 ## Post-Deployment Configuration
 
@@ -467,15 +500,6 @@ azd up
 - Consider reserved instances for predictable usage
 
 **Cost-effective configurations:**
-```bash
-# Development environments
-azd env set APP_SERVICE_SKU "B1"
-azd env set COSMOS_DB_THROUGHPUT "400"
-azd env set SEARCH_SKU "basic"
-
-# Production with cost optimization
-azd env set ENABLE_REDIS_CACHE "false"  # Start without Redis
-azd env set COSMOS_DB_AUTOSCALE "true"  # Use autoscale for variable load
-```
+For short-lived MVP or evaluation environments, you can override Bicep parameters to use Free Azure AI Search/Semantic Ranker or Cosmos DB serverless. Those are cost-focused exceptions; the repo defaults remain Standard S1 Search and provisioned Cosmos DB because they avoid common document-search and semantic-quota failures.
 
 This Azure Developer CLI approach provides the fastest path from zero to a fully functional Simple Chat deployment with minimal manual configuration required.

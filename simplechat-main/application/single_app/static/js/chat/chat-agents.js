@@ -5,8 +5,14 @@ import {
     getUserSetting,
     setUserSetting
 } from '../agents_common.js';
-import { createSearchableSingleSelect } from './chat-searchable-select.js';
-import { getEffectiveScopes, setEffectiveScopes } from './chat-documents.js';
+import { createFloatingSearchableSelectDropdownConfig, createSearchableSingleSelect } from './chat-searchable-select.js';
+import {
+    applyAssignedKnowledgeLock,
+    clearAssignedKnowledgeLock,
+    getEffectiveScopes,
+    isScopeLocked,
+    setEffectiveScopes
+} from './chat-documents.js';
 import { getConversationFilteringContext } from './chat-conversation-scope.js';
 
 const enableAgentsBtn = document.getElementById("enable-agents-btn");
@@ -22,11 +28,26 @@ const agentDropdownText = agentDropdownButton
 const agentSearchInput = document.getElementById('agent-search-input');
 const agentDropdownItems = document.getElementById('agent-dropdown-items');
 
+const FLOATING_SELECTOR_DROPDOWN_CONFIG = createFloatingSearchableSelectDropdownConfig();
+
 let agentSelectorController = null;
 let scopeChangeListenerInitialized = false;
 let pendingScopeNarrowingAgent = null;
 let scopeClearActionInitialized = false;
 let dropdownHideListenerInitialized = false;
+
+function hasAgentInteractionControls() {
+    return Boolean(enableAgentsBtn && agentSelectContainer && agentSelect);
+}
+
+function notifyMobileSelectorActivated(selectorId, dropdownButtonId) {
+    window.dispatchEvent(new CustomEvent('chat:toolbar-selector-activated', {
+        detail: {
+            selectorId,
+            dropdownButtonId,
+        },
+    }));
+}
 
 function initializeAgentSelector() {
     if (agentSelectorController || !agentSelect) {
@@ -44,6 +65,8 @@ function initializeAgentSelector() {
         placeholderText: 'Select an Agent',
         emptyMessage: 'No agents available',
         emptySearchMessage: 'No matching agents found',
+        renderOptionContent: renderAgentOptionContent,
+        dropdownConfig: FLOATING_SELECTOR_DROPDOWN_CONFIG,
     });
 
     return agentSelectorController;
@@ -99,16 +122,70 @@ function getAgentOptionLabel(agent, duplicateCounts) {
     return `${displayName} (${agent.name || agent.id || 'agent'})`;
 }
 
+function normalizeIconPayload(iconPayload) {
+    if (!iconPayload || typeof iconPayload !== 'object' || Array.isArray(iconPayload)) {
+        return null;
+    }
+    const kind = String(iconPayload.kind || '').trim().toLowerCase();
+    const value = String(iconPayload.value || '').trim();
+    if (kind === 'bootstrap' && /^bi-[a-z0-9][a-z0-9-]{0,80}$/.test(value)) {
+        return { kind, value };
+    }
+    if (kind === 'image' && /^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/.test(value) && value.length <= 350000) {
+        return { kind, value };
+    }
+    return null;
+}
+
+function createOptionIconElement(iconPayload) {
+    const icon = normalizeIconPayload(iconPayload);
+    if (!icon) {
+        return null;
+    }
+    if (icon.kind === 'image') {
+        const image = document.createElement('img');
+        image.src = icon.value;
+        image.alt = '';
+        image.className = 'chat-searchable-select-item-icon';
+        return image;
+    }
+    const iconWrapper = document.createElement('span');
+    iconWrapper.className = 'chat-searchable-select-item-icon';
+    const iconElement = document.createElement('i');
+    iconElement.className = `bi ${icon.value}`;
+    iconElement.setAttribute('aria-hidden', 'true');
+    iconWrapper.appendChild(iconElement);
+    return iconWrapper;
+}
+
+function renderAgentOptionContent(option, optionLabel) {
+    const wrapper = document.createElement('span');
+    wrapper.className = 'd-flex align-items-center gap-2 min-w-0';
+    const iconElement = createOptionIconElement(parseJsonObject(option.dataset.agentIcon || ''));
+    if (iconElement) {
+        wrapper.appendChild(iconElement);
+    }
+    const textEl = document.createElement('span');
+    textEl.className = 'chat-searchable-select-item-text text-truncate';
+    textEl.textContent = optionLabel;
+    wrapper.appendChild(textEl);
+    return wrapper;
+}
+
+function shouldUseConversationScopeGuard(filteringContext) {
+    return !filteringContext.isNewConversation && isScopeLocked() !== false;
+}
+
 function isAgentEnabledForContext(agent, scopes, filteringContext) {
-    if (!filteringContext.isNewConversation && filteringContext.conversationScope === 'group') {
+    if (shouldUseConversationScopeGuard(filteringContext) && filteringContext.conversationScope === 'group') {
         return agent.is_global || String(agent.group_id || '') === String(filteringContext.groupId || '');
     }
 
-    if (!filteringContext.isNewConversation && filteringContext.conversationScope === 'public') {
+    if (shouldUseConversationScopeGuard(filteringContext) && filteringContext.conversationScope === 'public') {
         return agent.is_global;
     }
 
-    if (!filteringContext.isNewConversation && filteringContext.conversationScope === 'personal') {
+    if (shouldUseConversationScopeGuard(filteringContext) && filteringContext.conversationScope === 'personal') {
         return !agent.is_group;
     }
 
@@ -202,7 +279,7 @@ function rebuildAgentOptions(sections, selectedAgentObj, filteringContext) {
 
     agentSelect.innerHTML = '';
 
-    const hideUnavailableOptions = !filteringContext.isNewConversation;
+    const hideUnavailableOptions = shouldUseConversationScopeGuard(filteringContext);
     const renderedSections = sections
         .map(section => ({
             ...section,
@@ -244,6 +321,10 @@ function rebuildAgentOptions(sections, selectedAgentObj, filteringContext) {
             option.dataset.isGroup = agent.is_group ? 'true' : 'false';
             option.dataset.groupId = agent.group_id || '';
             option.dataset.groupName = agent.group_name || '';
+            option.dataset.assignedKnowledge = JSON.stringify(agent.assigned_knowledge || { enabled: false });
+            option.dataset.agentIcon = JSON.stringify(agent.icon || {});
+            option.dataset.agentTags = JSON.stringify(Array.isArray(agent.tags) ? agent.tags : []);
+            option.dataset.catalogKey = agent.catalog_key || '';
             option.disabled = agent.disabled;
             option.selected = !agent.disabled && optionKey === selectedKey;
 
@@ -334,6 +415,71 @@ function getPreloadedAgentOptions() {
     return Array.isArray(window.chatAgentOptions) ? window.chatAgentOptions : [];
 }
 
+function parseAssignedKnowledge(rawValue) {
+    if (!rawValue) {
+        return { enabled: false };
+    }
+    try {
+        const parsed = JSON.parse(rawValue);
+        return parsed && typeof parsed === 'object' ? parsed : { enabled: false };
+    } catch (error) {
+        console.warn('Unable to parse assigned knowledge metadata for agent option:', error);
+        return { enabled: false };
+    }
+}
+
+function parseJsonObject(rawValue) {
+    if (!rawValue) {
+        return {};
+    }
+    try {
+        const parsed = JSON.parse(rawValue);
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch (error) {
+        return {};
+    }
+}
+
+function parseJsonArray(rawValue) {
+    if (!rawValue) {
+        return [];
+    }
+    try {
+        const parsed = JSON.parse(rawValue);
+        return Array.isArray(parsed) ? parsed : [];
+    } catch (error) {
+        return [];
+    }
+}
+
+function buildAgentPayloadFromOption(selectedOption) {
+    if (!selectedOption) {
+        return null;
+    }
+    return {
+        name: selectedOption.dataset.name || '',
+        display_name: selectedOption.dataset.displayName || selectedOption.textContent || '',
+        id: selectedOption.dataset.agentId || null,
+        is_global: selectedOption.dataset.isGlobal === 'true',
+        is_group: selectedOption.dataset.isGroup === 'true',
+        group_id: selectedOption.dataset.groupId || null,
+        group_name: selectedOption.dataset.groupName || (window.activeGroupName || null),
+        assigned_knowledge: parseAssignedKnowledge(selectedOption.dataset.assignedKnowledge || ''),
+        icon: parseJsonObject(selectedOption.dataset.agentIcon || ''),
+        tags: parseJsonArray(selectedOption.dataset.agentTags || '[]'),
+        catalog_key: selectedOption.dataset.catalogKey || null
+    };
+}
+
+async function syncAssignedKnowledgeForPayload(payload) {
+    if (payload?.assigned_knowledge?.enabled) {
+        await applyAssignedKnowledgeLock(payload);
+        return true;
+    }
+    clearAssignedKnowledgeLock();
+    return false;
+}
+
 async function maybeNarrowScopeForSelectedAgent(payload) {
     const filteringContext = getConversationFilteringContext();
     if (!filteringContext.isNewConversation) {
@@ -391,7 +537,10 @@ function initializeScopeChangeListener() {
         return;
     }
 
-    window.addEventListener('chat:scope-changed', async () => {
+    window.addEventListener('chat:scope-changed', async (event) => {
+        if (event?.detail?.source === 'assigned-knowledge') {
+            return;
+        }
         if (!areAgentsEnabled()) {
             return;
         }
@@ -412,46 +561,52 @@ export function areAgentsEnabled() {
 }
 
 export async function initializeAgentInteractions() {
-    if (enableAgentsBtn && agentSelectContainer) {
-        initializeAgentSelector();
-        initializeScopeChangeListener();
-        initializeDropdownHideListener();
-        ensureScopeClearAction();
+    if (!hasAgentInteractionControls()) {
+        return;
+    }
 
-        // On load, sync UI with enable_agents setting
-        const enableAgents = await getUserSetting('enable_agents');
-        if (enableAgents) {
-            enableAgentsBtn.classList.add('active');
+    initializeAgentSelector();
+    initializeScopeChangeListener();
+    initializeDropdownHideListener();
+    ensureScopeClearAction();
+
+    // On load, sync UI with enable_agents setting
+    const enableAgents = await getUserSetting('enable_agents');
+    if (enableAgents) {
+        enableAgentsBtn.classList.add('active');
+        agentSelectContainer.style.display = "block";
+        if (modelSelectContainer) modelSelectContainer.style.display = "none";
+        await populateAgentDropdown();
+    } else {
+        enableAgentsBtn.classList.remove('active');
+        agentSelectContainer.style.display = "none";
+        if (modelSelectContainer) modelSelectContainer.style.display = "block";
+        clearAssignedKnowledgeLock();
+    }
+
+    // Button click handler
+    enableAgentsBtn.addEventListener("click", async function() {
+        const isActive = this.classList.toggle("active");
+        await setUserSetting('enable_agents', isActive);
+        if (isActive) {
             agentSelectContainer.style.display = "block";
             if (modelSelectContainer) modelSelectContainer.style.display = "none";
+            // Populate agent dropdown
             await populateAgentDropdown();
+            notifyMobileSelectorActivated('agent-select-container', 'agent-dropdown-button');
         } else {
-            enableAgentsBtn.classList.remove('active');
             agentSelectContainer.style.display = "none";
             if (modelSelectContainer) modelSelectContainer.style.display = "block";
+            clearAssignedKnowledgeLock();
         }
-
-        // Button click handler
-        enableAgentsBtn.addEventListener("click", async function() {
-            const isActive = this.classList.toggle("active");
-            await setUserSetting('enable_agents', isActive);
-            if (isActive) {
-                agentSelectContainer.style.display = "block";
-                if (modelSelectContainer) modelSelectContainer.style.display = "none";
-                // Populate agent dropdown
-                await populateAgentDropdown();
-            } else {
-                agentSelectContainer.style.display = "none";
-                if (modelSelectContainer) modelSelectContainer.style.display = "block";
-            }
-        });
-    } else {
-        if (!enableAgentsBtn) console.error("Agent Init Error: enable-agents-btn not found.");
-        if (!agentSelectContainer) console.error("Agent Init Error: agent-select-container not found.");
-    }
+    });
 }
 
 export async function populateAgentDropdown() {
+    if (!hasAgentInteractionControls()) {
+        return;
+    }
+
     initializeAgentSelector();
     initializeDropdownHideListener();
     ensureScopeClearAction();
@@ -465,27 +620,21 @@ export async function populateAgentDropdown() {
         rebuildAgentOptions(sections, selectedAgent, filteringContext);
         updateScopeClearAction(scopes, filteringContext);
         agentSelectorController?.refresh();
+        await syncAssignedKnowledgeForPayload(buildAgentPayloadFromOption(agentSelect.options[agentSelect.selectedIndex]));
         agentSelect.onchange = async function () {
             const selectedOption = agentSelect.options[agentSelect.selectedIndex];
             if (!selectedOption) {
                 return;
             }
-            const payload = {
-                name: selectedOption.dataset.name || '',
-                display_name: selectedOption.dataset.displayName || selectedOption.textContent || '',
-                id: selectedOption.dataset.agentId || null,
-                is_global: selectedOption.dataset.isGlobal === 'true',
-                is_group: selectedOption.dataset.isGroup === 'true',
-                group_id: selectedOption.dataset.groupId || null,
-                group_name: selectedOption.dataset.groupName || (window.activeGroupName || null)
-            };
+            const payload = buildAgentPayloadFromOption(selectedOption);
             console.log('DEBUG: Agent dropdown changed with payload:', payload);
             if (!payload.name) {
                 console.warn('Selected agent is missing a name, skipping settings update.');
                 return;
             }
             await setSelectedAgent(payload);
-            pendingScopeNarrowingAgent = payload;
+            const assignedKnowledgeApplied = await syncAssignedKnowledgeForPayload(payload);
+            pendingScopeNarrowingAgent = assignedKnowledgeApplied ? null : payload;
             console.log('DEBUG: Agent selection saved successfully');
         };
     } catch (e) {

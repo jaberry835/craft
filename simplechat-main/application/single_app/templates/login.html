@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sign In - {{ app_settings.app_title or 'SimpleChat' }}</title>
+    <link href="{{ url_for('static', filename='css/bootstrap.min.css') }}" rel="stylesheet" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/bootstrap-icons.min.css') }}" />
+    <style>
+        :root {
+            color-scheme: light;
+        }
+
+        body {
+            align-items: center;
+            background: #f7f8fb;
+            color: #24262d;
+            display: flex;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            justify-content: center;
+            margin: 0;
+            min-height: 100vh;
+            padding: 1.5rem;
+        }
+
+        .login-panel {
+            background: #ffffff;
+            border: 1px solid #d9dee8;
+            border-radius: 8px;
+            box-shadow: 0 16px 48px rgba(32, 41, 64, 0.12);
+            max-width: 420px;
+            padding: 2.25rem;
+            text-align: center;
+            width: 100%;
+        }
+
+        .logo-section {
+            margin-bottom: 1.75rem;
+        }
+
+        .logo-section img {
+            margin-bottom: 1rem;
+            max-height: 96px;
+            max-width: 96px;
+        }
+
+        .app-title {
+            color: #24262d;
+            font-size: 1.55rem;
+            font-weight: 650;
+            letter-spacing: 0;
+            line-height: 1.25;
+            margin-bottom: 0;
+        }
+
+        .spinner-container {
+            align-items: center;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            min-height: 180px;
+        }
+
+        .spinner {
+            animation: spin 1s linear infinite;
+            border: 4px solid #e3e7ef;
+            border-radius: 50%;
+            border-top-color: #2563eb;
+            height: 48px;
+            margin: 0 auto 1.5rem;
+            width: 48px;
+        }
+
+        @keyframes spin {
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+
+        .status-message {
+            color: #24262d;
+            font-size: 1.05rem;
+            font-weight: 600;
+            margin-bottom: 0.45rem;
+        }
+
+        .status-detail {
+            color: #667085;
+            font-size: 0.92rem;
+            line-height: 1.45;
+        }
+
+        .error-icon {
+            color: #b42318;
+            font-size: 2.4rem;
+            margin-bottom: 1rem;
+        }
+
+        .error-title {
+            color: #912018;
+            font-size: 1.2rem;
+            font-weight: 650;
+            margin-bottom: 0.75rem;
+        }
+
+        .error-message {
+            background: #fff4f2;
+            border-left: 4px solid #d92d20;
+            border-radius: 6px;
+            color: #5f1f18;
+            line-height: 1.45;
+            margin-bottom: 1.35rem;
+            padding: 0.9rem 1rem;
+            text-align: left;
+        }
+    </style>
+</head>
+<body>
+    <main class="login-panel" aria-labelledby="login-title">
+        <section class="logo-section" aria-label="Application identity">
+            {% if app_settings.show_logo %}
+                {% if app_settings.custom_logo_base64 %}
+                    <img src="data:image/png;base64,{{ app_settings.custom_logo_base64 }}" alt="Logo" />
+                {% else %}
+                    <img src="{{ url_for('static', filename='images/logo.png') }}" alt="Logo" />
+                {% endif %}
+            {% endif %}
+            {% if not app_settings.hide_app_title %}
+                <h1 id="login-title" class="app-title">{{ app_settings.app_title or 'SimpleChat' }}</h1>
+            {% endif %}
+        </section>
+
+        <section id="loading-section" class="spinner-container" aria-live="polite" aria-busy="true">
+            <div class="spinner" aria-hidden="true"></div>
+            <div class="status-message" id="status-message">Signing in...</div>
+            <div class="status-detail" id="status-detail">Checking your Microsoft Teams session.</div>
+        </section>
+
+        <section id="error-section" class="d-none" aria-live="assertive">
+            <div class="error-icon" aria-hidden="true">
+                <i class="bi bi-exclamation-circle-fill"></i>
+            </div>
+            <div class="error-title">Authentication Error</div>
+            <div class="error-message" id="error-message"></div>
+            <button id="standard-login-btn" type="button" class="btn btn-primary">
+                <i class="bi bi-microsoft me-2" aria-hidden="true"></i>Sign in with Microsoft
+            </button>
+        </section>
+    </main>
+
+    <script src="{{ url_for('static', filename='js/MicrosoftTeams.min.js') }}?v={{ config['VERSION'] }}"></script>
+    <script>
+        const teamsSettings = {
+            enabled: {{ enable_teams_sso|tojson }},
+            appResource: {{ teams_app_resource|tojson }},
+            customOrigins: {{ custom_teams_origins|tojson }},
+            successRedirectPath: {{ teams_success_redirect_path|tojson }},
+            standardLoginUrl: {{ url_for('login', teams='false')|tojson }}
+        };
+
+        function updateStatus(message, detail = '') {
+            document.getElementById('status-message').textContent = message;
+            document.getElementById('status-detail').textContent = detail;
+        }
+
+        function redirectToStandardLogin() {
+            updateStatus('Redirecting...', 'Opening Microsoft sign-in.');
+            window.location.href = teamsSettings.standardLoginUrl;
+        }
+
+        function showError(message, title = 'Authentication Error') {
+            document.getElementById('loading-section').classList.add('d-none');
+            document.getElementById('error-section').classList.remove('d-none');
+
+            const errorTitleElement = document.querySelector('.error-title');
+            if (errorTitleElement) {
+                errorTitleElement.textContent = title;
+            }
+
+            document.getElementById('error-message').textContent = message;
+            document.getElementById('standard-login-btn').addEventListener('click', redirectToStandardLogin, { once: true });
+        }
+
+        async function parseJsonResponse(response) {
+            try {
+                return await response.json();
+            } catch (error) {
+                return {
+                    error: 'invalid_response',
+                    error_description: 'Authentication service returned an unexpected response.'
+                };
+            }
+        }
+
+        async function getTeamsAuthToken() {
+            const authOptions = { silent: false };
+            if (teamsSettings.appResource) {
+                authOptions.resources = [teamsSettings.appResource];
+            }
+            return microsoftTeams.authentication.getAuthToken(authOptions);
+        }
+
+        async function authenticateWithTeams() {
+            updateStatus('Authenticating...', 'Requesting your Teams sign-in token.');
+            const authToken = await getTeamsAuthToken();
+
+            updateStatus('Completing sign-in...', 'Validating your Teams session.');
+            const response = await fetch('/auth/teams/token-exchange', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ token: authToken })
+            });
+            const result = await parseJsonResponse(response);
+
+            if (!response.ok || !result.success) {
+                const message = result.error_description || result.error || 'Teams sign-in could not be completed.';
+                throw new Error(message);
+            }
+
+            updateStatus('Signed in', 'Opening SimpleChat.');
+            window.location.href = teamsSettings.successRedirectPath || '/chats';
+        }
+
+        async function detectAndAuthenticate() {
+            if (!teamsSettings.enabled || !window.microsoftTeams) {
+                redirectToStandardLogin();
+                return;
+            }
+
+            try {
+                updateStatus('Checking Teams...', 'Preparing secure sign-in.');
+                if (teamsSettings.customOrigins && teamsSettings.customOrigins.length > 0) {
+                    await microsoftTeams.app.initialize(teamsSettings.customOrigins);
+                } else {
+                    await microsoftTeams.app.initialize();
+                }
+
+                const context = await microsoftTeams.app.getContext();
+                if (!context) {
+                    redirectToStandardLogin();
+                    return;
+                }
+
+                await authenticateWithTeams();
+            } catch (error) {
+                showError(
+                    error.message || 'Teams sign-in could not be completed. Use Microsoft sign-in to continue.',
+                    'Authentication Failed'
+                );
+                setTimeout(redirectToStandardLogin, 3000);
+            }
+        }
+
+        detectAndAuthenticate();
+    </script>
+</body>
+</html>

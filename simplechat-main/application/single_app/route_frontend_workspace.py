@@ -1,8 +1,15 @@
 # route_frontend_workspace.py
 
+import logging
+
 from config import *
 from functions_authentication import *
+from functions_group import get_user_groups
+from functions_governance import filter_governed_model_endpoints, is_action_scope_access_allowed, is_governance_access_allowed
+from functions_public_workspaces import get_user_visible_public_workspace_docs
 from functions_settings import *
+from functions_file_sync import is_file_sync_enabled_for_user
+from functions_source_review import is_url_access_enabled_for_user
 from swagger_wrapper import swagger_route, get_auth_security
 
 def register_route_frontend_workspace(app):
@@ -21,6 +28,17 @@ def register_route_frontend_workspace(app):
         enable_extract_meta_data = settings.get('enable_extract_meta_data', False)
         enable_video_file_support = settings.get('enable_video_file_support', False)
         enable_audio_file_support = settings.get('enable_audio_file_support', False)
+        user_info = get_current_user_info() or {}
+        current_user_roles = (session.get('user') or {}).get('roles', [])
+        public_settings['allow_user_workflows'] = is_user_workflows_enabled_for_user(
+            settings,
+            user_roles=current_user_roles,
+        )
+        public_settings['enable_url_access'] = is_url_access_enabled_for_user(
+            settings,
+            user_roles=current_user_roles,
+        )
+        file_sync_enabled = is_file_sync_enabled_for_user(settings, user_id, user_info.get('email'), user_info=user_info) if user_id else False
         if not user_id:
             print("User not authenticated.")
             return redirect(url_for('login'))
@@ -51,11 +69,55 @@ def register_route_frontend_workspace(app):
         ))
         allowed_extensions_str = "Allowed: " + ", ".join(allowed_extensions)
         
+        workspace_governance = {
+            "user_agents": is_governance_access_allowed("governance_user_agents", user_id),
+            "user_actions": is_action_scope_access_allowed("governance_user_actions", user_id, "personal"),
+            "user_endpoints": is_governance_access_allowed("governance_user_endpoints", user_id),
+            "global_endpoints": is_governance_access_allowed("governance_global_endpoints", user_id),
+        }
+
         personal_endpoints = user_settings.get("settings", {}).get("personal_model_endpoints", [])
-        personal_model_endpoints = sanitize_model_endpoints_for_frontend(personal_endpoints)
-        global_model_endpoints = sanitize_model_endpoints_for_frontend(
-            settings.get("model_endpoints", [])
+        personal_model_endpoints = sanitize_model_endpoints_for_frontend(
+            filter_governed_model_endpoints(user_id, personal_endpoints, "governance_user_endpoints")
         )
+        global_model_endpoints = sanitize_model_endpoints_for_frontend(
+            filter_governed_model_endpoints(user_id, settings.get("model_endpoints", []), "governance_global_endpoints")
+        )
+        user_groups_simple = []
+        try:
+            user_groups_simple = [
+                {
+                    'id': str(group.get('id') or ''),
+                    'name': str(group.get('name') or group.get('id') or ''),
+                }
+                for group in get_user_groups(user_id)
+                if group.get('id')
+            ]
+        except Exception as exc:
+            log_event(
+                f'[WorkspaceRoute] Failed to load workflow group picker options: {exc}',
+                extra={'user_id': user_id},
+                level=logging.WARNING,
+                exceptionTraceback=True,
+            )
+
+        user_visible_public_workspaces = []
+        try:
+            user_visible_public_workspaces = [
+                {
+                    'id': str(workspace.get('id') or ''),
+                    'name': str(workspace.get('name') or workspace.get('id') or ''),
+                }
+                for workspace in get_user_visible_public_workspace_docs(user_id)
+                if workspace.get('id')
+            ]
+        except Exception as exc:
+            log_event(
+                f'[WorkspaceRoute] Failed to load workflow public picker options: {exc}',
+                extra={'user_id': user_id},
+                level=logging.WARNING,
+                exceptionTraceback=True,
+            )
 
         return render_template(
             'workspace.html', 
@@ -68,7 +130,11 @@ def register_route_frontend_workspace(app):
             legacy_docs_count=legacy_count,
             allowed_extensions=allowed_extensions_str,
             personal_model_endpoints=personal_model_endpoints,
-            global_model_endpoints=global_model_endpoints
+            global_model_endpoints=global_model_endpoints,
+            file_sync_enabled=file_sync_enabled,
+            user_groups=user_groups_simple,
+                user_visible_public_workspaces=user_visible_public_workspaces,
+            workspace_governance=workspace_governance
         )
 
     

@@ -4,9 +4,28 @@ from config import *
 from functions_authentication import *
 from functions_prompts import count_public_prompts_for_workspace
 from functions_public_workspaces import *
+from functions_settings import (
+    get_settings,
+    is_public_workspace_file_download_admin_enabled,
+    is_public_workspace_file_download_enabled,
+)
 from functions_notifications import create_notification
 from swagger_wrapper import swagger_route, get_auth_security
 from functions_debug import debug_print
+from functions_stats_windows import (
+    build_stats_date_series,
+    resolve_stats_time_window,
+    stats_window_response_payload,
+    timestamp_to_stats_date_key,
+)
+from functions_workspace_branding import (
+    DEFAULT_WORKSPACE_HERO_COLOR,
+    decode_workspace_logo_base64,
+    get_workspace_logo_metadata,
+    is_allowed_workspace_logo_file,
+    normalize_workspace_hero_color,
+    prepare_workspace_logo_image_for_storage,
+)
 
 
 def is_user_in_admins(user_id, admins_list):
@@ -114,7 +133,7 @@ def register_route_backend_public_workspaces(app):
     def api_list_public_workspaces():
         """
         GET /api/public_workspaces
-        Paginated list of the user's public workspaces.
+        Paginated list of public workspaces visible to authenticated users.
         Query params:
           - page (int), page_size (int), search (str)
         """
@@ -141,11 +160,11 @@ def register_route_backend_public_workspaces(app):
 
         search_term = request.args.get("search", "").strip()
 
-        # fetch user’s workspaces
+        # Fetch public workspaces. Public workspace discovery is open to all authenticated users.
         if search_term:
-            all_ws = search_public_workspaces(search_term, user_id)
+            all_ws = search_all_public_workspaces(search_term)
         else:
-            all_ws = get_user_public_workspaces(user_id)
+            all_ws = get_all_public_workspaces()
 
         total_count = len(all_ws)
         slice_ws = all_ws[offset: offset + page_size]
@@ -155,23 +174,30 @@ def register_route_backend_public_workspaces(app):
         active_id = settings["settings"].get("activePublicWorkspaceOid", "")
 
         mapped = []
+        app_settings = get_settings()
         for ws in slice_ws:
-            # determine userRole
-            if ws["owner"]["userId"] == user_id:
-                role = "Owner"
-            elif user_id in ws.get("admins", []):
-                role = "Admin"
-            else:
-                # documentManagers list of dicts
-                dm_ids = [dm["userId"] for dm in ws.get("documentManagers", [])]
-                role = "DocumentManager" if user_id in dm_ids else None
+            role = get_user_role_in_public_workspace(ws, user_id)
+            owner = ws.get("owner", {}) or {}
+            logo_metadata = get_workspace_logo_metadata(ws)
 
             mapped.append({
                 "id": ws["id"],
                 "name": ws.get("name", ""),
                 "description": ws.get("description", ""),
+                "owner": {
+                    "displayName": owner.get("displayName", ""),
+                    "email": owner.get("email", ""),
+                },
+                "heroColor": normalize_workspace_hero_color(
+                    ws.get("heroColor"),
+                    DEFAULT_WORKSPACE_HERO_COLOR,
+                ),
+                **logo_metadata,
                 "userRole": role,
                 "status": ws.get("status", "active"),
+                "disable_file_downloads": bool(ws.get("disable_file_downloads", False)),
+                "file_downloads_admin_enabled": is_public_workspace_file_download_admin_enabled(app_settings, ws),
+                "file_downloads_enabled": is_public_workspace_file_download_enabled(app_settings, ws),
                 "isActive": (ws["id"] == active_id)
             })
 
@@ -211,12 +237,64 @@ def register_route_backend_public_workspaces(app):
     def api_get_public_workspace(ws_id):
         """
         GET /api/public_workspaces/<ws_id>
-        Returns full workspace document.
+        Returns a role-aware workspace payload.
         """
+        info = get_current_user_info()
+        user_id = info["userId"]
+
         ws = find_public_workspace_by_id(ws_id)
         if not ws:
             return jsonify({"error": "Workspace not found"}), 404
-        return jsonify(ws), 200
+
+        role = get_user_role_in_public_workspace(ws, user_id)
+        if role:
+            app_settings = get_settings()
+            payload = build_public_workspace_member_payload(ws, user_id)
+            payload["file_downloads_admin_enabled"] = is_public_workspace_file_download_admin_enabled(
+                app_settings,
+                ws,
+            )
+            payload["file_downloads_enabled"] = is_public_workspace_file_download_enabled(app_settings, ws)
+            return jsonify(payload), 200
+
+        return jsonify(build_public_workspace_public_summary(ws)), 200
+
+    @app.route("/api/public_workspaces/<ws_id>/download-settings", methods=["PATCH"])
+    @swagger_route(security=get_auth_security())
+    @login_required
+    @user_required
+    @enabled_required("enable_public_workspaces")
+    def api_update_public_workspace_download_settings(ws_id):
+        info = get_current_user_info()
+        user_id = info["userId"]
+
+        ws = find_public_workspace_by_id(ws_id)
+        if not ws:
+            return jsonify({"error": "Workspace not found"}), 404
+
+        role = get_user_role_in_public_workspace(ws, user_id)
+        if role not in ["Owner", "Admin"]:
+            return jsonify({"error": "Only workspace owners and admins can update download settings"}), 403
+
+        if not is_public_workspace_file_download_admin_enabled(get_settings(), ws):
+            return jsonify({
+                "error": "File downloads have not been enabled for this public workspace by an administrator"
+            }), 403
+
+        data = request.get_json(silent=True) or {}
+        ws["disable_file_downloads"] = bool(data.get("disable_file_downloads", False))
+        ws["modifiedDate"] = datetime.utcnow().isoformat()
+
+        try:
+            cosmos_public_workspaces_container.upsert_item(ws)
+        except exceptions.CosmosHttpResponseError as ex:
+            return jsonify({"error": str(ex)}), 400
+
+        return jsonify({
+            "success": True,
+            "message": "Download settings updated",
+            "disable_file_downloads": ws["disable_file_downloads"],
+        }), 200
 
     @app.route("/api/public_workspaces/<ws_id>", methods=["PATCH", "PUT"])
     @swagger_route(security=get_auth_security())
@@ -240,7 +318,10 @@ def register_route_backend_public_workspaces(app):
         data = request.get_json() or {}
         ws["name"] = data.get("name", ws.get("name"))
         ws["description"] = data.get("description", ws.get("description"))
-        ws["heroColor"] = data.get("heroColor", ws.get("heroColor", "#0078d4"))
+        ws["heroColor"] = normalize_workspace_hero_color(
+            data.get("heroColor"),
+            ws.get("heroColor", DEFAULT_WORKSPACE_HERO_COLOR),
+        )
         ws["modifiedDate"] = datetime.utcnow().isoformat()
 
         try:
@@ -248,6 +329,77 @@ def register_route_backend_public_workspaces(app):
             return jsonify({"message": "Updated"}), 200
         except exceptions.CosmosHttpResponseError as ex:
             return jsonify({"error": str(ex)}), 400
+
+    @app.route("/api/public_workspaces/<ws_id>/logo", methods=["GET"])
+    @swagger_route(security=get_auth_security())
+    @login_required
+    @user_required
+    @enabled_required("enable_public_workspaces")
+    def api_get_public_workspace_logo(ws_id):
+        ws = find_public_workspace_by_id(ws_id)
+        if not ws:
+            return jsonify({"error": "Workspace not found"}), 404
+
+        logo_base64 = str(ws.get("logoBase64") or "").strip()
+        if not logo_base64:
+            return jsonify({"error": "Workspace logo not found"}), 404
+
+        try:
+            logo_bytes = decode_workspace_logo_base64(logo_base64)
+        except (ValueError, TypeError):
+            return jsonify({"error": "Stored workspace logo is invalid"}), 500
+
+        return send_file(
+            BytesIO(logo_bytes),
+            mimetype="image/png",
+            max_age=3600,
+            download_name="workspace-logo.png",
+        )
+
+    @app.route("/api/public_workspaces/<ws_id>/logo", methods=["POST"])
+    @swagger_route(security=get_auth_security())
+    @login_required
+    @user_required
+    @enabled_required("enable_public_workspaces")
+    def api_upload_public_workspace_logo(ws_id):
+        info = get_current_user_info()
+        user_id = info["userId"]
+
+        ws = find_public_workspace_by_id(ws_id)
+        if not ws:
+            return jsonify({"error": "Workspace not found"}), 404
+        if ws["owner"]["userId"] != user_id:
+            return jsonify({"error": "Only owner can update the workspace logo"}), 403
+
+        logo_file = request.files.get("logo_file")
+        if not logo_file or not logo_file.filename:
+            return jsonify({"error": "No logo file provided"}), 400
+
+        if not is_allowed_workspace_logo_file(logo_file.filename):
+            return jsonify({"error": "Unsupported image type. Allowed: png, jpg, jpeg"}), 400
+
+        try:
+            processed_logo = prepare_workspace_logo_image_for_storage(
+                logo_file.read(),
+                logo_file.filename,
+            )
+        except (ValueError, OSError) as ex:
+            return jsonify({"error": str(ex)}), 400
+
+        current_logo_version = get_workspace_logo_metadata(ws)["logoVersion"]
+        ws["logoBase64"] = processed_logo["base64_str"]
+        ws["logoVersion"] = current_logo_version + 1
+        ws["modifiedDate"] = datetime.utcnow().isoformat()
+
+        try:
+            cosmos_public_workspaces_container.upsert_item(ws)
+        except exceptions.CosmosHttpResponseError as ex:
+            return jsonify({"error": str(ex)}), 400
+
+        return jsonify({
+            "message": "Workspace logo updated",
+            "logoVersion": ws["logoVersion"],
+        }), 200
 
     @app.route("/api/public_workspaces/<ws_id>", methods=["DELETE"])
     @swagger_route(security=get_auth_security())
@@ -289,13 +441,11 @@ def register_route_backend_public_workspaces(app):
         info = get_current_user_info()
         user_id = info["userId"]
 
-        ws = find_public_workspace_by_id(ws_id)
-        if not ws:
+        try:
+            update_active_public_workspace_for_user(user_id, ws_id)
+        except LookupError:
             return jsonify({"error": "Workspace not found"}), 404
 
-        # Public workspaces are accessible to all authenticated users for chat.
-        # No membership check needed — any user can set a public workspace as active.
-        update_active_public_workspace_for_user(user_id, ws_id)
         return jsonify({"message": f"Active set to {ws_id}"}), 200
 
     @app.route("/api/public_workspaces/<ws_id>/requests", methods=["GET"])
@@ -835,6 +985,11 @@ def register_route_backend_public_workspaces(app):
         if not is_member:
             return jsonify({"error": "Forbidden"}), 403
 
+        try:
+            stats_window = resolve_stats_time_window(request.args)
+        except ValueError as ex:
+            return jsonify({"error": str(ex)}), 400
+
         # Get metrics from workspace record (pre-calculated)
         metrics = ws.get("metrics", {})
         document_metrics = metrics.get("document_metrics", {})
@@ -848,23 +1003,27 @@ def register_route_backend_public_workspaces(app):
         doc_managers = ws.get("documentManagers", [])
         total_members = 1 + len(admins) + len(doc_managers)
 
-        # Get token usage from activity logs (last 30 days)
-        from datetime import datetime, timedelta
-        thirty_days_ago = (datetime.utcnow() - timedelta(days=30)).isoformat()
+        start_date = stats_window['start_date_iso']
+        end_date = stats_window['end_date_iso']
         
         debug_print(f"[PUBLIC_WORKSPACE_STATS] Workspace ID: {ws_id}")
-        debug_print(f"[PUBLIC_WORKSPACE_STATS] Start date: {thirty_days_ago}")
+        debug_print(f"[PUBLIC_WORKSPACE_STATS] Start date: {start_date}")
+        debug_print(f"[PUBLIC_WORKSPACE_STATS] End date: {end_date}")
         
         token_query = """
             SELECT a.usage
             FROM a 
             WHERE a.workspace_context.public_workspace_id = @wsId 
-            AND a.timestamp >= @startDate
+            AND (
+                (IS_DEFINED(a.timestamp) AND a.timestamp >= @startDate AND a.timestamp <= @endDate)
+                OR (IS_DEFINED(a.created_at) AND a.created_at >= @startDate AND a.created_at <= @endDate)
+            )
             AND a.activity_type = 'token_usage'
         """
         token_params = [
             {"name": "@wsId", "value": ws_id},
-            {"name": "@startDate", "value": thirty_days_ago}
+            {"name": "@startDate", "value": start_date},
+            {"name": "@endDate", "value": end_date}
         ]
         
         total_tokens = 0
@@ -889,12 +1048,13 @@ def register_route_backend_public_workspaces(app):
         doc_delete_data = []
         token_usage_labels = []
         token_usage_data = []
+        date_series = build_stats_date_series(stats_window['start_date'], stats_window['end_date'])
+        date_index_by_key = {}
         
-        # Generate labels for last 30 days
-        for i in range(29, -1, -1):
-            date = datetime.utcnow() - timedelta(days=i)
-            doc_activity_labels.append(date.strftime("%m/%d"))
-            token_usage_labels.append(date.strftime("%m/%d"))
+        for index, day in enumerate(date_series):
+            date_index_by_key[day['date']] = index
+            doc_activity_labels.append(day['label'])
+            token_usage_labels.append(day['label'])
             doc_upload_data.append(0)
             doc_delete_data.append(0)
             token_usage_data.append(0)
@@ -904,7 +1064,10 @@ def register_route_backend_public_workspaces(app):
             SELECT a.timestamp, a.created_at
             FROM a
             WHERE a.workspace_context.public_workspace_id = @wsId
-            AND a.timestamp >= @startDate
+            AND (
+                (IS_DEFINED(a.timestamp) AND a.timestamp >= @startDate AND a.timestamp <= @endDate)
+                OR (IS_DEFINED(a.created_at) AND a.created_at >= @startDate AND a.created_at <= @endDate)
+            )
             AND a.activity_type = 'document_creation'
         """
         debug_print(f"[PUBLIC_WORKSPACE_STATS] Document upload query: {doc_upload_query}")
@@ -921,15 +1084,11 @@ def register_route_backend_public_workspaces(app):
             for item in upload_results:
                 timestamp = item.get("timestamp") or item.get("created_at")
                 if timestamp:
-                    try:
-                        dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
-                        day_date = dt.strftime("%m/%d")
-                        if day_date in doc_activity_labels:
-                            idx = doc_activity_labels.index(day_date)
-                            doc_upload_data[idx] += 1
-                            debug_print(f"[PUBLIC_WORKSPACE_STATS] Added upload for {day_date}")
-                    except Exception as e:
-                        debug_print(f"[PUBLIC_WORKSPACE_STATS] Error parsing timestamp {timestamp}: {e}")
+                    date_key = timestamp_to_stats_date_key(timestamp)
+                    idx = date_index_by_key.get(date_key)
+                    if idx is not None:
+                        doc_upload_data[idx] += 1
+                        debug_print(f"[PUBLIC_WORKSPACE_STATS] Added upload for {date_key}")
         except Exception as e:
             debug_print(f"[PUBLIC_WORKSPACE_STATS] Error querying document uploads: {e}")
             import traceback
@@ -940,7 +1099,10 @@ def register_route_backend_public_workspaces(app):
             SELECT a.timestamp, a.created_at
             FROM a
             WHERE a.workspace_context.public_workspace_id = @wsId
-            AND a.timestamp >= @startDate
+            AND (
+                (IS_DEFINED(a.timestamp) AND a.timestamp >= @startDate AND a.timestamp <= @endDate)
+                OR (IS_DEFINED(a.created_at) AND a.created_at >= @startDate AND a.created_at <= @endDate)
+            )
             AND a.activity_type = 'document_deletion'
         """
         debug_print(f"[PUBLIC_WORKSPACE_STATS] Document delete query: {doc_delete_query}")
@@ -956,15 +1118,11 @@ def register_route_backend_public_workspaces(app):
             for item in delete_results:
                 timestamp = item.get("timestamp") or item.get("created_at")
                 if timestamp:
-                    try:
-                        dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
-                        day_date = dt.strftime("%m/%d")
-                        if day_date in doc_activity_labels:
-                            idx = doc_activity_labels.index(day_date)
-                            doc_delete_data[idx] += 1
-                            debug_print(f"[PUBLIC_WORKSPACE_STATS] Added delete for {day_date}")
-                    except Exception as e:
-                        debug_print(f"[PUBLIC_WORKSPACE_STATS] Error parsing timestamp {timestamp}: {e}")
+                    date_key = timestamp_to_stats_date_key(timestamp)
+                    idx = date_index_by_key.get(date_key)
+                    if idx is not None:
+                        doc_delete_data[idx] += 1
+                        debug_print(f"[PUBLIC_WORKSPACE_STATS] Added delete for {date_key}")
         except Exception as e:
             debug_print(f"[PUBLIC_WORKSPACE_STATS] Error querying document deletes: {e}")
             import traceback
@@ -975,7 +1133,10 @@ def register_route_backend_public_workspaces(app):
             SELECT a.timestamp, a.created_at, a.usage
             FROM a
             WHERE a.workspace_context.public_workspace_id = @wsId
-            AND a.timestamp >= @startDate
+            AND (
+                (IS_DEFINED(a.timestamp) AND a.timestamp >= @startDate AND a.timestamp <= @endDate)
+                OR (IS_DEFINED(a.created_at) AND a.created_at >= @startDate AND a.created_at <= @endDate)
+            )
             AND a.activity_type = 'token_usage'
         """
         debug_print(f"[PUBLIC_WORKSPACE_STATS] Token usage query: {token_activity_query}")
@@ -991,17 +1152,13 @@ def register_route_backend_public_workspaces(app):
             for item in token_results:
                 timestamp = item.get("timestamp") or item.get("created_at")
                 if timestamp:
-                    try:
-                        dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
-                        day_date = dt.strftime("%m/%d")
-                        if day_date in token_usage_labels:
-                            idx = token_usage_labels.index(day_date)
-                            usage = item.get("usage", {})
-                            tokens = usage.get("total_tokens", 0)
-                            token_usage_data[idx] += tokens
-                            debug_print(f"[PUBLIC_WORKSPACE_STATS] Added {tokens} tokens for {day_date}")
-                    except Exception as e:
-                        debug_print(f"[PUBLIC_WORKSPACE_STATS] Error parsing timestamp {timestamp}: {e}")
+                    date_key = timestamp_to_stats_date_key(timestamp)
+                    idx = date_index_by_key.get(date_key)
+                    if idx is not None:
+                        usage = item.get("usage", {})
+                        tokens = usage.get("total_tokens", 0)
+                        token_usage_data[idx] += tokens
+                        debug_print(f"[PUBLIC_WORKSPACE_STATS] Added {tokens} tokens for {date_key}")
         except Exception as e:
             debug_print(f"[PUBLIC_WORKSPACE_STATS] Error querying token usage: {e}")
             import traceback
@@ -1029,7 +1186,9 @@ def register_route_backend_public_workspaces(app):
             "tokenUsage": {
                 "labels": token_usage_labels,
                 "data": token_usage_data
-            }
+            },
+            "dateRange": [day['date'] for day in date_series],
+            "window": stats_window_response_payload(stats_window)
         }
         
         debug_print(f"[PUBLIC_WORKSPACE_STATS] Final stats: {stats}")

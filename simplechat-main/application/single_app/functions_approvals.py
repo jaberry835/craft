@@ -14,6 +14,7 @@ from config import cosmos_approvals_container, cosmos_groups_container
 from functions_appinsights import log_event
 from functions_notifications import create_notification, delete_notifications_by_metadata
 from functions_group import find_group_by_id
+from functions_settings import get_settings
 from functions_debug import debug_print
 
 # Approval request statuses
@@ -30,12 +31,68 @@ TYPE_TRANSFER_OWNERSHIP = "transfer_ownership"
 TYPE_DELETE_DOCUMENTS = "delete_documents"
 TYPE_DELETE_GROUP = "delete_group"
 TYPE_DELETE_USER_DOCUMENTS = "delete_user_documents"
+TYPE_WARN_USER = "warn_user"
+TYPE_SUSPEND_USER = "suspend_user"
+TYPE_BLOCK_USER = "block_user"
+
+USER_TARGETED_APPROVAL_TYPES = {
+    TYPE_DELETE_USER_DOCUMENTS,
+    TYPE_WARN_USER,
+    TYPE_SUSPEND_USER,
+    TYPE_BLOCK_USER,
+}
+
+SAFETY_USER_APPROVAL_TYPES = {
+    TYPE_WARN_USER,
+    TYPE_SUSPEND_USER,
+    TYPE_BLOCK_USER,
+}
 
 # TTL settings
 TTL_AUTO_DENY_DAYS = 3
 TTL_AUTO_DENY_SECONDS = TTL_AUTO_DENY_DAYS * 24 * 60 * 60  # 3 days in seconds
 
 PENDING_APPROVAL_ADMIN_NOTIFICATION_TYPES = ['approval_request_pending']
+
+
+def get_approval_roles_for_request_type(request_type: str) -> List[str]:
+    """Return role assignments eligible to review the supplied approval type."""
+    if request_type in SAFETY_USER_APPROVAL_TYPES:
+        settings = get_settings()
+        if settings.get('require_member_of_control_center_admin', False):
+            return ['ControlCenterAdmin']
+        return ['Admin']
+
+    return ['Admin', 'ControlCenterAdmin']
+
+
+def _normalize_user_roles(user_roles: Optional[List[str]]) -> List[str]:
+    """Return a safe role list for approval authorization checks."""
+    if not user_roles:
+        return []
+    if isinstance(user_roles, list):
+        return user_roles
+    if isinstance(user_roles, (tuple, set)):
+        return list(user_roles)
+    return [str(user_roles)]
+
+
+def _get_approval_metadata(approval: Dict[str, Any]) -> Dict[str, Any]:
+    """Return approval metadata when it is a dictionary, otherwise an empty dict."""
+    metadata = approval.get('metadata')
+    if isinstance(metadata, dict):
+        return metadata
+    return {}
+
+
+def _get_approval_sort_value(approval: Dict[str, Any]) -> str:
+    """Return a stable created-at value for local approval sorting."""
+    created_at = approval.get('created_at')
+    if isinstance(created_at, datetime):
+        return created_at.isoformat()
+    if isinstance(created_at, str):
+        return created_at
+    return ''
 
 
 def create_approval_request(
@@ -67,9 +124,9 @@ def create_approval_request(
         # Initialize group variable for notifications (may be None for non-group operations)
         group = None
         
-        if request_type == TYPE_DELETE_USER_DOCUMENTS:
+        if request_type in USER_TARGETED_APPROVAL_TYPES:
             # For user document deletions, group_id is actually the user_id (partition key)
-            group_name = metadata.get('user_name', 'Unknown User')
+            group_name = metadata.get('user_name') or metadata.get('user_email') or metadata.get('user_id') or 'Unknown User'
             group_owner = {}
         elif metadata and metadata.get('entity_type') == 'workspace':
             # For public workspace operations
@@ -154,7 +211,10 @@ def create_approval_request(
         debug_print(f"Created approval request: {approval_request}")
         
         # Create notifications for eligible approvers
-        _create_approval_notifications(approval_request, group if request_type != TYPE_DELETE_USER_DOCUMENTS else None)
+        _create_approval_notifications(
+            approval_request,
+            group if request_type not in USER_TARGETED_APPROVAL_TYPES else None,
+        )
         _create_requester_pending_notification(approval_request)
         
         return approval_request
@@ -195,26 +255,27 @@ def get_pending_approvals(
         Dictionary with approvals list, total count, and pagination info
     """
     try:
+        safe_user_roles = _normalize_user_roles(user_roles)
+
         # Build query based on filters
-        query_parts = ["SELECT * FROM c WHERE 1=1"]
+        filter_parts = []
         parameters = []
         
         # Status filter
         if status_filter != 'all':
             # If specific status requested (pending, approved, denied, executed)
-            query_parts.append("AND c.status = @status")
+            filter_parts.append("c.status = @status")
             parameters.append({"name": "@status", "value": status_filter})
         # else: 'all' means no status filter
         
         # Request type filter
         if request_type_filter:
-            query_parts.append("AND c.request_type = @request_type")
+            filter_parts.append("c.request_type = @request_type")
             parameters.append({"name": "@request_type", "value": request_type_filter})
-        
-        # Order by created date descending
-        query_parts.append("ORDER BY c.created_at DESC")
-        
-        query = " ".join(query_parts)
+
+        query = "SELECT * FROM c"
+        if filter_parts:
+            query = f"{query} WHERE {' AND '.join(filter_parts)}"
         
         debug_print(f"📋 [GET_APPROVALS] Query: {query}")
         debug_print(f"📋 [GET_APPROVALS] Parameters: {parameters}")
@@ -226,22 +287,23 @@ def get_pending_approvals(
             parameters=parameters,
             enable_cross_partition_query=True
         ))
+        items.sort(key=_get_approval_sort_value, reverse=True)
         
         debug_print(f"📋 [GET_APPROVALS] Found {len(items)} total items from query")
         
-        # Filter by user eligibility
-        # For pending requests: check if user can approve
-        # For completed requests: check if user has visibility (was involved or is admin/owner)
+        # Filter by user visibility.
+        # Pending requests may be visible to requesters who can deny but cannot approve.
         eligible_approvals = []
         for approval in items:
-            if status_filter == 'pending':
-                # For pending requests, check if user can approve
-                if _can_user_approve(approval, user_id, user_roles):
+            try:
+                if _can_user_view(approval, user_id, safe_user_roles):
                     eligible_approvals.append(approval)
-            else:
-                # For completed requests, check if user has visibility
-                if _can_user_view(approval, user_id, user_roles):
-                    eligible_approvals.append(approval)
+            except Exception as ex:
+                log_event("[Approvals] Skipping malformed approval during eligibility check", {
+                    'approval_id': approval.get('id') if isinstance(approval, dict) else None,
+                    'error': str(ex)
+                }, level=logging.WARNING)
+                debug_print(f"Skipping malformed approval during eligibility check: {ex}")
         
         debug_print(f"📋 [GET_APPROVALS] After eligibility filter: {len(eligible_approvals)} approvals")
         
@@ -265,7 +327,7 @@ def get_pending_approvals(
         log_event("[Approvals] Error fetching pending approvals", {
             'error': str(e),
             'user_id': user_id,
-            'user_roles': user_roles
+            'user_roles': _normalize_user_roles(user_roles)
         })
         debug_print(f"Error fetching pending approvals: {e}")
         raise
@@ -277,7 +339,8 @@ def approve_request(
     approver_id: str,
     approver_email: str,
     approver_name: str,
-    comment: Optional[str] = None
+    comment: Optional[str] = None,
+    approval: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Approve an approval request.
@@ -295,15 +358,19 @@ def approve_request(
     """
     try:
         # Get the approval request
-        approval = cosmos_approvals_container.read_item(
-            item=approval_id,
-            partition_key=group_id
-        )
+        if approval is None:
+            approval = cosmos_approvals_container.read_item(
+                item=approval_id,
+                partition_key=group_id
+            )
         
         # Validate status
         if approval['status'] != STATUS_PENDING:
             debug_print(f"Cannot approve request with status: {approval['status']}")
             raise ValueError(f"Cannot approve request with status: {approval['status']}")
+
+        if approval.get('requester_id') == approver_id:
+            raise PermissionError("Requesters cannot approve their own approval requests.")
         
         # Update approval status
         approval['status'] = STATUS_APPROVED
@@ -368,7 +435,8 @@ def deny_request(
     denier_email: str,
     denier_name: str,
     comment: str,
-    auto_denied: bool = False
+    auto_denied: bool = False,
+    approval: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Deny an approval request.
@@ -387,10 +455,11 @@ def deny_request(
     """
     try:
         # Get the approval request
-        approval = cosmos_approvals_container.read_item(
-            item=approval_id,
-            partition_key=group_id
-        )
+        if approval is None:
+            approval = cosmos_approvals_container.read_item(
+                item=approval_id,
+                partition_key=group_id
+            )
         
         # Validate status (allow denying pending requests)
         if approval['status'] not in [STATUS_PENDING]:
@@ -543,6 +612,35 @@ def get_approval_by_id(approval_id: str, group_id: str) -> Optional[Dict[str, An
         return None
 
 
+def get_authorized_approval(
+    approval_id: str,
+    group_id: str,
+    user_id: str,
+    user_roles: List[str],
+    require_approval_rights: bool = False,
+    require_denial_rights: bool = False,
+) -> Dict[str, Any]:
+    """Return an approval only if the current user is allowed to view or approve it."""
+    if require_approval_rights and require_denial_rights:
+        raise ValueError("Approval and denial authorization checks are mutually exclusive")
+
+    approval = get_approval_by_id(approval_id, group_id)
+    if not approval:
+        raise LookupError("Approval not found")
+
+    if require_approval_rights:
+        is_authorized = _can_user_approve(approval, user_id, user_roles)
+    elif require_denial_rights:
+        is_authorized = _can_user_deny(approval, user_id, user_roles)
+    else:
+        is_authorized = _can_user_view(approval, user_id, user_roles)
+
+    if not is_authorized:
+        raise PermissionError("You are not authorized to access this approval")
+
+    return approval
+
+
 def auto_deny_expired_approvals() -> int:
     """
     Auto-deny approval requests that have expired (older than 3 days).
@@ -628,6 +726,9 @@ def _can_user_view(
     Returns:
         True if user can view, False otherwise
     """
+    safe_user_roles = _normalize_user_roles(user_roles)
+    metadata = _get_approval_metadata(approval)
+
     # Check if user was involved in the request
     is_requester = approval.get('requester_id') == user_id
     is_approver = approval.get('approved_by_id') == user_id
@@ -638,16 +739,32 @@ def _can_user_view(
     # Check if user is the personal workspace owner (for user document deletion)
     is_personal_workspace_owner = False
     if approval.get('request_type') == TYPE_DELETE_USER_DOCUMENTS:
-        target_user_id = approval.get('metadata', {}).get('user_id')
+        target_user_id = metadata.get('user_id')
         is_personal_workspace_owner = target_user_id == user_id
+
+    is_affected_user = False
+    if approval.get('request_type') in SAFETY_USER_APPROVAL_TYPES:
+        target_user_id = metadata.get('user_id')
+        is_affected_user = target_user_id == user_id
     
     # Check if user has admin roles
-    has_control_center_admin = 'ControlCenterAdmin' in user_roles
-    has_admin = 'Admin' in user_roles or 'admin' in user_roles
+    has_control_center_admin = 'ControlCenterAdmin' in safe_user_roles
+    has_admin = 'Admin' in safe_user_roles or 'admin' in safe_user_roles
+    has_request_role = any(
+        role in safe_user_roles for role in get_approval_roles_for_request_type(approval.get('request_type'))
+    )
     
     # User can view if they meet any of these criteria
-    return (is_requester or is_approver or is_group_owner or 
-            is_personal_workspace_owner or has_control_center_admin or has_admin)
+    return (
+        is_requester
+        or is_approver
+        or is_group_owner
+        or is_personal_workspace_owner
+        or is_affected_user
+        or has_request_role
+        or has_control_center_admin
+        or has_admin
+    )
 
 
 def _can_user_approve(
@@ -663,7 +780,7 @@ def _can_user_approve(
     - User must be the personal workspace owner (for user document operations), OR
     - User must have 'ControlCenterAdmin' role, OR
     - User must have 'Admin' role
-    - User cannot be the requester (unless they're the only eligible approver)
+    - User cannot be the requester
     
     Args:
         approval: Approval request document
@@ -673,6 +790,12 @@ def _can_user_approve(
     Returns:
         True if user can approve, False otherwise
     """
+    safe_user_roles = _normalize_user_roles(user_roles)
+    metadata = _get_approval_metadata(approval)
+
+    if approval.get('requester_id') == user_id:
+        return False
+
     # Check if user is the group owner (for group-based approvals)
     is_group_owner = approval.get('group_owner_id') == user_id
     
@@ -680,24 +803,44 @@ def _can_user_approve(
     is_personal_workspace_owner = False
     if approval.get('request_type') == TYPE_DELETE_USER_DOCUMENTS:
         # For user document deletion, check if user owns the documents
-        target_user_id = approval.get('metadata', {}).get('user_id')
+        target_user_id = metadata.get('user_id')
         is_personal_workspace_owner = target_user_id == user_id
     
+    if approval.get('request_type') in SAFETY_USER_APPROVAL_TYPES:
+        has_request_role = any(
+            role in safe_user_roles for role in get_approval_roles_for_request_type(approval.get('request_type'))
+        )
+        if not has_request_role:
+            return False
+
+        return True
+
     # Check if user has admin roles (check both capitalized and lowercase)
-    has_control_center_admin = 'ControlCenterAdmin' in user_roles
-    has_admin = 'Admin' in user_roles or 'admin' in user_roles
+    has_control_center_admin = 'ControlCenterAdmin' in safe_user_roles
+    has_admin = 'Admin' in safe_user_roles or 'admin' in safe_user_roles
     
     # User must have at least one eligibility criterion
     if not (is_group_owner or is_personal_workspace_owner or has_control_center_admin or has_admin):
         return False
     
-    # Special case: If user is the requester, they can still approve if they're the only eligible approver
-    # This handles the case where there's only one admin in the system
-    if approval.get('requester_id') == user_id:
-        # Allow same-user approval (with documentation through the approval system)
-        return True
-    
     return True
+
+
+def _can_user_deny(
+    approval: Dict[str, Any],
+    user_id: str,
+    user_roles: List[str]
+) -> bool:
+    """
+    Check if a user is eligible to deny a specific request.
+
+    Requesters may deny their own pending approval requests to cancel them,
+    while approval remains restricted to a different eligible reviewer.
+    """
+    if approval.get('requester_id') == user_id:
+        return True
+
+    return _can_user_approve(approval, user_id, user_roles)
 
 
 def _create_approval_notifications(
@@ -727,11 +870,11 @@ def _create_approval_notifications(
         
         # Build assignment criteria based on request type
         assignment = {
-            'roles': ['Admin', 'ControlCenterAdmin']  # Always include admin roles
+            'roles': get_approval_roles_for_request_type(approval['request_type'])
         }
         
         # Add ownership-based targeting
-        if approval['request_type'] == TYPE_DELETE_USER_DOCUMENTS:
+        if approval['request_type'] in USER_TARGETED_APPROVAL_TYPES:
             # For user document deletion: notify the user whose documents are being deleted
             user_id = approval.get('metadata', {}).get('user_id')
             if user_id:
@@ -904,6 +1047,9 @@ def _format_request_type(request_type: str) -> str:
         TYPE_TRANSFER_OWNERSHIP: "Transfer Ownership",
         TYPE_DELETE_DOCUMENTS: "Delete All Documents",
         TYPE_DELETE_GROUP: "Delete Group",
-        TYPE_DELETE_USER_DOCUMENTS: "Delete All User Documents"
+        TYPE_DELETE_USER_DOCUMENTS: "Delete All User Documents",
+        TYPE_WARN_USER: "Warn User",
+        TYPE_SUSPEND_USER: "Suspend User",
+        TYPE_BLOCK_USER: "Block User",
     }
     return type_labels.get(request_type, request_type)

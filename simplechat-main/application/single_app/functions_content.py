@@ -6,11 +6,17 @@ import zipfile
 from xml.etree import ElementTree
 
 import olefile
+from bs4 import BeautifulSoup
 
 from functions_debug import debug_print
 from config import *
+import functions_settings
 from functions_settings import *
 from functions_logging import *
+
+
+def get_settings(*args, **kwargs):
+    return functions_settings.get_settings(*args, **kwargs)
 
 def extract_text_file(file_path):
     with open(file_path, 'r', encoding='utf-8') as f:
@@ -207,17 +213,252 @@ def extract_legacy_doc_text(file_path):
     finally:
         ole.close()
 
-def extract_content_with_azure_di(file_path):
+
+def _normalize_msg_text(text):
+    """Normalize Outlook message text into readable plain text."""
+    if not text:
+        return ""
+
+    normalized_text = (
+        str(text)
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .replace("\x00", "")
+    )
+    normalized_text = re.sub(r"[\x01-\x08\x0b\x0c\x0e-\x1f]", " ", normalized_text)
+    normalized_text = re.sub(r"[ \t]{2,}", " ", normalized_text)
+    normalized_text = re.sub(r"\n{3,}", "\n\n", normalized_text)
+    return normalized_text.strip()
+
+
+def _build_msg_stream_map(ole):
+    """Build a map of top-level MAPI property streams from an Outlook .msg file."""
+    stream_map = {}
+    for stream_entry in ole.listdir(streams=True, storages=False):
+        if not stream_entry or len(stream_entry) != 1:
+            continue
+
+        stream_name = stream_entry[-1]
+        normalized_stream_name = str(stream_name or "").upper()
+        if normalized_stream_name.startswith("__SUBSTG1.0_"):
+            stream_map[normalized_stream_name] = stream_entry
+
+    return stream_map
+
+
+def _decode_msg_string(data, encoding):
+    """Decode a MAPI string property stream."""
+    if not data:
+        return ""
+
+    try:
+        return _normalize_msg_text(data.decode(encoding, errors="ignore"))
+    except Exception:
+        return ""
+
+
+def _extract_msg_string_property(ole, stream_map, property_id):
+    """Extract a Unicode or ANSI string MAPI property by hex property id."""
+    normalized_property_id = str(property_id or "").upper().zfill(4)
+    for type_suffix, encoding in (("001F", "utf-16le"), ("001E", "cp1252")):
+        stream_entry = stream_map.get(f"__SUBSTG1.0_{normalized_property_id}{type_suffix}")
+        if not stream_entry:
+            continue
+
+        value = _decode_msg_string(ole.openstream(stream_entry).read(), encoding)
+        if value:
+            return value
+
+    return ""
+
+
+def _extract_msg_first_string_property(ole, stream_map, property_ids):
+    """Return the first readable MAPI string property from a list of ids."""
+    for property_id in property_ids:
+        value = _extract_msg_string_property(ole, stream_map, property_id)
+        if value:
+            return value
+
+    return ""
+
+
+def _decode_msg_html_bytes(html_bytes):
+    """Decode and strip HTML body content from a MAPI HTML body stream."""
+    if not html_bytes:
+        return ""
+
+    encodings = []
+    if html_bytes.startswith((b"\xff\xfe", b"\xfe\xff")) or html_bytes.count(b"\x00") > max(2, len(html_bytes) // 5):
+        encodings.append("utf-16le")
+    encodings.extend(["utf-8-sig", "cp1252"])
+
+    decoded_html = ""
+    for encoding in encodings:
+        try:
+            candidate_html = html_bytes.decode(encoding, errors="replace")
+        except Exception:
+            continue
+
+        if candidate_html and (not decoded_html or candidate_html.count("\ufffd") < decoded_html.count("\ufffd")):
+            decoded_html = candidate_html
+
+    if not decoded_html:
+        return ""
+
+    soup = BeautifulSoup(decoded_html, "html.parser")
+    for unsafe_node in soup(["script", "style"]):
+        unsafe_node.decompose()
+    return _normalize_msg_text(soup.get_text(separator=" ", strip=True))
+
+
+def _extract_msg_html_body(ole, stream_map):
+    """Extract plain text from the Outlook HTML body MAPI property."""
+    html_string = _extract_msg_string_property(ole, stream_map, "1013")
+    if html_string:
+        soup = BeautifulSoup(html_string, "html.parser")
+        for unsafe_node in soup(["script", "style"]):
+            unsafe_node.decompose()
+        return _normalize_msg_text(soup.get_text(separator=" ", strip=True))
+
+    stream_entry = stream_map.get("__SUBSTG1.0_10130102")
+    if not stream_entry:
+        return ""
+
+    return _decode_msg_html_bytes(ole.openstream(stream_entry).read())
+
+
+def _format_msg_sender(sender_name, sender_email):
+    """Format sender metadata without duplicating values."""
+    normalized_name = _normalize_msg_text(sender_name)
+    normalized_email = _normalize_msg_text(sender_email)
+    if normalized_name and normalized_email and normalized_email.lower() not in normalized_name.lower():
+        return f"{normalized_name} <{normalized_email}>"
+    return normalized_name or normalized_email
+
+
+def extract_outlook_msg_text(file_path):
+    """Extract searchable plain text from an Outlook .msg file."""
+    if not olefile.isOleFile(file_path):
+        raise Exception("File is not a valid Outlook .msg OLE document")
+
+    ole = olefile.OleFileIO(file_path)
+    try:
+        stream_map = _build_msg_stream_map(ole)
+        if not stream_map:
+            raise Exception("No readable Outlook message property streams found")
+
+        subject = _extract_msg_first_string_property(ole, stream_map, ["0037"])
+        sender = _format_msg_sender(
+            _extract_msg_first_string_property(ole, stream_map, ["0C1A", "0042"]),
+            _extract_msg_first_string_property(ole, stream_map, ["0C1F", "0065"]),
+        )
+        display_to = _extract_msg_first_string_property(ole, stream_map, ["0E04"])
+        display_cc = _extract_msg_first_string_property(ole, stream_map, ["0E03"])
+        message_id = _extract_msg_first_string_property(ole, stream_map, ["1035"])
+        body_text = _extract_msg_first_string_property(ole, stream_map, ["1000"])
+        if not body_text:
+            body_text = _extract_msg_html_body(ole, stream_map)
+
+        header_lines = []
+        for label, value in (
+            ("Subject", subject),
+            ("From", sender),
+            ("To", display_to),
+            ("Cc", display_cc),
+            ("Message-Id", message_id),
+        ):
+            if value:
+                header_lines.append(f"{label}: {value}")
+
+        message_parts = []
+        if header_lines:
+            message_parts.append("\n".join(header_lines))
+        if body_text:
+            message_parts.append(f"Body:\n{body_text}")
+
+        extracted_text = _normalize_msg_text("\n\n".join(message_parts))
+        if not extracted_text:
+            raise Exception("No readable text content found in Outlook message")
+
+        return extracted_text
+    finally:
+        ole.close()
+
+_SELECTION_MARK_PATTERN = re.compile(r'(\u2612|\u2610|:selected:|:unselected:)', re.IGNORECASE)
+
+
+def _clean_selection_mark_label(label_text):
+    """Return a compact text label adjacent to a DI selection mark."""
+    clean_label = re.sub(r'<[^>]+>', ' ', str(label_text or ''))
+    clean_label = re.sub(r'\s+', ' ', clean_label).strip(' -:\t')
+    if len(clean_label) > 240:
+        clean_label = clean_label[:240].rstrip()
+    return clean_label
+
+
+def _build_selection_mark_summary(page_text):
+    """Build explicit checked/unchecked text from Layout markdown selection marks."""
+    summaries = []
+    seen = set()
+
+    for raw_line in str(page_text or '').splitlines():
+        if not _SELECTION_MARK_PATTERN.search(raw_line):
+            continue
+
+        parts = _SELECTION_MARK_PATTERN.split(raw_line)
+        for index in range(1, len(parts), 2):
+            marker = parts[index].lower()
+            label = _clean_selection_mark_label(parts[index + 1] if index + 1 < len(parts) else '')
+            if not label and index > 1:
+                label = _clean_selection_mark_label(parts[index - 1])
+            if not label:
+                continue
+
+            state = 'unchecked'
+            if marker in ('\u2612', ':selected:'):
+                state = 'checked'
+
+            summary_key = (label.lower(), state)
+            if summary_key in seen:
+                continue
+            seen.add(summary_key)
+            summaries.append(f"- {label}: {state}")
+
+    if not summaries:
+        return ''
+
+    return "Selection marks detected:\n" + "\n".join(summaries)
+
+
+def _append_selection_mark_summary(page_text):
+    """Append explicit selection-mark language to Layout content when available."""
+    summary = _build_selection_mark_summary(page_text)
+    if not summary:
+        return page_text
+    return f"{str(page_text or '').rstrip()}\n\n{summary}"
+
+
+def extract_content_with_azure_di(file_path, extraction_mode='read', pages=None):
     """
-    Extracts text page-by-page using Azure Document Intelligence "prebuilt-read"
+    Extracts text page-by-page using Azure Document Intelligence.
     and returns a list of dicts, each containing page_number and content.
     """
     try:
         document_intelligence_client = CLIENTS['document_intelligence_client'] # Ensure CLIENTS is populated
+        normalized_extraction_mode = functions_settings.normalize_document_intelligence_pdf_image_extraction_mode(extraction_mode)
+        model_id = "prebuilt-layout" if normalized_extraction_mode == "layout" else "prebuilt-read"
+        analyze_options = {}
+        if normalized_extraction_mode == "layout":
+            analyze_options["output_content_format"] = "markdown"
+        if pages:
+            analyze_options["pages"] = str(pages)
         
         # Debug logging for troubleshooting
         debug_print(f"Starting Azure DI extraction for: {os.path.basename(file_path)}")
         debug_print(f"AZURE_ENVIRONMENT: {AZURE_ENVIRONMENT}")
+        debug_print(f"Azure DI extraction mode: {normalized_extraction_mode}")
+        if pages:
+            debug_print(f"Azure DI page selection: {pages}")
 
         if AZURE_ENVIRONMENT in ("usgovernment", "custom"):
             # Required format for Document Intelligence API version 2024-11-30
@@ -229,8 +470,9 @@ def extract_content_with_azure_di(file_path):
             # For stable API 1.0.2, use the correct body parameter structure
             analyze_request = {"base64Source": base64_source}
             poller = document_intelligence_client.begin_analyze_document(
-                model_id="prebuilt-read",
-                body=analyze_request
+                model_id=model_id,
+                body=analyze_request,
+                **analyze_options
             )
             debug_print("Successfully started analysis with base64Source")
         else:
@@ -243,9 +485,10 @@ def extract_content_with_azure_di(file_path):
                 try:
                     # Method 1: Use bytes directly in body
                     poller = document_intelligence_client.begin_analyze_document(
-                        model_id="prebuilt-read",
+                        model_id=model_id,
                         body=file_content,
-                        content_type="application/pdf"
+                        content_type="application/pdf",
+                        **analyze_options
                     )
                     debug_print("Successfully started analysis with body as bytes")
                 except Exception as e1:
@@ -256,8 +499,9 @@ def extract_content_with_azure_di(file_path):
                         base64_source = base64.b64encode(file_content).decode('utf-8')
                         analyze_request = {"base64Source": base64_source}
                         poller = document_intelligence_client.begin_analyze_document(
-                            model_id="prebuilt-read",
-                            body=analyze_request
+                            model_id=model_id,
+                            body=analyze_request,
+                            **analyze_options
                         )
                         debug_print("Successfully started analysis with base64Source in body")
                     except Exception as e2:
@@ -330,13 +574,14 @@ def extract_content_with_azure_di(file_path):
 
                 pages_data.append({
                     "page_number": page_number,
-                    "content": page_text.strip() # Add strip() just in case
+                    "content": _append_selection_mark_summary(page_text.strip()) if normalized_extraction_mode == "layout" else page_text.strip()
                 })
         # --- Fallback if NO pages were found at all, but top-level content exists ---
         elif result.content:
+            fallback_content = result.content.strip()
             pages_data.append({
                 "page_number": 1,
-                "content": result.content.strip()
+                "content": _append_selection_mark_summary(fallback_content) if normalized_extraction_mode == "layout" else fallback_content
             })
         # else: # No pages and no content, pages_data remains empty
 

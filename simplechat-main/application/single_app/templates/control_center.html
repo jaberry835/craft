@@ -126,6 +126,208 @@
             opacity: 1;
             transform: translateY(-50%) rotate(180deg);
         }
+
+        .activity-log-layout-toolbar {
+            border-bottom: 1px solid var(--bs-border-color);
+            margin-bottom: 1rem;
+            padding-bottom: 1rem;
+        }
+
+        .activity-log-layout-presets {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+        }
+
+        .activity-log-layout-presets .btn {
+            white-space: nowrap;
+        }
+
+        .activity-log-layout-hint {
+            max-width: 40rem;
+        }
+
+        .activity-logs-table {
+            --activity-logs-min-width: 940px;
+            --activity-log-timestamp-width: 18%;
+            --activity-log-activity-type-width: 18%;
+            --activity-log-user-width: 20%;
+            --activity-log-details-width: 32%;
+            --activity-log-workspace-width: 12%;
+            --activity-log-timestamp-min-width: 170px;
+            --activity-log-activity-type-min-width: 170px;
+            --activity-log-user-min-width: 180px;
+            --activity-log-details-min-width: 300px;
+            --activity-log-workspace-min-width: 120px;
+            --activity-log-details-max-height: 3.3rem;
+            width: 100%;
+            min-width: var(--activity-logs-min-width);
+            table-layout: fixed;
+        }
+
+        .activity-logs-table[data-layout-preset="details-focus"] {
+            --activity-logs-min-width: 1020px;
+            --activity-log-timestamp-width: 16%;
+            --activity-log-activity-type-width: 16%;
+            --activity-log-user-width: 18%;
+            --activity-log-details-width: 38%;
+            --activity-log-workspace-width: 12%;
+            --activity-log-details-min-width: 360px;
+            --activity-log-details-max-height: 4.6rem;
+        }
+
+        .activity-logs-table[data-layout-preset="compact"] {
+            --activity-logs-min-width: 880px;
+            --activity-log-timestamp-width: 19%;
+            --activity-log-activity-type-width: 19%;
+            --activity-log-user-width: 18%;
+            --activity-log-details-width: 28%;
+            --activity-log-workspace-width: 16%;
+            --activity-log-details-min-width: 240px;
+            --activity-log-details-max-height: 2.7rem;
+        }
+
+        .activity-logs-table th,
+        .activity-logs-table td {
+            vertical-align: top;
+        }
+
+        .activity-logs-table th:nth-child(1),
+        .activity-logs-table td:nth-child(1) {
+            width: var(--activity-log-timestamp-width);
+            min-width: var(--activity-log-timestamp-min-width);
+        }
+
+        .activity-logs-table th:nth-child(2),
+        .activity-logs-table td:nth-child(2) {
+            width: var(--activity-log-activity-type-width);
+            min-width: var(--activity-log-activity-type-min-width);
+        }
+
+        .activity-logs-table th:nth-child(3),
+        .activity-logs-table td:nth-child(3) {
+            width: var(--activity-log-user-width);
+            min-width: var(--activity-log-user-min-width);
+        }
+
+        .activity-logs-table th:nth-child(4),
+        .activity-logs-table td:nth-child(4) {
+            width: var(--activity-log-details-width);
+            min-width: var(--activity-log-details-min-width);
+        }
+
+        .activity-logs-table th:nth-child(5),
+        .activity-logs-table td:nth-child(5) {
+            width: var(--activity-log-workspace-width);
+            min-width: var(--activity-log-workspace-min-width);
+        }
+
+        .activity-log-cell-text,
+        .activity-log-badge-wrap {
+            display: block;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .activity-log-details {
+            display: block;
+            overflow: hidden;
+            max-height: var(--activity-log-details-max-height);
+            line-height: 1.35;
+            word-break: break-word;
+        }
+
+        .activity-log-details small {
+            display: block;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .activity-log-row {
+            cursor: pointer;
+        }
+
+        .activity-log-row:hover {
+            background-color: rgba(var(--bs-primary-rgb), 0.04);
+        }
+
+        #rawLogModal .modal-xl {
+            max-width: 1200px;
+        }
+
+        #rawLogModal .card {
+            border: 1px solid var(--bs-border-color);
+            box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+        }
+
+        #rawLogModal .card-header {
+            border-bottom: 1px solid var(--bs-border-color);
+            font-weight: 600;
+        }
+
+        #rawLogModal .badge {
+            font-size: 0.75em;
+        }
+
+        #rawLogModal code,
+        #rawLogModal pre {
+            font-size: 0.875em;
+        }
+
+        #rawLogModal code {
+            background-color: var(--bs-gray-100);
+            border-radius: 0.25rem;
+            display: inline-block;
+            max-width: 100%;
+            overflow-wrap: anywhere;
+            padding: 0.125rem 0.25rem;
+            white-space: normal;
+        }
+
+        #rawLogModal .accordion-button:not(.collapsed) {
+            background-color: rgba(var(--bs-primary-rgb), 0.08);
+            color: var(--bs-primary);
+        }
+
+        .activity-log-detail-label {
+            color: var(--bs-secondary-color);
+            font-size: 0.75rem;
+            font-weight: 600;
+            letter-spacing: 0.04em;
+            margin-bottom: 0.2rem;
+            text-transform: uppercase;
+        }
+
+        .activity-log-detail-value {
+            font-weight: 500;
+            overflow-wrap: anywhere;
+        }
+
+        .activity-log-summary-text {
+            line-height: 1.5;
+        }
+
+        .activity-log-summary-text small {
+            display: block;
+            margin-top: 0.35rem;
+        }
+
+        .activity-log-raw-json pre {
+            background-color: var(--bs-secondary-bg);
+            border: 1px solid var(--bs-border-color);
+            border-radius: 0.5rem;
+            margin-bottom: 0;
+            max-height: 360px;
+            overflow-y: auto;
+            padding: 1rem;
+        }
+
+        [data-bs-theme="dark"] #rawLogModal code {
+            background-color: var(--bs-gray-800);
+            color: var(--bs-gray-200);
+        }
         
         /* Group Management Table Styles */
         .group-table th {
@@ -461,6 +663,8 @@
             </button>
         </div>
     </div>
+
+    {% include "_semantic_search_health_warning.html" %}
     
     <!-- Activity Log Migration Banner -->
     <div id="migrationBanner" class="alert alert-warning alert-dismissible fade show" role="alert" style="display: none;">
@@ -829,21 +1033,34 @@
                             </div>
 
                             <!-- User Management Controls -->
-                            <div class="row mb-3">
-                                <div class="col-md-6">
+                            <div class="row mb-3 g-2 align-items-center">
+                                <div class="col-lg-5 col-md-12">
                                     <div class="input-group">
                                         <span class="input-group-text"><i class="bi bi-search"></i></span>
-                                        <input type="text" class="form-control" id="userSearchInput" placeholder="Search users by name or email...">
+                                        <input type="text" class="form-control" id="userSearchInput" placeholder="Search users by name, email, or ID...">
                                     </div>
                                 </div>
-                                <div class="col-md-3">
+                                <div class="col-lg-2 col-md-4">
                                     <select class="form-select" id="accessFilterSelect">
                                         <option value="all">All Users</option>
                                         <option value="allow">Allowed Access</option>
                                         <option value="deny">Denied Access</option>
                                     </select>
                                 </div>
-                                <div class="col-md-3">
+                                <div class="col-lg-2 col-md-4">
+                                    <label class="visually-hidden" for="userManagementPerPageSelect">Users per page</label>
+                                    <div class="input-group">
+                                        <select class="form-select" id="userManagementPerPageSelect">
+                                            <option value="10">10</option>
+                                            <option value="25" selected>25</option>
+                                            <option value="50">50</option>
+                                            <option value="100">100</option>
+                                            <option value="250">250</option>
+                                        </select>
+                                        <span class="input-group-text">per page</span>
+                                    </div>
+                                </div>
+                                <div class="col-lg-3 col-md-4">
                                     <div class="btn-group w-100" role="group">
                                         <button type="button" class="btn btn-primary" id="bulkActionBtn" disabled>
                                             <i class="bi bi-gear-fill me-1"></i>Bulk
@@ -945,22 +1162,36 @@
                             </div>
 
                             <!-- Group Management Controls -->
-                            <div class="row mb-3">
-                                <div class="col-md-6">
+                            <div class="row mb-3 g-2 align-items-center">
+                                <div class="col-lg-5 col-md-12">
                                     <div class="input-group">
                                         <span class="input-group-text"><i class="bi bi-search"></i></span>
-                                        <input type="text" class="form-control" id="groupSearchInput" placeholder="Search groups by name or owner...">
+                                        <input type="text" class="form-control" id="groupSearchInput" placeholder="Search groups by name, owner, or ID...">
                                     </div>
                                 </div>
-                                <div class="col-md-3">
+                                <div class="col-lg-2 col-md-4">
                                     <select class="form-select" id="groupStatusFilterSelect">
                                         <option value="all">All Groups</option>
                                         <option value="active">Active Groups</option>
                                         <option value="locked">Locked Groups</option>
                                         <option value="upload_disabled">Upload Disabled</option>
+                                        <option value="inactive">Inactive Groups</option>
                                     </select>
                                 </div>
-                                <div class="col-md-3">
+                                <div class="col-lg-2 col-md-4">
+                                    <label class="visually-hidden" for="groupManagementPerPageSelect">Groups per page</label>
+                                    <div class="input-group">
+                                        <select class="form-select" id="groupManagementPerPageSelect">
+                                            <option value="10">10</option>
+                                            <option value="25" selected>25</option>
+                                            <option value="50">50</option>
+                                            <option value="100">100</option>
+                                            <option value="250">250</option>
+                                        </select>
+                                        <span class="input-group-text">per page</span>
+                                    </div>
+                                </div>
+                                <div class="col-lg-3 col-md-4">
                                     <div class="btn-group w-100" role="group">
                                         <button type="button" class="btn btn-primary" id="bulkGroupActionBtn" disabled>
                                             <i class="bi bi-gear-fill me-1"></i>Bulk
@@ -990,12 +1221,13 @@
                                                     <th class="sortable" data-sort="members" style="padding-right: 25px;">Members</th>
                                                     <th class="sortable" data-sort="status" style="padding-right: 25px;">Status</th>
                                                     <th class="sortable" data-sort="documents" style="padding-right: 25px;">Documents</th>
+                                                    <th class="sortable" data-sort="tokens" style="padding-right: 25px;">Token Total</th>
                                                     <th>Actions</th>
                                                 </tr>
                                             </thead>
                                             <tbody id="groupsTableBody">
                                                 <tr>
-                                                    <td colspan="7" class="text-center py-4">
+                                                    <td colspan="8" class="text-center py-4">
                                                         <div class="spinner-border text-primary" role="status">
                                                             <span class="visually-hidden">Loading...</span>
                                                         </div>
@@ -1023,31 +1255,47 @@
                         
                         <!-- Public Workspace Management Tab -->
                         <div class="tab-pane fade" id="workspaces" role="tabpanel">
-            <div class="d-flex justify-content-between align-items-center mb-4">
-                <h5 class="mb-0">
-                    <i class="bi bi-folder2-open me-2"></i>Public Workspace Management
-                </h5>
-            </div>                            <!-- Filters -->
-                            <div class="row mb-3">
-                                <div class="col-md-6">
+                            <div class="d-flex justify-content-between align-items-center mb-4">
+                                <h5 class="mb-0">
+                                    <i class="bi bi-folder2-open me-2"></i>Public Workspace Management
+                                </h5>
+                            </div>
+                            <!-- Filters -->
+                            <div class="row mb-3 g-2 align-items-center">
+                                <div class="col-lg-5 col-md-12">
                                     <div class="input-group">
                                         <span class="input-group-text">
                                             <i class="bi bi-search"></i>
                                         </span>
-                                        <input type="text" 
-                                               class="form-control" 
-                                               id="publicWorkspaceSearchInput" 
-                                               placeholder="Search workspaces by name or description..."
-                                               onkeyup="controlCenter.searchPublicWorkspaces(this.value)">
+                                        <input type="text"
+                                               class="form-control"
+                                               id="publicWorkspaceSearchInput"
+                                               placeholder="Search workspaces by name, description, owner, or ID..." />
                                     </div>
                                 </div>
-                                <div class="col-md-3">
-                                    <select class="form-select" id="publicWorkspaceStatusFilter" onchange="controlCenter.filterPublicWorkspacesByStatus(this.value)">
+                                <div class="col-lg-2 col-md-4">
+                                    <select class="form-select" id="publicWorkspaceStatusFilterSelect">
                                         <option value="all">All Statuses</option>
                                         <option value="active">Active</option>
+                                        <option value="locked">Locked</option>
+                                        <option value="upload_disabled">Upload Disabled</option>
+                                        <option value="inactive">Inactive</option>
                                     </select>
                                 </div>
-                                <div class="col-md-3">
+                                <div class="col-lg-2 col-md-4">
+                                    <label class="visually-hidden" for="publicWorkspaceManagementPerPageSelect">Public workspaces per page</label>
+                                    <div class="input-group">
+                                        <select class="form-select" id="publicWorkspaceManagementPerPageSelect">
+                                            <option value="10">10</option>
+                                            <option value="25" selected>25</option>
+                                            <option value="50">50</option>
+                                            <option value="100">100</option>
+                                            <option value="250">250</option>
+                                        </select>
+                                        <span class="input-group-text">per page</span>
+                                    </div>
+                                </div>
+                                <div class="col-lg-3 col-md-4">
                                     <div class="btn-group w-100" role="group">
                                         <button type="button" class="btn btn-primary" id="bulkPublicWorkspaceActionBtn" disabled>
                                             <i class="bi bi-gear-fill me-1"></i>Bulk
@@ -1060,47 +1308,52 @@
                                         </button>
                                     </div>
                                 </div>
-                                <div class="col-md-12">
-                                    <div class="text-muted small mt-2">
-                                        <span id="publicWorkspaceCount">Loading...</span>
-                                    </div>
-                                </div>
                             </div>
 
                             <!-- Public Workspaces Table -->
-                            <div class="table-responsive">
-                                <table class="table table-hover align-middle" id="publicWorkspacesTable">
-                                    <thead class="table-light">
-                                        <tr>
-                                            <th style="width: 50px;">
-                                                <input type="checkbox" class="form-check-input" id="selectAllPublicWorkspaces">
-                                            </th>
-                                            <th>Workspace Name</th>
-                                            <th>Owner</th>
-                                            <th>Members</th>
-                                            <th>Status</th>
-                                            <th>Documents</th>
-                                            <th>Actions</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody id="publicWorkspacesTableBody">
-                                        <tr>
-                                            <td colspan="7" class="text-center py-4">
-                                                <div class="spinner-border text-primary" role="status">
-                                                    <span class="visually-hidden">Loading...</span>
-                                                </div>
-                                            </td>
-                                        </tr>
-                                    </tbody>
-                                </table>
-                            </div>
+                            <div class="card">
+                                <div class="card-body">
+                                    <div class="table-responsive">
+                                        <table class="table table-hover group-table align-middle" id="publicWorkspacesTable">
+                                            <thead>
+                                                <tr>
+                                                    <th style="width: 50px;">
+                                                        <input type="checkbox" class="form-check-input" id="selectAllPublicWorkspaces">
+                                                    </th>
+                                                    <th class="sortable" data-sort="name" style="padding-right: 25px;">Workspace Name</th>
+                                                    <th class="sortable" data-sort="owner" style="padding-right: 25px;">Owner</th>
+                                                    <th class="sortable" data-sort="members" style="padding-right: 25px;">Members</th>
+                                                    <th class="sortable" data-sort="status" style="padding-right: 25px;">Status</th>
+                                                    <th class="sortable" data-sort="documents" style="padding-right: 25px;">Documents</th>
+                                                    <th>Actions</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody id="publicWorkspacesTableBody">
+                                                <tr>
+                                                    <td colspan="7" class="text-center py-4">
+                                                        <div class="spinner-border text-primary" role="status">
+                                                            <span class="visually-hidden">Loading...</span>
+                                                        </div>
+                                                        <div class="mt-2">Loading public workspaces...</div>
+                                                    </td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                    </div>
 
-                            <!-- Pagination -->
-                            <nav aria-label="Public workspaces pagination" id="publicWorkspacesPagination" style="display: none;">
-                                <ul class="pagination justify-content-center">
-                                    <!-- Pagination buttons will be inserted here -->
-                                </ul>
-                            </nav>
+                                    <!-- Pagination -->
+                                    <div class="d-flex justify-content-between align-items-center mt-3">
+                                        <div class="text-muted small" id="publicWorkspacesPaginationInfo">
+                                            <!-- Pagination info will be populated by JavaScript -->
+                                        </div>
+                                        <nav aria-label="Public workspaces pagination">
+                                            <ul class="pagination mb-0" id="publicWorkspacesPagination">
+                                                <!-- Pagination controls will be populated by JavaScript -->
+                                            </ul>
+                                        </nav>
+                                    </div>
+                                </div>
+                            </div>
 
                             <!-- No Results Message -->
                             <div id="noPublicWorkspacesMessage" style="display: none;">
@@ -1133,12 +1386,15 @@
                                     <select class="form-select" id="activityTypeFilterSelect">
                                         <option value="all">All Activity Types</option>
                                         <option value="user_login">User Login</option>
+                                        <option value="chat_activity">Chat Activity</option>
                                         <option value="conversation_creation">Conversation Creation</option>
                                         <option value="conversation_deletion">Conversation Deletion</option>
                                         <option value="conversation_archival">Conversation Archival</option>
                                         <option value="document_creation">Document Creation</option>
                                         <option value="document_deletion">Document Deletion</option>
                                         <option value="document_metadata_update">Document Metadata Update</option>
+                                        <option value="file_sync">File Sync</option>
+                                        <option value="data_management">Data Management</option>
                                         <option value="token_usage">Token Usage</option>
                                         <option value="group_status_change">Group Status Change</option>
                                         <option value="group_member_deleted">Group Member Deleted</option>
@@ -1168,8 +1424,26 @@
                             <!-- Activity Logs Table -->
                             <div class="card">
                                 <div class="card-body">
+                                    <div class="activity-log-layout-toolbar d-flex flex-column flex-lg-row justify-content-between align-items-lg-center gap-3">
+                                        <div>
+                                            <div class="small text-uppercase text-muted fw-semibold mb-2">Layout Preset</div>
+                                            <div class="activity-log-layout-presets" role="group" aria-label="Activity log layout presets">
+                                                <input type="radio" class="btn-check" name="activityLogsLayoutPreset" id="activityLogsLayoutPresetBalanced" value="balanced" autocomplete="off" checked />
+                                                <label class="btn btn-outline-secondary btn-sm" for="activityLogsLayoutPresetBalanced">Balanced</label>
+
+                                                <input type="radio" class="btn-check" name="activityLogsLayoutPreset" id="activityLogsLayoutPresetDetailsFocus" value="details-focus" autocomplete="off" />
+                                                <label class="btn btn-outline-secondary btn-sm" for="activityLogsLayoutPresetDetailsFocus">Details Focus</label>
+
+                                                <input type="radio" class="btn-check" name="activityLogsLayoutPreset" id="activityLogsLayoutPresetCompact" value="compact" autocomplete="off" />
+                                                <label class="btn btn-outline-secondary btn-sm" for="activityLogsLayoutPresetCompact">Compact</label>
+                                            </div>
+                                        </div>
+                                        <div class="small text-muted activity-log-layout-hint" id="activityLogsLayoutHint">
+                                            Balanced view keeps the five log columns readable. Switch to Details Focus or click a row for the full raw log.
+                                        </div>
+                                    </div>
                                     <div class="table-responsive">
-                                        <table class="table table-hover user-table" id="activityLogsTable">
+                                        <table class="table table-hover user-table activity-logs-table" id="activityLogsTable" data-layout-preset="balanced">
                                             <thead>
                                                 <tr>
                                                     <th>Timestamp</th>
@@ -1619,6 +1893,9 @@
                                     <div class="row mt-2">
                                         <div class="col-md-6">
                                             <strong>Created:</strong> <span id="modalGroupCreated">-</span>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <strong>Token Total:</strong> <span id="modalGroupTokens">-</span>
                                         </div>
                                     </div>
                                 </div>
@@ -2801,21 +3078,21 @@
     </div>
 
     <!-- Raw Log Modal -->
-    <div class="modal fade" id="rawLogModal" tabindex="-1" aria-hidden="true">
-        <div class="modal-dialog modal-xl">
+    <div class="modal fade" id="rawLogModal" tabindex="-1" aria-labelledby="rawLogModalTitle" aria-hidden="true">
+        <div class="modal-dialog modal-xl modal-dialog-scrollable">
             <div class="modal-content">
                 <div class="modal-header">
                     <h5 class="modal-title" id="rawLogModalTitle">Activity Log</h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                 </div>
                 <div class="modal-body">
-                    <div class="d-flex justify-content-end mb-2">
-                        <button type="button" class="btn btn-sm btn-outline-primary" onclick="window.controlCenter.copyRawLogToClipboard()">
-                            <i class="bi bi-clipboard me-1"></i>Copy to Clipboard
-                        </button>
-                    </div>
-                    <div id="rawLogModalBody" class="border rounded p-3" style="background-color: var(--bs-secondary-bg);">
-                        <!-- Log JSON will be inserted here -->
+                    <div id="rawLogModalBody">
+                        <div class="text-center p-4">
+                            <div class="spinner-border text-primary" role="status">
+                                <span class="visually-hidden">Loading...</span>
+                            </div>
+                            <p class="mt-2 text-muted mb-0">Loading activity details...</p>
+                        </div>
                     </div>
                 </div>
                 <div class="modal-footer">
@@ -2873,7 +3150,7 @@
 <script src="{{ url_for('static', filename='js/chart.min.js') }}"></script>
 <script>
 // Pass user role information to JavaScript
-window.hasControlCenterAdmin = {{ 'true' if has_control_center_admin else 'false' }};
+window.hasControlCenterAdmin = JSON.parse('{{ has_control_center_admin|tojson }}');
 </script>
 <script src="{{ url_for('static', filename='js/validation-utils.js') }}"></script>
 <script type="module" src="{{ url_for('static', filename='js/control-center.js') }}"></script>
@@ -3202,40 +3479,22 @@ window.GroupManager = {
 
     // Handle search functionality
     handleSearch: function(event) {
-        const searchTerm = event.target.value.toLowerCase();
-        const rows = document.querySelectorAll('#groupsTableBody tr:not([style*="display: none"])');
-        
-        rows.forEach(row => {
-            const text = row.textContent.toLowerCase();
-            row.style.display = text.includes(searchTerm) ? '' : 'none';
-        });
+        if (window.controlCenter && typeof window.controlCenter.handleGroupSearchChange === 'function') {
+            window.controlCenter.handleGroupSearchChange(event);
+        }
     },
 
     // Handle status filter
     handleFilter: function(event) {
-        const filterValue = event.target.value;
-        const rows = document.querySelectorAll('#groupsTableBody tr[data-group-id]');
-        
-        rows.forEach(row => {
-            const statusBadge = row.querySelector('.group-status-badge');
-            if (!statusBadge) return;
-            
-            const status = statusBadge.className.includes('active') ? 'active' :
-                          statusBadge.className.includes('locked') ? 'locked' :
-                          statusBadge.className.includes('upload-disabled') ? 'upload_disabled' : 'inactive';
-            
-            row.style.display = (filterValue === 'all' || status === filterValue) ? '' : 'none';
-        });
+        if (window.controlCenter && typeof window.controlCenter.handleGroupFilterChange === 'function') {
+            window.controlCenter.handleGroupFilterChange(event);
+        }
     },
 
     // Handle select all functionality
     handleSelectAll: function(event) {
-        const checkboxes = document.querySelectorAll('.group-checkbox');
-        checkboxes.forEach(cb => cb.checked = event.target.checked);
-        
-        const bulkButton = document.getElementById('bulkGroupActionBtn');
-        if (bulkButton) {
-            bulkButton.disabled = !event.target.checked;
+        if (window.controlCenter && typeof window.controlCenter.handleSelectAllGroups === 'function') {
+            window.controlCenter.handleSelectAllGroups(event);
         }
     },
 
@@ -3299,6 +3558,8 @@ window.GroupManager = {
             document.getElementById('modalGroupOwner').textContent = `${group.owner_name || group.created_by || 'Unknown'} (${group.owner_email || 'No email'})`;
             document.getElementById('modalGroupMembers').textContent = `${group.member_count || 0} active members`;
             document.getElementById('modalGroupDocuments').textContent = `${group.document_count || 0} documents`;
+            const tokenTotal = Number(group.token_total ?? group.total_tokens ?? group.activity?.token_metrics?.total_tokens ?? 0);
+            document.getElementById('modalGroupTokens').textContent = `${Number.isFinite(tokenTotal) ? Math.trunc(tokenTotal).toLocaleString() : '0'} tokens`;
             
             // Format dates
             const formatDate = (dateStr) => {
@@ -3742,7 +4003,7 @@ window.GroupManager = {
                 
                 const ownershipResult = await ownershipResponse.json();
                 console.log('Ownership request created:', ownershipResult);
-                window.controlCenter.showToast(`Ownership transfer request submitted!<br><br>Status: Pending Approval<br>Approval ID: ${ownershipResult.approval_id}<br><br>The request requires approval from the group owner or another admin.`, 'success');
+                window.controlCenter.showToast(`Ownership transfer request submitted!<br><br>Status: Pending Approval<br>Approval ID: ${ownershipResult.approval_id}<br><br>The request requires approval from the group owner or another admin.`, 'success', true);
                 
             } else if (ownership === 'transfer') {
                 // Transfer ownership to another user - create approval request
@@ -3764,7 +4025,7 @@ window.GroupManager = {
                 
                 const transferResult = await transferResponse.json();
                 console.log('Transfer request created:', transferResult);
-                window.controlCenter.showToast(`Ownership transfer request submitted!<br><br>Status: Pending Approval<br>Approval ID: ${transferResult.approval_id}<br><br>The request requires approval from the group owner or another admin.`, 'success');
+                window.controlCenter.showToast(`Ownership transfer request submitted!<br><br>Status: Pending Approval<br>Approval ID: ${transferResult.approval_id}<br><br>The request requires approval from the group owner or another admin.`, 'success', true);
                 
             } else {
                 // No ownership change
@@ -4020,8 +4281,8 @@ window.GroupManager = {
                     return `
                         <tr>
                             <td>
-                                <div class="fw-bold">${member.name || 'Unknown User'}</div>
-                                <small class="text-muted">${member.email || 'No email'}</small>
+                                <div class="fw-bold">${GroupManager.escapeHtml(member.name || 'Unknown User')}</div>
+                                <small class="text-muted">${GroupManager.escapeHtml(member.email || 'No email')}</small>
                             </td>
                             <td>
                                 <span class="badge ${badgeClass}">${member.role}</span>

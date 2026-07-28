@@ -5,4 +5,14 @@ description: "Current feature guides with previous release highlights kept for r
 section: "Latest Release"
 ---
 
-This page mirrors the curated in-app Latest Features experience and keeps earlier release highlights available in an archive section below the current release.
+This page mirrors the curated in-app Latest Features experience for SimpleChat v0.250.001, keeps the v0.241.001-v0.241.007 feature set in Previous Release, and preserves v0.239.001 highlights in the archive below it.
+
+## Admin Setup and User View
+
+Admins control whether Latest Features are visible from the Support menu and can choose which current-release cards are shared with end users. Use **Admin Settings > General > User-Facing Latest Features** to enable the destination, decide whether public guide links are shown, and curate individual feature announcements.
+
+<img src="{{ '/images/latest-release/enable_support_menu_for_end_users.png' | relative_url }}" alt="Annotated Admin Settings screenshot showing Support menu and user-facing Latest Features controls." style="width: 80%;" />
+
+Users see the curated set from **Support > Latest Features**. The v0.250.001 feature guides below use placeholder screenshot filenames that can be replaced with final captures, while previous release guides keep the existing annotated screenshots where available.
+
+<img src="{{ '/images/latest-release/support_latest_features_current.png' | relative_url }}" alt="Annotated user-facing Latest Features page showing current release cards." style="width: 80%;" />

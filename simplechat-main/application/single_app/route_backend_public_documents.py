@@ -1,15 +1,69 @@
 # route_backend_public_documents.py
 
+from datetime import datetime, timezone
+
 from config import *
 
 from functions_authentication import *
 from functions_settings import *
 from functions_public_workspaces import *
 from functions_documents import *
+from functions_file_sync import (
+    FILE_SYNC_SCOPE_PUBLIC,
+    apply_synced_document_delete_action,
+    build_synced_document_delete_guard,
+)
+from functions_notifications import create_notification, delete_notifications_by_metadata
+from functions_simplechat_operations import download_blob_content, queue_generated_document_processing
 from utils_cache import invalidate_public_workspace_search_cache
 from flask import current_app
 from functions_debug import *
 from swagger_wrapper import swagger_route, get_auth_security
+
+
+PENDING_GENERATED_ARTIFACT_NOTIFICATION_TYPES = [
+    'approval_request_pending',
+    'approval_request_pending_submitter',
+]
+
+
+def _cleanup_public_generated_artifact_notifications(document_id, public_workspace_id):
+    delete_notifications_by_metadata(
+        metadata_filters={
+            'document_id': document_id,
+            'public_workspace_id': public_workspace_id,
+            'request_type': 'generated_artifact_promotion',
+        },
+        notification_types=PENDING_GENERATED_ARTIFACT_NOTIFICATION_TYPES,
+    )
+
+
+def _get_generated_artifact_actor_name(user_info, fallback_user_id):
+    return (
+        str((user_info or {}).get('displayName') or '').strip()
+        or str((user_info or {}).get('email') or '').strip()
+        or fallback_user_id
+    )
+
+
+PUBLIC_WORKSPACE_READER_ROLES = ('Owner', 'Admin', 'DocumentManager', 'User')
+PUBLIC_WORKSPACE_MANAGER_ROLES = ('Owner', 'Admin', 'DocumentManager')
+
+
+def _require_active_public_workspace_response(user_id, allowed_roles=PUBLIC_WORKSPACE_MANAGER_ROLES):
+    try:
+        active_ws, ws_doc, role = require_active_public_workspace(
+            user_id,
+            allowed_roles=allowed_roles,
+        )
+    except ValueError:
+        return None, None, None, (jsonify({'error': 'No active public workspace selected'}), 400)
+    except LookupError:
+        return None, None, None, (jsonify({'error': 'Active public workspace not found'}), 404)
+    except PermissionError:
+        return None, None, None, (jsonify({'error': 'Access denied'}), 403)
+
+    return active_ws, ws_doc, role, None
 
 def register_route_backend_public_documents(app):
     """
@@ -26,22 +80,16 @@ def register_route_backend_public_documents(app):
         if not user_id:
             return jsonify({'error': 'User not authenticated'}), 401
 
-        settings = get_user_settings(user_id)
-        active_ws = settings['settings'].get('activePublicWorkspaceOid')
-        if not active_ws:
-            return jsonify({'error': 'No active public workspace selected'}), 400
-
-        ws_doc = find_public_workspace_by_id(active_ws)
-        if not ws_doc:
-            return jsonify({'error': 'Active public workspace not found'}), 404
+        active_ws, ws_doc, _role, error_response = _require_active_public_workspace_response(
+            user_id,
+            PUBLIC_WORKSPACE_MANAGER_ROLES,
+        )
+        if error_response:
+            return error_response
 
         allowed, reason = check_public_workspace_status_allows_operation(ws_doc, 'upload')
         if not allowed:
             return jsonify({'error': reason}), 403
-
-        role = get_user_role_in_public_workspace(ws_doc, user_id)
-        if role not in ['Owner', 'Admin', 'DocumentManager']:
-            return jsonify({'error': 'Insufficient permissions'}), 403
 
         if 'file' not in request.files:
             return jsonify({'error': 'No file part'}), 400
@@ -120,18 +168,12 @@ def register_route_backend_public_documents(app):
         if not user_id:
             return jsonify({'error': 'User not authenticated'}), 401
 
-        settings = get_user_settings(user_id)
-        active_ws = settings['settings'].get('activePublicWorkspaceOid')
-        if not active_ws:
-            return jsonify({'error': 'No active public workspace selected'}), 400
-
-        ws_doc = find_public_workspace_by_id(active_ws)
-        if not ws_doc:
-            return jsonify({'error': 'Active public workspace not found'}), 404
-        from functions_public_workspaces import get_user_role_in_public_workspace
-        role = get_user_role_in_public_workspace(ws_doc, user_id)
-        if not role:
-            return jsonify({'error': 'Access denied'}), 403
+        active_ws, ws_doc, _role, error_response = _require_active_public_workspace_response(
+            user_id,
+            PUBLIC_WORKSPACE_READER_ROLES,
+        )
+        if error_response:
+            return error_response
 
         # pagination
         try:
@@ -228,11 +270,13 @@ def register_route_backend_public_documents(app):
         ))
         legacy_count = legacy[0] if legacy else 0
 
+        file_downloads_enabled = is_public_workspace_file_download_enabled(get_settings(), ws_doc)
         return jsonify({
             'documents': docs,
             'page': page,
             'page_size': page_size,
             'total_count': total_count,
+            'file_downloads_enabled': file_downloads_enabled,
             'needs_legacy_update': legacy_count > 0
         }), 200
 
@@ -297,17 +341,159 @@ def register_route_backend_public_documents(app):
     @enabled_required('enable_public_workspaces')
     def api_get_public_document(doc_id):
         user_id = get_current_user_id()
-        settings = get_user_settings(user_id)
-        active_ws = settings['settings'].get('activePublicWorkspaceOid')
-        if not active_ws:
-            return jsonify({'error': 'No active public workspace selected'}), 400
-        ws_doc = find_public_workspace_by_id(active_ws)
+        active_ws, _ws_doc, _role, error_response = _require_active_public_workspace_response(
+            user_id,
+            PUBLIC_WORKSPACE_READER_ROLES,
+        )
+        if error_response:
+            return error_response
+        return get_document(user_id=user_id, document_id=doc_id, public_workspace_id=active_ws)
+
+    @app.route('/api/public_workspace_documents/<document_id>/versions', methods=['GET'])
+    @swagger_route(security=get_auth_security())
+    @login_required
+    @user_required
+    @enabled_required('enable_public_workspaces')
+    def api_get_public_workspace_document_versions(document_id):
+        user_id = get_current_user_id()
+        if not user_id:
+            return jsonify({'error': 'User not authenticated'}), 401
+
+        workspace_id = str(request.args.get('workspace_id') or '').strip()
+        if not workspace_id:
+            return jsonify({'error': 'workspace_id is required'}), 400
+
+        ws_doc = find_public_workspace_by_id(workspace_id)
         if not ws_doc:
-            return jsonify({'error': 'Active public workspace not found'}), 404
+            return jsonify({'error': 'Public workspace not found'}), 404
+
         from functions_public_workspaces import get_user_role_in_public_workspace
         if not get_user_role_in_public_workspace(ws_doc, user_id):
-            return jsonify({'error':'Access denied'}), 403
-        return get_document(user_id=user_id, document_id=doc_id, public_workspace_id=active_ws)
+            return jsonify({'error': 'Access denied'}), 403
+
+        versions = get_document_versions(
+            user_id=user_id,
+            document_id=document_id,
+            public_workspace_id=workspace_id,
+        )
+        if not versions:
+            return jsonify({'error': 'Document versions not found'}), 404
+
+        return jsonify({
+            'document_id': document_id,
+            'public_workspace_id': workspace_id,
+            'revision_family_id': versions[0].get('revision_family_id'),
+            'versions': versions,
+        }), 200
+
+    def _authorize_public_document_download(user_id, document_id):
+        try:
+            active_ws, ws_doc, _ = require_active_public_workspace(
+                user_id,
+                allowed_roles=("Owner", "Admin", "DocumentManager", "User"),
+            )
+        except ValueError:
+            return None, None, (jsonify({'error': 'No active public workspace selected'}), 400)
+        except LookupError:
+            return None, None, (jsonify({'error': 'Active public workspace not found'}), 404)
+        except PermissionError:
+            return None, None, (jsonify({'error': 'Access denied'}), 403)
+
+        if not is_public_workspace_file_download_enabled(get_settings(), ws_doc):
+            return None, None, (jsonify({'error': 'File downloads are disabled for this public workspace'}), 403)
+
+        document_record = get_document_record(
+            user_id=user_id,
+            document_id=document_id,
+            public_workspace_id=active_ws,
+        )
+        if not document_record:
+            return None, None, (jsonify({'error': 'Document not found or access denied'}), 404)
+        return active_ws, document_record, None
+
+    @app.route('/api/public_documents/<doc_id>/download', methods=['GET'])
+    @swagger_route(security=get_auth_security())
+    @login_required
+    @user_required
+    @enabled_required('enable_public_workspaces')
+    def api_download_public_document(doc_id):
+        user_id = get_current_user_id()
+        if not user_id:
+            return jsonify({'error': 'User not authenticated'}), 401
+
+        active_ws, document_record, error_response = _authorize_public_document_download(user_id, doc_id)
+        if error_response:
+            return error_response
+
+        try:
+            return build_document_download_response(document_record, user_id=user_id, public_workspace_id=active_ws)
+        except FileNotFoundError as exc:
+            return jsonify({'error': str(exc)}), 404
+        except Exception as exc:
+            log_event(
+                '[DocumentDownload] Failed public document download',
+                {'document_id': doc_id, 'public_workspace_id': active_ws, 'error': str(exc)},
+                debug_only=True,
+            )
+            return jsonify({'error': 'Unable to download document'}), 500
+
+    @app.route('/api/public_documents/download', methods=['POST'])
+    @swagger_route(security=get_auth_security())
+    @login_required
+    @user_required
+    @enabled_required('enable_public_workspaces')
+    def api_download_public_documents():
+        user_id = get_current_user_id()
+        if not user_id:
+            return jsonify({'error': 'User not authenticated'}), 401
+
+        data = request.get_json(silent=True) or {}
+        document_ids = data.get('document_ids') or []
+        if not isinstance(document_ids, list):
+            return jsonify({'error': 'document_ids must be a list'}), 400
+
+        active_ws = None
+        documents = []
+        seen_ids = set()
+        for document_id_value in document_ids:
+            normalized_document_id = str(document_id_value or '').strip()
+            if not normalized_document_id or normalized_document_id in seen_ids:
+                continue
+            seen_ids.add(normalized_document_id)
+            authorized_ws, document_record, error_response = _authorize_public_document_download(
+                user_id,
+                normalized_document_id,
+            )
+            if error_response:
+                return error_response
+            if active_ws is None:
+                active_ws = authorized_ws
+            documents.append(document_record)
+
+        if not documents:
+            return jsonify({'error': 'No documents selected'}), 400
+        if len(documents) == 1:
+            try:
+                return build_document_download_response(documents[0], user_id=user_id, public_workspace_id=active_ws)
+            except FileNotFoundError as exc:
+                return jsonify({'error': str(exc)}), 404
+
+        try:
+            return build_documents_zip_download_response(
+                documents,
+                'public_workspace_documents.zip',
+                user_id=user_id,
+                public_workspace_id=active_ws,
+            )
+        except FileNotFoundError as exc:
+            return jsonify({'error': str(exc)}), 404
+        except Exception as exc:
+            log_event(
+                '[DocumentDownload] Failed public document ZIP download',
+                {'public_workspace_id': active_ws, 'document_count': len(documents), 'error': str(exc)},
+                debug_only=True,
+            )
+            return jsonify({'error': 'Unable to download selected documents'}), 500
 
     @app.route('/api/public_documents/<doc_id>', methods=['PATCH'])
     @swagger_route(security=get_auth_security())
@@ -316,13 +502,12 @@ def register_route_backend_public_documents(app):
     @enabled_required('enable_public_workspaces')
     def api_patch_public_document(doc_id):
         user_id = get_current_user_id()
-        settings = get_user_settings(user_id)
-        active_ws = settings['settings'].get('activePublicWorkspaceOid')
-        ws_doc = find_public_workspace_by_id(active_ws) if active_ws else None
-        from functions_public_workspaces import get_user_role_in_public_workspace
-        role = get_user_role_in_public_workspace(ws_doc, user_id) if ws_doc else None
-        if role not in ['Owner','Admin','DocumentManager']:
-            return jsonify({'error':'Access denied'}), 403
+        active_ws, _ws_doc, _role, error_response = _require_active_public_workspace_response(
+            user_id,
+            PUBLIC_WORKSPACE_MANAGER_ROLES,
+        )
+        if error_response:
+            return error_response
         data = request.get_json() or {}
         
         # Track which fields were updated
@@ -387,25 +572,39 @@ def register_route_backend_public_documents(app):
     @enabled_required('enable_public_workspaces')
     def api_delete_public_document(doc_id):
         user_id = get_current_user_id()
-        settings = get_user_settings(user_id)
-        active_ws = settings['settings'].get('activePublicWorkspaceOid')
-        ws_doc = find_public_workspace_by_id(active_ws) if active_ws else None
+        active_ws, ws_doc, _role, error_response = _require_active_public_workspace_response(
+            user_id,
+            PUBLIC_WORKSPACE_MANAGER_ROLES,
+        )
+        if error_response:
+            return error_response
         
         # Check if workspace status allows deletions
-        if ws_doc:
-            from functions_public_workspaces import check_public_workspace_status_allows_operation
-            allowed, reason = check_public_workspace_status_allows_operation(ws_doc, 'delete')
-            if not allowed:
-                return jsonify({'error': reason}), 403
-        
-        from functions_public_workspaces import get_user_role_in_public_workspace
-        role = get_user_role_in_public_workspace(ws_doc, user_id) if ws_doc else None
-        if role not in ['Owner','Admin','DocumentManager']:
-            return jsonify({'error':'Access denied'}), 403
+        allowed, reason = check_public_workspace_status_allows_operation(ws_doc, 'delete')
+        if not allowed:
+            return jsonify({'error': reason}), 403
+
         delete_mode = request.args.get('delete_mode', 'all_versions')
         if delete_mode not in {'all_versions', 'current_only'}:
             return jsonify({'error': 'Invalid delete mode'}), 400
+        file_sync_delete_action = request.args.get('file_sync_delete_action')
+        file_sync_guard = build_synced_document_delete_guard(
+            FILE_SYNC_SCOPE_PUBLIC,
+            doc_id,
+            user_id,
+            public_workspace_id=active_ws,
+            requested_action=file_sync_delete_action,
+        )
+        if file_sync_guard:
+            return jsonify(file_sync_guard), 409
         try:
+            apply_synced_document_delete_action(
+                FILE_SYNC_SCOPE_PUBLIC,
+                doc_id,
+                user_id,
+                file_sync_delete_action,
+                public_workspace_id=active_ws,
+            )
             delete_result = delete_document_revision(
                 user_id=user_id,
                 document_id=doc_id,
@@ -420,6 +619,239 @@ def register_route_backend_public_documents(app):
         except Exception as e:
             return jsonify({'error':str(e)}), 500
 
+    @app.route('/api/public_documents/<doc_id>/approve-generated-artifact', methods=['POST'])
+    @swagger_route(security=get_auth_security())
+    @login_required
+    @user_required
+    @enabled_required('enable_public_workspaces')
+    def api_approve_public_generated_artifact(doc_id):
+        """Approve a generated chat artifact promotion into the active public workspace."""
+        user_id = get_current_user_id()
+        if not user_id:
+            return jsonify({'error': 'User not authenticated'}), 401
+
+        try:
+            active_ws, ws_doc, _ = require_active_public_workspace(user_id)
+
+            allowed, reason = check_public_workspace_status_allows_operation(ws_doc, 'upload')
+            if not allowed:
+                return jsonify({'error': reason}), 403
+
+            document_item = get_document_metadata(
+                document_id=doc_id,
+                user_id=user_id,
+                public_workspace_id=active_ws,
+            )
+            if not document_item:
+                return jsonify({'error': 'Document not found or access denied'}), 404
+
+            promotion_status = str(document_item.get('generated_artifact_promotion_status') or '').strip().lower()
+            if promotion_status != 'pending_approval':
+                return jsonify({'error': 'Document is not awaiting generated artifact approval'}), 400
+
+            owner_user_id = str(document_item.get('user_id') or '').strip()
+            source_blob_container = str(document_item.get('generated_artifact_source_blob_container') or '').strip()
+            source_blob_path = str(document_item.get('generated_artifact_source_blob_path') or '').strip()
+            if not owner_user_id or not source_blob_container or not source_blob_path:
+                return jsonify({'error': 'Generated artifact source is incomplete'}), 400
+
+            artifact_bytes = download_blob_content(source_blob_container, source_blob_path)
+            approver_info = get_current_user_info() or {}
+            approver_name = (
+                str(approver_info.get('displayName') or '').strip()
+                or str(approver_info.get('email') or '').strip()
+                or user_id
+            )
+
+            try:
+                update_document(
+                    document_id=doc_id,
+                    user_id=owner_user_id,
+                    public_workspace_id=active_ws,
+                    status='Queued for processing',
+                    percentage_complete=0,
+                    generated_artifact_promotion_status='approved',
+                    generated_artifact_approved_at=datetime.now(timezone.utc).isoformat(),
+                    generated_artifact_approved_by_user_id=user_id,
+                    generated_artifact_approved_by_display_name=approver_name,
+                )
+                queue_generated_document_processing(
+                    document_id=doc_id,
+                    owner_user_id=owner_user_id,
+                    normalized_file_name=str(document_item.get('file_name') or 'generated-artifact.json').strip() or 'generated-artifact.json',
+                    file_content_bytes=artifact_bytes,
+                    public_workspace_id=active_ws,
+                )
+            except Exception as exc:
+                update_document(
+                    document_id=doc_id,
+                    user_id=owner_user_id,
+                    public_workspace_id=active_ws,
+                    status=f'Approval failed: {str(exc)}',
+                    generated_artifact_promotion_status='approval_failed',
+                )
+                raise
+
+            _cleanup_public_generated_artifact_notifications(doc_id, active_ws)
+            invalidate_public_workspace_search_cache(active_ws)
+
+            workspace_name = str(ws_doc.get('name') or 'this public workspace').strip() or 'this public workspace'
+            create_notification(
+                user_id=owner_user_id,
+                notification_type='approval_request_approved',
+                title='Generated artifact approved',
+                message=f"{str(document_item.get('file_name') or 'Your generated artifact').strip()} was approved for {workspace_name} and is now processing.",
+                link_url='/public_workspaces',
+                link_context={
+                    'workspace_type': 'public',
+                    'public_workspace_id': active_ws,
+                    'document_id': doc_id,
+                },
+                metadata={
+                    'document_id': doc_id,
+                    'public_workspace_id': active_ws,
+                    'request_type': 'generated_artifact_promotion',
+                },
+            )
+
+            return jsonify({
+                'message': 'Generated artifact approved and queued for processing',
+                'document_id': doc_id,
+            }), 200
+        except PermissionError as exc:
+            return jsonify({'error': str(exc)}), 403
+        except LookupError as exc:
+            return jsonify({'error': str(exc)}), 404
+        except ValueError as exc:
+            return jsonify({'error': str(exc)}), 400
+        except Exception as e:
+            return jsonify({'error': f'Error approving generated artifact: {str(e)}'}), 500
+
+    @app.route('/api/public_documents/<doc_id>/deny-generated-artifact', methods=['POST'])
+    @swagger_route(security=get_auth_security())
+    @login_required
+    @user_required
+    @enabled_required('enable_public_workspaces')
+    def api_deny_public_generated_artifact(doc_id):
+        """Deny a pending generated chat artifact promotion in the active public workspace."""
+        user_id = get_current_user_id()
+        if not user_id:
+            return jsonify({'error': 'User not authenticated'}), 401
+
+        try:
+            active_ws, ws_doc, role = require_active_public_workspace(user_id)
+            if role not in ['Owner', 'Admin', 'DocumentManager']:
+                return jsonify({'error': 'Access denied'}), 403
+
+            document_item = get_document_metadata(
+                document_id=doc_id,
+                user_id=user_id,
+                public_workspace_id=active_ws,
+            )
+            if not document_item:
+                return jsonify({'error': 'Document not found or access denied'}), 404
+
+            promotion_status = str(document_item.get('generated_artifact_promotion_status') or '').strip().lower()
+            if promotion_status != 'pending_approval':
+                return jsonify({'error': 'Document is not awaiting generated artifact approval'}), 400
+
+            requester_user_id = (
+                str(document_item.get('generated_artifact_requested_by_user_id') or '').strip()
+                or str(document_item.get('user_id') or '').strip()
+            )
+            document_name = str(document_item.get('file_name') or 'This generated artifact').strip() or 'This generated artifact'
+            workspace_name = str(ws_doc.get('name') or 'this public workspace').strip() or 'this public workspace'
+            denier_name = _get_generated_artifact_actor_name(get_current_user_info(), user_id)
+
+            delete_document_revision(
+                user_id=user_id,
+                document_id=doc_id,
+                delete_mode='all_versions',
+                public_workspace_id=active_ws,
+            )
+            _cleanup_public_generated_artifact_notifications(doc_id, active_ws)
+            invalidate_public_workspace_search_cache(active_ws)
+
+            if requester_user_id:
+                create_notification(
+                    user_id=requester_user_id,
+                    notification_type='approval_request_denied',
+                    title='Generated artifact denied',
+                    message=f"{document_name} was denied for {workspace_name} by {denier_name}.",
+                    link_url='/public_workspaces',
+                    link_context={
+                        'workspace_type': 'public',
+                        'public_workspace_id': active_ws,
+                    },
+                    metadata={
+                        'document_id': doc_id,
+                        'public_workspace_id': active_ws,
+                        'request_type': 'generated_artifact_promotion',
+                    },
+                )
+
+            return jsonify({'message': 'Generated artifact request denied and removed from the public workspace.'}), 200
+        except PermissionError as exc:
+            return jsonify({'error': str(exc)}), 403
+        except LookupError as exc:
+            return jsonify({'error': str(exc)}), 404
+        except ValueError as exc:
+            return jsonify({'error': str(exc)}), 400
+        except Exception as e:
+            return jsonify({'error': f'Error denying generated artifact: {str(e)}'}), 500
+
+    @app.route('/api/public_documents/<doc_id>/cancel-generated-artifact', methods=['POST'])
+    @swagger_route(security=get_auth_security())
+    @login_required
+    @user_required
+    @enabled_required('enable_public_workspaces')
+    def api_cancel_public_generated_artifact(doc_id):
+        """Cancel a pending generated chat artifact promotion requested by the current user."""
+        user_id = get_current_user_id()
+        if not user_id:
+            return jsonify({'error': 'User not authenticated'}), 401
+
+        try:
+            active_ws, _, _ = require_active_public_workspace(user_id)
+
+            document_item = get_document_metadata(
+                document_id=doc_id,
+                user_id=user_id,
+                public_workspace_id=active_ws,
+            )
+            if not document_item:
+                return jsonify({'error': 'Document not found or access denied'}), 404
+
+            promotion_status = str(document_item.get('generated_artifact_promotion_status') or '').strip().lower()
+            if promotion_status != 'pending_approval':
+                return jsonify({'error': 'Document is not awaiting generated artifact approval'}), 400
+
+            requester_user_id = (
+                str(document_item.get('generated_artifact_requested_by_user_id') or '').strip()
+                or str(document_item.get('user_id') or '').strip()
+            )
+            if requester_user_id != user_id:
+                return jsonify({'error': 'Only the requester can cancel this generated artifact request'}), 403
+
+            delete_document_revision(
+                user_id=user_id,
+                document_id=doc_id,
+                delete_mode='all_versions',
+                public_workspace_id=active_ws,
+            )
+            _cleanup_public_generated_artifact_notifications(doc_id, active_ws)
+            invalidate_public_workspace_search_cache(active_ws)
+
+            return jsonify({'message': 'Generated artifact request canceled.'}), 200
+        except PermissionError as exc:
+            return jsonify({'error': str(exc)}), 403
+        except LookupError as exc:
+            return jsonify({'error': str(exc)}), 404
+        except ValueError as exc:
+            return jsonify({'error': str(exc)}), 400
+        except Exception as e:
+            return jsonify({'error': f'Error canceling generated artifact: {str(e)}'}), 500
+
     @app.route('/api/public_documents/<doc_id>/extract_metadata', methods=['POST'])
     @swagger_route(security=get_auth_security())
     @login_required
@@ -430,16 +862,103 @@ def register_route_backend_public_documents(app):
         settings = get_settings()
         if not settings.get('enable_extract_meta_data'):
             return jsonify({'error':'Not enabled'}), 403
-        user_cfg = get_user_settings(user_id)
-        active_ws = user_cfg['settings'].get('activePublicWorkspaceOid')
-        ws_doc = find_public_workspace_by_id(active_ws) if active_ws else None
-        from functions_public_workspaces import get_user_role_in_public_workspace
-        role = get_user_role_in_public_workspace(ws_doc, user_id) if ws_doc else None
-        if role not in ['Owner','Admin','DocumentManager']:
-            return jsonify({'error':'Access denied'}), 403
+        active_ws, _ws_doc, _role, error_response = _require_active_public_workspace_response(
+            user_id,
+            PUBLIC_WORKSPACE_MANAGER_ROLES,
+        )
+        if error_response:
+            return error_response
         executor = current_app.extensions['executor']
         executor.submit(process_metadata_extraction_background, document_id=doc_id, user_id=user_id, public_workspace_id=active_ws)
         return jsonify({'message':'Extraction queued'}), 200
+
+    @app.route('/api/public_documents/reprocess_extraction', methods=['POST'])
+    @swagger_route(security=get_auth_security())
+    @login_required
+    @user_required
+    @enabled_required('enable_public_workspaces')
+    def api_reprocess_public_document_extraction():
+        user_id = get_current_user_id()
+        if not user_id:
+            return jsonify({'error': 'User not authenticated'}), 401
+
+        try:
+            active_ws, ws_doc, _ = require_active_public_workspace(
+                user_id,
+                allowed_roles=('Owner', 'Admin', 'DocumentManager'),
+            )
+        except ValueError:
+            return jsonify({'error': 'No active public workspace selected'}), 400
+        except LookupError:
+            return jsonify({'error': 'Active public workspace not found'}), 404
+        except PermissionError:
+            return jsonify({'error': 'Access denied'}), 403
+
+        allowed, reason = check_public_workspace_status_allows_operation(ws_doc, 'delete')
+        if not allowed:
+            return jsonify({'error': reason}), 403
+
+        payload = request.get_json(silent=True) or {}
+        raw_mode = str(payload.get('extraction_mode') or payload.get('target_extraction_mode') or '').strip().lower()
+        if raw_mode not in DOCUMENT_INTELLIGENCE_MANUAL_EXTRACTION_MODES:
+            return jsonify({'error': 'Extraction mode must be Standard or Enhanced.'}), 400
+        target_mode = normalize_document_intelligence_manual_extraction_mode(raw_mode)
+
+        document_ids = payload.get('document_ids')
+        if not isinstance(document_ids, list):
+            doc_id = payload.get('document_id')
+            document_ids = [doc_id] if doc_id else []
+        document_ids = [str(document_id).strip() for document_id in document_ids if str(document_id or '').strip()]
+        if not document_ids:
+            return jsonify({'error': 'At least one document ID is required.'}), 400
+
+        queued = []
+        errors = []
+        for document_id in document_ids:
+            try:
+                document_item = get_document_metadata(
+                    document_id=document_id,
+                    user_id=user_id,
+                    public_workspace_id=active_ws,
+                )
+                if not document_item:
+                    errors.append({'document_id': document_id, 'error': 'Document not found.'})
+                    continue
+                if document_item.get('public_workspace_id') != active_ws:
+                    errors.append({'document_id': document_id, 'error': 'Only documents in the active public workspace can have extraction changed.'})
+                    continue
+
+                is_valid, validation_message = validate_document_reprocess_source(
+                    document_item,
+                    user_id=user_id,
+                    public_workspace_id=active_ws,
+                )
+                if not is_valid:
+                    errors.append({'document_id': document_id, 'error': validation_message})
+                    continue
+
+                current_app.extensions['executor'].submit_stored(
+                    f"{document_id}_public_di_reprocess_{target_mode}",
+                    process_document_reprocess_extraction_background,
+                    document_id=document_id,
+                    user_id=user_id,
+                    target_extraction_mode=target_mode,
+                    public_workspace_id=active_ws,
+                )
+                queued.append({'document_id': document_id, 'extraction_mode': target_mode})
+            except Exception as e:
+                errors.append({'document_id': document_id, 'error': str(e)})
+
+        if queued:
+            invalidate_public_workspace_search_cache(active_ws)
+
+        status_code = 202 if queued and not errors else (207 if queued else 400)
+        target_mode_label = "Enhanced" if target_mode == "layout" else "Standard"
+        return jsonify({
+            'message': f'Queued {len(queued)} document(s) to extract again with {target_mode_label}.',
+            'queued': queued,
+            'errors': errors,
+        }), status_code
 
     @app.route('/api/public_documents/upgrade_legacy', methods=['POST'])
     @swagger_route(security=get_auth_security())
@@ -448,13 +967,12 @@ def register_route_backend_public_documents(app):
     @enabled_required('enable_public_workspaces')
     def api_upgrade_legacy_public_documents():
         user_id = get_current_user_id()
-        user_cfg = get_user_settings(user_id)
-        active_ws = user_cfg['settings'].get('activePublicWorkspaceOid')
-        ws_doc = find_public_workspace_by_id(active_ws) if active_ws else None
-        from functions_public_workspaces import get_user_role_in_public_workspace
-        role = get_user_role_in_public_workspace(ws_doc, user_id) if ws_doc else None
-        if role not in ['Owner','Admin','DocumentManager']:
-            return jsonify({'error':'Access denied'}), 403
+        active_ws, _ws_doc, _role, error_response = _require_active_public_workspace_response(
+            user_id,
+            PUBLIC_WORKSPACE_MANAGER_ROLES,
+        )
+        if error_response:
+            return error_response
         try:
             count = upgrade_legacy_documents(user_id=user_id, public_workspace_id=active_ws)
             return jsonify({'message':f'Upgraded {count} docs'}), 200
@@ -520,28 +1038,23 @@ def register_route_backend_public_documents(app):
         if not user_id:
             return jsonify({'error': 'User not authenticated'}), 401
 
-        user_cfg = get_user_settings(user_id)
-        active_ws = user_cfg['settings'].get('activePublicWorkspaceOid')
-        if not active_ws:
-            return jsonify({'error': 'No active public workspace selected'}), 400
-
-        ws_doc = find_public_workspace_by_id(active_ws)
-        if not ws_doc:
-            return jsonify({'error': 'Active public workspace not found'}), 404
-
-        from functions_public_workspaces import get_user_role_in_public_workspace
-        role = get_user_role_in_public_workspace(ws_doc, user_id)
-        if role not in ['Owner', 'Admin', 'DocumentManager']:
-            return jsonify({'error': 'You do not have permission to manage tags'}), 403
+        active_ws, ws_doc, _role, error_response = _require_active_public_workspace_response(
+            user_id,
+            PUBLIC_WORKSPACE_MANAGER_ROLES,
+        )
+        if error_response:
+            if error_response[1] == 403:
+                return jsonify({'error': 'You do not have permission to manage tags'}), 403
+            return error_response
 
         data = request.get_json()
         tag_name = data.get('tag_name')
-        color = data.get('color', '#0d6efd')
+        color = data.get('color')
 
         if not tag_name:
             return jsonify({'error': 'tag_name is required'}), 400
 
-        from functions_documents import normalize_tag, validate_tags
+        from functions_documents import normalize_tag, validate_tag_color, validate_tags
         from datetime import datetime, timezone
 
         try:
@@ -550,6 +1063,9 @@ def register_route_backend_public_documents(app):
                 return jsonify({'error': error_msg}), 400
 
             normalized_tag = normalized_tags[0]
+            is_valid_color, color_error, normalized_color = validate_tag_color(color, normalized_tag)
+            if not is_valid_color:
+                return jsonify({'error': color_error}), 400
 
             tag_defs = ws_doc.get('tag_definitions', {})
 
@@ -557,7 +1073,7 @@ def register_route_backend_public_documents(app):
                 return jsonify({'error': 'Tag already exists'}), 409
 
             tag_defs[normalized_tag] = {
-                'color': color,
+                'color': normalized_color,
                 'created_at': datetime.now(timezone.utc).isoformat()
             }
             ws_doc['tag_definitions'] = tag_defs
@@ -567,7 +1083,7 @@ def register_route_backend_public_documents(app):
                 'message': f'Tag "{normalized_tag}" created successfully',
                 'tag': {
                     'name': normalized_tag,
-                    'color': color
+                    'color': normalized_color
                 }
             }), 201
 
@@ -594,19 +1110,14 @@ def register_route_backend_public_documents(app):
         if not user_id:
             return jsonify({'error': 'User not authenticated'}), 401
 
-        user_cfg = get_user_settings(user_id)
-        active_ws = user_cfg['settings'].get('activePublicWorkspaceOid')
-        if not active_ws:
-            return jsonify({'error': 'No active public workspace selected'}), 400
-
-        ws_doc = find_public_workspace_by_id(active_ws)
-        if not ws_doc:
-            return jsonify({'error': 'Active public workspace not found'}), 404
-
-        from functions_public_workspaces import get_user_role_in_public_workspace
-        role = get_user_role_in_public_workspace(ws_doc, user_id)
-        if role not in ['Owner', 'Admin', 'DocumentManager']:
-            return jsonify({'error': 'You do not have permission to manage tags'}), 403
+        active_ws, _ws_doc, _role, error_response = _require_active_public_workspace_response(
+            user_id,
+            PUBLIC_WORKSPACE_MANAGER_ROLES,
+        )
+        if error_response:
+            if error_response[1] == 403:
+                return jsonify({'error': 'You do not have permission to manage tags'}), 403
+            return error_response
 
         data = request.get_json()
         document_ids = data.get('document_ids', [])
@@ -722,25 +1233,20 @@ def register_route_backend_public_documents(app):
         if not user_id:
             return jsonify({'error': 'User not authenticated'}), 401
 
-        user_cfg = get_user_settings(user_id)
-        active_ws = user_cfg['settings'].get('activePublicWorkspaceOid')
-        if not active_ws:
-            return jsonify({'error': 'No active public workspace selected'}), 400
-
-        ws_doc = find_public_workspace_by_id(active_ws)
-        if not ws_doc:
-            return jsonify({'error': 'Active public workspace not found'}), 404
-
-        from functions_public_workspaces import get_user_role_in_public_workspace
-        role = get_user_role_in_public_workspace(ws_doc, user_id)
-        if role not in ['Owner', 'Admin', 'DocumentManager']:
-            return jsonify({'error': 'You do not have permission to manage tags'}), 403
+        active_ws, ws_doc, _role, error_response = _require_active_public_workspace_response(
+            user_id,
+            PUBLIC_WORKSPACE_MANAGER_ROLES,
+        )
+        if error_response:
+            if error_response[1] == 403:
+                return jsonify({'error': 'You do not have permission to manage tags'}), 403
+            return error_response
 
         data = request.get_json()
         new_name = data.get('new_name')
         new_color = data.get('color')
 
-        from functions_documents import normalize_tag, validate_tags, update_document, propagate_tags_to_chunks
+        from functions_documents import normalize_tag, validate_tag_color, validate_tags, update_document, propagate_tags_to_chunks
 
         try:
             normalized_old_tag = normalize_tag(tag_name)
@@ -801,14 +1307,18 @@ def register_route_backend_public_documents(app):
                 }), 200
 
             if new_color:
+                is_valid_color, color_error, normalized_color = validate_tag_color(new_color, normalized_old_tag)
+                if not is_valid_color:
+                    return jsonify({'error': color_error}), 400
+
                 tag_defs = ws_doc.get('tag_definitions', {})
 
                 if normalized_old_tag in tag_defs:
-                    tag_defs[normalized_old_tag]['color'] = new_color
+                    tag_defs[normalized_old_tag]['color'] = normalized_color
                 else:
                     from datetime import datetime, timezone
                     tag_defs[normalized_old_tag] = {
-                        'color': new_color,
+                        'color': normalized_color,
                         'created_at': datetime.now(timezone.utc).isoformat()
                     }
 
@@ -816,7 +1326,11 @@ def register_route_backend_public_documents(app):
                 cosmos_public_workspaces_container.upsert_item(ws_doc)
 
                 return jsonify({
-                    'message': f'Tag color updated for "{normalized_old_tag}"'
+                    'message': f'Tag color updated for "{normalized_old_tag}"',
+                    'tag': {
+                        'name': normalized_old_tag,
+                        'color': normalized_color
+                    }
                 }), 200
 
             return jsonify({'error': 'No updates specified'}), 400
@@ -835,19 +1349,14 @@ def register_route_backend_public_documents(app):
         if not user_id:
             return jsonify({'error': 'User not authenticated'}), 401
 
-        user_cfg = get_user_settings(user_id)
-        active_ws = user_cfg['settings'].get('activePublicWorkspaceOid')
-        if not active_ws:
-            return jsonify({'error': 'No active public workspace selected'}), 400
-
-        ws_doc = find_public_workspace_by_id(active_ws)
-        if not ws_doc:
-            return jsonify({'error': 'Active public workspace not found'}), 404
-
-        from functions_public_workspaces import get_user_role_in_public_workspace
-        role = get_user_role_in_public_workspace(ws_doc, user_id)
-        if role not in ['Owner', 'Admin', 'DocumentManager']:
-            return jsonify({'error': 'You do not have permission to manage tags'}), 403
+        active_ws, ws_doc, _role, error_response = _require_active_public_workspace_response(
+            user_id,
+            PUBLIC_WORKSPACE_MANAGER_ROLES,
+        )
+        if error_response:
+            if error_response[1] == 403:
+                return jsonify({'error': 'You do not have permission to manage tags'}), 403
+            return error_response
 
         from functions_documents import normalize_tag, update_document, propagate_tags_to_chunks
 

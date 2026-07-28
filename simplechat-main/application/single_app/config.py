@@ -21,6 +21,7 @@ mimetypes.add_type('font/woff', '.woff')
 mimetypes.add_type('font/woff2', '.woff2')
 mimetypes.add_type('font/ttf', '.ttf')
 mimetypes.add_type('font/otf', '.otf')
+mimetypes.add_type('application/vnd.ms-outlook', '.msg')
 import openpyxl
 import xlrd
 import traceback
@@ -94,32 +95,42 @@ load_dotenv()
 EXECUTOR_TYPE = 'thread'
 EXECUTOR_MAX_WORKERS = 30
 SESSION_TYPE = 'filesystem'
-VERSION = "0.241.006"
+VERSION = "0.250.001"
+
+SESSION_COOKIE_SAMESITE = os.getenv('SESSION_COOKIE_SAMESITE', 'Lax')
+SESSION_COOKIE_HTTPONLY = os.getenv('SESSION_COOKIE_HTTPONLY', 'true').lower() != 'false'
+SESSION_COOKIE_SECURE = os.getenv('SESSION_COOKIE_SECURE', 'false').lower() == 'true'
+CSRF_ENFORCE_ORIGIN_FOR_UNSAFE_METHODS = os.getenv(
+    'CSRF_ENFORCE_ORIGIN_FOR_UNSAFE_METHODS',
+    'true'
+).lower() != 'false'
+def _split_origin_list(raw_value):
+    """Return trimmed origins from comma, space, or JSON-list environment values."""
+    if not raw_value:
+        return []
+
+    value = raw_value.strip()
+    parsed_values = []
+    if value.startswith('['):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                parsed_values = parsed
+        except (TypeError, ValueError):
+            parsed_values = []
+    else:
+        parsed_values = re.split(r'[\s,]+', value)
+
+    return [
+        str(origin).strip().rstrip('/')
+        for origin in parsed_values
+        if str(origin).strip()
+    ]
+
+
+CSRF_TRUSTED_ORIGINS = _split_origin_list(os.getenv('CSRF_TRUSTED_ORIGINS', ''))
 
 SECRET_KEY = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
-
-# Security Headers Configuration
-SECURITY_HEADERS = {
-    'X-Content-Type-Options': 'nosniff',
-    'X-Frame-Options': 'DENY',
-    'X-XSS-Protection': '1; mode=block',
-    'Referrer-Policy': 'strict-origin-when-cross-origin',
-    'Content-Security-Policy': (
-        "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
-        #"script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net https://code.jquery.com https://stackpath.bootstrapcdn.com; "
-        "style-src 'self' 'unsafe-inline'; "
-        #"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://stackpath.bootstrapcdn.com; "
-        "img-src 'self' data: https: blob:; "
-        "font-src 'self'; "
-        #"font-src 'self' https://cdn.jsdelivr.net https://stackpath.bootstrapcdn.com; "
-        "connect-src 'self' https: wss: ws:; "
-        "media-src 'self' blob:; "
-        "object-src 'none'; "
-        "frame-ancestors 'self'; "
-        "base-uri 'self';"
-    )
-}
 
 # Security Configuration
 ENABLE_STRICT_TRANSPORT_SECURITY = os.getenv('ENABLE_HSTS', 'false').lower() == 'true'
@@ -132,8 +143,10 @@ CLIENTS_LOCK = threading.Lock()
 BASE_ALLOWED_EXTENSIONS = {'txt', 'doc', 'docm', 'html', 'md', 'json', 'xml', 'yaml', 'yml', 'log'}
 DOCUMENT_EXTENSIONS = {'pdf', 'docx', 'pptx', 'ppt'}
 TABULAR_EXTENSIONS = {'csv', 'xlsx', 'xls', 'xlsm'}
+VISIO_EXTENSIONS = {'vsdx'}
+EMAIL_EXTENSIONS = {'msg'}
 
-# Updates to image, video, or audio extensions should also be made in static/js/chat/chat-enhanced-citations.js if the new file types can be natively rendered in the browser.
+# Updates to image, video, audio, or Visio extensions should also be made in static/js/chat/chat-enhanced-citations.js if the new file types can be natively rendered in the browser.
 IMAGE_EXTENSIONS = {'jpg', 'jpeg', 'png', 'bmp', 'tiff', 'tif', 'heif', 'heic'}
 
 # Optional extensions by feature
@@ -150,6 +163,7 @@ def get_allowed_extensions(enable_video=False, enable_audio=False):
     
     Args:
         enable_video: Whether video file support is enabled
+        enable_audio: Whether audio file support is enabled
     Returns:
         set: Allowed file extensions
     """
@@ -157,6 +171,8 @@ def get_allowed_extensions(enable_video=False, enable_audio=False):
     extensions.update(DOCUMENT_EXTENSIONS)
     extensions.update(IMAGE_EXTENSIONS)
     extensions.update(TABULAR_EXTENSIONS)
+    extensions.update(VISIO_EXTENSIONS)
+    extensions.update(EMAIL_EXTENSIONS)
 
     if enable_video:
         extensions.update(VIDEO_EXTENSIONS)
@@ -191,6 +207,7 @@ IDLE_TIMEOUT_EXEMPT_PATHS = {
     '/logout/local',
     '/getAToken',
     '/getATokenApi',
+    '/ci-auth/session',
     '/robots933456.txt',
     '/favicon.ico'
 }
@@ -208,9 +225,21 @@ CLIENT_SECRET = os.getenv("MICROSOFT_PROVIDER_AUTHENTICATION_SECRET")
 TENANT_ID = os.getenv("TENANT_ID")
 SCOPE = ["User.Read", "User.ReadBasic.All", "People.Read.All", "Group.Read.All"] # Adjust scope according to your needs
 MICROSOFT_PROVIDER_AUTHENTICATION_SECRET = os.getenv("MICROSOFT_PROVIDER_AUTHENTICATION_SECRET")
+ENABLE_CI_BEARER_SESSION_AUTH = os.getenv("ENABLE_CI_BEARER_SESSION_AUTH", "false").lower() == "true"
+CI_BEARER_SESSION_ALLOWED_APP_IDS = [
+    app_id.strip().lower()
+    for app_id in os.getenv("CI_BEARER_SESSION_ALLOWED_APP_IDS", "").split(",")
+    if app_id.strip()
+]
+CI_BEARER_SESSION_REQUIRED_ROLE = os.getenv("CI_BEARER_SESSION_REQUIRED_ROLE", "Admin")
 LOGIN_REDIRECT_URL = os.getenv("LOGIN_REDIRECT_URL")
 HOME_REDIRECT_URL = os.getenv("HOME_REDIRECT_URL")  # Front Door URL for home page
 AZURE_ENVIRONMENT = os.getenv("AZURE_ENVIRONMENT", "public") # public, usgovernment, custom
+ENABLE_TEAMS_SSO = os.getenv("ENABLE_TEAMS_SSO", "false").lower() == "true"
+TEAMS_APP_RESOURCE = os.getenv("TEAMS_APP_RESOURCE", "")
+TEAMS_SUCCESS_REDIRECT_PATH = os.getenv("TEAMS_SUCCESS_REDIRECT_PATH", "/chats")
+TEAMS_FRAME_ANCESTORS = _split_origin_list(os.getenv("TEAMS_FRAME_ANCESTORS", ""))
+CUSTOM_TEAMS_ORIGINS = _split_origin_list(os.getenv("CUSTOM_TEAMS_ORIGINS", ""))
 
 WORD_CHUNK_SIZE = 400
 
@@ -242,6 +271,7 @@ if AZURE_ENVIRONMENT == "custom":
     KEY_VAULT_DOMAIN = os.getenv("KEY_VAULT_DOMAIN", ".vault.azure.net")
 elif AZURE_ENVIRONMENT == "usgovernment":
     OIDC_METADATA_URL = f"https://login.microsoftonline.us/{TENANT_ID}/v2.0/.well-known/openid-configuration"
+    OIDC_METADATA_URL = CUSTOM_OIDC_METADATA_URL_VALUE or f"https://login.microsoftonline.us/{TENANT_ID}/v2.0/.well-known/openid-configuration"
     resource_manager = "https://management.usgovcloudapi.net"
     credential_scopes=[resource_manager + "/.default"]
     cognitive_services_scope = "https://cognitiveservices.azure.us/.default"
@@ -255,6 +285,56 @@ else:
     cognitive_services_scope = "https://cognitiveservices.azure.com/.default"
     video_indexer_endpoint = "https://api.videoindexer.ai"
     KEY_VAULT_DOMAIN = ".vault.azure.net"
+
+if ENABLE_TEAMS_SSO and not TEAMS_FRAME_ANCESTORS:
+    if AZURE_ENVIRONMENT == "usgovernment":
+        TEAMS_FRAME_ANCESTORS = [
+            "https://teams.microsoft.us",
+            "https://*.teams.microsoft.us",
+        ]
+    elif AZURE_ENVIRONMENT == "public":
+        TEAMS_FRAME_ANCESTORS = [
+            "https://teams.microsoft.com",
+            "https://*.teams.microsoft.com",
+        ]
+
+if ENABLE_TEAMS_SSO and not CUSTOM_TEAMS_ORIGINS:
+    CUSTOM_TEAMS_ORIGINS = list(TEAMS_FRAME_ANCESTORS)
+
+TEAMS_ALLOWED_ORIGINS = list(dict.fromkeys(TEAMS_FRAME_ANCESTORS + CUSTOM_TEAMS_ORIGINS))
+if ENABLE_TEAMS_SSO:
+    CSRF_TRUSTED_ORIGINS = list(dict.fromkeys(CSRF_TRUSTED_ORIGINS + TEAMS_ALLOWED_ORIGINS))
+    if SESSION_COOKIE_SAMESITE.lower() != 'none':
+        SESSION_COOKIE_SAMESITE = 'None'
+    SESSION_COOKIE_SECURE = True
+
+TEAMS_APP_RESOURCE = TEAMS_APP_RESOURCE or (f"api://{CLIENT_ID}" if CLIENT_ID else "")
+FRAME_ANCESTORS_DIRECTIVE = "frame-ancestors 'self'"
+if TEAMS_FRAME_ANCESTORS:
+    FRAME_ANCESTORS_DIRECTIVE = f"{FRAME_ANCESTORS_DIRECTIVE} {' '.join(TEAMS_FRAME_ANCESTORS)}"
+
+# Security Headers Configuration
+SECURITY_HEADERS = {
+    'X-Content-Type-Options': 'nosniff',
+    'X-XSS-Protection': '1; mode=block',
+    'Referrer-Policy': 'strict-origin-when-cross-origin',
+    'Content-Security-Policy': (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: https: blob:; "
+        "font-src 'self'; "
+        "connect-src 'self' https: wss: ws:; "
+        "media-src 'self' blob:; "
+        "frame-src 'self' blob:; "
+        "object-src 'none'; "
+        f"{FRAME_ANCESTORS_DIRECTIVE}; "
+        "base-uri 'self';"
+    )
+}
+
+if not ENABLE_TEAMS_SSO:
+    SECURITY_HEADERS['X-Frame-Options'] = 'DENY'
 
 def get_redis_cache_infrastructure_endpoint(redis_hostname: str) -> str:
     """
@@ -308,6 +388,60 @@ cosmos_messages_container = cosmos_database.create_container_if_not_exists(
     partition_key=PartitionKey(path="/conversation_id")
 )
 
+cosmos_tabular_export_runs_container_name = "tabular_export_runs"
+cosmos_tabular_export_runs_container = cosmos_database.create_container_if_not_exists(
+    id=cosmos_tabular_export_runs_container_name,
+    partition_key=PartitionKey(path="/user_id")
+)
+
+cosmos_data_management_jobs_container_name = "data_management_jobs"
+cosmos_data_management_jobs_container = cosmos_database.create_container_if_not_exists(
+    id=cosmos_data_management_jobs_container_name,
+    partition_key=PartitionKey(path="/id")
+)
+
+cosmos_data_management_job_items_container_name = "data_management_job_items"
+cosmos_data_management_job_items_container = cosmos_database.create_container_if_not_exists(
+    id=cosmos_data_management_job_items_container_name,
+    partition_key=PartitionKey(path="/job_id")
+)
+
+cosmos_personal_workflows_container_name = "personal_workflows"
+cosmos_personal_workflows_container = cosmos_database.create_container_if_not_exists(
+    id=cosmos_personal_workflows_container_name,
+    partition_key=PartitionKey(path="/user_id")
+)
+
+cosmos_personal_workflow_runs_container_name = "personal_workflow_runs"
+cosmos_personal_workflow_runs_container = cosmos_database.create_container_if_not_exists(
+    id=cosmos_personal_workflow_runs_container_name,
+    partition_key=PartitionKey(path="/user_id")
+)
+
+cosmos_personal_workflow_run_items_container_name = "personal_workflow_run_items"
+cosmos_personal_workflow_run_items_container = cosmos_database.create_container_if_not_exists(
+    id=cosmos_personal_workflow_run_items_container_name,
+    partition_key=PartitionKey(path="/run_id")
+)
+
+cosmos_group_workflows_container_name = "group_workflows"
+cosmos_group_workflows_container = cosmos_database.create_container_if_not_exists(
+    id=cosmos_group_workflows_container_name,
+    partition_key=PartitionKey(path="/group_id")
+)
+
+cosmos_group_workflow_runs_container_name = "group_workflow_runs"
+cosmos_group_workflow_runs_container = cosmos_database.create_container_if_not_exists(
+    id=cosmos_group_workflow_runs_container_name,
+    partition_key=PartitionKey(path="/group_id")
+)
+
+cosmos_group_workflow_run_items_container_name = "group_workflow_run_items"
+cosmos_group_workflow_run_items_container = cosmos_database.create_container_if_not_exists(
+    id=cosmos_group_workflow_run_items_container_name,
+    partition_key=PartitionKey(path="/run_id")
+)
+
 cosmos_group_conversations_container_name = "group_conversations"
 cosmos_group_conversations_container = cosmos_database.create_container_if_not_exists(
     id=cosmos_group_conversations_container_name,
@@ -320,9 +454,33 @@ cosmos_group_messages_container = cosmos_database.create_container_if_not_exists
     partition_key=PartitionKey(path="/conversation_id")
 )
 
+cosmos_collaboration_conversations_container_name = "collaboration_conversations"
+cosmos_collaboration_conversations_container = cosmos_database.create_container_if_not_exists(
+    id=cosmos_collaboration_conversations_container_name,
+    partition_key=PartitionKey(path="/id")
+)
+
+cosmos_collaboration_messages_container_name = "collaboration_messages"
+cosmos_collaboration_messages_container = cosmos_database.create_container_if_not_exists(
+    id=cosmos_collaboration_messages_container_name,
+    partition_key=PartitionKey(path="/conversation_id")
+)
+
+cosmos_collaboration_user_state_container_name = "collaboration_user_state"
+cosmos_collaboration_user_state_container = cosmos_database.create_container_if_not_exists(
+    id=cosmos_collaboration_user_state_container_name,
+    partition_key=PartitionKey(path="/user_id")
+)
+
 cosmos_settings_container_name = "settings"
 cosmos_settings_container = cosmos_database.create_container_if_not_exists(
     id=cosmos_settings_container_name,
+    partition_key=PartitionKey(path="/id")
+)
+
+cosmos_custom_pages_container_name = "custom_pages"
+cosmos_custom_pages_container = cosmos_database.create_container_if_not_exists(
+    id=cosmos_custom_pages_container_name,
     partition_key=PartitionKey(path="/id")
 )
 
@@ -354,6 +512,84 @@ cosmos_public_documents_container_name = "public_documents"
 cosmos_public_documents_container = cosmos_database.create_container_if_not_exists(
     id=cosmos_public_documents_container_name,
     partition_key=PartitionKey(path="/id")
+)
+
+cosmos_personal_file_sync_sources_container_name = "personal_file_sync_sources"
+cosmos_personal_file_sync_sources_container = cosmos_database.create_container_if_not_exists(
+    id=cosmos_personal_file_sync_sources_container_name,
+    partition_key=PartitionKey(path="/user_id")
+)
+
+cosmos_group_file_sync_sources_container_name = "group_file_sync_sources"
+cosmos_group_file_sync_sources_container = cosmos_database.create_container_if_not_exists(
+    id=cosmos_group_file_sync_sources_container_name,
+    partition_key=PartitionKey(path="/group_id")
+)
+
+cosmos_public_file_sync_sources_container_name = "public_file_sync_sources"
+cosmos_public_file_sync_sources_container = cosmos_database.create_container_if_not_exists(
+    id=cosmos_public_file_sync_sources_container_name,
+    partition_key=PartitionKey(path="/public_workspace_id")
+)
+
+cosmos_personal_workspace_identities_container_name = "personal_workspace_identities"
+cosmos_personal_workspace_identities_container = cosmos_database.create_container_if_not_exists(
+    id=cosmos_personal_workspace_identities_container_name,
+    partition_key=PartitionKey(path="/user_id")
+)
+
+cosmos_group_workspace_identities_container_name = "group_workspace_identities"
+cosmos_group_workspace_identities_container = cosmos_database.create_container_if_not_exists(
+    id=cosmos_group_workspace_identities_container_name,
+    partition_key=PartitionKey(path="/group_id")
+)
+
+cosmos_public_workspace_identities_container_name = "public_workspace_identities"
+cosmos_public_workspace_identities_container = cosmos_database.create_container_if_not_exists(
+    id=cosmos_public_workspace_identities_container_name,
+    partition_key=PartitionKey(path="/public_workspace_id")
+)
+
+cosmos_global_workspace_identities_container_name = "global_workspace_identities"
+cosmos_global_workspace_identities_container = cosmos_database.create_container_if_not_exists(
+    id=cosmos_global_workspace_identities_container_name,
+    partition_key=PartitionKey(path="/global_id")
+)
+
+cosmos_personal_file_sync_items_container_name = "personal_file_sync_items"
+cosmos_personal_file_sync_items_container = cosmos_database.create_container_if_not_exists(
+    id=cosmos_personal_file_sync_items_container_name,
+    partition_key=PartitionKey(path="/source_id")
+)
+
+cosmos_group_file_sync_items_container_name = "group_file_sync_items"
+cosmos_group_file_sync_items_container = cosmos_database.create_container_if_not_exists(
+    id=cosmos_group_file_sync_items_container_name,
+    partition_key=PartitionKey(path="/source_id")
+)
+
+cosmos_public_file_sync_items_container_name = "public_file_sync_items"
+cosmos_public_file_sync_items_container = cosmos_database.create_container_if_not_exists(
+    id=cosmos_public_file_sync_items_container_name,
+    partition_key=PartitionKey(path="/source_id")
+)
+
+cosmos_personal_file_sync_runs_container_name = "personal_file_sync_runs"
+cosmos_personal_file_sync_runs_container = cosmos_database.create_container_if_not_exists(
+    id=cosmos_personal_file_sync_runs_container_name,
+    partition_key=PartitionKey(path="/source_id")
+)
+
+cosmos_group_file_sync_runs_container_name = "group_file_sync_runs"
+cosmos_group_file_sync_runs_container = cosmos_database.create_container_if_not_exists(
+    id=cosmos_group_file_sync_runs_container_name,
+    partition_key=PartitionKey(path="/source_id")
+)
+
+cosmos_public_file_sync_runs_container_name = "public_file_sync_runs"
+cosmos_public_file_sync_runs_container = cosmos_database.create_container_if_not_exists(
+    id=cosmos_public_file_sync_runs_container_name,
+    partition_key=PartitionKey(path="/source_id")
 )
 
 cosmos_user_settings_container_name = "user_settings"
@@ -446,6 +682,18 @@ cosmos_global_actions_container = cosmos_database.create_container_if_not_exists
     partition_key=PartitionKey(path="/id")
 )
 
+cosmos_governance_policies_container_name = "governance_policies"
+cosmos_governance_policies_container = cosmos_database.create_container_if_not_exists(
+    id=cosmos_governance_policies_container_name,
+    partition_key=PartitionKey(path="/id")
+)
+
+cosmos_governance_item_policies_container_name = "governance_item_policies"
+cosmos_governance_item_policies_container = cosmos_database.create_container_if_not_exists(
+    id=cosmos_governance_item_policies_container_name,
+    partition_key=PartitionKey(path="/id")
+)
+
 cosmos_agent_templates_container_name = "agent_templates"
 cosmos_agent_templates_container = cosmos_database.create_container_if_not_exists(
     id=cosmos_agent_templates_container_name,
@@ -482,6 +730,13 @@ cosmos_approvals_container = cosmos_database.create_container_if_not_exists(
     id=cosmos_approvals_container_name,
     partition_key=PartitionKey(path="/group_id"),
     default_ttl=-1  # TTL disabled by default, enabled per-document for auto-cleanup
+)
+
+cosmos_msgraph_pending_actions_container_name = "msgraph_pending_actions"
+cosmos_msgraph_pending_actions_container = cosmos_database.create_container_if_not_exists(
+    id=cosmos_msgraph_pending_actions_container_name,
+    partition_key=PartitionKey(path="/user_id"),
+    default_ttl=-1
 )
 
 cosmos_thoughts_container_name = "thoughts"

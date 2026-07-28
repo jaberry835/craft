@@ -407,7 +407,7 @@ $paramStorageAccountSuffix = "sa" # Note: Storage account names need to be globa
 # --- Resource Specific Settings ---
 
 # App Service Plan
-$paramAppServicePlanSku = "P1V3" # Basic tier, 1 core, 1.75GB RAM. For US Gov, check available SKUs. (e.g., B1, P1V3, S1, I1V2)
+$paramAppServicePlanSku = "P1V3" # Premium V3 tier. For US Gov, check available SKUs. (e.g., B1, P1V3, S1, I1V2)
 
 # App Service (Web App)
 #$paramAppServiceRuntime = "DOTNETCORE|8.0" # Example runtime. Others: "NODE|18-lts", "PYTHON|3.11", "JAVA|17-java17"
@@ -419,6 +419,9 @@ $paramStorageAccessTier = "Hot"
 
 # Cosmos DB
 $paramCosmosDbKind = "GlobalDocumentDB" # For SQL API. Other: MongoDB, Cassandra, Gremlin, Table
+$paramCosmosDbCapacityMode = "Provisioned" # Default. Set to "Serverless" only for short-lived MVP/evaluation environments.
+$paramCosmosDbDatabaseName = "SimpleChat"
+$paramCosmosDbAutoscaleMaxThroughput = 1000
 
 # Azure OpenAI & Document Intelligence (Cognitive Services)
 $paramCognitiveServicesSku = "S0" # Standard tier. Check availability for OpenAI and Doc Intel in Azure Gov.
@@ -427,7 +430,8 @@ $paramCognitiveServicesSku = "S0" # Standard tier. Check availability for OpenAI
 #$paramAcrSku = "Basic" # Other options: Standard, Premium
 
 # Search Service
-$paramSearchSku = "basic" # Other options: standard, standard2, standard3. 'free' is not available in all regions or for all subscription types.
+$paramSearchSku = "standard" # Standard is Azure AI Search S1. Use 'free' only for short-lived MVP/evaluation environments.
+$paramSearchSemanticSearchSku = "standard" # Avoid the limited free semantic ranker quota by default.
 $paramSearchReplicaCount = 1
 $paramSearchPartitionCount = 1
 
@@ -665,13 +669,16 @@ function Ensure-OpenAiModelDeployment {
         [pscustomobject]$ModelDeployment
     )
 
-    $existingDeployment = az cognitiveservices account deployment show \
-        --name $AccountName \
-        --resource-group $ResourceGroupName \
-        --deployment-name $ModelDeployment.DeploymentName \
-        --subscription $SubscriptionId \
-        --query "name" \
-        --output tsv 2>$null
+    $showDeploymentArgs = @(
+        'cognitiveservices', 'account', 'deployment', 'show',
+        '--name', $AccountName,
+        '--resource-group', $ResourceGroupName,
+        '--deployment-name', $ModelDeployment.DeploymentName,
+        '--subscription', $SubscriptionId,
+        '--query', 'name',
+        '--output', 'tsv'
+    )
+    $existingDeployment = & az @showDeploymentArgs 2>$null
 
     if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($existingDeployment)) {
         Write-Host "Azure OpenAI $($ModelDeployment.Kind) deployment '$($ModelDeployment.DeploymentName)' already exists." -ForegroundColor Yellow
@@ -682,16 +689,19 @@ function Ensure-OpenAiModelDeployment {
 
     while ($true) {
         Write-Host "`n=====> Creating Azure OpenAI $($ModelDeployment.Kind) deployment '$($ModelDeployment.DeploymentName)' using deployment type '$currentSkuName'..."
-        az cognitiveservices account deployment create \
-            --name $AccountName \
-            --resource-group $ResourceGroupName \
-            --deployment-name $ModelDeployment.DeploymentName \
-            --model-name $ModelDeployment.ModelName \
-            --model-version $ModelDeployment.ModelVersion \
-            --model-format $ModelDeployment.ModelFormat \
-            --sku-name $currentSkuName \
-            --sku-capacity $ModelDeployment.SkuCapacity \
-            --subscription $SubscriptionId | Out-Null
+        $createDeploymentArgs = @(
+            'cognitiveservices', 'account', 'deployment', 'create',
+            '--name', $AccountName,
+            '--resource-group', $ResourceGroupName,
+            '--deployment-name', $ModelDeployment.DeploymentName,
+            '--model-name', $ModelDeployment.ModelName,
+            '--model-version', $ModelDeployment.ModelVersion,
+            '--model-format', $ModelDeployment.ModelFormat,
+            '--sku-name', $currentSkuName,
+            '--sku-capacity', $ModelDeployment.SkuCapacity,
+            '--subscription', $SubscriptionId
+        )
+        & az @createDeploymentArgs | Out-Null
 
         if ($LASTEXITCODE -eq 0) {
             Write-Host "Azure OpenAI $($ModelDeployment.Kind) deployment '$($ModelDeployment.DeploymentName)' created successfully." -ForegroundColor Green
@@ -761,10 +771,10 @@ function Invoke-AcrContainerBuild {
     }
 }
 
-function CosmosDb_CreateContainer($databaseName, $containerName)
+function CosmosDb_CreateContainer($databaseName, $containerDefinition)
 {
-    $partitionKeyPath = "/partitionKey"
-    $throughput = 4000
+    $containerName = $containerDefinition.Name
+    $partitionKeyPath = $containerDefinition.PartitionKeyPath
 
     Write-Host "`n=====> Creating Azure Cosmos DB database container: $containerName ..."
     $container = az cosmosdb sql container show `
@@ -777,13 +787,24 @@ function CosmosDb_CreateContainer($databaseName, $containerName)
 
     if (-not $container) {
         Write-Host "Container '$containerName' does not exist. Creating..."
-        az cosmosdb sql container create `
-            --account-name $script:cosmosDbName `
-            --resource-group $script:resourceGroupName `
-            --database-name $databaseName `
-            --name $containerName `
-            --partition-key-path $partitionKeyPath `
-            --throughput $throughput
+        $containerCreateArguments = @(
+            'cosmosdb', 'sql', 'container', 'create',
+            '--account-name', $script:cosmosDbName,
+            '--resource-group', $script:resourceGroupName,
+            '--database-name', $databaseName,
+            '--name', $containerName,
+            '--partition-key-path', $partitionKeyPath
+        )
+
+        if ($paramCosmosDbCapacityMode -ne "Serverless") {
+            $containerCreateArguments += @('--max-throughput', $paramCosmosDbAutoscaleMaxThroughput)
+        }
+
+        if ($null -ne $containerDefinition.DefaultTtl) {
+            $containerCreateArguments += @('--ttl', $containerDefinition.DefaultTtl)
+        }
+
+        & az @containerCreateArguments
     } else {
         Write-Host "Container '$containerName' already exists."
     }
@@ -1669,15 +1690,27 @@ Write-Host "`n=====> Creating Azure Cosmos DB account: $($cosmosDbName)..."
 $account = az cosmosdb show --name $cosmosDbName --resource-group $resourceGroupName --query "name" --output tsv 2>$null
 if (-not $account) {
     Write-Host "Cosmos DB account does not exist. Creating..."
-    az cosmosdb create --name $cosmosDbName `
-    --resource-group $resourceGroupName `
-    --locations regionName=$paramLocation `
-    --kind $paramCosmosDbKind `
-    --enable-multiple-write-locations false `
-    --public-network-access Enabled `
-    --default-consistency-level 'Session' `
-    --tags $tagsJson `
-    --enable-burst-capacity True
+    if ($paramCosmosDbCapacityMode -eq "Serverless") {
+        az cosmosdb create --name $cosmosDbName `
+        --resource-group $resourceGroupName `
+        --locations regionName=$paramLocation `
+        --kind $paramCosmosDbKind `
+        --enable-multiple-write-locations false `
+        --public-network-access Enabled `
+        --default-consistency-level 'Session' `
+        --tags $tagsJson `
+        --capabilities EnableServerless
+    } else {
+        az cosmosdb create --name $cosmosDbName `
+        --resource-group $resourceGroupName `
+        --locations regionName=$paramLocation `
+        --kind $paramCosmosDbKind `
+        --enable-multiple-write-locations false `
+        --public-network-access Enabled `
+        --default-consistency-level 'Session' `
+        --tags $tagsJson `
+        --enable-burst-capacity True
+    }
 
     if ($LASTEXITCODE -ne 0) { Write-Error "Failed to create Azure Cosmos DB account '$($cosmosDbName)'." }
     else { Write-Host "Azure Cosmos DB account '$($cosmosDbName)' created successfully." }
@@ -1687,30 +1720,88 @@ if (-not $account) {
 
 az resource update --resource-group $resourceGroupName --name $cosmosDbName --resource-type "Microsoft.DocumentDB/databaseAccounts" --set properties.disableLocalAuth=false
 
-# Create cosmos db database and collection
-# TODO: SHOULD I DO THIS OR NOT? Web UI creates this.
-# Write-Host "`n=====> Creating Azure Cosmos DB database ..."
-# $databaseName = "SimpleChatDb"
-# $resourceObject = az cosmosdb sql database show --account-name $cosmosDbName --resource-group $resourceGroupName --name $databaseName --query "name" --output tsv 2>$null
-# if (-not $resourceObject) {
-#     Write-Host "Database '$databaseName' does not exist. Creating..."
-#     az cosmosdb sql database create --account-name $cosmosDbName --resource-group $resourceGroupName --name $databaseName --throughput 1000
-# } else {
-#     Write-Host "Database '$databaseName' already exists."
-# }
+Write-Host "`n=====> Creating Azure Cosmos DB database: $($paramCosmosDbDatabaseName)..."
+$database = az cosmosdb sql database show `
+    --account-name $cosmosDbName `
+    --resource-group $resourceGroupName `
+    --name $paramCosmosDbDatabaseName `
+    --query "name" `
+    --output tsv 2>$null
+if (-not $database) {
+    az cosmosdb sql database create `
+        --account-name $cosmosDbName `
+        --resource-group $resourceGroupName `
+        --name $paramCosmosDbDatabaseName
 
-# $containerName = "messages"
-# CosmosDb_CreateContainer $databaseName $containerName
-# $containerName = "documents"
-# CosmosDb_CreateContainer $databaseName $containerName
-# $containerName = "group_documents"
-# CosmosDb_CreateContainer $databaseName $containerName
-# $containerName = "settings"
-# CosmosDb_CreateContainer $databaseName $containerName
-# $containerName = "feedback"
-# CosmosDb_CreateContainer $databaseName $containerName
-# $containerName = "archived_conversations"
-# CosmosDb_CreateContainer $databaseName $containerName
+    if ($LASTEXITCODE -ne 0) { Write-Error "Failed to create Azure Cosmos DB database '$($paramCosmosDbDatabaseName)'." }
+    else { Write-Host "Azure Cosmos DB database '$($paramCosmosDbDatabaseName)' created successfully." }
+} else {
+    Write-Host "Cosmos DB database '$paramCosmosDbDatabaseName' already exists."
+}
+
+$cosmosContainerDefinitions = @(
+    @{ Name = "conversations"; PartitionKeyPath = "/id"; DefaultTtl = $null },
+    @{ Name = "messages"; PartitionKeyPath = "/conversation_id"; DefaultTtl = $null },
+    @{ Name = "tabular_export_runs"; PartitionKeyPath = "/user_id"; DefaultTtl = $null },
+    @{ Name = "personal_workflows"; PartitionKeyPath = "/user_id"; DefaultTtl = $null },
+    @{ Name = "personal_workflow_runs"; PartitionKeyPath = "/user_id"; DefaultTtl = $null },
+    @{ Name = "personal_workflow_run_items"; PartitionKeyPath = "/run_id"; DefaultTtl = $null },
+    @{ Name = "group_workflows"; PartitionKeyPath = "/group_id"; DefaultTtl = $null },
+    @{ Name = "group_workflow_runs"; PartitionKeyPath = "/group_id"; DefaultTtl = $null },
+    @{ Name = "group_workflow_run_items"; PartitionKeyPath = "/run_id"; DefaultTtl = $null },
+    @{ Name = "group_conversations"; PartitionKeyPath = "/id"; DefaultTtl = $null },
+    @{ Name = "group_messages"; PartitionKeyPath = "/conversation_id"; DefaultTtl = $null },
+    @{ Name = "collaboration_conversations"; PartitionKeyPath = "/id"; DefaultTtl = $null },
+    @{ Name = "collaboration_messages"; PartitionKeyPath = "/conversation_id"; DefaultTtl = $null },
+    @{ Name = "collaboration_user_state"; PartitionKeyPath = "/user_id"; DefaultTtl = $null },
+    @{ Name = "settings"; PartitionKeyPath = "/id"; DefaultTtl = $null },
+    @{ Name = "groups"; PartitionKeyPath = "/id"; DefaultTtl = $null },
+    @{ Name = "public_workspaces"; PartitionKeyPath = "/id"; DefaultTtl = $null },
+    @{ Name = "documents"; PartitionKeyPath = "/id"; DefaultTtl = $null },
+    @{ Name = "group_documents"; PartitionKeyPath = "/id"; DefaultTtl = $null },
+    @{ Name = "public_documents"; PartitionKeyPath = "/id"; DefaultTtl = $null },
+    @{ Name = "personal_file_sync_sources"; PartitionKeyPath = "/user_id"; DefaultTtl = $null },
+    @{ Name = "group_file_sync_sources"; PartitionKeyPath = "/group_id"; DefaultTtl = $null },
+    @{ Name = "public_file_sync_sources"; PartitionKeyPath = "/public_workspace_id"; DefaultTtl = $null },
+    @{ Name = "personal_workspace_identities"; PartitionKeyPath = "/user_id"; DefaultTtl = $null },
+    @{ Name = "group_workspace_identities"; PartitionKeyPath = "/group_id"; DefaultTtl = $null },
+    @{ Name = "public_workspace_identities"; PartitionKeyPath = "/public_workspace_id"; DefaultTtl = $null },
+    @{ Name = "global_workspace_identities"; PartitionKeyPath = "/global_id"; DefaultTtl = $null },
+    @{ Name = "personal_file_sync_items"; PartitionKeyPath = "/source_id"; DefaultTtl = $null },
+    @{ Name = "group_file_sync_items"; PartitionKeyPath = "/source_id"; DefaultTtl = $null },
+    @{ Name = "public_file_sync_items"; PartitionKeyPath = "/source_id"; DefaultTtl = $null },
+    @{ Name = "personal_file_sync_runs"; PartitionKeyPath = "/source_id"; DefaultTtl = $null },
+    @{ Name = "group_file_sync_runs"; PartitionKeyPath = "/source_id"; DefaultTtl = $null },
+    @{ Name = "public_file_sync_runs"; PartitionKeyPath = "/source_id"; DefaultTtl = $null },
+    @{ Name = "user_settings"; PartitionKeyPath = "/id"; DefaultTtl = $null },
+    @{ Name = "safety"; PartitionKeyPath = "/id"; DefaultTtl = $null },
+    @{ Name = "feedback"; PartitionKeyPath = "/id"; DefaultTtl = $null },
+    @{ Name = "archived_conversations"; PartitionKeyPath = "/id"; DefaultTtl = $null },
+    @{ Name = "archived_messages"; PartitionKeyPath = "/conversation_id"; DefaultTtl = $null },
+    @{ Name = "prompts"; PartitionKeyPath = "/id"; DefaultTtl = $null },
+    @{ Name = "group_prompts"; PartitionKeyPath = "/id"; DefaultTtl = $null },
+    @{ Name = "public_prompts"; PartitionKeyPath = "/id"; DefaultTtl = $null },
+    @{ Name = "file_processing"; PartitionKeyPath = "/document_id"; DefaultTtl = $null },
+    @{ Name = "personal_agents"; PartitionKeyPath = "/user_id"; DefaultTtl = $null },
+    @{ Name = "personal_actions"; PartitionKeyPath = "/user_id"; DefaultTtl = $null },
+    @{ Name = "group_agents"; PartitionKeyPath = "/group_id"; DefaultTtl = $null },
+    @{ Name = "group_actions"; PartitionKeyPath = "/group_id"; DefaultTtl = $null },
+    @{ Name = "global_agents"; PartitionKeyPath = "/id"; DefaultTtl = $null },
+    @{ Name = "global_actions"; PartitionKeyPath = "/id"; DefaultTtl = $null },
+    @{ Name = "agent_templates"; PartitionKeyPath = "/id"; DefaultTtl = $null },
+    @{ Name = "agent_facts"; PartitionKeyPath = "/scope_id"; DefaultTtl = $null },
+    @{ Name = "search_cache"; PartitionKeyPath = "/user_id"; DefaultTtl = $null },
+    @{ Name = "activity_logs"; PartitionKeyPath = "/user_id"; DefaultTtl = $null },
+    @{ Name = "notifications"; PartitionKeyPath = "/user_id"; DefaultTtl = -1 },
+    @{ Name = "approvals"; PartitionKeyPath = "/group_id"; DefaultTtl = -1 },
+    @{ Name = "msgraph_pending_actions"; PartitionKeyPath = "/user_id"; DefaultTtl = -1 },
+    @{ Name = "thoughts"; PartitionKeyPath = "/user_id"; DefaultTtl = $null },
+    @{ Name = "archive_thoughts"; PartitionKeyPath = "/user_id"; DefaultTtl = $null }
+)
+
+foreach ($containerDefinition in $cosmosContainerDefinitions) {
+    CosmosDb_CreateContainer $paramCosmosDbDatabaseName $containerDefinition
+}
 
 # --- Create Azure OpenAI Service and model deployments ---
 # Note: Azure OpenAI requires registration and sometimes specific SKU availability.
@@ -1750,10 +1841,10 @@ if ($param_DeployAzureOpenAiModels) {
     } else {
         $openAiModelDeployments = Get-OpenAiModelDeploymentDefinitions
         foreach ($modelDeployment in $openAiModelDeployments) {
-            $deploymentCreated = Ensure-OpenAiModelDeployment \
-                -AccountName $openAiAccountName \
-                -ResourceGroupName $openAiResourceGroupName \
-                -SubscriptionId $openAiSubscriptionId \
+            $deploymentCreated = Ensure-OpenAiModelDeployment `
+                -AccountName $openAiAccountName `
+                -ResourceGroupName $openAiResourceGroupName `
+                -SubscriptionId $openAiSubscriptionId `
                 -ModelDeployment $modelDeployment
 
             if (-not $deploymentCreated) {
@@ -1783,7 +1874,7 @@ Write-Host "`n=====> Creating Azure AI Search Service: $($searchServiceName)..."
 $searchService = az search service show --name $searchServiceName --resource-group $resourceGroupName 2>$null | ConvertFrom-Json
 if (-not $searchService) {
     Write-Host "Search service does not exist. Creating..."
-    $searchService = az search service create --name $searchServiceName --resource-group $resourceGroupName --location $paramLocation --sku $paramSearchSku --replica-count $paramSearchReplicaCount --partition-count $paramSearchPartitionCount --public-network-access enabled | ConvertFrom-Json
+    $searchService = az search service create --name $searchServiceName --resource-group $resourceGroupName --location $paramLocation --sku $paramSearchSku --semantic-search $paramSearchSemanticSearchSku --replica-count $paramSearchReplicaCount --partition-count $paramSearchPartitionCount --public-network-access enabled | ConvertFrom-Json
     if ($LASTEXITCODE -ne 0) { Write-Warning "Failed to create Azure AI Search Service '$($searchServiceName)'. Check SKU availability and naming uniqueness." }
     else { Write-Host "Azure AI Search Service '$($searchServiceName)' created successfully." }
 
@@ -1886,6 +1977,7 @@ if ($LASTEXITCODE -ne 0) { Write-Warning "Failed to update Azure App Service App
 else { Write-Host "Azure App Service App Settings configured." }
 
 $additionalAppSettings = @(
+    "SIMPLECHAT_RUN_BACKGROUND_TASKS=1",
     "VIDEO_INDEXER_ARM_API_VERSION=$param_VideoIndexerArmApiVersion"
 )
 
@@ -2009,6 +2101,26 @@ if (-not $assignment) {
       --scope "$resourceId"
 } else {
     Write-Host "RBAC assignment already exists."
+}
+
+$roleName = "Cognitive Services User"
+$assigneeObjectId = $appRegistrationIdentity_SP_AppId
+# Check if the role assignment already exists
+Write-Host "Checking RBAC on Cognitive Services Open AI deployment discovery for [$assigneeObjectId]"
+$assignment = az role assignment list `
+    --assignee $assigneeObjectId `
+    --scope "$resourceId" `
+    --query "[?roleDefinitionName=='$roleName']" `
+    --output json | ConvertFrom-Json
+
+if (-not $assignment) {
+        Write-Host "RBAC assignment not found. Creating..."
+        az role assignment create `
+            --assignee $assigneeObjectId `
+            --role "$roleName" `
+            --scope "$resourceId"
+} else {
+        Write-Host "RBAC assignment already exists."
 }
 
 $assigneeObjectId = $managedIdentity_PrincipalId

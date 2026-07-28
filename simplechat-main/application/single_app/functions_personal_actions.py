@@ -13,9 +13,29 @@ from azure.cosmos import exceptions
 from flask import current_app
 from functions_keyvault import keyvault_plugin_save_helper, keyvault_plugin_get_helper, keyvault_plugin_delete_helper, SecretReturnType
 from functions_settings import get_user_settings, update_user_settings
+from functions_workspace_identities import (
+    WORKSPACE_IDENTITY_SCOPE_PERSONAL,
+    hydrate_action_identity_reference,
+    validate_action_identity_reference,
+)
 from functions_debug import debug_print
 from config import cosmos_personal_actions_container
 import logging
+from functions_governance import ensure_action_type_access, filter_actions_by_action_type_access
+
+
+def get_governed_personal_actions(user_id, return_type=SecretReturnType.TRIGGER):
+    """
+    Fetch personal actions only after the current user passes governance checks.
+
+    Args:
+        user_id (str): The user's unique identifier
+
+    Returns:
+        list: List of action/plugin dictionaries
+    """
+    actions = get_personal_actions(user_id, return_type=return_type)
+    return filter_actions_by_action_type_access(user_id, actions, 'governance_user_actions', 'personal')
 
 def get_personal_actions(user_id, return_type=SecretReturnType.TRIGGER):
     """
@@ -42,6 +62,12 @@ def get_personal_actions(user_id, return_type=SecretReturnType.TRIGGER):
         for action in actions:
             cleaned_action = {k: v for k, v in action.items() if not k.startswith('_')}
             cleaned_action = keyvault_plugin_get_helper(cleaned_action, scope_value=user_id, scope="user", return_type=return_type)
+            cleaned_action = hydrate_action_identity_reference(
+                cleaned_action,
+                WORKSPACE_IDENTITY_SCOPE_PERSONAL,
+                user_id,
+                return_type=return_type,
+            )
             cleaned_actions.append(cleaned_action)
         return cleaned_actions
         
@@ -89,13 +115,19 @@ def get_personal_action(user_id, action_id, return_type=SecretReturnType.TRIGGER
         # Remove Cosmos metadata and resolve Key Vault references
         cleaned_action = {k: v for k, v in action.items() if not k.startswith('_')}
         cleaned_action = keyvault_plugin_get_helper(cleaned_action, scope_value=user_id, scope="user", return_type=return_type)
+        cleaned_action = hydrate_action_identity_reference(
+            cleaned_action,
+            WORKSPACE_IDENTITY_SCOPE_PERSONAL,
+            user_id,
+            return_type=return_type,
+        )
         return cleaned_action
         
     except Exception as e:
         debug_print(f"Error fetching action {action_id} for user {user_id}: {e}")
         return None
 
-def save_personal_action(user_id, action_data):
+def save_personal_action(user_id, action_data, enforce_governance=True):
     """
     Save or update a personal action/plugin.
     
@@ -143,6 +175,12 @@ def save_personal_action(user_id, action_data):
 
         action_data['user_id'] = user_id
         action_data['last_updated'] = now
+
+        validate_action_identity_reference(
+            action_data,
+            WORKSPACE_IDENTITY_SCOPE_PERSONAL,
+            user_id,
+        )
         
         # Validate required fields
         required_fields = ['name', 'displayName', 'type', 'description']
@@ -164,6 +202,9 @@ def save_personal_action(user_id, action_data):
             action_data['auth'] = {'type': 'identity'}
         elif 'type' not in action_data['auth']:
             action_data['auth']['type'] = 'identity'
+
+        if enforce_governance:
+            ensure_action_type_access('governance_user_actions', user_id, action_data.get('type'), 'personal')
         
         # Store secrets in Key Vault before upsert
         action_data = keyvault_plugin_save_helper(
@@ -197,6 +238,8 @@ def delete_personal_action(user_id, action_id):
         action = get_personal_action(user_id, action_id, return_type=SecretReturnType.NAME)
         if not action:
             return False
+
+        ensure_action_type_access('governance_user_actions', user_id, action.get('type'), 'personal')
             
         # Delete secrets from Key Vault before deleting the action
         keyvault_plugin_delete_helper(action, scope_value=user_id, scope="user")
@@ -279,7 +322,7 @@ def migrate_actions_from_user_settings(user_id):
                     plugin['id'] = str(uuid.uuid4())
                 # Store secrets in Key Vault before migration
                 plugin = keyvault_plugin_save_helper(plugin, scope_value=user_id, scope="user")
-                save_personal_action(user_id, plugin)
+                save_personal_action(user_id, plugin, enforce_governance=False)
                 migrated_count += 1
             except Exception as e:
                 debug_print(f"Error migrating plugin {plugin.get('name', 'unknown')} for user {user_id}: {e}")

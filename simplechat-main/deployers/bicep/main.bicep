@@ -58,6 +58,26 @@ param enterpriseAppServicePrincipalId string
 @secure()
 param enterpriseAppClientSecret string
 
+@description('''Enable Microsoft Teams tab Single Sign-On for SimpleChat.
+- When true, the app enables Teams token exchange and allows App Service requests to reach the app-level authentication flow.
+- Teams app manifest installation and Entra app pre-authorization are still required outside this deployment.''')
+param enableTeamsSso bool = false
+
+@description('''Optional Teams frame ancestors for Content Security Policy.
+- Leave blank for built-in Azure commercial or Azure Government Teams defaults.
+- Set explicitly for custom or air-gapped Teams clouds.''')
+param teamsFrameAncestors string = ''
+
+@description('''Optional Teams SDK valid origins.
+- Accepts comma, space, or JSON-list formatted origins.
+- Leave blank to reuse the Teams frame ancestors.''')
+param customTeamsOrigins string = ''
+
+@description('''Optional Teams Application ID URI used by microsoftTeams.authentication.getAuthToken.
+- Example: api://simplechat.contoso.com/<client-id>
+- Leave blank to let the app default to api://<client-id>.''')
+param teamsAppResource string = ''
+
 //----------------
 // configurations
 @description('''Authentication type for resources that support Managed Identity or Key authentication.
@@ -72,6 +92,45 @@ param authenticationType string
 @description('''Configure permissions (based on authenticationType) for the deployed web application to access required resources.
 ''')
 param configureApplicationPermissions bool
+
+@description('''Azure Cosmos DB capacity mode.
+- provisioned: Default. Uses dedicated container autoscale throughput for application containers.
+- serverless: Optional for short-lived MVP or evaluation environments with very low traffic.''')
+@allowed([
+  'provisioned'
+  'serverless'
+])
+param cosmosCapacityMode string = 'provisioned'
+
+@description('''Maximum RU/s for each SimpleChat Cosmos DB container when cosmosCapacityMode is provisioned.
+- Default is 1000 RU/s autoscale max per container.
+- Parameter name is retained for deployment compatibility with earlier templates.
+- Ignored when cosmosCapacityMode is serverless.''')
+@minValue(1000)
+param cosmosDatabaseAutoscaleMaxThroughput int = 1000
+
+@description('''Azure AI Search service SKU.
+- standard is Azure AI Search S1 and is the default for document search.
+- free may be used only for short-lived MVP or evaluation phases with known service limits.''')
+@allowed([
+  'free'
+  'basic'
+  'standard'
+  'standard2'
+  'standard3'
+  'storage_optimized_l1'
+  'storage_optimized_l2'
+])
+param searchSkuName string = 'standard'
+
+@description('''Azure AI Search semantic ranker SKU.
+- standard is the default so workspace search does not depend on the limited free semantic quota.
+- free may be used only for short-lived MVP or evaluation phases.''')
+@allowed([
+  'free'
+  'standard'
+])
+param searchSemanticSearchSku string = 'standard'
 
 @description('Optional object containing additional tags to apply to all resources.')
 param specialTags object = {}
@@ -203,9 +262,8 @@ param deployVideoIndexerService bool
 var rgName = '${appName}-${environment}-rg'
 var requiredTags = { application: appName, environment: environment, 'azd-env-name': azdEnvironmentName }
 var tags = union(requiredTags, specialTags)
-var isPublicCloud = scCloudEnvironment == 'public'
 var isUsGovernmentCloud = scCloudEnvironment == 'usgovernment'
-var acrCloudSuffix = isPublicCloud ? '.azurecr.io' : '.azurecr.us'
+var acrCloudSuffix = az.environment().suffixes.acrLoginServer
 var acrName = toLower('${appName}${environment}acr')
 var containerRegistry = '${acrName}${acrCloudSuffix}'
 var containerImageName = '${containerRegistry}/${imageName}'
@@ -378,6 +436,8 @@ module cosmosDB 'modules/cosmosDb.bicep' = {
 
     enablePrivateNetworking: enablePrivateNetworking
     allowedIpAddresses: cosmosDbIpRules
+    capacityMode: cosmosCapacityMode
+    containerAutoscaleMaxThroughput: cosmosDatabaseAutoscaleMaxThroughput
   }
 }
 
@@ -414,6 +474,8 @@ module searchService 'modules/search.bicep' = {
     logAnalyticsId: logAnalytics.outputs.logAnalyticsId
 
     enablePrivateNetworking: enablePrivateNetworking
+    skuName: searchSkuName
+    semanticSearchSku: searchSemanticSearchSku
   }
 }
 
@@ -524,6 +586,10 @@ module appService 'modules/appService.bicep' = {
     appInsightsName: applicationInsights.outputs.appInsightsName
     enterpriseAppClientId: enterpriseAppClientId
     enterpriseAppClientSecret: enterpriseAppClientSecret
+    enableTeamsSso: enableTeamsSso
+    teamsFrameAncestors: teamsFrameAncestors
+    customTeamsOrigins: customTeamsOrigins
+    teamsAppResource: teamsAppResource
     authenticationType: authenticationType
     keyVaultUri: keyVault.outputs.keyVaultUri
 

@@ -15,19 +15,9 @@
   {% endif %}
 
   <!-- Bootstrap CSS -->
-  <!-- <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" />
-  LOCAL VERSION BELOW
-  -->
   <link rel="stylesheet" href="/static/css/bootstrap.min.css" />
   
   <!-- Bootstrap Icons -->
-   <!--
-  <link
-    rel="stylesheet"
-    href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css"
-  />
-  LOCAL VERSION BELOW
-  -->
   <link rel="stylesheet" href="/static/css/bootstrap-icons.css" />
 
   <!-- Prism.js syntax highlighting -->
@@ -40,23 +30,20 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='css/navigation.css') }}" />
   <link rel="stylesheet" href="{{ url_for('static', filename='css/sidebar.css') }}" />
   <!-- DataTables CSS -->
-  <!-- <link rel="stylesheet" href="https://cdn.datatables.net/1.13.1/css/jquery.dataTables.min.css" />
-  LOCAL VERSION BELOW
-  -->
   <link rel="stylesheet" href="/static/css/jquery.dataTables.min.css" />
 
   <style>
     /* Add this: if banner is present, increase padding-top */
     #classification-banner + nav.navbar.fixed-top {
-      top: 40px; /* Height of the banner */
+      top: var(--classification-banner-height, 40px);
     }
     #classification-banner {
-      height: 40px;
-      line-height: 40px;
+      height: var(--classification-banner-height, 40px);
+      line-height: var(--classification-banner-height, 40px);
     }
     /* Adjust body padding if banner is present */
     body.has-classification-banner {
-      padding-top: 96px; /* 56px navbar + 40px banner */
+      padding-top: calc(var(--top-nav-height, 56px) + var(--classification-banner-height, 40px));
     }
 
     .main-content {
@@ -64,8 +51,17 @@
     }
     /* Sidebar padding for main content when sidebar is enabled */
     .sidebar-padding {
-      padding-left: var(--sidebar-width, 260px);
       padding-top: 0 !important;
+    }
+
+    body:not(.sidebar-nav-enabled) .sidebar-padding {
+      padding-left: var(--sidebar-width, 260px);
+    }
+
+    @media (max-width: 991.98px) {
+      body:not(.sidebar-nav-enabled) .sidebar-padding {
+        padding-left: 0;
+      }
     }
 
     .modal-body {
@@ -180,7 +176,7 @@
     .editor-toolbar a.fa-question-circle:before { content: "?"; }
 
     .chat-container {
-      max-height: calc(100vh - 56px);
+      max-height: calc(100vh - var(--top-nav-height, 66px));
       display: flex;
       flex-direction: column;
       overflow: hidden;
@@ -254,7 +250,10 @@
   {% block head %}{% endblock %}
 </head>
 
-<body class="d-flex flex-column min-vh-100{% if app_settings.classification_banner_enabled and app_settings.classification_banner_text %} has-classification-banner{% endif %}">
+{% set nav_layout = user_settings.get('settings', {}).get('navLayout') %}
+{% set is_sidebar_layout = nav_layout == 'sidebar' or (not nav_layout and app_settings.enable_left_nav_default) %}
+{% set is_chat_page = request.endpoint == 'chats' %}
+<body class="d-flex flex-column min-vh-100{% if app_settings.classification_banner_enabled and app_settings.classification_banner_text %} has-classification-banner{% endif %}{% if is_chat_page %} chat-shell-page{% endif %}{% if is_chat_page and not is_sidebar_layout %} chat-top-nav-shell{% endif %}">
   {% if app_settings.classification_banner_enabled and app_settings.classification_banner_text %}
     <div id="classification-banner"
          style="background: {{ app_settings.classification_banner_color or '#ffc107' }}; color: {{ app_settings.classification_banner_text_color or '#ffffff' }}; display: flex; align-items: center; justify-content: center; text-align: center; font-weight: bold; padding: 0; height: 40px; font-size: 1.1em; letter-spacing: 0.5px; position: fixed; top: 0; left: 0; width: 100%; z-index: 1051;">
@@ -263,17 +262,17 @@
   {% endif %}
   <!-- Navigation Bar -->
   {% set left_sidebar_enabled = false %}
-  {% set nav_layout = user_settings.get('settings', {}).get('navLayout') %}
-  {% if nav_layout == 'sidebar' or (not nav_layout and app_settings.enable_left_nav_default) %}
+  {% if is_sidebar_layout %}
     {% include "_sidebar_nav.html" %}
     {% set left_sidebar_enabled = true %}
   {% else %}
     {% include "_top_nav.html" %}
-    {% if request.endpoint == 'chats' %}
+    {% if is_chat_page %}
       {% include "_sidebar_short_nav.html" %}
       {% set left_sidebar_enabled = true %}
     {% endif %}
   {% endif %}
+  {% include "_custom_pages_drawer.html" %}
 
   <!-- Main Content Area -->
   <div class="container main-content{% if left_sidebar_enabled %} sidebar-padding{% endif %}" id="main-content">
@@ -283,46 +282,354 @@
 
   <!-- Toast container for error/info messages -->
   <div id="toast-container" class="position-fixed bottom-0 end-0 p-3" style="z-index: 1100;"></div>
-  <!-- <script src="https://unpkg.com/split.js/dist/split.min.js"></script>
-  LOCAL VERSION BELOW
-  -->
+  {% if session.get('user') %}
+  <style>
+    .workflow-alert-modal-dialog {
+      max-width: 860px;
+    }
+
+    .workflow-alert-modal-content {
+      position: relative;
+      border: 0;
+      border-radius: 1.35rem;
+      overflow: hidden;
+      box-shadow: 0 1.5rem 3rem rgba(15, 23, 42, 0.18);
+      background: var(--bs-body-bg);
+    }
+
+    .workflow-alert-modal-content::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: 0;
+      bottom: 0;
+      width: 6px;
+      background: var(--workflow-alert-accent, var(--bs-primary));
+    }
+
+    .workflow-alert-modal-content[data-priority="high"] {
+      --workflow-alert-accent: var(--bs-danger);
+      --workflow-alert-accent-rgb: var(--bs-danger-rgb);
+    }
+
+    .workflow-alert-modal-content[data-priority="medium"] {
+      --workflow-alert-accent: var(--bs-warning);
+      --workflow-alert-accent-rgb: var(--bs-warning-rgb);
+    }
+
+    .workflow-alert-modal-content[data-priority="low"] {
+      --workflow-alert-accent: var(--bs-info);
+      --workflow-alert-accent-rgb: var(--bs-info-rgb);
+    }
+
+    .workflow-alert-modal-header {
+      display: flex;
+      justify-content: space-between;
+      gap: 1.5rem;
+      align-items: flex-start;
+      padding: 2rem 2rem 1rem 2.3rem;
+      border-bottom: 0;
+    }
+
+    .workflow-alert-header-main {
+      min-width: 0;
+      flex: 1 1 auto;
+    }
+
+    .workflow-alert-badge-row {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0.85rem;
+      margin-bottom: 0.75rem;
+    }
+
+    .workflow-alert-section-label {
+      font-size: 0.86rem;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      font-weight: 700;
+      color: var(--bs-secondary-color);
+    }
+
+    .workflow-alert-title {
+      margin: 0;
+      font-size: clamp(2rem, 3vw, 2.7rem);
+      line-height: 1.04;
+      font-weight: 700;
+      color: var(--bs-emphasis-color);
+    }
+
+    .workflow-alert-header-side {
+      display: flex;
+      align-items: flex-start;
+      gap: 1rem;
+      flex: 0 0 auto;
+    }
+
+    .workflow-alert-triggered {
+      text-align: right;
+      color: var(--bs-secondary-color);
+      font-size: 0.95rem;
+      font-weight: 700;
+      white-space: nowrap;
+      padding-top: 0.35rem;
+    }
+
+    .workflow-alert-triggered strong {
+      color: var(--bs-emphasis-color);
+      font-weight: 700;
+    }
+
+    .workflow-alert-close {
+      margin-top: 0.15rem;
+    }
+
+    .workflow-alert-modal-body {
+      padding: 0 2rem 2rem 2.3rem;
+    }
+
+    .workflow-alert-type-card {
+      display: inline-flex;
+      flex-direction: column;
+      gap: 0.35rem;
+      padding: 1rem 1.15rem;
+      border-radius: 1rem;
+      background: var(--bs-tertiary-bg);
+      margin-bottom: 1.5rem;
+      min-width: 150px;
+    }
+
+    .workflow-alert-type-card.d-none {
+      display: none !important;
+    }
+
+    .workflow-alert-type-label {
+      font-size: 0.72rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      font-weight: 700;
+      color: var(--bs-secondary-color);
+    }
+
+    .workflow-alert-type-value {
+      font-size: 1.05rem;
+      font-weight: 700;
+      color: var(--bs-primary);
+      line-height: 1.2;
+    }
+
+    .workflow-alert-summary-panel {
+      display: flex;
+      gap: 1rem;
+      align-items: flex-start;
+      padding: 1.4rem;
+      border-radius: 1.1rem;
+      background: var(--bs-tertiary-bg);
+      margin-bottom: 1rem;
+    }
+
+    .workflow-alert-summary-icon {
+      width: 3rem;
+      height: 3rem;
+      border-radius: 0.9rem;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(var(--workflow-alert-accent-rgb, var(--bs-primary-rgb)), 0.12);
+      color: var(--workflow-alert-accent, var(--bs-primary));
+      flex: 0 0 auto;
+      font-size: 1.2rem;
+    }
+
+    .workflow-alert-summary-copy {
+      min-width: 0;
+      flex: 1 1 auto;
+    }
+
+    .workflow-alert-message {
+      margin: 0;
+      font-size: 1.35rem;
+      line-height: 1.5;
+      color: var(--bs-emphasis-color);
+      font-weight: 500;
+    }
+
+    .workflow-alert-detail-card {
+      margin-top: 1rem;
+      padding: 1rem 1.1rem;
+      border-radius: 0.95rem;
+      background: rgba(var(--bs-primary-rgb), 0.06);
+      border-left: 4px solid var(--workflow-alert-accent, var(--bs-primary));
+    }
+
+    .workflow-alert-detail-label {
+      font-size: 0.78rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      font-weight: 700;
+      color: var(--bs-secondary-color);
+      margin-bottom: 0.35rem;
+    }
+
+    .workflow-alert-detail-text {
+      margin: 0;
+      font-size: 0.98rem;
+      line-height: 1.55;
+      color: var(--bs-secondary-color);
+      white-space: pre-line;
+    }
+
+    .workflow-alert-footer-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+      align-items: center;
+      color: var(--bs-secondary-color);
+      font-size: 0.94rem;
+      font-weight: 600;
+      margin-bottom: 1.4rem;
+    }
+
+    .workflow-alert-footer-meta span {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+    }
+
+    .workflow-alert-actions {
+      display: flex;
+      gap: 1rem;
+      align-items: stretch;
+      flex-wrap: wrap;
+    }
+
+    .workflow-alert-links {
+      flex: 1 1 360px;
+      min-width: 0;
+    }
+
+    .workflow-alert-links .btn {
+      width: 100%;
+      min-height: 3.35rem;
+      font-weight: 700;
+      border-radius: 0.85rem;
+      justify-content: flex-start;
+      padding-inline: 1.1rem;
+    }
+
+    .workflow-alert-secondary-actions {
+      flex: 0 0 auto;
+      display: flex;
+      gap: 0.75rem;
+      align-items: stretch;
+      margin-left: auto;
+    }
+
+    .workflow-alert-secondary-actions .btn {
+      min-width: 132px;
+      border-radius: 0.85rem;
+      font-weight: 700;
+    }
+
+    @media (max-width: 767.98px) {
+      .workflow-alert-modal-header,
+      .workflow-alert-modal-body {
+        padding-left: 1.5rem;
+        padding-right: 1.5rem;
+      }
+
+      .workflow-alert-header-side {
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 0.4rem;
+      }
+
+      .workflow-alert-summary-panel {
+        flex-direction: column;
+      }
+
+      .workflow-alert-actions,
+      .workflow-alert-secondary-actions {
+        flex-direction: column;
+      }
+
+      .workflow-alert-secondary-actions {
+        margin-left: 0;
+        width: 100%;
+      }
+
+      .workflow-alert-secondary-actions .btn {
+        width: 100%;
+      }
+    }
+  </style>
+  <div class="modal fade" id="workflowAlertModal" tabindex="-1" aria-labelledby="workflowAlertModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered workflow-alert-modal-dialog">
+      <div class="modal-content workflow-alert-modal-content" data-priority="medium">
+        <div class="modal-header workflow-alert-modal-header">
+          <div class="workflow-alert-header-main">
+            <div class="workflow-alert-badge-row">
+              <span class="badge text-bg-secondary text-uppercase" id="workflow-alert-priority-badge">Alert</span>
+              <span class="workflow-alert-section-label">Workflow Alert</span>
+            </div>
+            <h5 class="modal-title workflow-alert-title" id="workflowAlertModalLabel">Workflow alert</h5>
+          </div>
+          <div class="workflow-alert-header-side">
+            <div class="workflow-alert-triggered" id="workflow-alert-triggered-at">Triggered: --:--:--</div>
+            <button type="button" class="btn-close workflow-alert-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+        </div>
+        <div class="modal-body workflow-alert-modal-body">
+          <div class="workflow-alert-type-card d-none" id="workflow-alert-type-card">
+            <div class="workflow-alert-type-label">Type</div>
+            <div class="workflow-alert-type-value" id="workflow-alert-type-value"></div>
+          </div>
+          <div class="workflow-alert-summary-panel">
+            <div class="workflow-alert-summary-icon">
+              <i class="bi bi-bell-fill" id="workflow-alert-summary-icon"></i>
+            </div>
+            <div class="workflow-alert-summary-copy">
+              <p class="workflow-alert-message" id="workflow-alert-message"></p>
+              <div class="workflow-alert-detail-card d-none" id="workflow-alert-response-preview-card">
+                <div class="workflow-alert-detail-label">Detail</div>
+                <p class="workflow-alert-detail-text" id="workflow-alert-response-preview"></p>
+              </div>
+            </div>
+          </div>
+          <div class="workflow-alert-footer-meta" id="workflow-alert-meta"></div>
+          <div class="workflow-alert-actions">
+            <div class="workflow-alert-links d-grid gap-2" id="workflow-alert-links"></div>
+            <div class="workflow-alert-secondary-actions">
+              <button type="button" class="btn btn-light border" id="workflow-alert-dismiss-btn">Dismiss</button>
+              <button type="button" class="btn btn-light border" id="workflow-alert-mark-read-btn">Mark as read</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+  <!-- Split.js -->
   <script src="/static/js/chat/split.min.js"></script>
   <!-- jQuery must be loaded before any scripts that depend on it -->
 
-  <!-- <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
-    LOCAL VERSION BELOW
-    -->
   <script src="/static/js/chat/jquery.min.js"></script>
 
   <!-- Then Bootstrap JS (Bootstrap 5 doesn't require jQuery, 
          but it's okay to load it afterwards) -->
-  <!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script> 
-   LOCAL VERSION BELOW
-    -->
   <script src="/static/js/chat/bootstrap.bundle.min.js"></script>
 
 
   <!-- Then DataTables (depends on jQuery) -->
-  <!-- <script src="https://cdn.datatables.net/1.13.1/js/jquery.dataTables.min.js"></script>
-   LOCAL VERSION BELOW
-   -->
   <script src="/static/js/chat/jquery.dataTables.min.js"></script>
 
 
-  <!-- <script src="https://cdn.datatables.net/responsive/2.4.1/js/dataTables.responsive.min.js"></script>
-  LOCAL VERSION BELOW
-  -->
   <script src="/static/js/chat/dataTables.responsive.min.js"></script>
   
   <!-- Then any other libraries -->
-  <!-- <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  LOCAL VERSION BELOW 
-  -->
   <script src="/static/js/chat/marked.min.js"></script>
 
-  <!-- <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/2.3.6/purify.min.js"></script> 
-  LOCAL VERSION BELOW 
-  -->
   <script src="/static/js/chat/purify.min.js"></script>
 
 
@@ -333,15 +640,16 @@
       'displayName': session.get('user', {}).get('name'),
       'email': session.get('user', {}).get('preferred_username'),
       'roles': session.get('user', {}).get('roles', [])
-    } | tojson | safe }};
+    } | tojson }};
     window.currentUserIsAdmin = Array.isArray(window.userContext?.roles)
       ? window.userContext.roles.includes('Admin')
       : false;
     if (!window.current_user_id && window.userContext?.id) {
       window.current_user_id = window.userContext.id;
     }
-    const appSettings = {{ app_settings|tojson|safe }};
+    const appSettings = {{ app_settings|tojson }};
     window.appSettings = appSettings;
+    window.simplechatUserSettings = {{ user_settings.get('settings', {}) | tojson }};
   </script>
 
   <!-- Prism.js syntax highlighting script -->
@@ -394,6 +702,9 @@
   <script src="{{ url_for('static', filename='js/profile-image.js') }}"></script>
   <!-- Notifications JavaScript (for badge polling on all pages) -->
   <script src="{{ url_for('static', filename='js/notifications.js') }}"></script>
+  {% if session.get('user') and app_settings.enable_speech_to_text_input %}
+  <script src="{{ url_for('static', filename='js/form-voice-input.js') }}?v={{ config['VERSION'] }}"></script>
+  {% endif %}
   {% if session.get('user') %}
   <script>
     window.idleLogoutConfig = {{ {
@@ -403,7 +714,7 @@
       'heartbeatUrl': url_for('session_heartbeat'),
       'localLogoutUrl': url_for('local_logout'),
       'fullSsoLogoutUrl': url_for('logout')
-    } | tojson | safe }};
+    } | tojson }};
   </script>
   <script src="{{ url_for('static', filename='js/idle-logout-warning.js') }}"></script>
   {% endif %}

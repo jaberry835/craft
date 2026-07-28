@@ -1,53 +1,83 @@
 {# Sidebar Navigation Partial #}
+{% set sidebar_toggle_style = user_settings.get('settings', {}).get('sidebarToggleStyle', 'large') %}
+{% set sidebar_toggle_compact = sidebar_toggle_style == 'compact' %}
+{% set sidebar_brand_visible = app_settings.show_logo or not app_settings.hide_app_title %}
+{% set sidebar_menu_state_raw = user_settings.get('settings', {}).get('sidebarMenuState', {}) %}
+{% set sidebar_menu_state = sidebar_menu_state_raw if sidebar_menu_state_raw is mapping else {} %}
+{% set sidebar_settings = settings if settings is defined else app_settings %}
 <div id="sidebar-nav" class="d-flex flex-column vh-100 bg-light border-end sidebar-expanded" style="width: var(--sidebar-width, 260px); min-width: var(--sidebar-min-width, 220px); position: fixed; left: 0; top: 0; z-index: 1040; transition: transform 0.3s ease;">
 
   <div id="sidebar-resize-handle" class="sidebar-resize-handle" aria-label="Resize sidebar" role="separator" tabindex="0">
     <i class="bi bi-grip-vertical"></i>
   </div>
-  
-  <!-- Collapse/Expand button -->
-  <button type="button" id="sidebar-toggle-btn" class="btn btn-sm btn-outline-secondary position-absolute d-none d-sm-block"
-          aria-label="Toggle sidebar" title="Hide sidebar"
-          style="top: 1rem; right: 0.75rem; z-index: 1041; width: 28px; height: 28px; padding: 0; border-radius: 4px;"
-          onclick="toggleSidebar()">
-    <i id="sidebar-toggle-icon" class="bi bi-chevron-left" style="font-size: 0.875rem;"></i>
-  </button>
-  
-  <div class="p-3 border-bottom flex-shrink-0">
-    {% if app_settings.show_logo %}
-      <a class="navbar-brand d-flex align-items-center mb-2" href="{{ url_for('index') }}">
-        {% if app_settings.custom_logo_base64 or app_settings.custom_logo_dark_base64 %}
-          <!-- Light mode logo -->
-          {% if app_settings.custom_logo_base64 %}
-            <img id="sidebar-logo" src="{{ url_for('static', filename='images/custom_logo.png') }}?v={{ app_settings.logo_version | default(1) }}" 
-                 alt="Logo" height="32" class="me-2 d-light-mode-only" />
-          {% else %}
-            <img id="sidebar-logo" src="{{ url_for('static', filename='images/logo-lightmode.png') }}" 
-                 alt="Logo" height="32" class="me-2 d-light-mode-only" />
-          {% endif %}
-          <!-- Dark mode logo -->
-          {% if app_settings.custom_logo_dark_base64 %}
-            <img id="sidebar-logo-dark" src="{{ url_for('static', filename='images/custom_logo_dark.png') }}?v={{ app_settings.logo_dark_version | default(1) }}" 
-                 alt="Logo" height="32" class="me-2 d-dark-mode-only" />
-          {% elif app_settings.custom_logo_base64 %}
-            <img id="sidebar-logo-dark" src="{{ url_for('static', filename='images/custom_logo.png') }}?v={{ app_settings.logo_version | default(1) }}" 
-                 alt="Logo" height="32" class="me-2 d-dark-mode-only" />
-          {% else %}
-            <img id="sidebar-logo-dark" src="{{ url_for('static', filename='images/logo-darkmode.png') }}" 
-                 alt="Logo" height="32" class="me-2 d-dark-mode-only" />
-          {% endif %}
-        {% else %}
-          <img id="sidebar-logo" src="{{ url_for('static', filename='images/logo-lightmode.png') }}" alt="Logo" height="32" class="me-2 d-light-mode-only" />
-          <img id="sidebar-logo-dark" src="{{ url_for('static', filename='images/logo-darkmode.png') }}" alt="Logo" height="32" class="me-2 d-dark-mode-only" />
+
+  <div class="sidebar-header p-3 border-bottom flex-shrink-0{% if sidebar_toggle_compact %} sidebar-header-compact-toggle{% endif %}">
+    {% if sidebar_toggle_compact or sidebar_brand_visible %}
+      <div class="sidebar-brand-row{% if not sidebar_brand_visible %} sidebar-brand-row-icon-only{% endif %}">
+        {% if sidebar_toggle_compact %}
+          <button type="button" id="sidebar-toggle-btn" class="btn btn-sm sidebar-toggle-control sidebar-toggle-compact"
+                  data-sidebar-toggle="toggle"
+                  aria-controls="sidebar-nav"
+                  aria-expanded="true"
+                  aria-label="Hide navigation"
+                  title="Hide navigation">
+            <i id="sidebar-toggle-icon" class="bi bi-layout-sidebar" aria-hidden="true"></i>
+          </button>
         {% endif %}
-        {% if not app_settings.hide_app_title %}
-          <span id="sidebar-app-title" class="fw-bold sidebar-title-truncate" data-title="{{ app_settings.app_title }}" data-show-logo="{{ app_settings.show_logo }}" title="{{ app_settings.app_title }}">{{ app_settings.app_title }}</span>
+        {% if app_settings.show_logo %}
+          <a class="navbar-brand sidebar-brand-link" href="{{ url_for('index') }}">
+            {% if app_settings.custom_logo_base64 or app_settings.custom_logo_dark_base64 %}
+              <!-- Light mode logo -->
+              {% if app_settings.custom_logo_base64 %}
+                <img id="sidebar-logo" src="{{ url_for('static', filename='images/custom_logo.png') }}?v={{ app_settings.logo_version | default(1) }}"
+                     alt="Logo" height="32" class="me-2 d-light-mode-only" />
+              {% else %}
+                <img id="sidebar-logo" src="{{ url_for('static', filename='images/logo-lightmode.png') }}"
+                     alt="Logo" height="32" class="me-2 d-light-mode-only" />
+              {% endif %}
+              <!-- Dark mode logo -->
+              {% if app_settings.custom_logo_dark_base64 %}
+                <img id="sidebar-logo-dark" src="{{ url_for('static', filename='images/custom_logo_dark.png') }}?v={{ app_settings.logo_dark_version | default(1) }}"
+                     alt="Logo" height="32" class="me-2 d-dark-mode-only" />
+              {% elif app_settings.custom_logo_base64 %}
+                <img id="sidebar-logo-dark" src="{{ url_for('static', filename='images/custom_logo.png') }}?v={{ app_settings.logo_version | default(1) }}"
+                     alt="Logo" height="32" class="me-2 d-dark-mode-only" />
+              {% else %}
+                <img id="sidebar-logo-dark" src="{{ url_for('static', filename='images/logo-darkmode.png') }}"
+                     alt="Logo" height="32" class="me-2 d-dark-mode-only" />
+              {% endif %}
+            {% else %}
+              <img id="sidebar-logo" src="{{ url_for('static', filename='images/logo-lightmode.png') }}" alt="Logo" height="32" class="me-2 d-light-mode-only" />
+              <img id="sidebar-logo-dark" src="{{ url_for('static', filename='images/logo-darkmode.png') }}" alt="Logo" height="32" class="me-2 d-dark-mode-only" />
+            {% endif %}
+            {% if not app_settings.hide_app_title %}
+              <span class="sidebar-brand-text">
+                <span id="sidebar-app-title" class="fw-bold sidebar-title-truncate" data-title="{{ app_settings.app_title }}" data-show-logo="{{ app_settings.show_logo }}" title="{{ app_settings.app_title }}">{{ app_settings.app_title }}</span>
+              </span>
+            {% endif %}
+          </a>
+        {% elif not app_settings.hide_app_title %}
+          <a class="navbar-brand fw-bold sidebar-brand-link" href="{{ url_for('index') }}">
+            <span class="sidebar-brand-text">
+              <span id="sidebar-app-title" class="sidebar-title-truncate" data-title="{{ app_settings.app_title }}" data-show-logo="false" title="{{ app_settings.app_title }}">{{ app_settings.app_title }}</span>
+            </span>
+          </a>
         {% endif %}
-      </a>
-    {% elif not app_settings.hide_app_title %}
-      <a class="navbar-brand fw-bold" href="{{ url_for('index') }}">
-        <span id="sidebar-app-title" class="sidebar-title-truncate" data-title="{{ app_settings.app_title }}" data-show-logo="false" title="{{ app_settings.app_title }}">{{ app_settings.app_title }}</span>
-      </a>
+      </div>
+    {% endif %}
+
+    {% if not sidebar_toggle_compact %}
+    <div class="sidebar-toggle-row">
+      <button type="button" id="sidebar-toggle-btn" class="btn btn-sm btn-outline-secondary w-100 sidebar-toggle-control"
+              data-sidebar-toggle="toggle"
+              aria-controls="sidebar-nav"
+              aria-expanded="true"
+              aria-label="Hide navigation"
+              title="Hide navigation">
+        <i id="sidebar-toggle-icon" class="bi bi-chevron-bar-left" aria-hidden="true"></i>
+        <span class="sidebar-toggle-label">Hide navigation</span>
+      </button>
+    </div>
     {% endif %}
   </div>
   <div id="sidebar-content" class="flex-grow-1 d-flex flex-column" style="padding-bottom: 80px; overflow-y: auto;">
@@ -64,17 +94,25 @@
           </a>
           {% endif %}
         </li>
+        {% if sidebar_settings.enable_semantic_kernel %}
+        <li class="nav-item">
+          <a class="nav-link d-flex align-items-center" href="{{ url_for('agents') }}">
+            <i class="bi bi-robot me-2"></i><span class="nav-text">Agents</span>
+          </a>
+        </li>
+        {% endif %}
       {% endif %}
     </ul>
 
     <!-- Workspaces Section - Only show when logged in -->
     {% if session.get('user') and session['user'].get('roles') and ('Admin' in session['user']['roles'] or 'User' in session['user']['roles']) %}
+    {% set workspaces_menu_expanded = sidebar_menu_state.get('workspaces', true) %}
     <div class="overflow-auto">
-      <div id="workspaces-toggle" class="mt-2 mb-1 ps-3 pe-2 text-muted small d-flex align-items-center" style="font-weight: 500; letter-spacing: 0.02em; cursor: pointer; user-select: none;">
+      <div id="workspaces-toggle" class="mt-2 mb-1 ps-3 pe-2 text-muted small d-flex align-items-center" style="font-weight: 500; letter-spacing: 0.02em; cursor: pointer; user-select: none;" role="button" tabindex="0" aria-controls="workspaces-section" aria-expanded="{{ 'true' if workspaces_menu_expanded else 'false' }}" data-sidebar-menu-key="workspaces" data-sidebar-menu-target="workspaces-section" data-sidebar-menu-caret="workspaces-caret">
         <span class="nav-text">Workspaces</span>
-        <i id="workspaces-caret" class="bi bi-caret-down-fill ms-2 transition" style="font-size: 0.9em; transition: transform 0.2s;"></i>
+        <i id="workspaces-caret" class="bi bi-caret-down-fill ms-2 transition" style="font-size: 0.9em; transition: transform 0.2s;{% if not workspaces_menu_expanded %} transform: rotate(-90deg);{% endif %}"></i>
       </div>
-      <div id="workspaces-section">
+      <div id="workspaces-section"{% if not workspaces_menu_expanded %} class="d-none"{% endif %} aria-hidden="{{ 'false' if workspaces_menu_expanded else 'true' }}">
         <ul class="nav flex-column mb-2">
           {% if app_settings.enable_user_workspace %}
           <li class="nav-item">
@@ -95,7 +133,14 @@
                   <i class="bi bi-lightbulb me-2" style="font-size: 0.8em;"></i><span class="nav-text">Your Prompts</span>
                 </a>
               </li>
-              {% if settings.per_user_semantic_kernel and settings.enable_semantic_kernel %}
+              {% if sidebar_settings.allow_user_workflows %}
+              <li class="nav-item">
+                <a class="nav-link d-flex align-items-center workspace-nav-tab" href="#" data-tab="workflows-tab">
+                  <i class="bi bi-diagram-3 me-2" style="font-size: 0.8em;"></i><span class="nav-text">Your Workflows</span>
+                </a>
+              </li>
+              {% endif %}
+              {% if sidebar_settings.per_user_semantic_kernel and sidebar_settings.enable_semantic_kernel %}
               <li class="nav-item">
                 <a class="nav-link d-flex align-items-center workspace-nav-tab" href="#" data-tab="agents-tab">
                   <i class="bi bi-robot me-2" style="font-size: 0.8em;"></i><span class="nav-text">Your Agents</span>
@@ -104,6 +149,27 @@
               <li class="nav-item">
                 <a class="nav-link d-flex align-items-center workspace-nav-tab" href="#" data-tab="plugins-tab">
                   <i class="bi bi-plugin me-2" style="font-size: 0.8em;"></i><span class="nav-text">Your Actions</span>
+                </a>
+              </li>
+              {% endif %}
+              {% if sidebar_settings.allow_user_custom_endpoints and sidebar_settings.enable_multi_model_endpoints %}
+              <li class="nav-item">
+                <a class="nav-link d-flex align-items-center workspace-nav-tab" href="#" data-tab="endpoints-tab">
+                  <i class="bi bi-hdd-network me-2" style="font-size: 0.8em;"></i><span class="nav-text">Your Endpoints</span>
+                </a>
+              </li>
+              {% endif %}
+              {% if file_sync_enabled %}
+              <li class="nav-item">
+                <a class="nav-link d-flex align-items-center workspace-nav-tab" href="#" data-tab="sync-tab">
+                  <i class="bi bi-arrow-repeat me-2" style="font-size: 0.8em;"></i><span class="nav-text">Sync</span>
+                </a>
+              </li>
+              {% endif %}
+              {% if file_sync_enabled or sidebar_settings.enable_semantic_kernel or sidebar_settings.enable_multi_model_endpoints %}
+              <li class="nav-item">
+                <a class="nav-link d-flex align-items-center workspace-nav-tab" href="#" data-tab="identities-tab">
+                  <i class="bi bi-person-badge me-2" style="font-size: 0.8em;"></i><span class="nav-text">Identities</span>
                 </a>
               </li>
               {% endif %}
@@ -135,7 +201,7 @@
                   <i class="bi bi-lightbulb me-2" style="font-size: 0.8em;"></i><span class="nav-text">Group Prompts</span>
                 </a>
               </li>
-              {% if settings.allow_group_agents and settings.enable_semantic_kernel %}
+              {% if sidebar_settings.allow_group_agents and sidebar_settings.enable_semantic_kernel %}
                 <li class="nav-item">
                   <a class="nav-link d-flex align-items-center workspace-nav-tab" href="#" data-tab="group-agents-tab">
                     <i class="bi bi-robot me-2" style="font-size: 0.8em;"></i><span class="nav-text">Group Agents</span>
@@ -144,6 +210,27 @@
                 <li class="nav-item">
                   <a class="nav-link d-flex align-items-center workspace-nav-tab" href="#" data-tab="group-plugins-tab">
                     <i class="bi bi-plugin me-2" style="font-size: 0.8em;"></i><span class="nav-text">Group Actions</span>
+                  </a>
+                </li>
+              {% endif %}
+              {% if sidebar_settings.per_user_semantic_kernel and sidebar_settings.enable_semantic_kernel and sidebar_settings.allow_group_custom_endpoints and sidebar_settings.enable_multi_model_endpoints %}
+                <li class="nav-item">
+                  <a class="nav-link d-flex align-items-center workspace-nav-tab" href="#" data-tab="group-endpoints-tab">
+                    <i class="bi bi-hdd-network me-2" style="font-size: 0.8em;"></i><span class="nav-text">Group Endpoints</span>
+                  </a>
+                </li>
+              {% endif %}
+              {% if file_sync_enabled %}
+                <li class="nav-item">
+                  <a class="nav-link d-flex align-items-center workspace-nav-tab" href="#" data-tab="sync-tab">
+                    <i class="bi bi-arrow-repeat me-2" style="font-size: 0.8em;"></i><span class="nav-text">Sync</span>
+                  </a>
+                </li>
+              {% endif %}
+              {% if file_sync_enabled or sidebar_settings.enable_semantic_kernel or sidebar_settings.enable_multi_model_endpoints %}
+                <li class="nav-item d-none" data-group-identities-sidebar-nav>
+                  <a class="nav-link d-flex align-items-center workspace-nav-tab" href="#" data-tab="identities-tab">
+                    <i class="bi bi-person-badge me-2" style="font-size: 0.8em;"></i><span class="nav-text">Identities</span>
                   </a>
                 </li>
               {% endif %}
@@ -168,18 +255,69 @@
     </div>
     {% endif %}
 
+    <!-- Custom Pages Section - Show only when the signed-in user has visible custom pages -->
+    {% if session.get('user') and app_settings.enable_custom_pages and custom_pages_nav %}
+    <div class="overflow-auto custom-pages-menu-wrapper">
+      {% set custom_page_count = custom_pages_nav|length %}
+      {% set custom_pages_drawer_threshold = 5 %}
+      {% set custom_pages_use_drawer = custom_page_count > custom_pages_drawer_threshold %}
+      {% set custom_pages_should_force_menu = app_settings.custom_pages_force_menu or custom_page_count >= 3 %}
+      {% if custom_pages_use_drawer %}
+        <button type="button" class="custom-pages-menu-toggle mt-2 mb-1 text-muted small d-flex align-items-center w-100" data-custom-pages-open-drawer aria-controls="customPagesDrawer">
+          <span class="nav-text flex-grow-1 text-start">{{ app_settings.custom_pages_menu_name or 'Custom Pages' }}</span>
+          <span class="badge rounded-pill text-bg-secondary custom-pages-count-badge">{{ custom_page_count }}</span>
+          <i class="bi bi-layout-sidebar-inset-reverse ms-2 custom-pages-caret"></i>
+        </button>
+      {% elif custom_pages_should_force_menu %}
+        <div id="custom-pages-toggle" class="custom-pages-menu-toggle mt-2 mb-1 text-muted small d-flex align-items-center" role="button" tabindex="0" aria-controls="custom-pages-links-section" aria-expanded="true" data-sidebar-menu-key="customPages" data-sidebar-menu-target="custom-pages-links-section" data-sidebar-menu-caret="custom-pages-caret">
+          <span class="nav-text flex-grow-1">{{ app_settings.custom_pages_menu_name or 'Custom Pages' }}</span>
+          <span class="badge rounded-pill text-bg-secondary custom-pages-count-badge">{{ custom_page_count }}</span>
+          <i id="custom-pages-caret" class="bi bi-caret-down-fill ms-2 transition custom-pages-caret"></i>
+        </div>
+        <div id="custom-pages-links-section" class="custom-pages-menu-list">
+          <ul class="nav flex-column mb-2">
+            {% for page in custom_pages_nav %}
+            <li class="nav-item">
+              <a class="nav-link d-flex align-items-center" href="{{ page.url }}" {% if page.open_in_new_tab %}target="_blank" rel="noopener noreferrer"{% endif %}>
+                <i class="bi {{ page.icon }} me-2" style="font-size: 0.8em;"></i>
+                <span class="nav-text">{{ page.label }}</span>
+              </a>
+            </li>
+            {% endfor %}
+          </ul>
+        </div>
+      {% else %}
+        <div class="custom-pages-inline-label mt-2 mb-1 text-muted small d-flex align-items-center">
+          <span class="nav-text flex-grow-1">{{ app_settings.custom_pages_menu_name or 'Custom Pages' }}</span>
+          <span class="badge rounded-pill text-bg-secondary custom-pages-count-badge">{{ custom_page_count }}</span>
+        </div>
+        <ul class="nav flex-column mb-2">
+          {% for page in custom_pages_nav %}
+          <li class="nav-item">
+            <a class="nav-link d-flex align-items-center" href="{{ page.url }}" {% if page.open_in_new_tab %}target="_blank" rel="noopener noreferrer"{% endif %}>
+              <i class="bi {{ page.icon }} me-2" style="font-size: 0.8em;"></i>
+              <span class="nav-text">{{ page.label }}</span>
+            </a>
+          </li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    </div>
+    {% endif %}
+
     <!-- Support Menu Section - Only show when a signed-in app user can access at least one support destination -->
     {% set support_menu_role_allowed = session.get('user') and session['user'].get('roles') and ('Admin' in session['user']['roles'] or 'User' in session['user']['roles']) %}
     {% if support_menu_role_allowed and app_settings.enable_support_menu %}
     {% set show_support_latest_features = app_settings.enable_support_latest_features and app_settings.support_latest_features_has_visible_items %}
     {% set show_support_send_feedback = app_settings.enable_support_send_feedback and app_settings.support_feedback_recipient_configured %}
     {% if show_support_latest_features or show_support_send_feedback %}
+    {% set support_menu_expanded = sidebar_menu_state.get('support', true) %}
     <div class="overflow-auto">
-      <div id="support-menu-toggle" class="mt-2 mb-1 ps-3 pe-2 text-muted small d-flex align-items-center" style="font-weight: 500; letter-spacing: 0.02em; cursor: pointer; user-select: none;">
+      <div id="support-menu-toggle" class="mt-2 mb-1 ps-3 pe-2 text-muted small d-flex align-items-center" style="font-weight: 500; letter-spacing: 0.02em; cursor: pointer; user-select: none;" role="button" tabindex="0" aria-controls="support-menu-links-section" aria-expanded="{{ 'true' if support_menu_expanded else 'false' }}" data-sidebar-menu-key="support" data-sidebar-menu-target="support-menu-links-section" data-sidebar-menu-caret="support-menu-caret">
         <span class="nav-text">{{ app_settings.support_menu_name or 'Support' }}</span>
-        <i id="support-menu-caret" class="bi bi-caret-down-fill ms-2 transition" style="font-size: 0.9em; transition: transform 0.2s;"></i>
+        <i id="support-menu-caret" class="bi bi-caret-down-fill ms-2 transition" style="font-size: 0.9em; transition: transform 0.2s;{% if not support_menu_expanded %} transform: rotate(-90deg);{% endif %}"></i>
       </div>
-      <div id="support-menu-links-section">
+      <div id="support-menu-links-section"{% if not support_menu_expanded %} class="d-none"{% endif %} aria-hidden="{{ 'false' if support_menu_expanded else 'true' }}">
         <ul class="nav flex-column mb-2">
           {% if show_support_latest_features %}
           <li class="nav-item">
@@ -210,12 +348,13 @@
       {% set should_force_menu = app_settings.external_links_force_menu %}
       {% set link_count = app_settings.external_links|length %}
       {% if should_force_menu or link_count >= 3 %}
+        {% set external_links_menu_expanded = sidebar_menu_state.get('externalLinks', true) %}
         <!-- Display as collapsible section -->
-        <div id="external-links-toggle" class="mt-2 mb-1 ps-3 pe-2 text-muted small d-flex align-items-center" style="font-weight: 500; letter-spacing: 0.02em; cursor: pointer; user-select: none;">
+        <div id="external-links-toggle" class="mt-2 mb-1 ps-3 pe-2 text-muted small d-flex align-items-center" style="font-weight: 500; letter-spacing: 0.02em; cursor: pointer; user-select: none;" role="button" tabindex="0" aria-controls="external-links-section" aria-expanded="{{ 'true' if external_links_menu_expanded else 'false' }}" data-sidebar-menu-key="externalLinks" data-sidebar-menu-target="external-links-section" data-sidebar-menu-caret="external-links-caret">
           <span class="nav-text">{{ app_settings.external_links_menu_name or 'External Links' }}</span>
-          <i id="external-links-caret" class="bi bi-caret-down-fill ms-2 transition" style="font-size: 0.9em; transition: transform 0.2s;"></i>
+          <i id="external-links-caret" class="bi bi-caret-down-fill ms-2 transition" style="font-size: 0.9em; transition: transform 0.2s;{% if not external_links_menu_expanded %} transform: rotate(-90deg);{% endif %}"></i>
         </div>
-        <div id="external-links-section">
+        <div id="external-links-section"{% if not external_links_menu_expanded %} class="d-none"{% endif %} aria-hidden="{{ 'false' if external_links_menu_expanded else 'true' }}">
           <ul class="nav flex-column mb-2">
             {% for link in app_settings.external_links %}
             <li class="nav-item">
@@ -248,13 +387,14 @@
 
     <!-- Admin Settings Section - Only show when on admin settings page and user is admin -->
     {% if request.endpoint == 'admin_settings' and 'Admin' in session['user']['roles'] %}
+    {% set admin_settings_menu_expanded = sidebar_menu_state.get('adminSettings', true) %}
     <div class="overflow-auto">
-      <div id="admin-settings-toggle" class="mt-2 mb-1 ps-3 pe-2 text-muted small d-flex align-items-center justify-content-between" style="font-weight: 500; letter-spacing: 0.02em; cursor: pointer; user-select: none;">
+      <div id="admin-settings-toggle" class="mt-2 mb-1 ps-3 pe-2 text-muted small d-flex align-items-center justify-content-between" style="font-weight: 500; letter-spacing: 0.02em; cursor: pointer; user-select: none;" role="button" tabindex="0" aria-controls="admin-settings-section" aria-expanded="{{ 'true' if admin_settings_menu_expanded else 'false' }}" data-sidebar-menu-key="adminSettings" data-sidebar-menu-target="admin-settings-section" data-sidebar-menu-caret="admin-settings-caret">
         <div class="d-flex align-items-center">
           <span class="nav-text">Admin Settings</span>
-          <i id="admin-settings-caret" class="bi bi-caret-down-fill ms-2 transition" style="font-size: 0.9em; transition: transform 0.2s;"></i>
+          <i id="admin-settings-caret" class="bi bi-caret-down-fill ms-2 transition" style="font-size: 0.9em; transition: transform 0.2s;{% if not admin_settings_menu_expanded %} transform: rotate(-90deg);{% endif %}"></i>
         </div>
-        <button id="admin-search-btn" class="btn btn-sm p-1" style="border: none; background: none; color: inherit;" title="Search Admin Settings">
+        <button id="admin-search-btn" class="btn btn-sm p-1" style="border: none; background: none; color: inherit;" title="Search Admin Settings" data-sidebar-menu-ignore="true">
           <i class="bi bi-search" style="font-size: 0.9em;"></i>
         </button>
       </div>
@@ -268,93 +408,35 @@
           </button>
         </div>
       </div>
-      <div id="admin-settings-section">
+      <div id="admin-settings-section"{% if not admin_settings_menu_expanded %} class="d-none"{% endif %} aria-hidden="{{ 'false' if admin_settings_menu_expanded else 'true' }}">
         <ul class="nav flex-column mb-2">
           <li class="nav-item">
             <a class="nav-link d-flex align-items-center admin-nav-tab" href="#" data-tab="latest-features">
               <i class="bi bi-lightning-charge me-2"></i><span class="nav-text">Latest Features</span><span class="badge bg-warning text-dark text-uppercase ms-2">New</span>
             </a>
             <ul class="nav flex-column ms-3" style="display: none;" id="latest-features-submenu">
-              <li class="nav-item">
-                <a class="nav-link d-flex align-items-center admin-nav-section" href="#" data-tab="latest-features" data-section="latest-features-release-notifications-card">
-                  <i class="bi bi-megaphone me-2" style="font-size: 0.8em;"></i><span class="nav-text">Registration Badge</span>
-                </a>
-              </li>
-              <li class="nav-item">
-                <a class="nav-link d-flex align-items-center admin-nav-section" href="#" data-tab="latest-features" data-section="latest-features-guided-tutorials-card">
-                  <i class="bi bi-signpost-split me-2" style="font-size: 0.8em;"></i><span class="nav-text">Guided Tutorials</span>
-                </a>
-              </li>
-              <li class="nav-item">
-                <a class="nav-link d-flex align-items-center admin-nav-section" href="#" data-tab="latest-features" data-section="latest-features-background-chat-card">
-                  <i class="bi bi-bell me-2" style="font-size: 0.8em;"></i><span class="nav-text">Background Chat</span>
-                </a>
-              </li>
-              <li class="nav-item">
-                <a class="nav-link d-flex align-items-center admin-nav-section" href="#" data-tab="latest-features" data-section="latest-features-model-selection-card">
-                  <i class="bi bi-cpu me-2" style="font-size: 0.8em;"></i><span class="nav-text">GPT Selection</span>
-                </a>
-              </li>
-              <li class="nav-item">
-                <a class="nav-link d-flex align-items-center admin-nav-section" href="#" data-tab="latest-features" data-section="latest-features-tabular-card">
-                  <i class="bi bi-table me-2" style="font-size: 0.8em;"></i><span class="nav-text">Tabular Analysis</span>
-                </a>
-              </li>
-              <li class="nav-item">
-                <a class="nav-link d-flex align-items-center admin-nav-section" href="#" data-tab="latest-features" data-section="latest-features-citation-improvements-card">
-                  <i class="bi bi-journal-text me-2" style="font-size: 0.8em;"></i><span class="nav-text">Citation Improvements</span>
-                </a>
-              </li>
-              <li class="nav-item">
-                <a class="nav-link d-flex align-items-center admin-nav-section" href="#" data-tab="latest-features" data-section="latest-features-document-versioning-card">
-                  <i class="bi bi-files me-2" style="font-size: 0.8em;"></i><span class="nav-text">Document Versioning</span>
-                </a>
-              </li>
-              <li class="nav-item">
-                <a class="nav-link d-flex align-items-center admin-nav-section" href="#" data-tab="latest-features" data-section="latest-features-export-card">
-                  <i class="bi bi-file-earmark-arrow-down me-2" style="font-size: 0.8em;"></i><span class="nav-text">Summaries and Export</span>
-                </a>
-              </li>
-              <li class="nav-item">
-                <a class="nav-link d-flex align-items-center admin-nav-section" href="#" data-tab="latest-features" data-section="latest-features-agent-ops-card">
-                  <i class="bi bi-grid me-2" style="font-size: 0.8em;"></i><span class="nav-text">Agent Operations</span>
-                </a>
-              </li>
-              <li class="nav-item">
-                <a class="nav-link d-flex align-items-center admin-nav-section" href="#" data-tab="latest-features" data-section="latest-features-thoughts-card">
-                  <i class="bi bi-stars me-2" style="font-size: 0.8em;"></i><span class="nav-text">AI Transparency</span>
-                </a>
-              </li>
-              <li class="nav-item">
-                <a class="nav-link d-flex align-items-center admin-nav-section" href="#" data-tab="latest-features" data-section="latest-features-fact-memory-card">
-                  <i class="bi bi-journal-bookmark me-2" style="font-size: 0.8em;"></i><span class="nav-text">Fact Memory</span>
-                </a>
-              </li>
-              <li class="nav-item">
-                <a class="nav-link d-flex align-items-center admin-nav-section" href="#" data-tab="latest-features" data-section="latest-features-deployment-card">
-                  <i class="bi bi-hdd-rack me-2" style="font-size: 0.8em;"></i><span class="nav-text">Deployment</span>
-                </a>
-              </li>
-              <li class="nav-item">
-                <a class="nav-link d-flex align-items-center admin-nav-section" href="#" data-tab="latest-features" data-section="latest-features-redis-card">
-                  <i class="bi bi-key me-2" style="font-size: 0.8em;"></i><span class="nav-text">Redis and Key Vault</span>
-                </a>
-              </li>
-              <li class="nav-item">
-                <a class="nav-link d-flex align-items-center admin-nav-section" href="#" data-tab="latest-features" data-section="latest-features-send-feedback-card">
-                  <i class="bi bi-envelope-paper me-2" style="font-size: 0.8em;"></i><span class="nav-text">Send Feedback</span>
-                </a>
-              </li>
-              <li class="nav-item">
-                <a class="nav-link d-flex align-items-center admin-nav-section" href="#" data-tab="latest-features" data-section="latest-features-support-menu-card">
-                  <i class="bi bi-life-preserver me-2" style="font-size: 0.8em;"></i><span class="nav-text">Support Menu</span>
-                </a>
-              </li>
-              <li class="nav-item">
-                <a class="nav-link d-flex align-items-center admin-nav-section" href="#" data-tab="latest-features" data-section="latest-features-previous-release-card">
-                  <i class="bi bi-clock-history me-2" style="font-size: 0.8em;"></i><span class="nav-text">Previous Release</span>
-                </a>
-              </li>
+              {% for release_group in admin_latest_feature_release_groups %}
+                {% if release_group.id == 'current_release' %}
+                  {% for feature in release_group.features %}
+                  {% set feature_card_id = 'latest-features-' ~ feature.id|replace('_', '-') ~ '-card' %}
+                  <li class="nav-item">
+                    <a class="nav-link d-flex align-items-center admin-nav-section" href="#" data-tab="latest-features" data-section="{{ feature_card_id }}">
+                      <i class="bi {{ feature.icon }} me-2" style="font-size: 0.8em;"></i><span class="nav-text">{{ feature.title }}</span>
+                    </a>
+                  </li>
+                  {% endfor %}
+                {% endif %}
+              {% endfor %}
+              {% for release_group in admin_latest_feature_release_groups %}
+                {% if release_group.id != 'current_release' %}
+                {% set release_card_id = 'latest-features-previous-release-card' if release_group.id == 'previous_release' else 'latest-features-' ~ release_group.id|replace('_', '-') ~ '-card' %}
+                <li class="nav-item">
+                  <a class="nav-link d-flex align-items-center admin-nav-section" href="#" data-tab="latest-features" data-section="{{ release_card_id }}">
+                    <i class="bi bi-clock-history me-2" style="font-size: 0.8em;"></i><span class="nav-text">{{ release_group.label|replace(' Features', '') }}</span>
+                  </a>
+                </li>
+                {% endif %}
+              {% endfor %}
             </ul>
           </li>
           <li class="nav-item">
@@ -410,13 +492,25 @@
             </ul>
           </li>
           <li class="nav-item">
+            <a class="nav-link d-flex align-items-center admin-nav-tab" href="#" data-tab="custom-pages">
+              <i class="bi bi-window-plus me-2"></i><span class="nav-text">Custom Pages</span>
+            </a>
+            <ul class="nav flex-column ms-3" style="display: none;" id="custom-pages-submenu">
+              <li class="nav-item">
+                <a class="nav-link d-flex align-items-center admin-nav-section" href="#" data-tab="custom-pages" data-section="custom-pages-section">
+                  <i class="bi bi-file-earmark-richtext me-2" style="font-size: 0.8em;"></i><span class="nav-text">Static Pages</span>
+                </a>
+              </li>
+            </ul>
+          </li>
+          <li class="nav-item">
             <a class="nav-link d-flex align-items-center admin-nav-tab" href="#" data-tab="ai-models">
               <i class="bi bi-cpu me-2"></i><span class="nav-text">AI Models</span>
             </a>
             <ul class="nav flex-column ms-3" style="display: none;" id="ai-models-submenu">
               <li class="nav-item">
                 <a class="nav-link d-flex align-items-center admin-nav-section" href="#" data-tab="ai-models" data-section="gpt-config">
-                  <i class="bi bi-chat-square-text me-2" style="font-size: 0.8em;"></i><span class="nav-text">GPT Configuration</span>
+                  <i class="bi bi-chat-square-text me-2" style="font-size: 0.8em;"></i><span class="nav-text">Chat Model</span>
                 </a>
               </li>
               <li class="nav-item">
@@ -498,6 +592,53 @@
             </a>
           </li>
           <li class="nav-item">
+            <a class="nav-link d-flex align-items-center admin-nav-tab" href="#" data-tab="data-management">
+              <i class="bi bi-database-check me-2"></i><span class="nav-text">Data Management</span>
+            </a>
+            <ul class="nav flex-column ms-3" style="display: none;" id="data-management-submenu">
+              <li class="nav-item">
+                <a class="nav-link d-flex align-items-center admin-nav-section" href="#" data-tab="data-management" data-section="data-management-backup-section">
+                  <i class="bi bi-archive me-2" style="font-size: 0.8em;"></i><span class="nav-text">Backup</span>
+                </a>
+              </li>
+              <li class="nav-item">
+                <a class="nav-link d-flex align-items-center admin-nav-section" href="#" data-tab="data-management" data-section="data-management-schedule-section">
+                  <i class="bi bi-calendar-event me-2" style="font-size: 0.8em;"></i><span class="nav-text">Schedule</span>
+                </a>
+              </li>
+              <li class="nav-item">
+                <a class="nav-link d-flex align-items-center admin-nav-section" href="#" data-tab="data-management" data-section="data-management-storage-section">
+                  <i class="bi bi-hdd me-2" style="font-size: 0.8em;"></i><span class="nav-text">Storage</span>
+                </a>
+              </li>
+              <li class="nav-item">
+                <a class="nav-link d-flex align-items-center admin-nav-section" href="#" data-tab="data-management" data-section="data-management-encryption-section">
+                  <i class="bi bi-key me-2" style="font-size: 0.8em;"></i><span class="nav-text">Encryption</span>
+                </a>
+              </li>
+              <li class="nav-item">
+                <a class="nav-link d-flex align-items-center admin-nav-section" href="#" data-tab="data-management" data-section="data-management-migration-section">
+                  <i class="bi bi-arrow-left-right me-2" style="font-size: 0.8em;"></i><span class="nav-text">Migration</span>
+                </a>
+              </li>
+              <li class="nav-item">
+                <a class="nav-link d-flex align-items-center admin-nav-section" href="#" data-tab="data-management" data-section="data-management-backup-inventory-section">
+                  <i class="bi bi-box-seam me-2" style="font-size: 0.8em;"></i><span class="nav-text">Backup Inventory</span>
+                </a>
+              </li>
+              <li class="nav-item">
+                <a class="nav-link d-flex align-items-center admin-nav-section" href="#" data-tab="data-management" data-section="data-management-jobs-section">
+                  <i class="bi bi-clock-history me-2" style="font-size: 0.8em;"></i><span class="nav-text">Jobs</span>
+                </a>
+              </li>
+            </ul>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link d-flex align-items-center admin-nav-tab" href="#" data-tab="governance">
+              <i class="bi bi-braces-asterisk me-2"></i><span class="nav-text">Governance</span>
+            </a>
+          </li>
+          <li class="nav-item">
             <a class="nav-link d-flex align-items-center admin-nav-tab" href="#" data-tab="workspaces">
               <i class="bi bi-folder me-2"></i><span class="nav-text">Workspaces</span>
             </a>
@@ -505,6 +646,11 @@
               <li class="nav-item">
                 <a class="nav-link d-flex align-items-center admin-nav-section" href="#" data-tab="workspaces" data-section="personal-workspaces-section">
                   <i class="bi bi-person me-2" style="font-size: 0.8em;"></i><span class="nav-text">Personal Workspaces</span>
+                </a>
+              </li>
+              <li class="nav-item">
+                <a class="nav-link d-flex align-items-center admin-nav-section" href="#" data-tab="workspaces" data-section="workflow-settings-section">
+                  <i class="bi bi-diagram-3 me-2" style="font-size: 0.8em;"></i><span class="nav-text">Workflow</span>
                 </a>
               </li>
               <li class="nav-item">
@@ -543,6 +689,16 @@
                 </a>
               </li>
             </ul>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link d-flex align-items-center admin-nav-tab" href="#" data-tab="file-sync">
+              <i class="bi bi-arrow-repeat me-2"></i><span class="nav-text">File Sync</span>
+            </a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link d-flex align-items-center admin-nav-tab" href="#" data-tab="workspace-identities">
+              <i class="bi bi-person-badge me-2"></i><span class="nav-text">Global Identities</span>
+            </a>
           </li>
           <li class="nav-item">
             <a class="nav-link d-flex align-items-center admin-nav-tab" href="#" data-tab="citation">
@@ -659,13 +815,14 @@
     <!-- When DISABLED (default), only regular Admin role grants access (ControlCenterAdmin is ignored) -->
     <!-- DashboardReader role grants dashboard-only access when that setting is enabled -->
     {% if request.endpoint == 'control_center' and ((app_settings.require_member_of_control_center_admin and session.get('user') and 'ControlCenterAdmin' in session['user']['roles']) or (app_settings.require_member_of_control_center_dashboard_reader and session.get('user') and 'ControlCenterDashboardReader' in session['user']['roles']) or (not app_settings.require_member_of_control_center_admin and 'Admin' in session['user']['roles'])) %}
+    {% set control_center_menu_expanded = sidebar_menu_state.get('controlCenter', true) %}
     <div class="overflow-auto">
-      <div id="control-center-toggle" class="mt-2 mb-1 ps-3 pe-2 text-muted small d-flex align-items-center justify-content-between" style="font-weight: 500; letter-spacing: 0.02em; cursor: pointer; user-select: none;">
+      <div id="control-center-toggle" class="mt-2 mb-1 ps-3 pe-2 text-muted small d-flex align-items-center justify-content-between" style="font-weight: 500; letter-spacing: 0.02em; cursor: pointer; user-select: none;" role="button" tabindex="0" aria-controls="control-center-section" aria-expanded="{{ 'true' if control_center_menu_expanded else 'false' }}" data-sidebar-menu-key="controlCenter" data-sidebar-menu-target="control-center-section" data-sidebar-menu-caret="control-center-caret">
         <div class="d-flex align-items-center">
           <span class="nav-text">Control Center</span>
-          <i id="control-center-caret" class="bi bi-caret-down-fill ms-2 transition" style="font-size: 0.9em; transition: transform 0.2s;"></i>
+          <i id="control-center-caret" class="bi bi-caret-down-fill ms-2 transition" style="font-size: 0.9em; transition: transform 0.2s;{% if not control_center_menu_expanded %} transform: rotate(-90deg);{% endif %}"></i>
         </div>
-        <button id="control-center-search-btn" class="btn btn-sm p-1" style="border: none; background: none; color: inherit;" title="Search Control Center">
+        <button id="control-center-search-btn" class="btn btn-sm p-1" style="border: none; background: none; color: inherit;" title="Search Control Center" data-sidebar-menu-ignore="true">
           <i class="bi bi-search" style="font-size: 0.9em;"></i>
         </button>
       </div>
@@ -679,7 +836,7 @@
           </button>
         </div>
       </div>
-      <div id="control-center-section">
+      <div id="control-center-section"{% if not control_center_menu_expanded %} class="d-none"{% endif %} aria-hidden="{{ 'false' if control_center_menu_expanded else 'true' }}">
         <ul class="nav flex-column mb-2">
           <li class="nav-item">
             <a class="nav-link d-flex align-items-center control-center-nav-tab" href="#" data-tab="dashboard">
@@ -718,17 +875,18 @@
 
     <!-- Conversations Section - Only show on chats page -->
     {% if request.endpoint == 'chats' %}
+    {% set conversations_menu_expanded = sidebar_menu_state.get('conversations', true) %}
     <div id="conversations-section" class="flex-grow-1 overflow-auto">
-      <div id="conversations-toggle" class="mt-2 mb-1 ps-3 pe-2 text-muted small d-flex align-items-center justify-content-between" style="font-weight: 500; letter-spacing: 0.02em; cursor: pointer; user-select: none;">
+      <div id="conversations-toggle" class="sidebar-section-toggle mt-2 mb-1 ps-3 pe-2 text-muted small d-flex align-items-center justify-content-between" role="button" tabindex="0" aria-controls="conversations-list-container" aria-expanded="{{ 'true' if conversations_menu_expanded else 'false' }}" data-sidebar-menu-key="conversations" data-sidebar-menu-target="conversations-list-container" data-sidebar-menu-caret="conversations-caret">
         <div class="d-flex align-items-center">
           <span class="nav-text">Conversations</span>
-          <i id="conversations-caret" class="bi bi-caret-down-fill ms-2 transition" style="font-size: 0.9em; transition: transform 0.2s;"></i>
+          <i id="conversations-caret" class="bi bi-caret-down-fill ms-2 transition" style="font-size: 0.9em; transition: transform 0.2s;{% if not conversations_menu_expanded %} transform: rotate(-90deg);{% endif %}"></i>
         </div>
         <div class="d-flex align-items-center">
-          <button id="sidebar-search-btn" class="btn btn-sm btn-link text-muted p-0 me-1" style="padding: 2px 6px; font-size: 0.75rem; border: none; background: none;" title="Search conversations">
+          <button id="sidebar-search-btn" class="btn btn-sm btn-link text-muted p-0 me-1" style="padding: 2px 6px; font-size: 0.75rem; border: none; background: none;" title="Search conversations" data-sidebar-menu-ignore="true">
             <i class="bi bi-search" style="font-size: 0.9em;"></i>
           </button>
-          <button id="sidebar-conversations-settings-btn" class="btn btn-sm btn-link text-muted p-0 me-1" style="padding: 2px 6px; font-size: 0.75rem; border: none; background: none;" title="Show/Hide hidden conversations">
+          <button id="sidebar-conversations-settings-btn" class="btn btn-sm btn-link text-muted p-0 me-1" style="padding: 2px 6px; font-size: 0.75rem; border: none; background: none;" title="Show/Hide hidden conversations" data-sidebar-menu-ignore="true">
             <i class="bi bi-eye" style="font-size: 0.9em;"></i>
           </button>
           <div id="conversations-actions" class="d-flex align-items-center" style="display: none !important;">
@@ -759,11 +917,25 @@
           </button>
         </div>
       </div>
-      <div id="conversations-list-container" class="px-2">
+      <div id="conversations-list-container" class="px-2{% if not conversations_menu_expanded %} d-none{% endif %}" aria-hidden="{{ 'false' if conversations_menu_expanded else 'true' }}">
         <div id="sidebar-conversations-list" class="list-group list-group-flush">
           <div class="text-center p-2 text-muted small">Loading conversations...</div>
         </div>
       </div>
+      {% if sidebar_settings.allow_user_workflows %}
+      <div id="sidebar-workflow-section" class="d-none">
+        <div id="sidebar-workflows-toggle" class="sidebar-section-toggle mt-2 mb-1 ps-3 pe-2 text-muted small d-flex align-items-center justify-content-between" role="button" tabindex="0" aria-controls="sidebar-workflow-list-container" aria-expanded="true">
+          <div class="d-flex align-items-center">
+            <span class="nav-text">Workflows</span>
+            <i id="sidebar-workflows-caret" class="bi bi-caret-down-fill ms-2 transition" style="font-size: 0.9em; transition: transform 0.2s;"></i>
+          </div>
+        </div>
+        <div id="sidebar-workflow-list-container" class="px-2 sidebar-workflow-list-container">
+          <div id="sidebar-workflow-conversations-list" class="list-group list-group-flush"></div>
+          <button type="button" id="sidebar-workflow-show-more-btn" class="btn btn-sm btn-link text-muted w-100 d-none" aria-expanded="false">Show more</button>
+        </div>
+      </div>
+      {% endif %}
     </div>
     {% endif %}
   </div>
@@ -902,224 +1074,42 @@
       <a class="btn btn-outline-primary w-100" href="{{ url_for('login') }}">Login</a>
     {% endif %}
   </div>
-  <script>
-    // Collapsible Workspaces Section
-    document.addEventListener('DOMContentLoaded', function() {
-      var toggle = document.getElementById('workspaces-toggle');
-      var section = document.getElementById('workspaces-section');
-      var caret = document.getElementById('workspaces-caret');
-      var collapsed = false;
-      if (toggle && section && caret) {
-        toggle.addEventListener('click', function() {
-          collapsed = !collapsed;
-          section.style.display = collapsed ? 'none' : '';
-          caret.style.transform = collapsed ? 'rotate(-90deg)' : 'rotate(0deg)';
-        });
-      }
-
-      // Collapsible Conversations Section (for chats page)
-      var conversationsToggle = document.getElementById('conversations-toggle');
-      var conversationsContainer = document.getElementById('conversations-list-container');
-      var conversationsCaret = document.getElementById('conversations-caret');
-      var conversationsCollapsed = false;
-      if (conversationsToggle && conversationsContainer && conversationsCaret) {
-        conversationsToggle.addEventListener('click', function() {
-          conversationsCollapsed = !conversationsCollapsed;
-          conversationsContainer.style.display = conversationsCollapsed ? 'none' : '';
-          conversationsCaret.style.transform = conversationsCollapsed ? 'rotate(-90deg)' : 'rotate(0deg)';
-        });
-      }
-
-      // Collapsible External Links Section
-      var externalLinksToggle = document.getElementById('external-links-toggle');
-      var externalLinksSection = document.getElementById('external-links-section');
-      var externalLinksCaret = document.getElementById('external-links-caret');
-      var externalLinksCollapsed = false;
-      if (externalLinksToggle && externalLinksSection && externalLinksCaret) {
-        externalLinksToggle.addEventListener('click', function() {
-          externalLinksCollapsed = !externalLinksCollapsed;
-          externalLinksSection.style.display = externalLinksCollapsed ? 'none' : '';
-          externalLinksCaret.style.transform = externalLinksCollapsed ? 'rotate(-90deg)' : 'rotate(0deg)';
-        });
-      }
-
-      // Collapsible Support Menu Section
-      var supportMenuToggle = document.getElementById('support-menu-toggle');
-      var supportMenuSection = document.getElementById('support-menu-links-section');
-      var supportMenuCaret = document.getElementById('support-menu-caret');
-      var supportMenuCollapsed = false;
-      if (supportMenuToggle && supportMenuSection && supportMenuCaret) {
-        supportMenuToggle.addEventListener('click', function() {
-          supportMenuCollapsed = !supportMenuCollapsed;
-          supportMenuSection.style.display = supportMenuCollapsed ? 'none' : '';
-          supportMenuCaret.style.transform = supportMenuCollapsed ? 'rotate(-90deg)' : 'rotate(0deg)';
-        });
-      }
-    });
-
-    // Sidebar Toggle Functionality
-    function toggleSidebar() {
-      var sidebar = document.getElementById('sidebar-nav');
-      var toggleBtn = document.getElementById('sidebar-toggle-btn');
-      var toggleIcon = document.getElementById('sidebar-toggle-icon');
-      var floatingBtn = document.getElementById('floating-expand-btn');
-      var body = document.body;
-      
-      // Get all main content containers - using more comprehensive selectors
-      var allContentElements = document.querySelectorAll('.main-content, .container, .container-fluid, #main-content');
-      var mainContent = document.getElementById('main-content');
-      
-      if (sidebar.classList.contains('sidebar-expanded')) {
-        // Hide sidebar completely
-        sidebar.classList.remove('sidebar-expanded');
-        sidebar.classList.add('sidebar-collapsed');
-        body.classList.add('sidebar-collapsed');
-        
-        // Update all content areas - remove left margin when sidebar is hidden
-        allContentElements.forEach(function(element) {
-          element.style.marginLeft = '0px';
-          element.style.maxWidth = '100%';
-        });
-        // Remove sidebar-padding class from main content
-        if (mainContent) mainContent.classList.remove('sidebar-padding');
-        
-        // Hide the sidebar toggle button and show the floating button
-        toggleBtn.style.display = 'none';
-        floatingBtn.classList.remove('d-none');
-        floatingBtn.classList.add('d-block');
-        
-      } else {
-        // Show sidebar
-        sidebar.classList.remove('sidebar-collapsed');
-        sidebar.classList.add('sidebar-expanded');
-        body.classList.remove('sidebar-collapsed');
-        
-        // Remove any inline margin/maxWidth and add sidebar-padding class
-        allContentElements.forEach(function(element) {
-          element.style.marginLeft = '';
-          element.style.maxWidth = '';
-        });
-        if (mainContent) mainContent.classList.add('sidebar-padding');
-        
-        // Show the sidebar toggle button and hide the floating button
-        toggleBtn.style.display = 'block';
-        floatingBtn.classList.remove('d-block');
-        floatingBtn.classList.add('d-none');
-      }
-    }
-    
-    // Add CSS for collapsed state
-    var style = document.createElement('style');
-    style.textContent = `
-      #sidebar-nav {
-        transition: transform 0.3s ease;
-        position: relative;
-      }
-      
-      #sidebar-nav.sidebar-collapsed {
-        transform: translateX(-100%);
-      }
-      
-      /* Fixed user account section */
-      #sidebar-user-account {
-        width: var(--sidebar-width, 260px);
-        min-width: var(--sidebar-min-width, 220px);
-        transition: inherit;
-        backdrop-filter: blur(10px);
-        -webkit-backdrop-filter: blur(10px);
-      }
-      
-      /* Ensure user account section inherits background from sidebar */
-      #sidebar-user-account {
-        background-color: var(--bs-light, #f8f9fa) !important;
-      }
-      
-      /* Dark mode support for user account section */
-      [data-bs-theme="dark"] #sidebar-user-account {
-        background-color: var(--bs-dark, #212529) !important;
-        border-color: var(--bs-border-color-translucent, rgba(255,255,255,0.15)) !important;
-      }
-      
-      /* Smooth transitions for content area adjustments */
-      .main-content,
-      .container,
-      .container-fluid,
-      #main-content {
-        transition: margin-left 0.3s ease-in-out, max-width 0.3s ease-in-out !important;
-      }
-      
-      /* Floating expand button styles */
-      #floating-expand-btn {
-        background-color: var(--bs-body-bg, #fff) !important;
-        border: 1px solid var(--bs-border-color, #dee2e6) !important;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.15) !important;
-        color: var(--bs-body-color, #212529) !important;
-      }
-      
-      /* Dark mode styles for floating expand button */
-      [data-bs-theme="dark"] #floating-expand-btn {
-        background-color: var(--bs-dark, #212529) !important;
-        border: 1px solid var(--bs-border-color-translucent, rgba(255,255,255,0.15)) !important;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.5) !important;
-        color: var(--bs-body-color, #fff) !important;
-      }
-      
-      /* Floating expand button hover effect */
-      #floating-expand-btn:hover {
-        background-color: var(--bs-gray-100, #f8f9fa) !important;
-        transform: scale(1.05);
-        transition: all 0.2s ease;
-      }
-      
-      /* Dark mode hover effect */
-      [data-bs-theme="dark"] #floating-expand-btn:hover {
-        background-color: var(--bs-gray-800, #343a40) !important;
-      }
-      
-      /* Sidebar title truncation styles */
-      .sidebar-title-truncate {
-        display: inline-block;
-        overflow: hidden;
-        white-space: nowrap;
-        text-overflow: ellipsis;
-        max-width: 140px; /* Default max width for no logo scenario (18 chars approx) */
-      }
-      
-      /* When logo is present, reduce max width */
-      [data-show-logo="true"].sidebar-title-truncate {
-        max-width: 80px; /* Reduced width for logo scenario (10 chars approx) */
-      }
-    `;
-    document.head.appendChild(style);
-  </script>
+  <script type="application/json" id="sidebar-menu-state-data">{{ sidebar_menu_state | tojson }}</script>
 </div>
 <!-- Floating expand button (shown when sidebar is collapsed) -->
 <button type="button" id="floating-expand-btn" class="btn btn-sm btn-outline-secondary d-none"
         aria-label="Show sidebar" title="Show sidebar"
-        style="position: fixed; left: 0.5rem; top: 0.5rem; z-index: 1050; width: auto; min-width: 30px; height: 30px; padding: 3px; border-radius: 1px; display: flex; align-items: center; justify-content: center;"
-        onclick="toggleSidebar()">
-  {% if app_settings.custom_logo_base64 or app_settings.custom_logo_dark_base64 %}
-    <!-- Light mode logo -->
-    {% if app_settings.custom_logo_base64 %}
-      <img src="{{ url_for('static', filename='images/custom_logo.png') }}?v={{ app_settings.logo_version | default(1) }}" 
-           alt="Logo" height="24" style="max-width: none;" class="d-light-mode-only" />
+        data-sidebar-toggle="toggle">
+  {% if app_settings.show_logo %}
+    {% if app_settings.custom_logo_base64 or app_settings.custom_logo_dark_base64 %}
+      <!-- Light mode logo -->
+      {% if app_settings.custom_logo_base64 %}
+        <img src="{{ url_for('static', filename='images/custom_logo.png') }}?v={{ app_settings.logo_version | default(1) }}"
+             alt="Logo" height="24" class="sidebar-floating-logo d-light-mode-only" />
+      {% else %}
+        <img src="{{ url_for('static', filename='images/logo-lightmode.png') }}"
+             alt="Logo" height="24" class="sidebar-floating-logo d-light-mode-only" />
+      {% endif %}
+      <!-- Dark mode logo -->
+      {% if app_settings.custom_logo_dark_base64 %}
+        <img src="{{ url_for('static', filename='images/custom_logo_dark.png') }}?v={{ app_settings.logo_dark_version | default(1) }}"
+             alt="Logo" height="24" class="sidebar-floating-logo d-dark-mode-only" />
+      {% elif app_settings.custom_logo_base64 %}
+        <img src="{{ url_for('static', filename='images/custom_logo.png') }}?v={{ app_settings.logo_version | default(1) }}"
+             alt="Logo" height="24" class="sidebar-floating-logo d-dark-mode-only" />
+      {% else %}
+        <img src="{{ url_for('static', filename='images/logo-darkmode.png') }}"
+             alt="Logo" height="24" class="sidebar-floating-logo d-dark-mode-only" />
+      {% endif %}
     {% else %}
-      <img src="{{ url_for('static', filename='images/logo-lightmode.png') }}" 
-           alt="Logo" height="24" style="max-width: none;" class="d-light-mode-only" />
+      <img src="{{ url_for('static', filename='images/logo-lightmode.png') }}" alt="Logo" height="24" class="sidebar-floating-logo d-light-mode-only" />
+      <img src="{{ url_for('static', filename='images/logo-darkmode.png') }}" alt="Logo" height="24" class="sidebar-floating-logo d-dark-mode-only" />
     {% endif %}
-    <!-- Dark mode logo -->
-    {% if app_settings.custom_logo_dark_base64 %}
-      <img src="{{ url_for('static', filename='images/custom_logo_dark.png') }}?v={{ app_settings.logo_dark_version | default(1) }}" 
-           alt="Logo" height="24" style="max-width: none;" class="d-dark-mode-only" />
-    {% elif app_settings.custom_logo_base64 %}
-      <img src="{{ url_for('static', filename='images/custom_logo.png') }}?v={{ app_settings.logo_version | default(1) }}" 
-           alt="Logo" height="24" style="max-width: none;" class="d-dark-mode-only" />
-    {% else %}
-      <img src="{{ url_for('static', filename='images/logo-darkmode.png') }}" 
-           alt="Logo" height="24" style="max-width: none;" class="d-dark-mode-only" />
-    {% endif %}
-  {% else %}
-    <img src="{{ url_for('static', filename='images/logo-lightmode.png') }}" alt="Logo" height="24" style="max-width: none;" class="d-light-mode-only" />
-    <img src="{{ url_for('static', filename='images/logo-darkmode.png') }}" alt="Logo" height="24" style="max-width: none;" class="d-dark-mode-only" />
+  {% endif %}
+  {% if not app_settings.hide_app_title %}
+    <span class="floating-expand-title">{{ app_settings.app_title }}</span>
+  {% endif %}
+  {% if not app_settings.show_logo and app_settings.hide_app_title %}
+    <i class="bi bi-layout-sidebar-reverse" aria-hidden="true"></i>
   {% endif %}
 </button>

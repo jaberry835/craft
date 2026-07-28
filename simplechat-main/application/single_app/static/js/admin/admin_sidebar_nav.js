@@ -17,7 +17,7 @@ function initAdminSidebarNav() {
     const adminSearchInput = document.getElementById('admin-search-input');
     const adminSearchClear = document.getElementById('admin-search-clear');
     
-    if (adminToggle) {
+    if (adminToggle && !adminToggle.dataset.sidebarMenuKey) {
         adminToggle.addEventListener('click', function(e) {
             // Don't toggle if clicking on search button
             if (e.target.closest('#admin-search-btn')) {
@@ -39,8 +39,12 @@ function initAdminSidebarNav() {
             
             if (!isVisible) {
                 // Ensure admin section is expanded when search is opened
-                adminSection.style.display = 'block';
-                adminCaret.classList.add('rotate-180');
+                if (typeof window.setPersistentSidebarMenuExpanded === 'function') {
+                    window.setPersistentSidebarMenuExpanded('adminSettings', true);
+                } else {
+                    adminSection.classList.remove('d-none');
+                    adminCaret.style.transform = 'rotate(0deg)';
+                }
                 
                 // Focus on search input
                 setTimeout(() => adminSearchInput.focus(), 100);
@@ -165,6 +169,9 @@ function showAdminTab(tabId) {
     
     // Update the hash in URL for deep linking
     window.location.hash = tabId;
+    if (typeof window.updateAdminSettingsSaveButtonState === 'function') {
+        window.updateAdminSettingsSaveButtonState();
+    }
 }
 
 // Make function globally available
@@ -183,6 +190,7 @@ function scrollToSection(sectionId) {
         'home-page-text-section': 'home-page-text-section',
         'appearance-section': 'appearance-section',
         'classification-banner-section': 'classification-banner-section',
+        'custom-pages-section': 'custom-pages-section',
         'external-links-section': 'external-links-section',
         'health-check-section': 'health-check-section',
         'system-settings-section': 'system-settings-section',
@@ -211,6 +219,15 @@ function scrollToSection(sectionId) {
         'conversation-archiving-section': 'conversation-archiving-section',
         // Security tab sections
         'keyvault-section': 'keyvault-section',
+        // Data Management tab sections
+        'data-management-backup-section': 'data-management-backup-section',
+        'data-management-schedule-section': 'data-management-schedule-section',
+        'data-management-storage-section': 'data-management-storage-section',
+        'data-management-encryption-section': 'data-management-encryption-section',
+        'data-management-migration-section': 'data-management-migration-section',
+        'data-management-target-cosmos-section': 'data-management-target-cosmos-section',
+        'data-management-backup-inventory-section': 'data-management-backup-inventory-section',
+        'data-management-jobs-section': 'data-management-jobs-section',
         // Search & Extract tab sections
         'web-search-section': 'web-search-foundry-section',
         'azure-ai-search-section': 'azure-ai-search-section',

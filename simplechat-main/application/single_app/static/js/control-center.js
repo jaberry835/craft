@@ -23,6 +23,16 @@ function parseDateKey(dateStr) {
     return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
+const ACTIVITY_LOGS_LAYOUT_PRESET_STORAGE_KEY = 'simplechat_activityLogsLayoutPreset';
+const ACTIVITY_LOGS_LAYOUT_PRESETS = ['balanced', 'details-focus', 'compact'];
+const ACTIVITY_LOGS_LAYOUT_HINTS = {
+    balanced: 'Balanced view keeps the five log columns readable. Switch to Details Focus or click a row for the full raw log.',
+    'details-focus': 'Details Focus widens the Details column for longer entries. Click a row for the full raw log.',
+    compact: 'Compact view prioritizes faster scanning. Click a row for the full raw log when details are truncated.'
+};
+const CONTROL_CENTER_MANAGEMENT_DEFAULT_PAGE_SIZE = 25;
+const CONTROL_CENTER_MANAGEMENT_MAX_PAGE_SIZE = 250;
+
 // Group Table Sorter - similar to user table but for groups
 class GroupTableSorter {
     constructor(tableId) {
@@ -71,8 +81,8 @@ class GroupTableSorter {
             let bValue = this.getCellValue(b, sortKey);
 
             // Handle different data types
-            if (sortKey === 'members' || sortKey === 'documents') {
-                // Numeric sorting for numbers and dates
+            if (sortKey === 'members' || sortKey === 'documents' || sortKey === 'tokens') {
+                // Numeric sorting for counts and totals
                 aValue = this.parseNumericValue(aValue);
                 bValue = this.parseNumericValue(bValue);
                 
@@ -130,6 +140,9 @@ class GroupTableSorter {
                 const docMatch = docText.match(/(\d+)/);
                 value = docMatch ? docMatch[1] : '0';
                 break;
+            case 'tokens':
+                value = cell.textContent.trim();
+                break;
             default:
                 value = cell.textContent.trim();
         }
@@ -150,18 +163,27 @@ class GroupTableSorter {
     parseNumericValue(value) {
         if (!value || value === '' || value.toLowerCase() === 'never') return 0;
         
-        // Extract numeric value from string
-        const numMatch = value.match(/(\d+)/);
-        return numMatch ? parseInt(numMatch[1]) : 0;
+        // Extract numeric value from strings that may contain comma group separators.
+        const normalizedValue = value.replace(/,/g, '');
+        const numMatch = normalizedValue.match(/(\d+(?:\.\d+)?)/);
+        return numMatch ? Number.parseFloat(numMatch[1]) : 0;
     }
 }
 
 class ControlCenter {
     constructor() {
         this.currentPage = 1;
-        this.usersPerPage = 50;
+        this.usersPerPage = CONTROL_CENTER_MANAGEMENT_DEFAULT_PAGE_SIZE;
         this.searchTerm = '';
         this.accessFilter = 'all';
+        this.groupPage = 1;
+        this.groupsPerPage = CONTROL_CENTER_MANAGEMENT_DEFAULT_PAGE_SIZE;
+        this.groupSearchTerm = '';
+        this.groupStatusFilter = 'all';
+        this.publicWorkspacePage = 1;
+        this.publicWorkspacesPerPage = CONTROL_CENTER_MANAGEMENT_DEFAULT_PAGE_SIZE;
+        this.publicWorkspaceSearchTerm = '';
+        this.publicWorkspaceStatusFilter = 'all';
         this.selectedUsers = new Set();
         this.selectedGroups = new Set();
         this.selectedPublicWorkspaces = new Set();
@@ -178,12 +200,17 @@ class ControlCenter {
         this.activityLogsPerPage = 50;
         this.activityLogsSearch = '';
         this.activityTypeFilter = 'all';
+        this.activityLogsLayoutPreset = 'balanced';
+        this.currentActivityLogUserMap = {};
+        this.currentRawLogJson = '';
         
         this.init();
     }
     
     init() {
         this.bindEvents();
+        this.loadActivityLogsLayoutPreset();
+        this.applyActivityLogsLayoutPreset(this.activityLogsLayoutPreset);
         
         // Check if user has admin role (passed from backend)
         const hasAdminRole = window.hasControlCenterAdmin === true;
@@ -219,17 +246,8 @@ class ControlCenter {
             setTimeout(() => this.loadPublicWorkspaces(), 100);
         });
         
-        document.getElementById('activity-logs-tab')?.addEventListener('click', () => {
-            console.log('Activity Logs tab clicked!');
-            setTimeout(() => {
-                console.log('Calling loadActivityLogs...');
-                this.loadActivityLogs();
-            }, 100);
-        });
-        
-        // Also use shown.bs.tab as backup
         document.getElementById('activity-logs-tab')?.addEventListener('shown.bs.tab', () => {
-            console.log('Activity Logs tab shown event fired');
+            this.loadActivityLogs();
         });
         
         // Search and filter controls
@@ -237,12 +255,18 @@ class ControlCenter {
             this.debounce(() => this.handleSearchChange(), 300));
         document.getElementById('accessFilterSelect')?.addEventListener('change', 
             () => this.handleFilterChange());
+        document.getElementById('userManagementPerPageSelect')?.addEventListener('change',
+            (e) => this.handleUserPerPageChange(e));
+        document.getElementById('groupManagementPerPageSelect')?.addEventListener('change',
+            (e) => this.handleGroupPerPageChange(e));
         
         // Public workspace search and filter controls
         document.getElementById('publicWorkspaceSearchInput')?.addEventListener('input', 
-            this.debounce((e) => this.searchPublicWorkspaces(e.target.value), 300));
+            this.debounce(() => this.handlePublicWorkspaceSearchChange(), 300));
         document.getElementById('publicWorkspaceStatusFilterSelect')?.addEventListener('change', 
-            (e) => this.filterPublicWorkspacesByStatus(e.target.value));
+            () => this.handlePublicWorkspaceFilterChange());
+        document.getElementById('publicWorkspaceManagementPerPageSelect')?.addEventListener('change',
+            (e) => this.handlePublicWorkspacePerPageChange(e));
         
         // Export buttons
         document.getElementById('exportGroupsBtn')?.addEventListener('click', 
@@ -361,6 +385,9 @@ class ControlCenter {
             () => this.exportActivityLogsToCSV());
         document.getElementById('refreshActivityLogsBtn')?.addEventListener('click', 
             () => this.loadActivityLogs());
+        document.querySelectorAll('input[name="activityLogsLayoutPreset"]').forEach((presetInput) => {
+            presetInput.addEventListener('change', (event) => this.handleActivityLogsLayoutPresetChange(event));
+        });
     }
     
     debounce(func, wait) {
@@ -390,6 +417,7 @@ class ControlCenter {
             const data = await response.json();
             
             if (response.ok) {
+                this.currentPage = Number(data.pagination?.page || this.currentPage);
                 this.renderUsers(data.users);
                 this.renderPagination(data.pagination);
             } else {
@@ -496,7 +524,7 @@ class ControlCenter {
     renderUserAvatar(user) {
         if (user.profile_image) {
             return `
-                <img src="${user.profile_image}" alt="${this.escapeHtml(user.display_name || user.email)}" 
+                <img src="${this.escapeHtml(user.profile_image)}" alt="${this.escapeHtml(user.display_name || user.email)}" 
                      class="rounded-circle me-2" style="width: 32px; height: 32px; object-fit: cover;">
             `;
         } else {
@@ -607,77 +635,154 @@ class ControlCenter {
     }
     
     renderPagination(pagination) {
-        const paginationInfo = document.getElementById('usersPaginationInfo');
-        const paginationNav = document.getElementById('usersPagination');
-        
+        this.renderManagementPagination(pagination, {
+            infoId: 'usersPaginationInfo',
+            paginationId: 'usersPagination',
+            itemLabel: 'users',
+            onPageSelected: (page) => this.goToPage(page)
+        });
+    }
+
+    renderGroupsPagination(pagination) {
+        this.renderManagementPagination(pagination, {
+            infoId: 'groupsPaginationInfo',
+            paginationId: 'groupsPagination',
+            itemLabel: 'groups',
+            onPageSelected: (page) => this.goToGroupsPage(page)
+        });
+    }
+
+    renderPublicWorkspacesPagination(pagination) {
+        const totalItems = Number(pagination?.total_items ?? pagination?.total_count ?? 0);
+        const publicWorkspaceCount = document.getElementById('publicWorkspaceCount');
+        if (publicWorkspaceCount) {
+            publicWorkspaceCount.textContent = `${totalItems.toLocaleString()} public workspace${totalItems === 1 ? '' : 's'}`;
+        }
+
+        this.renderManagementPagination(pagination, {
+            infoId: 'publicWorkspacesPaginationInfo',
+            paginationId: 'publicWorkspacesPagination',
+            itemLabel: 'public workspaces',
+            onPageSelected: (page) => this.goToPublicWorkspacesPage(page)
+        });
+    }
+
+    renderManagementPagination(pagination, options) {
+        const paginationInfo = document.getElementById(options.infoId);
+        const paginationNav = document.getElementById(options.paginationId);
+        const totalItems = Number(pagination?.total_items ?? pagination?.total_count ?? 0);
+        const perPage = Math.max(Number(pagination?.per_page ?? CONTROL_CENTER_MANAGEMENT_DEFAULT_PAGE_SIZE), 1);
+        const totalPages = Math.max(Number(pagination?.total_pages ?? 1), 1);
+        const currentPage = Math.min(Math.max(Number(pagination?.page ?? 1), 1), totalPages);
+
         if (paginationInfo) {
-            const start = (pagination.page - 1) * pagination.per_page + 1;
-            const end = Math.min(pagination.page * pagination.per_page, pagination.total_items);
-            paginationInfo.textContent = `Showing ${start}-${end} of ${pagination.total_items} users`;
+            const start = totalItems === 0 ? 0 : ((currentPage - 1) * perPage) + 1;
+            const end = totalItems === 0 ? 0 : Math.min(currentPage * perPage, totalItems);
+            paginationInfo.textContent = `Showing ${start}-${end} of ${totalItems} ${options.itemLabel}`;
         }
-        
-        if (paginationNav) {
-            let paginationHtml = '';
-            
-            // Previous button
-            paginationHtml += `
-                <li class="page-item ${!pagination.has_prev ? 'disabled' : ''}">
-                    <a class="page-link" href="#" onclick="controlCenter.goToPage(${pagination.page - 1}); return false;">
-                        <i class="bi bi-chevron-left"></i>
-                    </a>
-                </li>
-            `;
-            
-            // Page numbers
-            const startPage = Math.max(1, pagination.page - 2);
-            const endPage = Math.min(pagination.total_pages, pagination.page + 2);
-            
-            if (startPage > 1) {
-                paginationHtml += `
-                    <li class="page-item">
-                        <a class="page-link" href="#" onclick="controlCenter.goToPage(1); return false;">1</a>
-                    </li>
-                `;
-                if (startPage > 2) {
-                    paginationHtml += '<li class="page-item disabled"><span class="page-link">...</span></li>';
-                }
-            }
-            
-            for (let i = startPage; i <= endPage; i++) {
-                paginationHtml += `
-                    <li class="page-item ${i === pagination.page ? 'active' : ''}">
-                        <a class="page-link" href="#" onclick="controlCenter.goToPage(${i}); return false;">${i}</a>
-                    </li>
-                `;
-            }
-            
-            if (endPage < pagination.total_pages) {
-                if (endPage < pagination.total_pages - 1) {
-                    paginationHtml += '<li class="page-item disabled"><span class="page-link">...</span></li>';
-                }
-                paginationHtml += `
-                    <li class="page-item">
-                        <a class="page-link" href="#" onclick="controlCenter.goToPage(${pagination.total_pages}); return false;">${pagination.total_pages}</a>
-                    </li>
-                `;
-            }
-            
-            // Next button
-            paginationHtml += `
-                <li class="page-item ${!pagination.has_next ? 'disabled' : ''}">
-                    <a class="page-link" href="#" onclick="controlCenter.goToPage(${pagination.page + 1}); return false;">
-                        <i class="bi bi-chevron-right"></i>
-                    </a>
-                </li>
-            `;
-            
-            paginationNav.innerHTML = paginationHtml;
+
+        if (!paginationNav) {
+            return;
         }
+
+        paginationNav.replaceChildren();
+
+        const appendPageButton = ({ label, page, disabled = false, active = false, iconClass = null, ariaLabel = null }) => {
+            const item = document.createElement('li');
+            item.className = `page-item${disabled ? ' disabled' : ''}${active ? ' active' : ''}`;
+
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'page-link';
+            button.disabled = disabled;
+            if (ariaLabel) {
+                button.setAttribute('aria-label', ariaLabel);
+            }
+            if (active) {
+                button.setAttribute('aria-current', 'page');
+            }
+
+            if (iconClass) {
+                const icon = document.createElement('i');
+                icon.className = iconClass;
+                button.appendChild(icon);
+            } else {
+                button.textContent = label;
+            }
+
+            if (!disabled && !active) {
+                button.addEventListener('click', () => options.onPageSelected(page));
+            }
+
+            item.appendChild(button);
+            paginationNav.appendChild(item);
+        };
+
+        const appendEllipsis = () => {
+            const item = document.createElement('li');
+            item.className = 'page-item disabled';
+            const span = document.createElement('span');
+            span.className = 'page-link';
+            span.textContent = '...';
+            item.appendChild(span);
+            paginationNav.appendChild(item);
+        };
+
+        appendPageButton({
+            label: 'Previous',
+            page: currentPage - 1,
+            disabled: currentPage <= 1,
+            iconClass: 'bi bi-chevron-left',
+            ariaLabel: 'Previous page'
+        });
+
+        const startPage = Math.max(1, currentPage - 2);
+        const endPage = Math.min(totalPages, currentPage + 2);
+
+        if (startPage > 1) {
+            appendPageButton({ label: '1', page: 1 });
+            if (startPage > 2) {
+                appendEllipsis();
+            }
+        }
+
+        for (let page = startPage; page <= endPage; page += 1) {
+            appendPageButton({
+                label: String(page),
+                page,
+                active: page === currentPage
+            });
+        }
+
+        if (endPage < totalPages) {
+            if (endPage < totalPages - 1) {
+                appendEllipsis();
+            }
+            appendPageButton({ label: String(totalPages), page: totalPages });
+        }
+
+        appendPageButton({
+            label: 'Next',
+            page: currentPage + 1,
+            disabled: currentPage >= totalPages,
+            iconClass: 'bi bi-chevron-right',
+            ariaLabel: 'Next page'
+        });
     }
     
     goToPage(page) {
         this.currentPage = page;
         this.loadUsers();
+    }
+
+    goToGroupsPage(page) {
+        this.groupPage = page;
+        this.loadGroups();
+    }
+
+    goToPublicWorkspacesPage(page) {
+        this.publicWorkspacePage = page;
+        this.loadPublicWorkspaces();
     }
     
     handleSearchChange() {
@@ -691,6 +796,58 @@ class ControlCenter {
         this.currentPage = 1;
         this.loadUsers();
     }
+
+    handleUserPerPageChange(event) {
+        this.usersPerPage = this.getManagementPageSize(event.target.value, this.usersPerPage);
+        this.currentPage = 1;
+        this.loadUsers();
+    }
+
+    handleGroupSearchChange() {
+        this.groupSearchTerm = document.getElementById('groupSearchInput')?.value || '';
+        this.groupPage = 1;
+        clearTimeout(this.groupSearchTimeout);
+        this.groupSearchTimeout = setTimeout(() => this.loadGroups(), 300);
+    }
+
+    handleGroupFilterChange() {
+        this.groupStatusFilter = document.getElementById('groupStatusFilterSelect')?.value || 'all';
+        this.groupPage = 1;
+        this.loadGroups();
+    }
+
+    handleGroupPerPageChange(event) {
+        this.groupsPerPage = this.getManagementPageSize(event.target.value, this.groupsPerPage);
+        this.groupPage = 1;
+        this.loadGroups();
+    }
+
+    handlePublicWorkspaceSearchChange() {
+        this.publicWorkspaceSearchTerm = document.getElementById('publicWorkspaceSearchInput')?.value || '';
+        this.publicWorkspacePage = 1;
+        this.loadPublicWorkspaces();
+    }
+
+    handlePublicWorkspaceFilterChange() {
+        this.publicWorkspaceStatusFilter = document.getElementById('publicWorkspaceStatusFilterSelect')?.value || 'all';
+        this.publicWorkspacePage = 1;
+        this.loadPublicWorkspaces();
+    }
+
+    handlePublicWorkspacePerPageChange(event) {
+        this.publicWorkspacesPerPage = this.getManagementPageSize(event.target.value, this.publicWorkspacesPerPage);
+        this.publicWorkspacePage = 1;
+        this.loadPublicWorkspaces();
+    }
+
+    getManagementPageSize(value, fallback) {
+        const pageSize = Number.parseInt(value, 10);
+        if (!Number.isInteger(pageSize) || pageSize < 1) {
+            return fallback || CONTROL_CENTER_MANAGEMENT_DEFAULT_PAGE_SIZE;
+        }
+
+        return Math.min(pageSize, CONTROL_CENTER_MANAGEMENT_MAX_PAGE_SIZE);
+    }
     
     handleSelectAll(e) {
         const checkboxes = document.querySelectorAll('.user-checkbox');
@@ -703,6 +860,52 @@ class ControlCenter {
             }
         });
         this.updateBulkActionButton();
+    }
+
+    handleSelectAllGroups(e) {
+        const checkboxes = document.querySelectorAll('.group-checkbox');
+        checkboxes.forEach(checkbox => {
+            checkbox.checked = e.target.checked;
+            if (e.target.checked) {
+                this.selectedGroups.add(checkbox.value);
+            } else {
+                this.selectedGroups.delete(checkbox.value);
+            }
+        });
+        this.updateGroupBulkActionButton();
+    }
+
+    handleSelectAllPublicWorkspaces(e) {
+        const checkboxes = document.querySelectorAll('.public-workspace-checkbox');
+        checkboxes.forEach(checkbox => {
+            checkbox.checked = e.target.checked;
+            if (e.target.checked) {
+                this.selectedPublicWorkspaces.add(checkbox.value);
+            } else {
+                this.selectedPublicWorkspaces.delete(checkbox.value);
+            }
+        });
+        this.updatePublicWorkspaceBulkActionButton();
+    }
+
+    updateVisibleSelectionState(checkboxSelector, selectAllId) {
+        const allCheckboxes = document.querySelectorAll(checkboxSelector);
+        const checkedCheckboxes = document.querySelectorAll(`${checkboxSelector}:checked`);
+        const selectAllCheckbox = document.getElementById(selectAllId);
+
+        if (!selectAllCheckbox) {
+            return;
+        }
+
+        if (checkedCheckboxes.length === 0) {
+            selectAllCheckbox.indeterminate = false;
+            selectAllCheckbox.checked = false;
+        } else if (checkedCheckboxes.length === allCheckboxes.length) {
+            selectAllCheckbox.indeterminate = false;
+            selectAllCheckbox.checked = true;
+        } else {
+            selectAllCheckbox.indeterminate = true;
+        }
     }
     
     handleUserSelection(e) {
@@ -745,7 +948,7 @@ class ControlCenter {
     }
     
     updatePublicWorkspaceBulkActionButton() {
-        const bulkActionBtn = document.getElementById('publicWorkspaceBulkActionBtn');
+        const bulkActionBtn = document.getElementById('bulkPublicWorkspaceActionBtn');
         if (bulkActionBtn) {
             bulkActionBtn.disabled = this.selectedPublicWorkspaces.size === 0;
         }
@@ -757,7 +960,7 @@ class ControlCenter {
     }
     
     updateGroupBulkActionButton() {
-        const bulkActionBtn = document.getElementById('groupBulkActionBtn');
+        const bulkActionBtn = document.getElementById('bulkGroupActionBtn');
         if (bulkActionBtn) {
             bulkActionBtn.disabled = this.selectedGroups.size === 0;
         }
@@ -1198,6 +1401,7 @@ class ControlCenter {
             'Member Count',
             'Status',
             'Total Documents',
+            'Token Total',
             'AI Search Size (MB)',
             'Storage Account Size (MB)',
             'Group ID'
@@ -1220,6 +1424,7 @@ class ControlCenter {
                 group.member_count || 0,
                 'Active',
                 docMetrics.total_documents || 0,
+                this.getGroupTokenTotal(group),
                 this.formatBytesForCSV(docMetrics.ai_search_size || 0),
                 this.formatBytesForCSV(docMetrics.storage_account_size || 0),
                 this.escapeCSVField(group.id || '')
@@ -1293,13 +1498,17 @@ class ControlCenter {
         this.showToast(message, 'danger');
     }
     
-    showToast(message, type = 'info') {
+    showToast(message, type = 'info', allowHtml = false) {
+        const safeMessage = allowHtml
+            ? String(message ?? '')
+            : this.escapeHtml(String(message ?? ''));
+
         // Create toast HTML
         const toastHtml = `
             <div class="toast align-items-center text-bg-${type} border-0" role="alert" aria-live="assertive" aria-atomic="true">
                 <div class="d-flex">
                     <div class="toast-body">
-                        ${message}
+                        ${safeMessage}
                     </div>
                     <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
                 </div>
@@ -2414,16 +2623,82 @@ class ControlCenter {
     }
     
     // Activity Logs Methods
-    async loadActivityLogs() {
-        console.log('=== loadActivityLogs CALLED ===');
-        console.log('this:', this);
-        console.log('State:', {
-            activityLogsPage: this.activityLogsPage,
-            activityLogsPerPage: this.activityLogsPerPage,
-            activityLogsSearch: this.activityLogsSearch,
-            activityTypeFilter: this.activityTypeFilter
+    getDefaultActivityLogsLayoutPreset() {
+        return 'balanced';
+    }
+
+    isValidActivityLogsLayoutPreset(preset) {
+        return ACTIVITY_LOGS_LAYOUT_PRESETS.includes(preset);
+    }
+
+    loadActivityLogsLayoutPreset() {
+        let storedPreset = null;
+
+        try {
+            storedPreset = window.localStorage.getItem(ACTIVITY_LOGS_LAYOUT_PRESET_STORAGE_KEY);
+        } catch (error) {
+            console.warn('Unable to load Activity Logs layout preset:', error);
+        }
+
+        if (this.isValidActivityLogsLayoutPreset(storedPreset)) {
+            this.activityLogsLayoutPreset = storedPreset;
+            return;
+        }
+
+        this.activityLogsLayoutPreset = this.getDefaultActivityLogsLayoutPreset();
+    }
+
+    saveActivityLogsLayoutPreset() {
+        try {
+            window.localStorage.setItem(ACTIVITY_LOGS_LAYOUT_PRESET_STORAGE_KEY, this.activityLogsLayoutPreset);
+        } catch (error) {
+            console.warn('Unable to save Activity Logs layout preset:', error);
+        }
+    }
+
+    syncActivityLogsLayoutPresetControls() {
+        document.querySelectorAll('input[name="activityLogsLayoutPreset"]').forEach((presetInput) => {
+            presetInput.checked = presetInput.value === this.activityLogsLayoutPreset;
         });
-        
+    }
+
+    updateActivityLogsLayoutHint() {
+        const hintElement = document.getElementById('activityLogsLayoutHint');
+        if (!hintElement) {
+            return;
+        }
+
+        hintElement.textContent = ACTIVITY_LOGS_LAYOUT_HINTS[this.activityLogsLayoutPreset]
+            || ACTIVITY_LOGS_LAYOUT_HINTS[this.getDefaultActivityLogsLayoutPreset()];
+    }
+
+    applyActivityLogsLayoutPreset(preset) {
+        const resolvedPreset = this.isValidActivityLogsLayoutPreset(preset)
+            ? preset
+            : this.getDefaultActivityLogsLayoutPreset();
+
+        this.activityLogsLayoutPreset = resolvedPreset;
+
+        const activityLogsTable = document.getElementById('activityLogsTable');
+        if (activityLogsTable) {
+            activityLogsTable.setAttribute('data-layout-preset', resolvedPreset);
+        }
+
+        this.syncActivityLogsLayoutPresetControls();
+        this.updateActivityLogsLayoutHint();
+    }
+
+    handleActivityLogsLayoutPresetChange(event) {
+        const preset = event.target?.value;
+        if (!this.isValidActivityLogsLayoutPreset(preset)) {
+            return;
+        }
+
+        this.applyActivityLogsLayoutPreset(preset);
+        this.saveActivityLogsLayoutPreset();
+    }
+
+    async loadActivityLogs() {
         try {
             const params = new URLSearchParams({
                 page: this.activityLogsPage,
@@ -2432,31 +2707,31 @@ class ControlCenter {
                 activity_type_filter: this.activityTypeFilter
             });
 
-            const url = `/api/admin/control-center/activity-logs?${params}`;
-            console.log('Fetching from:', url);
-            
-            const response = await fetch(url);
-            console.log('Response received:', response.status);
+            const response = await fetch(`/api/admin/control-center/activity-logs?${params}`);
+            let data = null;
+            try {
+                data = await response.json();
+            } catch (parseError) {
+                data = null;
+            }
             
             if (!response.ok) {
-                throw new Error('Failed to load activity logs');
+                throw new Error(data?.error || 'Failed to load activity logs');
             }
-
-            const data = await response.json();
-            console.log('Activity logs loaded:', data);
             
             this.renderActivityLogs(data.logs, data.user_map);
             this.renderActivityLogsPagination(data.pagination);
             
         } catch (error) {
             console.error('Error loading activity logs:', error);
-            this.showActivityLogsError('Failed to load activity logs. Please try again.');
+            this.showActivityLogsError(error.message || 'Failed to load activity logs. Please try again.');
         }
     }
 
-    renderActivityLogs(logs, userMap) {
+    renderActivityLogs(logs, userMap = {}) {
         // Store logs for modal access
         this.currentActivityLogs = logs;
+        this.currentActivityLogUserMap = userMap;
         
         const tbody = document.getElementById('activityLogsTableBody');
         if (!tbody) return;
@@ -2472,7 +2747,7 @@ class ControlCenter {
             return;
         }
 
-        tbody.innerHTML = logs.map(log => {
+        tbody.innerHTML = logs.map((log, logIndex) => {
             // Handle user identification - some activities may not have user_id (system activities)
             let userName = 'System';
             if (log.user_id) {
@@ -2486,42 +2761,78 @@ class ControlCenter {
                 userName = log.added_by_email;
             }
             
-            const timestamp = new Date(log.timestamp).toLocaleString();
+            const timestamp = this.formatActivityLogTimestamp(log.timestamp);
             const activityType = this.formatActivityType(log.activity_type);
             const details = this.formatActivityDetails(log);
             const workspaceType = log.workspace_type || 'N/A';
-
-            const logIndex = logs.indexOf(log);
             return `
-                <tr style="cursor: pointer;" onclick="window.controlCenter.showRawLogModal(${logIndex})" title="Click to view raw log data">
-                    <td>${timestamp}</td>
-                    <td><span class="badge bg-primary">${activityType}</span></td>
-                    <td>${this.escapeHtml(userName)}</td>
-                    <td>${details}</td>
-                    <td>${this.capitalizeFirst(workspaceType)}</td>
+                <tr class="activity-log-row" onclick="window.controlCenter.showRawLogModal(${logIndex})" title="Click to view raw log data">
+                    <td><span class="activity-log-cell-text">${this.escapeHtml(timestamp)}</span></td>
+                    <td><span class="activity-log-badge-wrap"><span class="badge bg-primary">${this.escapeHtml(activityType)}</span></span></td>
+                    <td><span class="activity-log-cell-text">${this.escapeHtml(userName)}</span></td>
+                    <td><div class="activity-log-details">${details}</div></td>
+                    <td><span class="activity-log-cell-text">${this.escapeHtml(this.capitalizeFirst(workspaceType))}</span></td>
                 </tr>
             `;
         }).join('');
     }
 
+    formatActivityLogTimestamp(timestamp) {
+        if (!timestamp) {
+            return 'N/A';
+        }
+
+        const parsedTimestamp = new Date(timestamp);
+        if (Number.isNaN(parsedTimestamp.getTime())) {
+            return String(timestamp);
+        }
+
+        return parsedTimestamp.toLocaleString();
+    }
+
     formatActivityType(activityType) {
         const typeMap = {
             'user_login': 'User Login',
+            'chat_activity': 'Chat Activity',
             'conversation_creation': 'Conversation Created',
             'conversation_deletion': 'Conversation Deleted',
             'conversation_archival': 'Conversation Archived',
             'document_creation': 'Document Created',
             'document_deletion': 'Document Deleted',
             'document_metadata_update': 'Document Metadata Updated',
+            'file_sync': 'File Sync',
+            'data_management': 'Data Management',
             'token_usage': 'Token Usage',
             'group_status_change': 'Group Status Change',
             'group_member_deleted': 'Group Member Deleted',
             'add_member_directly': 'Add Member Directly',
+            'admin_add_member_csv': 'Add Member CSV',
             'admin_take_ownership_approved': 'Admin Take Ownership (Approved)',
             'delete_group_approved': 'Delete Group (Approved)',
-            'delete_all_documents_approved': 'Delete All Documents (Approved)'
+            'delete_all_documents_approved': 'Delete All Documents (Approved)',
+            'public_workspace_status_change': 'Public Workspace Status Change',
+            'admin_take_workspace_ownership_approved': 'Take Workspace Ownership (Approved)',
+            'transfer_workspace_ownership_approved': 'Transfer Workspace Ownership (Approved)',
+            'transfer_ownership_approved': 'Transfer Ownership (Approved)',
+            'add_workspace_member_directly': 'Add Workspace Member',
+            'admin_add_workspace_member_csv': 'Add Workspace Member CSV',
+            'delete_workspace_documents_approved': 'Delete Workspace Documents (Approved)',
+            'delete_workspace_approved': 'Delete Workspace (Approved)'
         };
-        return typeMap[activityType] || activityType.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+        if (!activityType) {
+            return 'Unknown';
+        }
+        return typeMap[activityType] || this.formatActivityValue(activityType);
+    }
+
+    formatActivityValue(value) {
+        if (!value) {
+            return 'N/A';
+        }
+
+        return String(value)
+            .replace(/[_-]/g, ' ')
+            .replace(/\b\w/g, letter => letter.toUpperCase());
     }
 
     formatActivityDetails(log) {
@@ -2530,6 +2841,45 @@ class ControlCenter {
         switch (activityType) {
             case 'user_login':
                 return `Login method: ${log.login_method || log.details?.login_method || 'N/A'}`;
+
+            case 'chat_activity':
+                const conversationSource = log.additional_context?.conversation_source || '';
+                const conversationSourceMap = {
+                    'document_action_chat': 'Document Action',
+                    'collaboration_chat': 'Multi-User Collaboration',
+                    'standard_chat': 'Standard Chat'
+                };
+                const messageLabel = this.formatActivityValue(log.message_type || 'message');
+                const sourceLabel = log.additional_context?.document_action_type
+                    ? this.formatActivityValue(log.additional_context.document_action_type)
+                    : (conversationSourceMap[conversationSource] || this.formatActivityValue(conversationSource));
+                const contextLabel = this.formatActivityValue(log.chat_context || log.workspace_type || '');
+                const chatSummaryParts = [messageLabel];
+                const chatMetadataParts = [];
+
+                if (sourceLabel !== 'N/A') {
+                    chatSummaryParts.push(sourceLabel);
+                }
+                if (contextLabel !== 'N/A') {
+                    chatSummaryParts.push(contextLabel);
+                }
+                if (log.conversation_id) {
+                    chatMetadataParts.push(`Conversation: ${this.escapeHtml(log.conversation_id)}`);
+                }
+                if (log.additional_context?.visibility_mode) {
+                    chatMetadataParts.push(`Visibility: ${this.escapeHtml(this.formatActivityValue(log.additional_context.visibility_mode))}`);
+                }
+                if (log.group_id) {
+                    chatMetadataParts.push(`Group: ${this.escapeHtml(log.group_id)}`);
+                }
+                if (log.public_workspace_id) {
+                    chatMetadataParts.push(`Public Workspace: ${this.escapeHtml(log.public_workspace_id)}`);
+                }
+                if (Number(log.message_length || 0) > 0) {
+                    chatMetadataParts.push(`${Number(log.message_length).toLocaleString()} chars`);
+                }
+
+                return `${chatSummaryParts.map(part => this.escapeHtml(part)).join(' · ')}${chatMetadataParts.length ? `<br><small class="text-muted">${chatMetadataParts.join(' · ')}</small>` : ''}`;
                 
             case 'conversation_creation':
                 const convTitle = log.conversation?.title || 'Untitled';
@@ -2560,6 +2910,42 @@ class ControlCenter {
                 const updatedFileName = log.document?.file_name || 'Unknown';
                 const updatedFields = Object.keys(log.updated_fields || {}).join(', ') || 'N/A';
                 return `File: ${this.escapeHtml(updatedFileName)}<br><small class="text-muted">Updated: ${updatedFields}</small>`;
+
+            case 'file_sync':
+                const fileSyncContext = log.workspace_context || {};
+                const fileSyncAdditionalContext = log.additional_context || {};
+                const fileSyncCounts = fileSyncAdditionalContext.counts || {};
+                const fileSyncAction = this.formatActivityValue(log.action || 'sync_event');
+                const fileSyncSource = fileSyncContext.source_name || fileSyncAdditionalContext.source_name || 'Unknown Source';
+                const fileSyncScope = this.formatActivityValue(fileSyncContext.scope_type || log.workspace_type || 'workspace');
+                const fileSyncDetails = [];
+                if (fileSyncAdditionalContext.run_id) {
+                    fileSyncDetails.push(`Run: ${this.escapeHtml(fileSyncAdditionalContext.run_id)}`);
+                }
+                if (this.isActivityLogValuePresent(fileSyncCounts.scanned)) {
+                    fileSyncDetails.push(`Scanned: ${this.formatActivityLogNumber(fileSyncCounts.scanned)}`);
+                }
+                if (this.isActivityLogValuePresent(fileSyncCounts.queued)) {
+                    fileSyncDetails.push(`Queued: ${this.formatActivityLogNumber(fileSyncCounts.queued)}`);
+                }
+                if (this.isActivityLogValuePresent(fileSyncCounts.failed)) {
+                    fileSyncDetails.push(`Failed: ${this.formatActivityLogNumber(fileSyncCounts.failed)}`);
+                }
+                if (fileSyncAdditionalContext.error) {
+                    fileSyncDetails.push(`Error: ${this.escapeHtml(fileSyncAdditionalContext.error)}`);
+                }
+                return `Action: ${this.escapeHtml(fileSyncAction)}<br>Source: ${this.escapeHtml(fileSyncSource)}<br><small class="text-muted">Scope: ${this.escapeHtml(fileSyncScope)}${fileSyncDetails.length ? ' · ' + fileSyncDetails.join(' · ') : ''}</small>`;
+
+            case 'data_management':
+                const dataManagementContext = log.additional_context || {};
+                const dataManagementAction = this.formatActivityValue(log.action || 'data_management_event');
+                const dataManagementJobId = dataManagementContext.job_id || log.workspace_context?.job_id || 'N/A';
+                const dataManagementStatus = this.formatActivityValue(dataManagementContext.status || 'unknown');
+                const dataManagementOperation = this.formatActivityValue(dataManagementContext.operation || log.workspace_context?.operation || 'job');
+                const dataManagementBackupType = dataManagementContext.backup_type
+                    ? ` · ${this.escapeHtml(this.formatActivityValue(dataManagementContext.backup_type))}`
+                    : '';
+                return `Action: ${this.escapeHtml(dataManagementAction)}<br>Job: ${this.escapeHtml(dataManagementJobId)}<br><small class="text-muted">${this.escapeHtml(dataManagementOperation)}${dataManagementBackupType} · ${this.escapeHtml(dataManagementStatus)}</small>`;
                 
             case 'token_usage':
                 const tokenType = log.token_type || 'unknown';
@@ -2665,7 +3051,7 @@ class ControlCenter {
                 return `Workspace: ${this.escapeHtml(deletedWorkspace)}<br>Requested by: ${this.escapeHtml(wsDelRequester)}<br><small class="text-muted">Approved by: ${this.escapeHtml(wsDelApprover)}</small>`;
                 
             default:
-                return 'N/A';
+                return this.escapeHtml(log.description || 'N/A');
         }
     }
 
@@ -2674,9 +3060,13 @@ class ControlCenter {
         const paginationNav = document.getElementById('activityLogsPagination');
         
         if (paginationInfo) {
-            const start = (pagination.page - 1) * pagination.per_page + 1;
-            const end = Math.min(pagination.page * pagination.per_page, pagination.total_items);
-            paginationInfo.textContent = `Showing ${start}-${end} of ${pagination.total_items} logs`;
+            if (!pagination.total_items) {
+                paginationInfo.textContent = 'Showing 0-0 of 0 logs';
+            } else {
+                const start = (pagination.page - 1) * pagination.per_page + 1;
+                const end = Math.min(pagination.page * pagination.per_page, pagination.total_items);
+                paginationInfo.textContent = `Showing ${start}-${end} of ${pagination.total_items} logs`;
+            }
         }
         
         if (paginationNav) {
@@ -2739,6 +3129,9 @@ class ControlCenter {
     }
 
     goToActivityLogsPage(page) {
+        if (page < 1) {
+            return;
+        }
         this.activityLogsPage = page;
         this.loadActivityLogs();
     }
@@ -2764,65 +3157,56 @@ class ControlCenter {
     }
 
     async exportActivityLogsToCSV() {
+        const exportButton = document.getElementById('exportActivityLogsBtn');
+        const originalButtonMarkup = exportButton ? exportButton.innerHTML : '';
+
+        if (exportButton) {
+            exportButton.disabled = true;
+            exportButton.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Exporting';
+        }
+
         try {
-            // Get current filtered data
             const params = new URLSearchParams({
-                page: 1,
-                per_page: 10000, // Get all for export
                 search: this.activityLogsSearch,
                 activity_type_filter: this.activityTypeFilter
             });
 
-            const response = await fetch(`/api/admin/control-center/activity-logs?${params}`);
+            const response = await fetch(`/api/admin/control-center/activity-logs/export?${params}`);
             
             if (!response.ok) {
-                throw new Error('Failed to load activity logs for export');
+                let errorMessage = 'Failed to export activity logs';
+                try {
+                    const errorData = await response.json();
+                    errorMessage = errorData.error || errorMessage;
+                } catch (parseError) {
+                    // Ignore JSON parse failures and use the default message.
+                }
+                throw new Error(errorMessage);
             }
 
-            const data = await response.json();
-            
-            // Convert to CSV
-            const headers = ['Timestamp', 'Activity Type', 'User ID', 'User Email', 'User Name', 'Details', 'Workspace Type'];
-            const csvRows = [headers.join(',')];
-            
-            data.logs.forEach(log => {
-                const user = data.user_map[log.user_id] || {};
-                const timestamp = new Date(log.timestamp).toISOString();
-                const activityType = log.activity_type;
-                const userId = log.user_id;
-                const userEmail = user.email || '';
-                const userName = user.display_name || '';
-                const details = this.getActivityDetailsForCSV(log);
-                const workspaceType = log.workspace_type || '';
-                
-                const row = [
-                    timestamp,
-                    activityType,
-                    userId,
-                    userEmail,
-                    userName,
-                    details,
-                    workspaceType
-                ].map(field => `"${String(field).replace(/"/g, '""')}"`);
-                
-                csvRows.push(row.join(','));
-            });
-            
-            // Download CSV
-            const csvContent = csvRows.join('\n');
-            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const blob = await response.blob();
             const link = document.createElement('a');
             const url = URL.createObjectURL(blob);
+            const disposition = response.headers.get('Content-Disposition') || '';
+            const filenameMatch = disposition.match(/filename="?([^";]+)"?/i);
+            const filename = filenameMatch ? filenameMatch[1] : `activity_logs_${new Date().toISOString().split('T')[0]}.csv`;
+
             link.setAttribute('href', url);
-            link.setAttribute('download', `activity_logs_${new Date().toISOString().split('T')[0]}.csv`);
+            link.setAttribute('download', filename);
             link.style.visibility = 'hidden';
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
+            window.URL.revokeObjectURL(url);
             
         } catch (error) {
             console.error('Error exporting activity logs:', error);
-            showToast('Failed to export activity logs. Please try again.', 'danger');
+            showToast(error.message || 'Failed to export activity logs. Please try again.', 'danger');
+        } finally {
+            if (exportButton) {
+                exportButton.disabled = false;
+                exportButton.innerHTML = originalButtonMarkup;
+            }
         }
     }
 
@@ -2831,22 +3215,46 @@ class ControlCenter {
         
         switch (activityType) {
             case 'user_login':
-                return `Login method: ${log.login_method || log.details?.login_method || 'N/A'}`;
+                return `Login method: ${this.escapeHtml(log.login_method || log.details?.login_method || 'N/A')}`;
                 
             case 'conversation_creation':
-                return `Title: ${log.conversation?.title || 'Untitled'}, ID: ${log.conversation?.conversation_id || 'N/A'}`;
+                return `Title: ${this.escapeHtml(log.conversation?.title || 'Untitled')}, ID: ${this.escapeHtml(log.conversation?.conversation_id || 'N/A')}`;
                 
             case 'document_creation':
-                return `File: ${log.document?.file_name || 'Unknown'}, Type: ${log.document?.file_type || ''}`;
+                return `File: ${this.escapeHtml(log.document?.file_name || 'Unknown')}, Type: ${this.escapeHtml(log.document?.file_type || '')}`;
+
+            case 'file_sync': {
+                const workspaceContext = log.workspace_context || {};
+                const additionalContext = log.additional_context || {};
+                const counts = additionalContext.counts || {};
+                const countParts = ['scanned', 'queued', 'unchanged', 'skipped', 'deleted', 'failed']
+                    .filter((key) => this.isActivityLogValuePresent(counts[key]))
+                    .map((key) => `${this.formatActivityValue(key)}: ${this.formatActivityLogNumber(counts[key])}`);
+                const detailParts = [
+                    `Action: ${this.escapeHtml(this.formatActivityValue(log.action || 'sync_event'))}`,
+                    `Source: ${this.escapeHtml(workspaceContext.source_name || additionalContext.source_name || 'Unknown Source')}`,
+                    `Scope: ${this.escapeHtml(this.formatActivityValue(workspaceContext.scope_type || log.workspace_type || 'workspace'))}`
+                ];
+                if (additionalContext.run_id) {
+                    detailParts.push(`Run: ${this.escapeHtml(additionalContext.run_id)}`);
+                }
+                if (countParts.length) {
+                    detailParts.push(countParts.join(', '));
+                }
+                if (additionalContext.error) {
+                    detailParts.push(`Error: ${this.escapeHtml(additionalContext.error)}`);
+                }
+                return detailParts.join(', ');
+            }
                 
             case 'token_usage':
-                return `Type: ${log.token_type || 'unknown'}, Tokens: ${log.usage?.total_tokens || 0}, Model: ${log.usage?.model || 'N/A'}`;
+                return `Type: ${this.escapeHtml(log.token_type || 'unknown')}, Tokens: ${log.usage?.total_tokens || 0}, Model: ${this.escapeHtml(log.usage?.model || 'N/A')}`;
                 
             case 'conversation_deletion':
-                return `Deleted: ${log.conversation?.title || 'Untitled'}, ID: ${log.conversation?.conversation_id || 'N/A'}`;
+                return `Deleted: ${this.escapeHtml(log.conversation?.title || 'Untitled')}, ID: ${this.escapeHtml(log.conversation?.conversation_id || 'N/A')}`;
                 
             case 'conversation_archival':
-                return `Archived: ${log.conversation?.title || 'Untitled'}, ID: ${log.conversation?.conversation_id || 'N/A'}`;
+                return `Archived: ${this.escapeHtml(log.conversation?.title || 'Untitled')}, ID: ${this.escapeHtml(log.conversation?.conversation_id || 'N/A')}`;
                 
             default:
                 return 'N/A';
@@ -2855,6 +3263,9 @@ class ControlCenter {
 
     showActivityLogsError(message) {
         const tbody = document.getElementById('activityLogsTableBody');
+        const paginationInfo = document.getElementById('activityLogsPaginationInfo');
+        const paginationNav = document.getElementById('activityLogsPagination');
+
         if (tbody) {
             tbody.innerHTML = `
                 <tr>
@@ -2866,11 +3277,519 @@ class ControlCenter {
                 </tr>
             `;
         }
+
+        if (paginationInfo) {
+            paginationInfo.textContent = message;
+        }
+
+        if (paginationNav) {
+            paginationNav.innerHTML = '';
+        }
     }
 
     capitalizeFirst(str) {
         if (!str) return '';
         return str.charAt(0).toUpperCase() + str.slice(1);
+    }
+
+    isActivityLogValuePresent(value) {
+        return value !== undefined && value !== null && value !== '';
+    }
+
+    formatActivityLogNumber(value) {
+        const parsedValue = Number(value);
+        if (!Number.isFinite(parsedValue)) {
+            return String(value);
+        }
+
+        return parsedValue.toLocaleString();
+    }
+
+    getActivityLogBadgeClass(activityType) {
+        const badgeClassMap = {
+            token_usage: 'bg-success',
+            document_creation: 'bg-primary',
+            document_deletion: 'bg-danger',
+            document_metadata_update: 'bg-warning text-dark',
+            file_sync: 'bg-info text-dark',
+            conversation_creation: 'bg-info text-dark',
+            conversation_deletion: 'bg-secondary',
+            conversation_archival: 'bg-dark',
+            user_login: 'bg-primary',
+            group_status_change: 'bg-warning text-dark',
+            public_workspace_status_change: 'bg-warning text-dark'
+        };
+
+        return badgeClassMap[activityType] || 'bg-primary';
+    }
+
+    renderActivityLogBooleanBadge(value, trueLabel = 'Yes', falseLabel = 'No') {
+        const badgeClass = value ? 'bg-success' : 'bg-secondary';
+        const label = value ? trueLabel : falseLabel;
+        return `<span class="badge ${badgeClass}">${this.escapeHtml(label)}</span>`;
+    }
+
+    renderActivityLogFieldValue(field) {
+        if (field.html !== undefined) {
+            return field.html;
+        }
+
+        const fieldValue = field.formatter
+            ? field.formatter(field.value)
+            : String(field.value);
+        const escapedValue = this.escapeHtml(fieldValue);
+
+        if (field.code) {
+            return `<code>${escapedValue}</code>`;
+        }
+
+        if (field.badgeClass) {
+            return `<span class="badge ${field.badgeClass}">${escapedValue}</span>`;
+        }
+
+        return escapedValue;
+    }
+
+    renderActivityLogMetricGrid(fields) {
+        const visibleFields = fields.filter((field) => field && this.isActivityLogValuePresent(field.value ?? field.html));
+
+        if (!visibleFields.length) {
+            return '<div class="text-muted">No additional details captured for this activity.</div>';
+        }
+
+        return `
+            <div class="row g-3">
+                ${visibleFields.map((field) => `
+                    <div class="${field.columnClass || 'col-sm-6'}">
+                        <div class="activity-log-detail-label">${this.escapeHtml(field.label)}</div>
+                        <div class="activity-log-detail-value">${this.renderActivityLogFieldValue(field)}</div>
+                    </div>
+                `).join('')}
+            </div>
+        `;
+    }
+
+    renderActivityLogSection(columnClass, title, icon, headerClass, bodyHtml, headerSuffix = '') {
+        if (!bodyHtml) {
+            return '';
+        }
+
+        return `
+            <div class="${columnClass}">
+                <div class="card h-100">
+                    <div class="card-header ${headerClass} d-flex justify-content-between align-items-center">
+                        <h6 class="mb-0"><i class="bi ${icon} me-2"></i>${this.escapeHtml(title)}</h6>
+                        ${headerSuffix}
+                    </div>
+                    <div class="card-body">
+                        ${bodyHtml}
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    resolveActivityLogActor(log) {
+        const actorUserId = log.user_id || log.admin_user_id || log.added_by_user_id || '';
+        const resolvedUser = actorUserId ? (this.currentActivityLogUserMap?.[actorUserId] || {}) : {};
+        const actorEmail = resolvedUser.email || log.admin_email || log.requester_email || log.added_by_email || log.member_email || '';
+        const actorDisplayName = resolvedUser.display_name || actorEmail || actorUserId || 'System';
+
+        return {
+            userId: actorUserId,
+            displayName: actorDisplayName,
+            email: actorEmail
+        };
+    }
+
+    renderActivityLogOverviewContent(log) {
+        const actor = this.resolveActivityLogActor(log);
+
+        return this.renderActivityLogMetricGrid([
+            {
+                label: 'Timestamp',
+                value: this.formatActivityLogTimestamp(log.timestamp),
+                columnClass: 'col-md-4'
+            },
+            {
+                label: 'Activity',
+                value: this.formatActivityType(log.activity_type),
+                badgeClass: this.getActivityLogBadgeClass(log.activity_type),
+                columnClass: 'col-md-4'
+            },
+            {
+                label: 'Workspace',
+                value: this.capitalizeFirst(log.workspace_type || 'N/A'),
+                badgeClass: 'bg-secondary',
+                columnClass: 'col-md-4'
+            },
+            {
+                label: 'Actor',
+                value: actor.displayName,
+                columnClass: 'col-md-4'
+            },
+            {
+                label: 'Actor Email',
+                value: actor.email,
+                columnClass: 'col-md-4'
+            },
+            {
+                label: 'Log ID',
+                value: log.id || 'N/A',
+                code: true,
+                columnClass: 'col-md-4'
+            },
+            {
+                label: 'Actor ID',
+                value: actor.userId,
+                code: true,
+                columnClass: 'col-12'
+            }
+        ]);
+    }
+
+    renderActivityLogSummaryContent(log) {
+        const usage = log.usage || {};
+        const updatedFields = Object.keys(log.updated_fields || {});
+        const summaryFields = [];
+
+        switch (log.activity_type) {
+            case 'token_usage':
+                summaryFields.push(
+                    {
+                        label: 'Token Type',
+                        value: log.token_type || 'unknown',
+                        badgeClass: 'bg-success',
+                        columnClass: 'col-md-4'
+                    },
+                    {
+                        label: 'Total Tokens',
+                        value: usage.total_tokens,
+                        formatter: (value) => this.formatActivityLogNumber(value),
+                        columnClass: 'col-md-4'
+                    },
+                    {
+                        label: 'Model',
+                        value: usage.model || 'N/A',
+                        columnClass: 'col-md-4'
+                    },
+                    {
+                        label: 'Prompt Tokens',
+                        value: usage.prompt_tokens,
+                        formatter: (value) => this.formatActivityLogNumber(value),
+                        columnClass: 'col-md-6'
+                    },
+                    {
+                        label: 'Completion Tokens',
+                        value: usage.completion_tokens,
+                        formatter: (value) => this.formatActivityLogNumber(value),
+                        columnClass: 'col-md-6'
+                    }
+                );
+                break;
+            case 'document_creation':
+            case 'document_deletion':
+                summaryFields.push(
+                    {
+                        label: 'File Name',
+                        value: log.document?.file_name || 'Unknown',
+                        columnClass: 'col-12'
+                    },
+                    {
+                        label: 'File Type',
+                        value: log.document?.file_type,
+                        badgeClass: 'bg-secondary',
+                        columnClass: 'col-md-4'
+                    }
+                );
+                break;
+            case 'document_metadata_update':
+                summaryFields.push(
+                    {
+                        label: 'File Name',
+                        value: log.document?.file_name || 'Unknown',
+                        columnClass: 'col-12'
+                    },
+                    {
+                        label: 'Updated Fields',
+                        value: updatedFields.join(', '),
+                        columnClass: 'col-12'
+                    }
+                );
+                break;
+            case 'file_sync':
+                summaryFields.push(
+                    {
+                        label: 'Action',
+                        value: this.formatActivityValue(log.action || 'sync_event'),
+                        badgeClass: 'bg-info text-dark',
+                        columnClass: 'col-md-4'
+                    },
+                    {
+                        label: 'Source',
+                        value: log.workspace_context?.source_name || log.additional_context?.source_name || 'Unknown Source',
+                        columnClass: 'col-md-4'
+                    },
+                    {
+                        label: 'Scope',
+                        value: this.formatActivityValue(log.workspace_context?.scope_type || log.workspace_type || 'workspace'),
+                        columnClass: 'col-md-4'
+                    },
+                    {
+                        label: 'Scanned',
+                        value: log.additional_context?.counts?.scanned,
+                        formatter: (value) => this.formatActivityLogNumber(value),
+                        columnClass: 'col-md-4'
+                    },
+                    {
+                        label: 'Queued',
+                        value: log.additional_context?.counts?.queued,
+                        formatter: (value) => this.formatActivityLogNumber(value),
+                        columnClass: 'col-md-4'
+                    },
+                    {
+                        label: 'Failed',
+                        value: log.additional_context?.counts?.failed,
+                        formatter: (value) => this.formatActivityLogNumber(value),
+                        columnClass: 'col-md-4'
+                    }
+                );
+                break;
+            case 'conversation_creation':
+            case 'conversation_deletion':
+            case 'conversation_archival':
+                summaryFields.push({
+                    label: 'Conversation Title',
+                    value: log.conversation?.title || 'Untitled',
+                    columnClass: 'col-12'
+                });
+                break;
+            case 'user_login':
+                summaryFields.push({
+                    label: 'Login Method',
+                    value: log.login_method || log.details?.login_method || 'N/A',
+                    columnClass: 'col-12'
+                });
+                break;
+            case 'group_status_change':
+            case 'public_workspace_status_change':
+                summaryFields.push(
+                    {
+                        label: 'Target',
+                        value: log.group?.group_name || log.public_workspace?.workspace_name || log.workspace_context?.public_workspace_name || log.group_name || log.workspace_name || log.public_workspace_name || 'Unknown',
+                        columnClass: 'col-12'
+                    },
+                    {
+                        label: 'Previous Status',
+                        value: log.status_change?.old_status,
+                        badgeClass: 'bg-secondary',
+                        columnClass: 'col-md-6'
+                    },
+                    {
+                        label: 'New Status',
+                        value: log.status_change?.new_status,
+                        badgeClass: 'bg-success',
+                        columnClass: 'col-md-6'
+                    }
+                );
+                break;
+            default:
+                break;
+        }
+
+        if (summaryFields.length) {
+            return this.renderActivityLogMetricGrid(summaryFields);
+        }
+
+        return `<div class="activity-log-summary-text">${this.formatActivityDetails(log)}</div>`;
+    }
+
+    renderActivityLogContextContent(log) {
+        const workspaceContext = log.workspace_context || {};
+        const relatedFields = [
+            {
+                label: 'Group ID',
+                value: workspaceContext.group_id,
+                code: true,
+                columnClass: 'col-12'
+            },
+            {
+                label: 'Public Workspace ID',
+                value: workspaceContext.public_workspace_id,
+                code: true,
+                columnClass: 'col-12'
+            },
+            {
+                label: 'Group',
+                value: log.group?.group_name || log.group_name,
+                columnClass: 'col-12'
+            },
+            {
+                label: 'Workspace Name',
+                value: log.public_workspace?.workspace_name || workspaceContext.public_workspace_name || log.workspace_name || log.public_workspace_name,
+                columnClass: 'col-12'
+            },
+            {
+                label: 'Conversation ID',
+                value: log.chat_details?.conversation_id || log.conversation?.conversation_id,
+                code: true,
+                columnClass: 'col-12'
+            },
+            {
+                label: 'File Sync Source ID',
+                value: workspaceContext.source_id,
+                code: true,
+                columnClass: 'col-12'
+            },
+            {
+                label: 'Message ID',
+                value: log.chat_details?.message_id,
+                code: true,
+                columnClass: 'col-12'
+            },
+            {
+                label: 'Document ID',
+                value: log.document?.document_id || log.embedding_details?.document_id,
+                code: true,
+                columnClass: 'col-12'
+            },
+            {
+                label: 'Embedded File',
+                value: log.embedding_details?.file_name,
+                columnClass: 'col-12'
+            }
+        ];
+
+        const visibleFields = relatedFields.filter((field) => field && this.isActivityLogValuePresent(field.value));
+        if (!visibleFields.length) {
+            return '';
+        }
+
+        return this.renderActivityLogMetricGrid(visibleFields);
+    }
+
+    renderActivityLogAdditionalContextContent(log) {
+        const additionalContext = log.additional_context || {};
+        const updatedFields = Object.keys(log.updated_fields || {});
+        const metadataFields = [
+            {
+                label: 'Agent Name',
+                value: additionalContext.agent_name,
+                columnClass: 'col-md-6'
+            },
+            {
+                label: 'Augmented',
+                html: typeof additionalContext.augmented === 'boolean'
+                    ? this.renderActivityLogBooleanBadge(additionalContext.augmented, 'Enabled', 'Disabled')
+                    : undefined,
+                columnClass: 'col-md-6'
+            },
+            {
+                label: 'Reasoning Effort',
+                value: additionalContext.reasoning_effort,
+                columnClass: 'col-md-6'
+            },
+            {
+                label: 'Requester',
+                value: log.requester_email,
+                columnClass: 'col-md-6'
+            },
+            {
+                label: 'Approver',
+                value: log.approver_email,
+                columnClass: 'col-md-6'
+            },
+            {
+                label: 'Old Owner',
+                value: log.old_owner_email,
+                columnClass: 'col-md-6'
+            },
+            {
+                label: 'New Owner',
+                value: log.new_owner_email,
+                columnClass: 'col-md-6'
+            },
+            {
+                label: 'Member',
+                value: log.member_name || log.member_email || log.removed_member?.name || log.removed_member?.email,
+                columnClass: 'col-md-6'
+            },
+            {
+                label: 'Member Role',
+                value: log.member_role ? this.capitalizeFirst(String(log.member_role).replace(/_/g, ' ')) : '',
+                columnClass: 'col-md-6'
+            },
+            {
+                label: 'Documents Deleted',
+                value: log.documents_deleted,
+                formatter: (value) => this.formatActivityLogNumber(value),
+                columnClass: 'col-md-6'
+            },
+            {
+                label: 'Updated Fields',
+                value: updatedFields.join(', '),
+                columnClass: 'col-12'
+            }
+        ].filter((field) => field && this.isActivityLogValuePresent(field.value ?? field.html));
+
+        const sections = [];
+        if (metadataFields.length) {
+            sections.push(this.renderActivityLogMetricGrid(metadataFields));
+        }
+
+        if (this.isActivityLogValuePresent(log.description)) {
+            sections.push(`
+                <div class="${metadataFields.length ? 'mt-3' : ''}">
+                    <div class="activity-log-detail-label">Description</div>
+                    <div class="activity-log-detail-value activity-log-summary-text">${this.escapeHtml(log.description)}</div>
+                </div>
+            `);
+        }
+
+        return sections.join('');
+    }
+
+    renderActivityLogRawJsonAccordion(prettyJson) {
+        return `
+            <div class="col-12">
+                <div class="accordion" id="rawLogModalAccordion">
+                    <div class="accordion-item">
+                        <h2 class="accordion-header" id="rawLogJsonHeading">
+                            <button class="accordion-button collapsed" id="rawLogJsonToggle" type="button" data-bs-toggle="collapse" data-bs-target="#rawLogJsonCollapse" aria-expanded="false" aria-controls="rawLogJsonCollapse">
+                                <i class="bi bi-braces me-2"></i>Raw JSON
+                            </button>
+                        </h2>
+                        <div id="rawLogJsonCollapse" class="accordion-collapse collapse" aria-labelledby="rawLogJsonHeading" data-bs-parent="#rawLogModalAccordion">
+                            <div class="accordion-body activity-log-raw-json">
+                                <div class="d-flex justify-content-end mb-3">
+                                    <button type="button" class="btn btn-sm btn-outline-primary" id="copyRawLogJsonBtn" onclick="window.controlCenter.copyRawLogToClipboard()">
+                                        <i class="bi bi-clipboard me-1"></i>Copy JSON
+                                    </button>
+                                </div>
+                                <pre id="rawLogModalJson">${this.escapeHtml(prettyJson)}</pre>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    renderActivityLogModal(log, prettyJson) {
+        const overviewContent = this.renderActivityLogOverviewContent(log);
+        const summaryContent = this.renderActivityLogSummaryContent(log);
+        const contextContent = this.renderActivityLogContextContent(log);
+        const additionalContextContent = this.renderActivityLogAdditionalContextContent(log);
+        const activityBadge = `<span class="badge bg-light text-dark">${this.escapeHtml(this.formatActivityType(log.activity_type))}</span>`;
+        const sections = [
+            this.renderActivityLogSection('col-12', 'Overview', 'bi-journal-text', 'bg-primary text-white', overviewContent, activityBadge),
+            this.renderActivityLogSection('col-lg-6', 'Activity Summary', 'bi-card-checklist', 'bg-success text-white', summaryContent),
+            this.renderActivityLogSection('col-lg-6', 'Context & Related IDs', 'bi-diagram-3', 'bg-info text-white', contextContent),
+            this.renderActivityLogSection('col-12', 'Additional Context', 'bi-sliders2', 'bg-warning text-dark', additionalContextContent),
+            this.renderActivityLogRawJsonAccordion(prettyJson)
+        ].filter(Boolean);
+
+        return `<div class="row g-3">${sections.join('')}</div>`;
     }
 
     showRawLogModal(logIndex) {
@@ -2888,28 +3807,26 @@ class ControlCenter {
             return;
         }
 
-        // Set title
         const activityType = this.formatActivityType(log.activity_type);
-        const timestamp = new Date(log.timestamp).toLocaleString();
-        modalTitle.textContent = `${activityType} - ${timestamp}`;
+        const timestamp = this.formatActivityLogTimestamp(log.timestamp);
+        modalTitle.innerHTML = `<i class="bi bi-journal-text me-2"></i>${this.escapeHtml(activityType)}<span class="text-muted fs-6 ms-2">${this.escapeHtml(timestamp)}</span>`;
 
-        // Display JSON with pretty formatting
-        modalBody.innerHTML = `<pre class="mb-0" style="max-height: 500px; overflow-y: auto;">${this.escapeHtml(JSON.stringify(log, null, 2))}</pre>`;
+        this.currentRawLogJson = JSON.stringify(log, null, 2);
+        modalBody.innerHTML = this.renderActivityLogModal(log, this.currentRawLogJson);
 
-        // Show modal
         const modal = new bootstrap.Modal(document.getElementById('rawLogModal'));
         modal.show();
     }
 
     copyRawLogToClipboard() {
-        const rawLogText = document.getElementById('rawLogModalBody')?.textContent;
+        const rawLogText = this.currentRawLogJson || document.getElementById('rawLogModalJson')?.textContent;
         if (!rawLogText) {
             showToast('No log data to copy', 'warning');
             return;
         }
 
         navigator.clipboard.writeText(rawLogText).then(() => {
-            this.showToast('Log data copied to clipboard', 'success');
+            this.showToast('Log JSON copied to clipboard', 'success');
         }).catch(err => {
             console.error('Failed to copy:', err);
             showToast('Failed to copy to clipboard', 'danger');
@@ -3131,7 +4048,7 @@ class ControlCenter {
         // Show loading state like users do
         tbody.innerHTML = `
             <tr>
-                <td colspan="7" class="text-center py-4">
+                <td colspan="8" class="text-center py-4">
                     <div class="spinner-border text-primary" role="status">
                         <span class="visually-hidden">Loading...</span>
                     </div>
@@ -3142,16 +4059,20 @@ class ControlCenter {
         
         try {
             // Get current filter values like users do
-            const searchTerm = document.getElementById('groupSearchInput')?.value || '';
-            const statusFilter = document.getElementById('groupStatusFilterSelect')?.value || 'all';
+            this.groupSearchTerm = document.getElementById('groupSearchInput')?.value || '';
+            this.groupStatusFilter = document.getElementById('groupStatusFilterSelect')?.value || 'all';
+            this.groupsPerPage = this.getManagementPageSize(
+                document.getElementById('groupManagementPerPageSelect')?.value,
+                this.groupsPerPage
+            );
             
             // Build API URL with filters - same pattern as loadUsers
             // Use cached metrics by default (force_refresh=false) to get pre-calculated data
             const params = new URLSearchParams({
-                page: 1,
-                per_page: 100,
-                search: searchTerm,
-                status_filter: statusFilter,
+                page: this.groupPage,
+                per_page: this.groupsPerPage,
+                search: this.groupSearchTerm,
+                status_filter: this.groupStatusFilter,
                 force_refresh: 'false'  // Use cached metrics for performance
             });
             
@@ -3175,7 +4096,9 @@ class ControlCenter {
             });
             
             // Render groups data directly like users
+            this.groupPage = Number(data.pagination?.page || this.groupPage);
             this.renderGroups(data.groups || []);
+            this.renderGroupsPagination(data.pagination);
             
             console.log('✅ Groups loaded and rendered successfully');
             
@@ -3183,11 +4106,12 @@ class ControlCenter {
             console.error('❌ Error loading groups:', error);
             
             // Show error state like users do
+            // xss-check: ignore reviewed legacy static table shell; dynamic error text is escaped before interpolation.
             tbody.innerHTML = `
                 <tr>
-                    <td colspan="7" class="text-center py-4 text-danger">
+                    <td colspan="8" class="text-center py-4 text-danger">
                         <i class="bi bi-exclamation-triangle" style="font-size: 2rem;"></i>
-                        <div class="mt-2">Error loading groups: ${error.message}</div>
+                        <div class="mt-2">Error loading groups: ${this.escapeHtml(error.message)}</div>
                         <button class="btn btn-sm btn-outline-primary mt-2" onclick="window.controlCenter.loadGroups()">
                             <i class="bi bi-arrow-clockwise me-1"></i>Retry
                         </button>
@@ -3204,14 +4128,17 @@ class ControlCenter {
         console.log('🎨 Rendering', groups.length, 'groups');
         
         if (groups.length === 0) {
+            // xss-check: ignore reviewed legacy static empty table shell with no untrusted interpolation.
             tbody.innerHTML = `
                 <tr>
-                    <td colspan="7" class="text-center py-4">
+                    <td colspan="8" class="text-center py-4">
                         <i class="bi bi-collection" style="font-size: 2rem; color: var(--bs-secondary);"></i>
                         <div class="mt-2">No groups found</div>
                     </td>
                 </tr>
             `;
+            this.updateVisibleSelectionState('.group-checkbox', 'selectAllGroups');
+            this.updateGroupBulkActionButton();
             return;
         }
         
@@ -3227,11 +4154,13 @@ class ControlCenter {
                 } else {
                     this.selectedGroups.delete(e.target.value);
                 }
+                this.updateVisibleSelectionState('.group-checkbox', 'selectAllGroups');
                 this.updateGroupBulkActionButton();
             });
         });
         
         // Update bulk action button state
+        this.updateVisibleSelectionState('.group-checkbox', 'selectAllGroups');
         this.updateGroupBulkActionButton();
         
         // Initialize sorting after data is loaded
@@ -3251,6 +4180,8 @@ class ControlCenter {
         
         // Get document metrics
         const totalDocs = group.metrics?.document_metrics?.total_documents || group.activity?.document_metrics?.total_documents || 0;
+        const tokenTotal = this.getGroupTokenTotal(group);
+        const tokenTotalFormatted = tokenTotal.toLocaleString();
         
         // Get group info
         const memberCount = group.member_count || (group.users ? group.users.length : 0);
@@ -3266,11 +4197,12 @@ class ControlCenter {
             'inactive': { class: 'bg-secondary', text: 'Inactive' }
         };
         const statusInfo = statusConfig[status] || statusConfig['active'];
+        const isSelected = this.selectedGroups.has(group.id);
         
         return `
             <tr>
                 <td>
-                    <input type="checkbox" class="form-check-input group-checkbox" value="${group.id}">
+                    <input type="checkbox" class="form-check-input group-checkbox" value="${group.id}" ${isSelected ? 'checked' : ''}>
                 </td>
                 <td>
                     <div class="fw-semibold">${this.escapeHtml(group.name || 'Unnamed Group')}</div>
@@ -3296,12 +4228,31 @@ class ControlCenter {
                     </div>
                 </td>
                 <td>
+                    <div class="small"><strong>${tokenTotalFormatted}</strong> token${tokenTotal === 1 ? '' : 's'}</div>
+                </td>
+                <td>
                     <button class="btn btn-outline-primary btn-sm" onclick="GroupManager.manageGroup('${group.id}')">
                         <i class="bi bi-gear me-1"></i>Manage
                     </button>
                 </td>
             </tr>
         `;
+    }
+
+    getGroupTokenTotal(group) {
+        const tokenTotal = Number(
+            group.token_total
+            ?? group.total_tokens
+            ?? group.metrics?.token_metrics?.total_tokens
+            ?? group.activity?.token_metrics?.total_tokens
+            ?? 0
+        );
+
+        if (!Number.isFinite(tokenTotal) || tokenTotal < 0) {
+            return 0;
+        }
+
+        return Math.trunc(tokenTotal);
     }
     
     formatBytes(bytes) {
@@ -3347,16 +4298,20 @@ class ControlCenter {
         
         try {
             // Get current filter values like groups do
-            const searchTerm = document.getElementById('publicWorkspaceSearchInput')?.value || '';
-            const statusFilter = document.getElementById('publicWorkspaceStatusFilterSelect')?.value || 'all';
+            this.publicWorkspaceSearchTerm = document.getElementById('publicWorkspaceSearchInput')?.value || '';
+            this.publicWorkspaceStatusFilter = document.getElementById('publicWorkspaceStatusFilterSelect')?.value || 'all';
+            this.publicWorkspacesPerPage = this.getManagementPageSize(
+                document.getElementById('publicWorkspaceManagementPerPageSelect')?.value,
+                this.publicWorkspacesPerPage
+            );
             
             // Build API URL with filters - same pattern as loadGroups
             // Use cached metrics by default (force_refresh=false) to get pre-calculated data
             const params = new URLSearchParams({
-                page: 1,
-                per_page: 100,
-                search: searchTerm,
-                status_filter: statusFilter,
+                page: this.publicWorkspacePage,
+                per_page: this.publicWorkspacesPerPage,
+                search: this.publicWorkspaceSearchTerm,
+                status_filter: this.publicWorkspaceStatusFilter,
                 force_refresh: 'false'  // Use cached metrics for performance
             });
             
@@ -3380,7 +4335,9 @@ class ControlCenter {
             });
             
             // Render workspaces data directly like groups
+            this.publicWorkspacePage = Number(data.pagination?.page || this.publicWorkspacePage);
             this.renderPublicWorkspaces(data.workspaces || []);
+            this.renderPublicWorkspacesPagination(data.pagination);
             
             console.log('✅ Public workspaces loaded and rendered successfully');
             
@@ -3417,6 +4374,8 @@ class ControlCenter {
                     </td>
                 </tr>
             `;
+            this.updateVisibleSelectionState('.public-workspace-checkbox', 'selectAllPublicWorkspaces');
+            this.updatePublicWorkspaceBulkActionButton();
             return;
         }
         
@@ -3432,12 +4391,19 @@ class ControlCenter {
                 } else {
                     this.selectedPublicWorkspaces.delete(e.target.value);
                 }
+                this.updateVisibleSelectionState('.public-workspace-checkbox', 'selectAllPublicWorkspaces');
                 this.updatePublicWorkspaceBulkActionButton();
             });
         });
         
         // Update bulk action button state
+        this.updateVisibleSelectionState('.public-workspace-checkbox', 'selectAllPublicWorkspaces');
         this.updatePublicWorkspaceBulkActionButton();
+
+        // Initialize sorting after data is loaded, matching the group table behavior.
+        if (!window.publicWorkspaceTableSorter) {
+            window.publicWorkspaceTableSorter = new GroupTableSorter('publicWorkspacesTable');
+        }
     }
     
     createPublicWorkspaceRow(workspace) {
@@ -3466,20 +4432,21 @@ class ControlCenter {
             'inactive': { class: 'bg-secondary', text: 'Inactive' }
         };
         const statusInfo = statusConfig[status] || statusConfig['active'];
+        const isSelected = this.selectedPublicWorkspaces.has(workspace.id);
         
         return `
             <tr>
                 <td>
-                    <input type="checkbox" class="form-check-input public-workspace-checkbox" value="${workspace.id}">
+                    <input type="checkbox" class="form-check-input public-workspace-checkbox" value="${workspace.id}" ${isSelected ? 'checked' : ''}>
                 </td>
                 <td>
-                    <div class="fw-semibold">${workspace.name || 'Unnamed Workspace'}</div>
-                    <div class="text-muted small">${workspace.description || 'No description'}</div>
-                    <div class="text-muted small">ID: ${workspace.id}</div>
+                    <div class="fw-semibold">${this.escapeHtml(workspace.name || 'Unnamed Workspace')}</div>
+                    <div class="text-muted small">${this.escapeHtml(workspace.description || 'No description')}</div>
+                    <div class="text-muted small">ID: ${this.escapeHtml(workspace.id)}</div>
                 </td>
                 <td>
-                    <div>${ownerName}</div>
-                    <div class="text-muted small">${ownerEmail}</div>
+                    <div>${this.escapeHtml(ownerName)}</div>
+                    <div class="text-muted small">${this.escapeHtml(ownerEmail)}</div>
                 </td>
                 <td>
                     <div class="small"><strong>${memberCount}</strong> member${memberCount !== 1 ? 's' : ''}</div>
@@ -3514,7 +4481,8 @@ class ControlCenter {
     }
 
     searchPublicWorkspaces(searchTerm) {
-        // Debounce search like groups
+        this.publicWorkspaceSearchTerm = searchTerm || '';
+        this.publicWorkspacePage = 1;
         clearTimeout(this.publicWorkspaceSearchTimeout);
         this.publicWorkspaceSearchTimeout = setTimeout(() => {
             this.loadPublicWorkspaces();
@@ -3522,7 +4490,8 @@ class ControlCenter {
     }
 
     filterPublicWorkspacesByStatus(status) {
-        // Reload with new filter
+        this.publicWorkspaceStatusFilter = status || 'all';
+        this.publicWorkspacePage = 1;
         this.loadPublicWorkspaces();
     }
 
@@ -3533,15 +4502,19 @@ class ControlCenter {
         const searchInput = document.getElementById('publicWorkspaceSearchInput');
         const statusSelect = document.getElementById('publicWorkspaceStatusFilterSelect');
         
-        const searchTerm = searchInput ? searchInput.value.trim() : '';
-        const statusFilter = statusSelect ? statusSelect.value : 'all';
+        this.publicWorkspaceSearchTerm = searchInput ? searchInput.value.trim() : '';
+        this.publicWorkspaceStatusFilter = statusSelect ? statusSelect.value : 'all';
+        this.publicWorkspacesPerPage = this.getManagementPageSize(
+            document.getElementById('publicWorkspaceManagementPerPageSelect')?.value,
+            this.publicWorkspacesPerPage
+        );
         
         // Build API URL with force_refresh=true
         const params = new URLSearchParams({
-            page: 1,
-            per_page: 100,
-            search: searchTerm,
-            status_filter: statusFilter,
+            page: this.publicWorkspacePage,
+            per_page: this.publicWorkspacesPerPage,
+            search: this.publicWorkspaceSearchTerm,
+            status_filter: this.publicWorkspaceStatusFilter,
             force_refresh: 'true'  // Force fresh calculation
         });
         
@@ -3554,7 +4527,9 @@ class ControlCenter {
             })
             .then(data => {
                 console.log('🌍 Refreshed public workspaces data received:', data);
+                this.publicWorkspacePage = Number(data.pagination?.page || this.publicWorkspacePage);
                 this.renderPublicWorkspaces(data.workspaces || []);
+                this.renderPublicWorkspacesPagination(data.pagination);
                 
                 // Show success message
                 this.showAlert('success', 'Public workspaces refreshed successfully');

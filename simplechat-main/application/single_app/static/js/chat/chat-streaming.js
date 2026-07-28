@@ -1,12 +1,21 @@
 // chat-streaming.js
-import { appendMessage, updateUserMessageId } from './chat-messages.js';
+import { appendMessage, renderAiMessageContent, updateUserMessageId } from './chat-messages.js';
 import { applyConversationMetadataUpdate, markConversationRead } from './chat-conversations.js';
 import { hideLoadingIndicatorInChatbox, showLoadingIndicatorInChatbox } from './chat-loading-indicator.js';
 import { showToast } from './chat-toast.js';
 import { applyScopeLock } from './chat-documents.js';
 import { beginStreamingThoughtSession, clearStreamingThoughtSession, handleStreamingThought, markStreamingThoughtContentStarted, stopThoughtPolling } from './chat-thoughts.js';
+import { destroyInlineCharts, hydrateInlineCharts } from './chat-inline-charts.js';
+import { hydrateInlineImageProposals } from './chat-inline-image-proposals.js';
+import { escapeHtml } from './chat-utils.js';
 
 let currentStreamController = null;
+let currentStreamContext = null;
+const MAX_STREAM_CLIENT_ERROR_LENGTH = 500;
+
+function normalizeLegacyEscapedSseDelimiters(chunk) {
+    return String(chunk || '').replace(/(\})\\n\\n(?=(?:data:|event:|id:|retry:|:|$))/g, '$1\n\n');
+}
 
 function parseSseEventPayload(eventBlock) {
     const dataLines = eventBlock
@@ -22,16 +31,142 @@ function parseSseEventPayload(eventBlock) {
         .join('\n');
 }
 
-function createStreamingPlaceholder(statusLabel = 'Streaming...') {
+function getStreamingPlaceholderLabel(statusLabel) {
+    const normalizedStatusLabel = String(statusLabel || '').trim().replace(/\.+$/, '');
+
+    if (/reconnect/i.test(normalizedStatusLabel)) {
+        return 'Reconnecting';
+    }
+
+    if (normalizedStatusLabel && !/^streaming$/i.test(normalizedStatusLabel)) {
+        return normalizedStatusLabel;
+    }
+
+    return 'Thinking';
+}
+
+function createStreamingPlaceholderContent(statusLabel) {
+    const placeholderLabel = getStreamingPlaceholderLabel(statusLabel);
+    const ariaLabel = placeholderLabel === 'Reconnecting'
+        ? 'Reconnecting to the response'
+        : 'Thinking while the response starts';
+
+    return `<div class="streaming-thought-display streaming-thinking-placeholder" role="status" aria-live="polite" aria-label="${escapeHtml(ariaLabel)}">
+        <span class="streaming-thinking-chip">
+            <span class="streaming-thinking-icon" aria-hidden="true"><i class="bi bi-stars"></i></span>
+            <span class="streaming-thinking-label">${escapeHtml(placeholderLabel)}</span>
+        </span>
+    </div>`;
+}
+
+function createStreamingPlaceholder(statusLabel = 'Thinking') {
     const tempAiMessageId = `temp_ai_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
-    appendMessage('AI', `<span class="text-muted"><i class="bi bi-three-dots-vertical"></i> ${statusLabel}</span>`, null, tempAiMessageId);
+    appendMessage('AI', createStreamingPlaceholderContent(statusLabel), null, tempAiMessageId);
     beginStreamingThoughtSession(tempAiMessageId);
     return tempAiMessageId;
+}
+
+function getStreamingMessageElement(messageId) {
+    if (!messageId) {
+        return null;
+    }
+
+    return document.querySelector(`[data-message-id="${messageId}"]`);
+}
+
+function buildDefaultCancelEndpoint(conversationId) {
+    const normalizedConversationId = String(conversationId || '').trim();
+    if (!normalizedConversationId) {
+        return null;
+    }
+
+    return `/api/chat/stream/cancel/${encodeURIComponent(normalizedConversationId)}`;
+}
+
+function resolveCancelEndpoint(conversationId, explicitCancelEndpoint) {
+    const normalizedExplicitEndpoint = String(explicitCancelEndpoint || '').trim();
+    if (normalizedExplicitEndpoint) {
+        return normalizedExplicitEndpoint;
+    }
+
+    return buildDefaultCancelEndpoint(conversationId);
+}
+
+function setStreamingStopButtonState(messageId, state = 'ready') {
+    const messageElement = getStreamingMessageElement(messageId);
+    const stopButton = messageElement?.querySelector('.stream-stop-btn');
+    if (!stopButton) {
+        return;
+    }
+
+    stopButton.classList.toggle('disabled', state !== 'ready');
+    stopButton.disabled = state !== 'ready';
+    stopButton.classList.toggle('opacity-75', state === 'stopping');
+
+    if (state === 'stopping') {
+        stopButton.title = 'Stopping response';
+        stopButton.setAttribute('aria-label', 'Stopping response');
+        return;
+    }
+
+    if (state === 'waiting_for_conversation') {
+        stopButton.title = 'Preparing stop control';
+        stopButton.setAttribute('aria-label', 'Preparing stop control');
+        return;
+    }
+
+    stopButton.title = 'Stop generating';
+    stopButton.setAttribute('aria-label', 'Stop generating response');
+}
+
+function removeStreamingStopButton(messageId) {
+    const messageElement = getStreamingMessageElement(messageId);
+    const stopButton = messageElement?.querySelector('.stream-stop-btn');
+    if (stopButton) {
+        stopButton.remove();
+    }
+    messageElement?.classList.remove('streaming-message');
+}
+
+function attachStreamingStopButton(messageId, streamContext) {
+    const messageElement = getStreamingMessageElement(messageId);
+    if (!messageElement || messageElement.querySelector('.stream-stop-btn')) {
+        return;
+    }
+
+    const footer = messageElement.querySelector('.message-footer');
+    const actionsContainer = messageElement.querySelector('.message-actions') || footer?.firstElementChild || footer;
+    if (!actionsContainer) {
+        return;
+    }
+
+    messageElement.classList.add('streaming-message');
+
+    const stopButton = document.createElement('button');
+    stopButton.type = 'button';
+    stopButton.className = 'btn btn-sm stream-stop-btn d-inline-flex align-items-center justify-content-center rounded-circle p-0 border-0';
+    stopButton.dataset.messageId = messageId;
+
+    const icon = document.createElement('i');
+    icon.className = 'bi bi-stop-fill';
+    icon.setAttribute('aria-hidden', 'true');
+    icon.style.fontSize = '0.95rem';
+    stopButton.appendChild(icon);
+
+    stopButton.addEventListener('click', () => {
+        void requestStreamCancellation(streamContext);
+    });
+
+    actionsContainer.appendChild(stopButton);
+    setStreamingStopButtonState(messageId, streamContext?.cancelEndpoint ? 'ready' : 'waiting_for_conversation');
 }
 
 function clearCurrentStreamController(controller) {
     if (currentStreamController === controller) {
         currentStreamController = null;
+    }
+    if (currentStreamContext?.controller === controller) {
+        currentStreamContext = null;
     }
 }
 
@@ -40,6 +175,254 @@ function removeStreamingPlaceholder(messageId) {
     if (messageElement) {
         messageElement.remove();
     }
+}
+
+function normalizeStreamErrorMessage(errorLike) {
+    const normalized = String(errorLike || '').trim();
+    if (normalized.length <= MAX_STREAM_CLIENT_ERROR_LENGTH) {
+        return normalized;
+    }
+
+    return `${normalized.slice(0, MAX_STREAM_CLIENT_ERROR_LENGTH)}...`;
+}
+
+function normalizeStreamHttpUrl(value) {
+    const rawUrl = String(value || '').trim();
+    if (!rawUrl) {
+        return '';
+    }
+
+    try {
+        const parsedUrl = new URL(rawUrl);
+        if (!['http:', 'https:'].includes(parsedUrl.protocol) || !parsedUrl.hostname) {
+            return '';
+        }
+        return parsedUrl.toString();
+    } catch (error) {
+        return '';
+    }
+}
+
+function getStreamErrorPayload(errorDetails) {
+    if (!errorDetails || typeof errorDetails !== 'object') {
+        return {};
+    }
+
+    if (errorDetails.streamErrorData && typeof errorDetails.streamErrorData === 'object') {
+        return errorDetails.streamErrorData;
+    }
+
+    return errorDetails;
+}
+
+function getStreamAuthUrl(errorDetails) {
+    const errorPayload = getStreamErrorPayload(errorDetails);
+    return normalizeStreamHttpUrl(errorPayload.auth_url || errorPayload.consent_url || '');
+}
+
+function buildStreamingRequestError(errorData, status) {
+    const streamErrorData = errorData && typeof errorData === 'object' ? errorData : {};
+    const errorMessage = String(streamErrorData.error || `HTTP error! status: ${status}`).trim();
+    const streamError = new Error(errorMessage || `HTTP error! status: ${status}`);
+    streamError.streamErrorData = streamErrorData;
+    streamError.status = status;
+    return streamError;
+}
+
+function appendStreamErrorBanner(contentElement, errorMessage, errorDetails = {}) {
+    const errorPayload = getStreamErrorPayload(errorDetails);
+    const authRequired = errorPayload.auth_required === true;
+    const authUrl = getStreamAuthUrl(errorPayload);
+    const displayMessage = String(
+        errorMessage || errorPayload.error || errorPayload.message || 'An unknown streaming error occurred.'
+    ).trim();
+
+    const errorBanner = document.createElement('div');
+    errorBanner.className = 'alert alert-warning mt-2 mb-0';
+
+    const icon = document.createElement('i');
+    icon.className = 'bi bi-exclamation-triangle me-2';
+    icon.setAttribute('aria-hidden', 'true');
+
+    const title = document.createElement('strong');
+    title.textContent = authRequired ? 'Foundry access required:' : 'Stream interrupted:';
+
+    errorBanner.appendChild(icon);
+    errorBanner.appendChild(title);
+    errorBanner.appendChild(document.createTextNode(` ${displayMessage}`));
+
+    if (authRequired && authUrl) {
+        const actionRow = document.createElement('div');
+        actionRow.className = 'mt-2';
+
+        const authLink = document.createElement('a');
+        authLink.href = authUrl;
+        authLink.target = '_blank';
+        authLink.rel = 'noopener noreferrer';
+        authLink.textContent = 'Sign in or grant Foundry access';
+
+        actionRow.appendChild(authLink);
+        errorBanner.appendChild(actionRow);
+    }
+
+    const detailRow = document.createElement('div');
+    detailRow.className = 'mt-1';
+
+    const detailText = document.createElement('small');
+    detailText.textContent = authRequired
+        ? 'After access is granted, send the message again.'
+        : 'Response may be incomplete. The partial content above has been saved.';
+
+    detailRow.appendChild(detailText);
+    errorBanner.appendChild(detailRow);
+    contentElement.appendChild(errorBanner);
+}
+
+function reportClientStreamEvent(eventType, payload = {}) {
+    const normalizedEventType = String(eventType || '').trim();
+    if (!normalizedEventType) {
+        return Promise.resolve(false);
+    }
+
+    const requestBody = {
+        event_type: normalizedEventType,
+        ...payload,
+    };
+
+    if (requestBody.error_message) {
+        requestBody.error_message = normalizeStreamErrorMessage(requestBody.error_message);
+    }
+    if (requestBody.abort_reason) {
+        requestBody.abort_reason = normalizeStreamErrorMessage(requestBody.abort_reason);
+    }
+
+    return fetch('/api/chat/stream/client-event', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        credentials: 'same-origin',
+        body: JSON.stringify(requestBody),
+        keepalive: true,
+    }).then(() => true).catch(error => {
+        console.warn('Failed to report stream client event:', error);
+        return false;
+    });
+}
+
+function updateStreamContextConversation(streamContext, conversationId) {
+    if (!streamContext || !conversationId) {
+        return;
+    }
+
+    streamContext.conversationId = conversationId;
+    if (!streamContext.explicitCancelEndpoint) {
+        streamContext.cancelEndpoint = buildDefaultCancelEndpoint(conversationId);
+    }
+    setStreamingStopButtonState(streamContext.tempAiMessageId, streamContext.cancelEndpoint ? 'ready' : 'waiting_for_conversation');
+}
+
+async function requestStreamCancellation(streamContext = currentStreamContext) {
+    if (!streamContext || streamContext.cancellationRequested) {
+        return false;
+    }
+
+    if (!streamContext.cancelEndpoint) {
+        const fallbackEndpoint = buildDefaultCancelEndpoint(streamContext.conversationId || window.currentConversationId);
+        if (fallbackEndpoint) {
+            streamContext.cancelEndpoint = fallbackEndpoint;
+        }
+    }
+
+    if (!streamContext.cancelEndpoint) {
+        setStreamingStopButtonState(streamContext.tempAiMessageId, 'waiting_for_conversation');
+        showToast('Stop will be available once the conversation is ready.', 'info');
+        return false;
+    }
+
+    streamContext.cancellationRequested = true;
+    setStreamingStopButtonState(streamContext.tempAiMessageId, 'stopping');
+
+    void reportClientStreamEvent('stream_cancel_requested', {
+        conversation_id: streamContext.conversationId || window.currentConversationId || null,
+        cancel_endpoint: streamContext.explicitCancelEndpoint ? 'custom' : 'chat',
+    });
+
+    try {
+        const response = await fetch(streamContext.cancelEndpoint, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            credentials: 'same-origin',
+            body: JSON.stringify({ reason: 'user_requested' }),
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.error || `Failed to stop stream (${response.status})`);
+        }
+
+        return true;
+    } catch (error) {
+        if (currentStreamContext !== streamContext) {
+            return false;
+        }
+        streamContext.cancellationRequested = false;
+        setStreamingStopButtonState(streamContext.tempAiMessageId, 'ready');
+        console.warn('Failed to request stream cancellation:', error);
+        showToast(error.message || 'Failed to stop the response.', 'warning');
+        return false;
+    }
+}
+
+function findConversationListItem(conversationId) {
+    const normalizedConversationId = String(conversationId || '');
+    return Array.from(document.querySelectorAll('.conversation-item')).find(item => (
+        item.getAttribute('data-conversation-id') === normalizedConversationId
+    )) || null;
+}
+
+export function applyStreamingConversationMetadata(data = {}) {
+    const conversationId = data.conversation_id || data.conversationId;
+    if (!conversationId) {
+        return;
+    }
+
+    if (!window.currentConversationId) {
+        window.currentConversationId = conversationId;
+    }
+
+    const metadataUpdates = {};
+    const conversationTitle = data.conversation_title ?? data.title;
+    if (conversationTitle !== undefined) {
+        metadataUpdates.title = String(conversationTitle || '').trim() || 'New Conversation';
+    }
+    if (Array.isArray(data.classification)) {
+        metadataUpdates.classification = data.classification;
+    }
+    if (Array.isArray(data.context)) {
+        metadataUpdates.context = data.context;
+    }
+    if (data.chat_type !== undefined) {
+        metadataUpdates.chat_type = data.chat_type || null;
+    }
+
+    if (Object.keys(metadataUpdates).length === 0) {
+        return;
+    }
+
+    const existingItem = findConversationListItem(conversationId);
+    const canAddMissingActiveConversation = !window.currentConversationId || window.currentConversationId === conversationId;
+    if (!existingItem && canAddMissingActiveConversation && window.chatConversations?.addConversationToList && metadataUpdates.title) {
+        window.chatConversations.addConversationToList(
+            conversationId,
+            metadataUpdates.title,
+            metadataUpdates.classification || []
+        );
+    }
+
+    applyConversationMetadataUpdate(conversationId, metadataUpdates);
 }
 
 async function getStreamingStatus(conversationId) {
@@ -74,13 +457,32 @@ async function attemptStreamingRecovery(conversationId, failedMessageId, tempUse
     try {
         const statusData = await getStreamingStatus(conversationId);
         if (!statusData?.pending) {
+            void reportClientStreamEvent('stream_recovery_unavailable', {
+                conversation_id: conversationId,
+                pending: Boolean(statusData?.pending),
+                reattachable: Boolean(statusData?.reattachable),
+                status: statusData?.status || null,
+            });
             return false;
         }
+
+        void reportClientStreamEvent('stream_recovery_attempt', {
+            conversation_id: conversationId,
+            pending: Boolean(statusData?.pending),
+            reattachable: Boolean(statusData?.reattachable),
+            status: statusData?.status || null,
+        });
 
         clearStreamingThoughtSession(failedMessageId);
         removeStreamingPlaceholder(failedMessageId);
 
         const reconnectMessageId = createStreamingPlaceholder(reconnectStatusLabel);
+        void reportClientStreamEvent('stream_recovery_attached', {
+            conversation_id: conversationId,
+            pending: Boolean(statusData?.pending),
+            reattachable: Boolean(statusData?.reattachable),
+            status: statusData?.status || null,
+        });
         return consumeStreamingResponse(
             signal => fetch(`/api/chat/stream/reattach/${conversationId}`, {
                 method: 'GET',
@@ -111,19 +513,36 @@ function consumeStreamingResponse(requestFactory, tempAiMessageId, tempUserMessa
         onFinally = null,
         allowRecovery = true,
         recoveryConversationId = null,
+        cancelEndpoint = null,
         reconnectStatusLabel = 'Reconnecting...',
+        fallbackAgentInfo = null,
     } = options;
 
     if (currentStreamController) {
+        removeStreamingStopButton(currentStreamContext?.tempAiMessageId);
         currentStreamController.abort('replaced');
+        currentStreamContext = null;
     }
 
     const abortController = new AbortController();
     currentStreamController = abortController;
+    const streamContext = {
+        controller: abortController,
+        tempAiMessageId,
+        conversationId: recoveryConversationId,
+        explicitCancelEndpoint: Boolean(cancelEndpoint),
+        cancelEndpoint: resolveCancelEndpoint(recoveryConversationId, cancelEndpoint),
+        cancellationRequested: false,
+    };
+    currentStreamContext = streamContext;
+    attachStreamingStopButton(tempAiMessageId, streamContext);
+    const streamStartedAt = Date.now();
     let accumulatedContent = '';
     let hasStreamedContent = false;
     let streamError = false;
     let streamCompleted = false;
+    let lastChunkAt = null;
+    let eventCount = 0;
 
     requestFactory(abortController.signal).then(response => {
         if (!response.ok) {
@@ -131,13 +550,20 @@ function consumeStreamingResponse(requestFactory, tempAiMessageId, tempUserMessa
                 throw new Error('No active stream is available for this conversation.');
             }
             return response.json().then(errData => {
-                throw new Error(errData.error || `HTTP error! status: ${response.status}`);
+                throw buildStreamingRequestError(errData, response.status);
             });
         }
 
         if (!response.body) {
             throw new Error('Streaming response body is unavailable.');
         }
+
+        void reportClientStreamEvent('stream_response_opened', {
+            conversation_id: recoveryConversationId,
+            elapsed_ms: Date.now() - streamStartedAt,
+            had_streamed_content: hasStreamedContent,
+            event_count: eventCount,
+        });
         
         // Read the streaming response
         const reader = response.body.getReader();
@@ -145,11 +571,23 @@ function consumeStreamingResponse(requestFactory, tempAiMessageId, tempUserMessa
         let sseBuffer = '';
 
         function processStreamData(data) {
+            eventCount += 1;
+            lastChunkAt = Date.now();
+
             if (data.error) {
                 stopThoughtPolling();
                 streamError = true;
                 clearStreamingThoughtSession(tempAiMessageId);
-                handleStreamError(tempAiMessageId, data.partial_content || accumulatedContent, data.error);
+                removeStreamingStopButton(tempAiMessageId);
+                void reportClientStreamEvent('stream_read_error', {
+                    conversation_id: recoveryConversationId,
+                    elapsed_ms: Date.now() - streamStartedAt,
+                    time_since_last_chunk_ms: 0,
+                    had_streamed_content: hasStreamedContent,
+                    event_count: eventCount,
+                    error_message: data.error,
+                });
+                handleStreamError(tempAiMessageId, data.partial_content || accumulatedContent, data.error, data);
                 clearCurrentStreamController(abortController);
                 if (typeof onError === 'function') {
                     onError(data.error, data);
@@ -167,6 +605,16 @@ function consumeStreamingResponse(requestFactory, tempAiMessageId, tempUserMessa
                 return false;
             }
 
+            if (data.type === 'conversation_metadata') {
+                applyStreamingConversationMetadata(data);
+                updateStreamContextConversation(streamContext, data.conversation_id || data.conversationId);
+                return false;
+            }
+
+            if (data.conversation_id || data.conversationId) {
+                updateStreamContextConversation(streamContext, data.conversation_id || data.conversationId);
+            }
+
             if (data.content) {
                 accumulatedContent += data.content;
                 hasStreamedContent = true;
@@ -178,10 +626,31 @@ function consumeStreamingResponse(requestFactory, tempAiMessageId, tempUserMessa
                 streamCompleted = true;
                 clearStreamingThoughtSession(tempAiMessageId);
 
+                if (data.cancelled || data.canceled || data.type === 'cancelled' || data.type === 'canceled') {
+                    finalizeCancelledStreamingMessage(
+                        tempAiMessageId,
+                        tempUserMessageId,
+                        data,
+                        accumulatedContent,
+                    );
+
+                    if (typeof onDone === 'function') {
+                        onDone(data);
+                    }
+
+                    if (typeof onFinally === 'function') {
+                        onFinally();
+                    }
+
+                    clearCurrentStreamController(abortController);
+                    return true;
+                }
+
                 finalizeStreamingMessage(
                     tempAiMessageId,
                     tempUserMessageId,
-                    data
+                    data,
+                    fallbackAgentInfo
                 );
 
                 if (typeof onDone === 'function') {
@@ -245,11 +714,20 @@ function consumeStreamingResponse(requestFactory, tempAiMessageId, tempUserMessa
                 if (done) {
                     stopThoughtPolling();
 
-                    sseBuffer += decoder.decode();
+                    sseBuffer += normalizeLegacyEscapedSseDelimiters(decoder.decode());
                     const processedFinalEvent = processSseBuffer(true);
 
                     if (!processedFinalEvent && !streamCompleted && !streamError) {
                         clearCurrentStreamController(abortController);
+
+                        void reportClientStreamEvent('stream_premature_end', {
+                            conversation_id: recoveryConversationId,
+                            elapsed_ms: Date.now() - streamStartedAt,
+                            time_since_last_chunk_ms: lastChunkAt ? Date.now() - lastChunkAt : 0,
+                            had_streamed_content: hasStreamedContent,
+                            event_count: eventCount,
+                            status: 'done_without_terminal_event',
+                        });
 
                         if (allowRecovery) {
                             const recovered = await attemptStreamingRecovery(
@@ -287,7 +765,9 @@ function consumeStreamingResponse(requestFactory, tempAiMessageId, tempUserMessa
                     return;
                 }
                 
-                sseBuffer += decoder.decode(value, { stream: true }).replace(/\r/g, '');
+                sseBuffer += normalizeLegacyEscapedSseDelimiters(
+                    decoder.decode(value, { stream: true }).replace(/\r/g, '')
+                );
 
                 if (processSseBuffer() || streamCompleted || streamError) {
                     return;
@@ -296,6 +776,14 @@ function consumeStreamingResponse(requestFactory, tempAiMessageId, tempUserMessa
                 readStream(); // Continue reading
             }).catch(async err => {
                 if (abortController.signal.aborted) {
+                    void reportClientStreamEvent('stream_aborted', {
+                        conversation_id: recoveryConversationId,
+                        elapsed_ms: Date.now() - streamStartedAt,
+                        time_since_last_chunk_ms: lastChunkAt ? Date.now() - lastChunkAt : 0,
+                        had_streamed_content: hasStreamedContent,
+                        event_count: eventCount,
+                        abort_reason: abortController.signal.reason || 'aborted',
+                    });
                     clearStreamingThoughtSession(tempAiMessageId);
                     clearCurrentStreamController(abortController);
                     if (typeof onFinally === 'function') {
@@ -306,6 +794,14 @@ function consumeStreamingResponse(requestFactory, tempAiMessageId, tempUserMessa
 
                 stopThoughtPolling();
                 console.error('Stream reading error:', err);
+                void reportClientStreamEvent('stream_read_error', {
+                    conversation_id: recoveryConversationId,
+                    elapsed_ms: Date.now() - streamStartedAt,
+                    time_since_last_chunk_ms: lastChunkAt ? Date.now() - lastChunkAt : 0,
+                    had_streamed_content: hasStreamedContent,
+                    event_count: eventCount,
+                    error_message: err.message,
+                });
 
                 clearCurrentStreamController(abortController);
                 if (allowRecovery) {
@@ -326,7 +822,7 @@ function consumeStreamingResponse(requestFactory, tempAiMessageId, tempUserMessa
                 }
 
                 clearStreamingThoughtSession(tempAiMessageId);
-                handleStreamError(tempAiMessageId, accumulatedContent, err.message);
+                handleStreamError(tempAiMessageId, accumulatedContent, err.message, err);
                 if (typeof onError === 'function') {
                     onError(err.message, err);
                 }
@@ -340,6 +836,14 @@ function consumeStreamingResponse(requestFactory, tempAiMessageId, tempUserMessa
         
     }).catch(async error => {
         if (abortController.signal.aborted) {
+            void reportClientStreamEvent('stream_aborted', {
+                conversation_id: recoveryConversationId,
+                elapsed_ms: Date.now() - streamStartedAt,
+                time_since_last_chunk_ms: lastChunkAt ? Date.now() - lastChunkAt : 0,
+                had_streamed_content: hasStreamedContent,
+                event_count: eventCount,
+                abort_reason: abortController.signal.reason || 'aborted',
+            });
             clearStreamingThoughtSession(tempAiMessageId);
             clearCurrentStreamController(abortController);
             if (typeof onFinally === 'function') {
@@ -350,6 +854,14 @@ function consumeStreamingResponse(requestFactory, tempAiMessageId, tempUserMessa
 
         stopThoughtPolling();
         console.error('Streaming request error:', error);
+        void reportClientStreamEvent('stream_request_error', {
+            conversation_id: recoveryConversationId,
+            elapsed_ms: Date.now() - streamStartedAt,
+            time_since_last_chunk_ms: lastChunkAt ? Date.now() - lastChunkAt : 0,
+            had_streamed_content: hasStreamedContent,
+            event_count: eventCount,
+            error_message: error.message,
+        });
 
         clearCurrentStreamController(abortController);
         if (allowRecovery) {
@@ -369,11 +881,8 @@ function consumeStreamingResponse(requestFactory, tempAiMessageId, tempUserMessa
             }
         }
 
-        showToast(`Error: ${error.message}`, 'error');
         clearStreamingThoughtSession(tempAiMessageId);
-        
-        // Remove placeholder message
-        removeStreamingPlaceholder(tempAiMessageId);
+        handleStreamError(tempAiMessageId, accumulatedContent, error.message, error);
 
         if (typeof onError === 'function') {
             onError(error.message, error);
@@ -388,11 +897,12 @@ function consumeStreamingResponse(requestFactory, tempAiMessageId, tempUserMessa
 }
 
 export function sendMessageWithStreaming(messageData, tempUserMessageId, currentConversationId, options = {}) {
-    const tempAiMessageId = createStreamingPlaceholder('Streaming...');
+    const { endpoint = '/api/chat/stream' } = options;
+    const tempAiMessageId = createStreamingPlaceholder();
     const recoveryConversationId = currentConversationId || messageData?.conversation_id || window.currentConversationId || null;
 
     return consumeStreamingResponse(
-        signal => fetch('/api/chat/stream', {
+        signal => fetch(endpoint, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -444,7 +954,7 @@ export async function reattachStreamingConversation(conversationId, options = {}
     }
 }
 
-function updateStreamingMessage(messageId, content) {
+export function updateStreamingMessage(messageId, content) {
     const messageElement = document.querySelector(`[data-message-id="${messageId}"]`);
     if (!messageElement) return;
 
@@ -454,8 +964,12 @@ function updateStreamingMessage(messageId, content) {
     if (contentElement) {
         // Render markdown during streaming for proper formatting
         if (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
-            const renderedContent = DOMPurify.sanitize(marked.parse(content));
-            contentElement.innerHTML = renderedContent;
+            const stableChartNodes = collectStableStreamingChartNodes(contentElement);
+            const renderedContent = renderAiMessageContent(content);
+            contentElement.innerHTML = renderedContent.htmlContent;
+            restoreStableStreamingChartNodes(contentElement, stableChartNodes);
+            hydrateInlineCharts(messageElement);
+            hydrateInlineImageProposals(messageElement);
         } else {
             contentElement.textContent = content;
         }
@@ -470,9 +984,226 @@ function updateStreamingMessage(messageId, content) {
     }
 }
 
-function handleStreamError(messageId, partialContent, errorMessage) {
+function getStreamingChartInstance(chartContainer) {
+    const canvas = chartContainer?.querySelector('canvas');
+    if (!canvas) {
+        return null;
+    }
+
+    if (chartContainer._chartInstance) {
+        return chartContainer._chartInstance;
+    }
+
+    if (typeof window.Chart !== 'undefined' && typeof window.Chart.getChart === 'function') {
+        return window.Chart.getChart(canvas);
+    }
+
+    return null;
+}
+
+function collectStableStreamingChartNodes(contentElement) {
+    const stableChartNodes = new Map();
+    contentElement.querySelectorAll('.sc-inline-chart:not([data-chart-hydrated="status"])').forEach(chartContainer => {
+        const chartSpec = chartContainer.getAttribute('data-chart-spec') || '';
+        if (!chartSpec || chartContainer.getAttribute('data-chart-hydrated') !== 'true') {
+            return;
+        }
+
+        if (!getStreamingChartInstance(chartContainer)) {
+            return;
+        }
+
+        if (!stableChartNodes.has(chartSpec)) {
+            stableChartNodes.set(chartSpec, []);
+        }
+        stableChartNodes.get(chartSpec).push(chartContainer);
+    });
+    return stableChartNodes;
+}
+
+function restoreStableStreamingChartNodes(contentElement, stableChartNodes) {
+    const reusedChartNodes = new Set();
+    contentElement.querySelectorAll('.sc-inline-chart:not([data-chart-hydrated="status"])').forEach(newChartContainer => {
+        const chartSpec = newChartContainer.getAttribute('data-chart-spec') || '';
+        const matchingChartNodes = chartSpec ? stableChartNodes.get(chartSpec) : null;
+        const stableChartNode = matchingChartNodes?.shift();
+        if (!stableChartNode) {
+            return;
+        }
+
+        newChartContainer.replaceWith(stableChartNode);
+        reusedChartNodes.add(stableChartNode);
+    });
+
+    stableChartNodes.forEach(chartNodes => {
+        chartNodes.forEach(chartNode => {
+            if (!reusedChartNodes.has(chartNode)) {
+                destroyInlineCharts(chartNode);
+            }
+        });
+    });
+}
+
+function appendStoppedResponseBanner(messageElement, hasPartialContent) {
+    const contentElement = messageElement?.querySelector('.message-text');
+    if (!contentElement || contentElement.querySelector('.stream-stopped-banner')) {
+        return;
+    }
+
+    const banner = document.createElement('div');
+    banner.className = 'alert alert-info stream-stopped-banner mt-2 mb-0';
+
+    const icon = document.createElement('i');
+    icon.className = 'bi bi-stop-circle me-2';
+    icon.setAttribute('aria-hidden', 'true');
+    banner.appendChild(icon);
+
+    const strong = document.createElement('strong');
+    strong.textContent = 'Stopped by you.';
+    banner.appendChild(strong);
+
+    banner.appendChild(document.createTextNode(
+        hasPartialContent ? ' Response may be incomplete.' : ' No response content was received.'
+    ));
+
+    contentElement.appendChild(banner);
+}
+
+function renderStoppedContent(messageElement, partialContent) {
+    const contentElement = messageElement?.querySelector('.message-text');
+    if (!contentElement) {
+        return;
+    }
+
+    const cursor = contentElement.querySelector('.streaming-cursor');
+    if (cursor) {
+        cursor.remove();
+    }
+
+    const normalizedContent = String(partialContent || '').trim();
+    if (normalizedContent) {
+        if (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
+            const renderedContent = renderAiMessageContent(normalizedContent);
+            contentElement.innerHTML = renderedContent.htmlContent;
+            hydrateInlineCharts(messageElement);
+        } else {
+            contentElement.textContent = normalizedContent;
+        }
+    } else {
+        contentElement.textContent = 'Response stopped before any content was received.';
+    }
+
+    appendStoppedResponseBanner(messageElement, Boolean(normalizedContent));
+}
+
+function finalizeCancelledStreamingMessage(messageId, userMessageId, finalData, fallbackContent = '') {
+    const messageElement = getStreamingMessageElement(messageId);
+    const partialContent = finalData.full_content || finalData.partial_content || fallbackContent || '';
+
+    if (finalData.user_message_id && userMessageId) {
+        updateUserMessageId(userMessageId, finalData.user_message_id);
+    }
+
+    removeStreamingStopButton(messageId);
+
+    if (finalData.message_id && finalData.message_persisted) {
+        if (messageElement) {
+            messageElement.remove();
+        }
+
+        const existingFinalMessage = document.querySelector(`[data-message-id="${finalData.message_id}"]`);
+        if (!existingFinalMessage) {
+            const finalMessageObject = {
+                ...finalData,
+                content: partialContent,
+                role: finalData.role || 'assistant',
+                metadata: {
+                    ...(finalData.metadata || {}),
+                    incomplete: true,
+                    canceled: true,
+                },
+            };
+
+            appendMessage(
+                'AI',
+                partialContent,
+                finalData.model_deployment_name,
+                finalData.message_id,
+                finalData.augmented,
+                finalData.hybrid_citations || [],
+                finalData.web_search_citations || [],
+                finalData.agent_citations || [],
+                finalData.agent_display_name || null,
+                finalData.agent_name || null,
+                finalMessageObject,
+                false
+            );
+        }
+
+        appendStoppedResponseBanner(
+            document.querySelector(`[data-message-id="${finalData.message_id}"]`),
+            Boolean(String(partialContent || '').trim())
+        );
+    } else if (messageElement) {
+        renderStoppedContent(messageElement, partialContent);
+    }
+
+    if (finalData.conversation_id) {
+        markConversationRead(finalData.conversation_id, { force: true, suppressErrorToast: true }).catch(error => {
+            console.warn('Failed to clear unread state after stream cancellation:', error);
+        });
+    }
+}
+
+function normalizeFallbackAgentIcon(iconPayload) {
+    if (!iconPayload || typeof iconPayload !== 'object' || Array.isArray(iconPayload)) {
+        return null;
+    }
+
+    const kind = String(iconPayload.kind || '').trim().toLowerCase();
+    const value = String(iconPayload.value || '').trim();
+    if (kind === 'bootstrap' && /^bi-[a-z0-9][a-z0-9-]{0,80}$/.test(value)) {
+        return { kind, value };
+    }
+    if (kind === 'image' && /^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/.test(value) && value.length <= 350000) {
+        return { kind, value };
+    }
+    return null;
+}
+
+function applyFallbackAgentIcon(finalData = {}, fallbackAgentInfo = null) {
+    if (!fallbackAgentInfo || typeof fallbackAgentInfo !== 'object' || finalData.agent_icon) {
+        return finalData;
+    }
+
+    const fallbackIcon = normalizeFallbackAgentIcon(fallbackAgentInfo.icon || fallbackAgentInfo.agent_icon);
+    if (!fallbackIcon) {
+        return finalData;
+    }
+
+    return {
+        ...finalData,
+        agent_icon: fallbackIcon,
+        metadata: {
+            ...(finalData.metadata || {}),
+            agent_selection: {
+                ...(finalData.metadata?.agent_selection || {}),
+                agent_icon: fallbackIcon,
+            },
+        },
+    };
+}
+
+function handleStreamError(messageId, partialContent, errorMessage, errorDetails = {}) {
     const messageElement = document.querySelector(`[data-message-id="${messageId}"]`);
     if (!messageElement) return;
+
+    const errorPayload = getStreamErrorPayload(errorDetails);
+    const displayMessage = String(
+        errorMessage || errorPayload.error || errorPayload.message || 'An unknown streaming error occurred.'
+    ).trim();
+
+    removeStreamingStopButton(messageId);
     
     const contentElement = messageElement.querySelector('.message-text');
     if (contentElement) {
@@ -485,29 +1216,24 @@ function handleStreamError(messageId, partialContent, errorMessage) {
         
         // Parse markdown for partial content
         if (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
-            finalContent = DOMPurify.sanitize(marked.parse(finalContent));
+            finalContent = renderAiMessageContent(finalContent).htmlContent;
         }
         
         contentElement.innerHTML = finalContent;
-        
-        // Add error banner
-        const errorBanner = document.createElement('div');
-        errorBanner.className = 'alert alert-warning mt-2 mb-0';
-        errorBanner.innerHTML = `
-            <i class="bi bi-exclamation-triangle me-2"></i>
-            <strong>Stream interrupted:</strong> ${errorMessage}
-            <br>
-            <small>Response may be incomplete. The partial content above has been saved.</small>
-        `;
-        contentElement.appendChild(errorBanner);
+        hydrateInlineCharts(messageElement);
+
+        appendStreamErrorBanner(contentElement, displayMessage, errorPayload);
     }
-    
-    showToast(`Stream error: ${errorMessage}`, 'error');
+
+    showToast(`Stream error: ${displayMessage}`, 'error');
 }
 
-function finalizeStreamingMessage(messageId, userMessageId, finalData) {
+function finalizeStreamingMessage(messageId, userMessageId, finalData, fallbackAgentInfo = null) {
+    finalData = applyFallbackAgentIcon(finalData, fallbackAgentInfo);
     const messageElement = document.querySelector(`[data-message-id="${messageId}"]`);
     if (!messageElement) return;
+
+    removeStreamingStopButton(messageId);
     
     // Update user message ID first
     if (finalData.user_message_id && userMessageId) {
@@ -517,9 +1243,28 @@ function finalizeStreamingMessage(messageId, userMessageId, finalData) {
     // Remove the temporary streaming message
     messageElement.remove();
 
+    const existingFinalMessage = finalData.message_id
+        ? document.querySelector(`[data-message-id="${finalData.message_id}"]`)
+        : null;
+
     if (finalData.kernel_fallback_notice) {
         showToast(finalData.kernel_fallback_notice, 'warning');
     }
+
+    if (existingFinalMessage) {
+        if (finalData.conversation_id) {
+            markConversationRead(finalData.conversation_id, { force: true, suppressErrorToast: true }).catch(error => {
+                console.warn('Failed to clear unread state after live streaming completion:', error);
+            });
+        }
+        return;
+    }
+
+    const finalMessageObject = {
+        ...finalData,
+        content: finalData.full_content || finalData.content || '',
+        role: finalData.role || 'assistant',
+    };
 
     if (finalData.image_url) {
         appendMessage(
@@ -533,7 +1278,7 @@ function finalizeStreamingMessage(messageId, userMessageId, finalData) {
             finalData.agent_citations || [],
             finalData.agent_display_name || null,
             finalData.agent_name || null,
-            null,
+            finalMessageObject,
             true
         );
 
@@ -557,7 +1302,7 @@ function finalizeStreamingMessage(messageId, userMessageId, finalData) {
         finalData.agent_citations || [],
         finalData.agent_display_name || null,
         finalData.agent_name || null,
-        null,
+        finalMessageObject,
         true // isNewMessage - trigger autoplay for new streaming responses
     );
     
@@ -611,9 +1356,15 @@ function finalizeStreamingMessage(messageId, userMessageId, finalData) {
 }
 
 export function cancelStreaming() {
+    if (currentStreamContext) {
+        void requestStreamCancellation(currentStreamContext);
+        return;
+    }
+
     if (currentStreamController) {
         currentStreamController.abort('cancelled');
         currentStreamController = null;
+        currentStreamContext = null;
         showToast('Streaming cancelled', 'info');
     }
 }

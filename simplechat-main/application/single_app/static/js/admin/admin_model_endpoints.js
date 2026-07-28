@@ -1,6 +1,7 @@
 // admin_model_endpoints.js
 
 import { showToast } from "../chat/chat-toast.js";
+import { getIconPayload, setIconPayload } from "../agents_common.js";
 
 const enableMultiEndpointToggle = document.getElementById("enable_multi_model_endpoints");
 const endpointsWrapper = document.getElementById("model-endpoints-wrapper");
@@ -10,6 +11,10 @@ const endpointsInput = document.getElementById("model_endpoints_json");
 const defaultModelSelect = document.getElementById("default-model-selection");
 const defaultModelInput = document.getElementById("default_model_selection_json");
 const defaultModelWrapper = document.getElementById("default-model-selection-wrapper");
+const metadataExtractionModelSelect = document.getElementById("metadata_extraction_model");
+const metadataExtractionModelInput = document.getElementById("metadata_extraction_model_selection_json");
+const legacyGptApimToggle = document.getElementById("enable_gpt_apim");
+const legacyApimGptDeploymentInput = document.getElementById("azure_apim_gpt_deployment");
 const migrationPanel = document.getElementById("agent-default-model-migration-panel");
 const migrationStatus = document.getElementById("agent-default-model-migration-status");
 const migrationCallout = document.getElementById("agent-default-model-migration-callout");
@@ -39,12 +44,16 @@ const endpointIdInput = document.getElementById("model-endpoint-id");
 const endpointNameInput = document.getElementById("model-endpoint-name");
 const endpointProviderSelect = document.getElementById("model-endpoint-provider");
 const endpointUrlInput = document.getElementById("model-endpoint-endpoint");
+const endpointUrlLabel = document.getElementById("model-endpoint-endpoint-label");
+const endpointUrlHelp = document.getElementById("model-endpoint-endpoint-help");
 const endpointProjectGroup = document.getElementById("model-endpoint-project-group");
 const endpointProjectInput = document.getElementById("model-endpoint-project-name");
 const endpointProjectApiVersionGroup = document.getElementById("model-endpoint-project-api-version-group");
 const endpointProjectApiVersionInput = document.getElementById("model-endpoint-project-api-version");
+const endpointProjectApiVersionCustomInput = document.getElementById("model-endpoint-project-api-version-custom");
 const endpointOpenAiApiVersionGroup = document.getElementById("model-endpoint-openai-api-version-group");
 const endpointOpenAiApiVersionInput = document.getElementById("model-endpoint-openai-api-version");
+const endpointOpenAiApiVersionCustomInput = document.getElementById("model-endpoint-openai-api-version-custom");
 const endpointSubscriptionGroup = document.getElementById("model-endpoint-subscription-group");
 const endpointResourceGroup = document.getElementById("model-endpoint-resource-group-group");
 const endpointSubscriptionInput = document.getElementById("model-endpoint-subscription-id");
@@ -81,13 +90,41 @@ let modelEndpoints = Array.isArray(window.modelEndpoints) ? [...window.modelEndp
 let modalModels = [];
 let pendingDeleteEndpointId = null;
 let pendingDeleteTimeout = null;
+let pendingEndpointDuplicate = null;
+let endpointDuplicateKeyModal = null;
 let defaultModelSelection = window.defaultModelSelection && typeof window.defaultModelSelection === "object"
     ? { ...window.defaultModelSelection }
     : {};
+let metadataExtractionModelSelection = window.metadataExtractionModelSelection && typeof window.metadataExtractionModelSelection === "object"
+    ? { ...window.metadataExtractionModelSelection }
+    : {};
+const legacyMetadataExtractionModel = String(window.legacyMetadataExtractionModel || "").trim();
 let migrationPreviewState = null;
 let migrationSelectedKeys = new Set();
 
 const DEFAULT_AOAI_OPENAI_API_VERSION = "2024-05-01-preview";
+const DEFAULT_FOUNDRY_OPENAI_API_VERSION = "v1";
+const DEFAULT_FOUNDRY_PROJECT_API_VERSION = "v1";
+const CUSTOM_VERSION_VALUE = "custom";
+const MODEL_ICON_CLASS_PATTERN = /^bi-[a-z0-9][a-z0-9-]{0,80}$/;
+const MODEL_ICON_CONTROL_CONFIG = Object.freeze({
+    editor: ".model-icon-editor",
+    mode: ".model-icon-mode",
+    classInput: ".model-icon-class",
+    imageData: ".model-icon-image-data",
+    preview: ".model-icon-preview",
+    typeBootstrap: ".model-icon-type-bootstrap",
+    typeImage: ".model-icon-type-image",
+    bootstrapControls: ".model-bootstrap-icon-controls",
+    imageControls: ".model-image-icon-controls",
+    pickerButton: ".model-icon-picker-button",
+    pickerLabel: ".model-icon-picker-label",
+    pickerSearch: ".model-icon-picker-search",
+    pickerList: ".model-icon-picker-list",
+    imageFile: ".model-icon-image-file",
+    imageClear: ".model-icon-image-clear",
+    defaultBootstrapIcon: "bi-stars"
+});
 
 function generateId() {
     if (window.crypto && window.crypto.randomUUID) {
@@ -101,6 +138,106 @@ function setElementVisibility(element, isVisible) {
         return;
     }
     element.classList.toggle("d-none", !isVisible);
+}
+
+function isFoundryProvider(provider) {
+    return provider === "aifoundry" || provider === "new_foundry";
+}
+
+function endpointIncludesProject(endpoint) {
+    return String(endpoint || "").toLowerCase().includes("/api/projects/");
+}
+
+function getProjectNameFromEndpoint(endpoint) {
+    const endpointValue = String(endpoint || "").trim();
+    if (!endpointValue) {
+        return "";
+    }
+
+    try {
+        const parsedUrl = new URL(endpointValue);
+        const segments = parsedUrl.pathname.split("/").filter(Boolean);
+        const projectsIndex = segments.findIndex((segment) => segment.toLowerCase() === "projects");
+        if (projectsIndex >= 0 && segments[projectsIndex + 1]) {
+            return decodeURIComponent(segments[projectsIndex + 1]);
+        }
+    } catch (error) {
+        const marker = "/api/projects/";
+        const lowerEndpoint = endpointValue.toLowerCase();
+        const markerIndex = lowerEndpoint.indexOf(marker);
+        if (markerIndex >= 0) {
+            return endpointValue.slice(markerIndex + marker.length).split(/[/?#]/)[0];
+        }
+    }
+
+    return "";
+}
+
+function syncProjectNameFromEndpoint() {
+    if (!endpointProjectInput || !endpointUrlInput) {
+        return "";
+    }
+
+    const projectName = getProjectNameFromEndpoint(endpointUrlInput.value);
+    if (projectName) {
+        endpointProjectInput.value = projectName;
+    }
+    return projectName;
+}
+
+function syncEndpointCopyForProvider() {
+    const provider = endpointProviderSelect?.value || "aoai";
+    if (endpointUrlLabel) {
+        endpointUrlLabel.textContent = isFoundryProvider(provider)
+            ? "Project Endpoint"
+            : "Endpoint Fully Qualified Domain Name (FQDN)";
+    }
+    if (endpointUrlHelp) {
+        endpointUrlHelp.textContent = isFoundryProvider(provider)
+            ? "Paste the Project endpoint from Azure AI Foundry. It can include /api/projects/<project>; Claude deployments are detected from the model name."
+            : "For Azure OpenAI, paste the resource endpoint.";
+    }
+}
+
+function syncVersionCustomVisibility() {
+    setElementVisibility(
+        endpointProjectApiVersionCustomInput,
+        endpointProjectApiVersionInput?.value === CUSTOM_VERSION_VALUE
+    );
+    setElementVisibility(
+        endpointOpenAiApiVersionCustomInput,
+        endpointOpenAiApiVersionInput?.value === CUSTOM_VERSION_VALUE
+    );
+}
+
+function getSelectedVersionValue(versionInput, customInput, fallbackValue = "") {
+    const selectedValue = String(versionInput?.value || "").trim();
+    if (selectedValue === CUSTOM_VERSION_VALUE) {
+        return String(customInput?.value || "").trim();
+    }
+    return selectedValue || fallbackValue;
+}
+
+function setSelectedVersionValue(versionInput, customInput, value, fallbackValue = "") {
+    if (!versionInput) {
+        return;
+    }
+
+    const normalizedValue = String(value || fallbackValue || "").trim();
+    const matchingOption = Array.from(versionInput.options || []).find((option) => option.value === normalizedValue);
+    if (matchingOption && normalizedValue !== CUSTOM_VERSION_VALUE) {
+        versionInput.value = normalizedValue;
+        if (customInput) {
+            customInput.value = "";
+        }
+    } else {
+        versionInput.value = CUSTOM_VERSION_VALUE;
+        if (customInput) {
+            customInput.value = normalizedValue;
+        }
+    }
+
+    syncVersionCustomVisibility();
 }
 
 function updateHiddenInput() {
@@ -130,6 +267,21 @@ function updateDefaultModelInput() {
         return;
     }
     defaultModelInput.value = JSON.stringify(defaultModelSelection || {});
+}
+
+function updateMetadataExtractionModelInput() {
+    if (!metadataExtractionModelInput) {
+        return;
+    }
+    metadataExtractionModelInput.value = JSON.stringify(metadataExtractionModelSelection || {});
+}
+
+function isMultiEndpointModeEnabled() {
+    if (enableMultiEndpointToggle) {
+        return !!enableMultiEndpointToggle.checked;
+    }
+
+    return window.enableMultiModelEndpoints === true || window.enableMultiModelEndpoints === "true";
 }
 
 function isAdminSettingsFormModified() {
@@ -223,7 +375,7 @@ function formatProviderLabel(provider) {
 }
 
 function getDefaultOpenAiApiVersion(provider) {
-    return provider === "new_foundry" ? "" : DEFAULT_AOAI_OPENAI_API_VERSION;
+    return isFoundryProvider(provider) ? DEFAULT_FOUNDRY_OPENAI_API_VERSION : DEFAULT_AOAI_OPENAI_API_VERSION;
 }
 
 function syncOpenAiApiVersionForProvider() {
@@ -232,16 +384,24 @@ function syncOpenAiApiVersionForProvider() {
     }
 
     const provider = endpointProviderSelect?.value || "aoai";
-    const currentValue = endpointOpenAiApiVersionInput.value.trim();
-    if (provider === "new_foundry") {
+    const currentValue = getSelectedVersionValue(endpointOpenAiApiVersionInput, endpointOpenAiApiVersionCustomInput, "");
+    if (isFoundryProvider(provider)) {
         if (!currentValue || currentValue === DEFAULT_AOAI_OPENAI_API_VERSION) {
-            endpointOpenAiApiVersionInput.value = "";
+            setSelectedVersionValue(
+                endpointOpenAiApiVersionInput,
+                endpointOpenAiApiVersionCustomInput,
+                DEFAULT_FOUNDRY_OPENAI_API_VERSION
+            );
         }
         return;
     }
 
     if (!currentValue) {
-        endpointOpenAiApiVersionInput.value = getDefaultOpenAiApiVersion(provider);
+        setSelectedVersionValue(
+            endpointOpenAiApiVersionInput,
+            endpointOpenAiApiVersionCustomInput,
+            getDefaultOpenAiApiVersion(provider)
+        );
     }
 }
 
@@ -270,6 +430,7 @@ function renderEndpoints() {
         `;
         updateHiddenInput();
         buildDefaultModelOptions();
+        buildMetadataExtractionModelOptions();
         return;
     }
 
@@ -280,30 +441,98 @@ function renderEndpoints() {
         const statusClass = endpoint.enabled ? "success" : "secondary";
         const toggleLabel = endpoint.enabled ? "Disable" : "Enable";
 
-        row.innerHTML = `
-            <td>
-                <div class="fw-semibold">${escapeHtml(endpoint.name || "Unnamed Endpoint")}</div>
-                <div class="text-muted small">${escapeHtml(endpoint.connection?.endpoint || "")}</div>
-            </td>
-            <td>${escapeHtml(formatProviderLabel(endpoint.provider))}</td>
-            <td>
-                <span title="${escapeHtml(selectedModels)}">${escapeHtml(selectedModels)}</span>
-            </td>
-            <td><span class="badge bg-${statusClass}">${statusLabel}</span></td>
-            <td class="text-end">
-                <div class="btn-group btn-group-sm" role="group">
-                    <button type="button" class="btn btn-outline-primary" data-action="edit" data-endpoint-id="${endpoint.id}">Edit</button>
-                    <button type="button" class="btn btn-outline-${endpoint.enabled ? "warning" : "success"}" data-action="toggle" data-endpoint-id="${endpoint.id}">${toggleLabel}</button>
-                    <button type="button" class="btn btn-outline-danger" data-action="delete" data-endpoint-id="${endpoint.id}">Delete</button>
-                </div>
-            </td>
-        `;
+        const endpointCell = document.createElement("td");
+        const endpointName = document.createElement("div");
+        endpointName.className = "fw-semibold";
+        endpointName.textContent = endpoint.name || "Unnamed Endpoint";
+        const endpointUrl = document.createElement("div");
+        endpointUrl.className = "text-muted small";
+        endpointUrl.textContent = endpoint.connection?.endpoint || "";
+        endpointCell.appendChild(endpointName);
+        endpointCell.appendChild(endpointUrl);
+
+        const providerCell = document.createElement("td");
+        providerCell.textContent = formatProviderLabel(endpoint.provider);
+
+        const modelsCell = document.createElement("td");
+        const modelsSpan = document.createElement("span");
+        modelsSpan.title = selectedModels;
+        modelsSpan.textContent = selectedModels;
+        modelsCell.appendChild(modelsSpan);
+
+        const statusCell = document.createElement("td");
+        const statusBadge = document.createElement("span");
+        statusBadge.className = `badge bg-${statusClass}`;
+        statusBadge.textContent = statusLabel;
+        statusCell.appendChild(statusBadge);
+
+        const actionsCell = document.createElement("td");
+        actionsCell.className = "text-end";
+        const actionsGroup = document.createElement("div");
+        actionsGroup.className = "btn-group btn-group-sm";
+        actionsGroup.setAttribute("role", "group");
+
+        const createEndpointButton = (action, label, className) => {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = className;
+            button.dataset.action = action;
+            button.dataset.endpointId = endpoint.id || "";
+            button.textContent = label;
+            return button;
+        };
+
+        actionsGroup.appendChild(createEndpointButton("edit", "Edit", "btn btn-outline-primary"));
+        actionsGroup.appendChild(createEndpointButton("govern", "Govern", "btn btn-outline-info"));
+        actionsGroup.appendChild(createEndpointButton("duplicate", "Duplicate", "btn btn-outline-secondary"));
+        actionsGroup.appendChild(createEndpointButton("toggle", toggleLabel, `btn btn-outline-${endpoint.enabled ? "warning" : "success"}`));
+        actionsGroup.appendChild(createEndpointButton("delete", "Delete", "btn btn-outline-danger"));
+        actionsCell.appendChild(actionsGroup);
+
+        row.appendChild(endpointCell);
+        row.appendChild(providerCell);
+        row.appendChild(modelsCell);
+        row.appendChild(statusCell);
+        row.appendChild(actionsCell);
 
         endpointsTbody.appendChild(row);
     });
 
     updateHiddenInput();
     buildDefaultModelOptions();
+    buildMetadataExtractionModelOptions();
+}
+
+function buildEndpointModelOption(endpoint, model) {
+    const modelId = model.id
+        || model.deploymentName
+        || model.deployment
+        || model.modelName
+        || model.name
+        || generateId();
+    if (!model.id) {
+        model.id = modelId;
+    }
+
+    const endpointLabel = endpoint.name || endpoint.connection?.endpoint || "Endpoint";
+    const provider = (endpoint.provider || "aoai").toLowerCase();
+    const providerLabel = formatProviderLabel(provider);
+    const endpointEnabled = endpoint.enabled !== false;
+    const modelEnabled = model.enabled !== false;
+    const modelLabel = model.displayName || model.deploymentName || model.modelName || "Unnamed model";
+    const option = document.createElement("option");
+    option.value = `${endpoint.id}:${modelId}`;
+    option.dataset.endpointId = endpoint.id || "";
+    option.dataset.modelId = modelId || "";
+    option.dataset.provider = provider;
+    option.dataset.deploymentName = model.deploymentName || model.deployment || "";
+    option.disabled = !(endpointEnabled && modelEnabled);
+    option.textContent = `${endpointLabel} — ${modelLabel} (${providerLabel})`;
+    if (option.disabled) {
+        option.textContent += " (disabled)";
+    }
+
+    return option;
 }
 
 function buildDefaultModelOptions() {
@@ -320,38 +549,116 @@ function buildDefaultModelOptions() {
 
     modelEndpoints.forEach((endpoint) => {
         const models = Array.isArray(endpoint.models) ? endpoint.models : [];
-        const endpointLabel = endpoint.name || endpoint.connection?.endpoint || "Endpoint";
-        const provider = (endpoint.provider || "aoai").toLowerCase();
-        const providerLabel = formatProviderLabel(provider);
-        const endpointEnabled = endpoint.enabled !== false;
 
         models.forEach((model) => {
-            const modelId = model.id
-                || model.deploymentName
-                || model.deployment
-                || model.modelName
-                || model.name
-                || generateId();
-            if (!model.id) {
-                model.id = modelId;
-            }
-            const modelEnabled = model.enabled !== false;
-            const modelLabel = model.displayName || model.deploymentName || model.modelName || "Unnamed model";
-            const option = document.createElement("option");
-            option.value = `${endpoint.id}:${modelId}`;
-            option.dataset.endpointId = endpoint.id || "";
-            option.dataset.modelId = modelId || "";
-            option.dataset.provider = provider;
-            option.disabled = !(endpointEnabled && modelEnabled);
-            option.textContent = `${endpointLabel} — ${modelLabel} (${providerLabel})`;
-            if (option.disabled) {
-                option.textContent += " (disabled)";
-            }
-            defaultModelSelect.appendChild(option);
+            defaultModelSelect.appendChild(buildEndpointModelOption(endpoint, model));
         });
     });
 
     applyDefaultModelSelection(defaultModelSelection);
+}
+
+function buildMetadataExtractionModelOptions() {
+    if (!metadataExtractionModelSelect) {
+        return;
+    }
+
+    metadataExtractionModelSelect.innerHTML = "";
+
+    const emptyOption = document.createElement("option");
+    emptyOption.value = "";
+    emptyOption.textContent = "No metadata extraction model selected";
+    metadataExtractionModelSelect.appendChild(emptyOption);
+
+    if (!isMultiEndpointModeEnabled()) {
+        buildLegacyMetadataExtractionModelOptions();
+        return;
+    }
+
+    modelEndpoints.forEach((endpoint) => {
+        const models = Array.isArray(endpoint.models) ? endpoint.models : [];
+        models.forEach((model) => {
+            metadataExtractionModelSelect.appendChild(buildEndpointModelOption(endpoint, model));
+        });
+    });
+
+    applyMetadataExtractionModelSelection(metadataExtractionModelSelection);
+}
+
+function buildLegacyMetadataExtractionModelOptions() {
+    metadataExtractionModelSelection = {
+        endpoint_id: "",
+        model_id: "",
+        provider: ""
+    };
+    updateMetadataExtractionModelInput();
+
+    if (legacyGptApimToggle?.checked) {
+        const deployments = String(legacyApimGptDeploymentInput?.value || "")
+            .split(",")
+            .map((deployment) => deployment.trim())
+            .filter(Boolean);
+
+        deployments.forEach((deployment) => {
+            metadataExtractionModelSelect.add(new Option(deployment, deployment));
+        });
+    } else {
+        const legacyModels = Array.isArray(window.gptSelected) ? window.gptSelected : [];
+        legacyModels.forEach((model) => {
+            const deploymentName = model?.deploymentName || "";
+            if (!deploymentName) {
+                return;
+            }
+            const modelName = model?.modelName || deploymentName;
+            metadataExtractionModelSelect.add(new Option(`${deploymentName} (${modelName})`, deploymentName));
+        });
+    }
+
+    if (legacyMetadataExtractionModel) {
+        metadataExtractionModelSelect.value = legacyMetadataExtractionModel;
+    }
+}
+
+function applyMetadataExtractionModelSelection(selection) {
+    if (!metadataExtractionModelSelect) {
+        return;
+    }
+
+    metadataExtractionModelSelection = normalizeDefaultModelSelection(selection);
+    const hasSelection = metadataExtractionModelSelection.endpoint_id && metadataExtractionModelSelection.model_id;
+    let matchingOption = null;
+
+    if (hasSelection) {
+        matchingOption = Array.from(metadataExtractionModelSelect.options).find((option) => {
+            return option.dataset.endpointId === metadataExtractionModelSelection.endpoint_id
+                && option.dataset.modelId === metadataExtractionModelSelection.model_id;
+        });
+    } else if (legacyMetadataExtractionModel) {
+        matchingOption = Array.from(metadataExtractionModelSelect.options).find((option) => {
+            return option.dataset.deploymentName === legacyMetadataExtractionModel;
+        });
+        if (matchingOption && !matchingOption.disabled) {
+            metadataExtractionModelSelection = {
+                endpoint_id: matchingOption.dataset.endpointId || "",
+                model_id: matchingOption.dataset.modelId || "",
+                provider: matchingOption.dataset.provider || ""
+            };
+        }
+    }
+
+    if (!matchingOption || matchingOption.disabled) {
+        metadataExtractionModelSelection = {
+            endpoint_id: "",
+            model_id: "",
+            provider: ""
+        };
+        metadataExtractionModelSelect.value = "";
+        updateMetadataExtractionModelInput();
+        return;
+    }
+
+    metadataExtractionModelSelect.value = matchingOption.value;
+    updateMetadataExtractionModelInput();
 }
 
 function applyDefaultModelSelection(selection) {
@@ -413,12 +720,49 @@ function handleDefaultModelChange() {
     handleMigrationConfigurationChange();
 }
 
+function handleMetadataExtractionModelChange() {
+    if (!metadataExtractionModelSelect) {
+        return;
+    }
+
+    if (!isMultiEndpointModeEnabled()) {
+        metadataExtractionModelSelection = {
+            endpoint_id: "",
+            model_id: "",
+            provider: ""
+        };
+        updateMetadataExtractionModelInput();
+        markModified();
+        return;
+    }
+
+    const selectedOption = metadataExtractionModelSelect.selectedOptions[0];
+    if (!selectedOption || !selectedOption.value) {
+        metadataExtractionModelSelection = {
+            endpoint_id: "",
+            model_id: "",
+            provider: ""
+        };
+    } else {
+        metadataExtractionModelSelection = {
+            endpoint_id: selectedOption.dataset.endpointId || "",
+            model_id: selectedOption.dataset.modelId || "",
+            provider: selectedOption.dataset.provider || ""
+        };
+    }
+    updateMetadataExtractionModelInput();
+    markModified();
+}
+
 function updateAuthVisibility() {
     const authType = endpointAuthTypeSelect?.value || "managed_identity";
     const provider = endpointProviderSelect?.value || "aoai";
     const isApiKey = authType === "api_key";
-    const isFoundry = provider === "aifoundry" || provider === "new_foundry";
-    setElementVisibility(endpointProjectGroup, isFoundry);
+    const isFoundry = isFoundryProvider(provider);
+    const projectNameFromEndpoint = syncProjectNameFromEndpoint();
+    syncEndpointCopyForProvider();
+    syncVersionCustomVisibility();
+    setElementVisibility(endpointProjectGroup, isFoundry && !projectNameFromEndpoint);
     setElementVisibility(endpointProjectApiVersionGroup, isFoundry);
     setElementVisibility(endpointOpenAiApiVersionGroup, true);
     setElementVisibility(endpointSubscriptionGroup, provider === "aoai" && !isApiKey);
@@ -438,13 +782,24 @@ function updateAuthVisibility() {
 }
 
 function resetModal() {
+    if (endpointModalEl) {
+        endpointModalEl.dataset.duplicateDisabledDefault = '';
+    }
     if (endpointIdInput) endpointIdInput.value = "";
     if (endpointNameInput) endpointNameInput.value = "";
     if (endpointProviderSelect) endpointProviderSelect.value = "aoai";
     if (endpointUrlInput) endpointUrlInput.value = "";
     if (endpointProjectInput) endpointProjectInput.value = "";
-    if (endpointProjectApiVersionInput) endpointProjectApiVersionInput.value = "v1";
-    if (endpointOpenAiApiVersionInput) endpointOpenAiApiVersionInput.value = getDefaultOpenAiApiVersion("aoai");
+    setSelectedVersionValue(
+        endpointProjectApiVersionInput,
+        endpointProjectApiVersionCustomInput,
+        DEFAULT_FOUNDRY_PROJECT_API_VERSION
+    );
+    setSelectedVersionValue(
+        endpointOpenAiApiVersionInput,
+        endpointOpenAiApiVersionCustomInput,
+        getDefaultOpenAiApiVersion("aoai")
+    );
     if (endpointSubscriptionInput) endpointSubscriptionInput.value = "";
     if (endpointResourceGroupInput) endpointResourceGroupInput.value = "";
     if (endpointAuthTypeSelect) endpointAuthTypeSelect.value = "managed_identity";
@@ -479,12 +834,16 @@ function openModalForEndpoint(endpoint) {
         if (endpointProviderSelect) endpointProviderSelect.value = endpoint.provider || "aoai";
         if (endpointUrlInput) endpointUrlInput.value = endpoint.connection?.endpoint || "";
         if (endpointProjectInput) endpointProjectInput.value = endpoint.connection?.project_name || "";
-        if (endpointProjectApiVersionInput) {
-            endpointProjectApiVersionInput.value = endpoint.connection?.project_api_version || endpoint.connection?.api_version || "v1";
-        }
-        if (endpointOpenAiApiVersionInput) {
-            endpointOpenAiApiVersionInput.value = endpoint.connection?.openai_api_version || endpoint.connection?.api_version || getDefaultOpenAiApiVersion(endpoint.provider || "aoai");
-        }
+        setSelectedVersionValue(
+            endpointProjectApiVersionInput,
+            endpointProjectApiVersionCustomInput,
+            endpoint.connection?.project_api_version || endpoint.connection?.api_version || DEFAULT_FOUNDRY_PROJECT_API_VERSION
+        );
+        setSelectedVersionValue(
+            endpointOpenAiApiVersionInput,
+            endpointOpenAiApiVersionCustomInput,
+            endpoint.connection?.openai_api_version || endpoint.connection?.api_version || getDefaultOpenAiApiVersion(endpoint.provider || "aoai")
+        );
         if (endpointSubscriptionInput) endpointSubscriptionInput.value = endpoint.management?.subscription_id || "";
         if (endpointResourceGroupInput) endpointResourceGroupInput.value = endpoint.management?.resource_group || "";
         if (endpointAuthTypeSelect) endpointAuthTypeSelect.value = endpoint.auth?.type || "managed_identity";
@@ -515,6 +874,262 @@ function openModalForEndpoint(endpoint) {
     endpointModal.show();
 }
 
+function makeEndpointCopyName(name) {
+    const baseName = `${String(name || 'Endpoint').trim() || 'Endpoint'} Copy`;
+    const existingNames = new Set((modelEndpoints || []).map((endpoint) => String(endpoint.name || '').trim().toLowerCase()));
+    if (!existingNames.has(baseName.toLowerCase())) {
+        return baseName;
+    }
+
+    let suffix = 2;
+    while (existingNames.has(`${baseName} ${suffix}`.toLowerCase())) {
+        suffix += 1;
+    }
+    return `${baseName} ${suffix}`;
+}
+
+function cloneEndpointForDuplicate(endpoint) {
+    const duplicate = JSON.parse(JSON.stringify(endpoint || {}));
+    duplicate.id = generateId();
+    duplicate.name = makeEndpointCopyName(endpoint?.name || 'Endpoint');
+    duplicate.enabled = false;
+    duplicate.models = Array.isArray(duplicate.models)
+        ? duplicate.models.map((model) => ({ ...model, id: generateId() }))
+        : [];
+
+    if (duplicate.auth?.type === 'api_key') {
+        duplicate.auth.api_key = '';
+        duplicate.has_api_key = false;
+    }
+
+    return duplicate;
+}
+
+function ensureEndpointDuplicateKeyModal() {
+    let modalElement = document.getElementById('endpoint-duplicate-key-confirm-modal');
+    if (!modalElement) {
+        const modalMarkup = `
+            <div class="modal fade" id="endpoint-duplicate-key-confirm-modal" tabindex="-1" aria-hidden="true">
+                <div class="modal-dialog modal-dialog-centered">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h5 class="modal-title">Duplicate Key-Based Endpoint</h5>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                        </div>
+                        <div class="modal-body">
+                            <p class="mb-2">This endpoint uses API key authentication.</p>
+                            <div class="alert alert-warning mb-0" role="alert">The duplicated endpoint will be disabled and will not include the API key. Re-enter the API key before enabling it.</div>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                            <button type="button" class="btn btn-primary" id="endpoint-duplicate-key-confirm-btn">Continue</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+        const wrapper = document.createElement('div');
+        // xss-check: ignore - modalMarkup is a static Bootstrap shell; untrusted values are not interpolated.
+        wrapper.innerHTML = modalMarkup.trim();
+        modalElement = wrapper.firstElementChild;
+        document.body.appendChild(modalElement);
+    }
+
+    if (!endpointDuplicateKeyModal) {
+        endpointDuplicateKeyModal = bootstrap.Modal.getOrCreateInstance(modalElement);
+    }
+
+    if (!modalElement.dataset.wired) {
+        modalElement.dataset.wired = 'true';
+        modalElement.querySelector('#endpoint-duplicate-key-confirm-btn')?.addEventListener('click', () => {
+            const duplicate = pendingEndpointDuplicate;
+            pendingEndpointDuplicate = null;
+            endpointDuplicateKeyModal?.hide();
+            if (duplicate) {
+                openDuplicateEndpointModal(duplicate);
+            }
+        });
+    }
+
+    return modalElement;
+}
+
+function openDuplicateEndpointModal(duplicateEndpoint) {
+    openModalForEndpoint(duplicateEndpoint);
+    if (endpointModalEl) {
+        endpointModalEl.dataset.duplicateDisabledDefault = 'true';
+    }
+    showToast('Duplicated endpoint starts disabled. Review and save it, then enable intentionally.', 'info');
+}
+
+function duplicateEndpoint(endpoint) {
+    const duplicate = cloneEndpointForDuplicate(endpoint);
+    if (endpoint?.auth?.type === 'api_key' || endpoint?.has_api_key) {
+        pendingEndpointDuplicate = duplicate;
+        ensureEndpointDuplicateKeyModal();
+        endpointDuplicateKeyModal?.show();
+        return;
+    }
+
+    openDuplicateEndpointModal(duplicate);
+}
+
+function createElement(tagName, className = "") {
+    const element = document.createElement(tagName);
+    if (className) {
+        element.className = className;
+    }
+    return element;
+}
+
+function createSmallLabel(text) {
+    const label = createElement("label", "form-label small");
+    label.textContent = text;
+    return label;
+}
+
+function createModelTextInput(modelId, datasetKey, value, readOnly = false) {
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "form-control form-control-sm";
+    input.dataset[datasetKey] = modelId;
+    input.value = value || "";
+    input.readOnly = readOnly;
+    return input;
+}
+
+function getModelIconDomId(modelId, suffix) {
+    const safeModelId = String(modelId || "model").replace(/[^A-Za-z0-9_-]/g, "-");
+    return `model-${safeModelId}-${suffix}`;
+}
+
+function normalizeModelBootstrapIcon(value) {
+    const iconClass = String(value || "").replace(/^bi\s+/, "").trim();
+    return MODEL_ICON_CLASS_PATTERN.test(iconClass) ? iconClass : "bi-stars";
+}
+
+function appendModelIconModeToggle(buttonGroup, modelId, mode, labelText) {
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.className = `btn-check model-icon-type-${mode}`;
+    input.name = getModelIconDomId(modelId, "icon-type");
+    input.id = getModelIconDomId(modelId, `icon-type-${mode}`);
+    input.value = mode;
+    input.autocomplete = "off";
+    if (mode === "bootstrap") {
+        input.checked = true;
+    }
+
+    const label = document.createElement("label");
+    label.className = "btn btn-outline-secondary";
+    label.htmlFor = input.id;
+    label.textContent = labelText;
+
+    buttonGroup.appendChild(input);
+    buttonGroup.appendChild(label);
+}
+
+function createModelIconEditor(model, modelId) {
+    const iconPayload = model.icon && typeof model.icon === "object" && !Array.isArray(model.icon)
+        ? model.icon
+        : {};
+    const bootstrapIcon = normalizeModelBootstrapIcon(
+        iconPayload.kind === "bootstrap" ? iconPayload.value : "bi-stars"
+    );
+    const editor = createElement("div", "agent-icon-editor model-icon-editor border rounded p-2");
+    editor.dataset.modelEditorFor = modelId;
+
+    const modeInput = document.createElement("input");
+    modeInput.type = "hidden";
+    modeInput.className = "model-icon-mode";
+    modeInput.value = "bootstrap";
+    const classInput = document.createElement("input");
+    classInput.type = "hidden";
+    classInput.className = "model-icon-class";
+    classInput.setAttribute("data-icon-class-for", modelId);
+    classInput.value = bootstrapIcon;
+    const imageDataInput = document.createElement("input");
+    imageDataInput.type = "hidden";
+    imageDataInput.className = "model-icon-image-data";
+    imageDataInput.value = iconPayload.kind === "image" ? iconPayload.value || "" : "";
+
+    const topRow = createElement("div", "d-flex align-items-center gap-2 mb-2");
+    const preview = createElement("div", "agent-icon-preview model-icon-preview");
+    preview.setAttribute("aria-hidden", "true");
+    const buttonGroup = createElement("div", "btn-group btn-group-sm");
+    buttonGroup.setAttribute("role", "group");
+    buttonGroup.setAttribute("aria-label", "Model icon type");
+    appendModelIconModeToggle(buttonGroup, modelId, "bootstrap", "Bootstrap Icon");
+    appendModelIconModeToggle(buttonGroup, modelId, "image", "Image");
+    topRow.appendChild(preview);
+    topRow.appendChild(buttonGroup);
+
+    const bootstrapControls = createElement("div", "model-bootstrap-icon-controls");
+    const dropdown = createElement("div", "dropdown agent-icon-picker-dropdown");
+    const pickerButton = document.createElement("button");
+    pickerButton.type = "button";
+    pickerButton.className = "btn btn-outline-secondary btn-sm dropdown-toggle w-100 text-start model-icon-picker-button";
+    pickerButton.setAttribute("data-bs-toggle", "dropdown");
+    pickerButton.setAttribute("data-bs-auto-close", "outside");
+    pickerButton.setAttribute("aria-expanded", "false");
+    const pickerButtonIcon = document.createElement("i");
+    pickerButtonIcon.className = `bi ${bootstrapIcon} me-1`;
+    pickerButtonIcon.setAttribute("aria-hidden", "true");
+    const pickerLabel = createElement("span", "model-icon-picker-label");
+    pickerLabel.textContent = bootstrapIcon;
+    pickerButton.appendChild(pickerButtonIcon);
+    pickerButton.appendChild(pickerLabel);
+
+    const menu = createElement("div", "dropdown-menu p-2 agent-icon-picker-menu");
+    const search = document.createElement("input");
+    search.type = "search";
+    search.className = "form-control form-control-sm mb-2 model-icon-picker-search";
+    search.placeholder = "Search icons";
+    search.autocomplete = "off";
+    const list = createElement("div", "agent-icon-picker-list model-icon-picker-list");
+    list.setAttribute("role", "listbox");
+    list.setAttribute("aria-label", "Bootstrap icons");
+    menu.appendChild(search);
+    menu.appendChild(list);
+    dropdown.appendChild(pickerButton);
+    dropdown.appendChild(menu);
+    bootstrapControls.appendChild(dropdown);
+
+    const imageControls = createElement("div", "model-image-icon-controls d-none");
+    const fileInput = document.createElement("input");
+    fileInput.type = "file";
+    fileInput.className = "form-control form-control-sm model-icon-image-file";
+    fileInput.accept = ".png,.jpg,.jpeg,image/png,image/jpeg";
+    const helpText = createElement("div", "form-text");
+    helpText.textContent = "PNG or JPEG. The image is resized and saved with the model.";
+    const clearButton = document.createElement("button");
+    clearButton.type = "button";
+    clearButton.className = "btn btn-outline-secondary btn-sm mt-2 model-icon-image-clear";
+    clearButton.textContent = "Remove Image";
+    imageControls.appendChild(fileInput);
+    imageControls.appendChild(helpText);
+    imageControls.appendChild(clearButton);
+
+    editor.appendChild(modeInput);
+    editor.appendChild(classInput);
+    editor.appendChild(imageDataInput);
+    editor.appendChild(topRow);
+    editor.appendChild(bootstrapControls);
+    editor.appendChild(imageControls);
+
+    setIconPayload(
+        editor,
+        iconPayload.kind ? iconPayload : { kind: "bootstrap", value: bootstrapIcon },
+        MODEL_ICON_CONTROL_CONFIG
+    );
+    return editor;
+}
+
+function findModelEditor(modelId) {
+    return Array.from(modelsListEl?.querySelectorAll("[data-model-editor-for]") || [])
+        .find((editor) => editor.dataset.modelEditorFor === String(modelId));
+}
+
 function renderModalModels(models) {
     if (!modelsListEl) {
         return;
@@ -537,32 +1152,60 @@ function renderModalModels(models) {
         const modelId = model.id || generateId();
         model.id = modelId;
 
-        wrapper.innerHTML = `
-            <div class="form-check mb-2">
-                <input class="form-check-input" type="checkbox" data-model-id="${modelId}" ${model.enabled ? "checked" : ""}>
-                <label class="form-check-label">
-                    ${escapeHtml(deploymentName)} ${modelName ? `<span class=\"text-muted\">(${escapeHtml(modelName)})</span>` : ""}
-                </label>
-            </div>
-            <div class="row g-2">
-                <div class="col-md-4">
-                    <label class="form-label small">Deployment Name</label>
-                    <input type="text" class="form-control form-control-sm" data-deployment-name-for="${modelId}" value="${escapeHtml(deploymentName)}" ${deploymentReadonly}>
-                </div>
-                <div class="col-md-6">
-                    <label class="form-label small">Display Name</label>
-                    <input type="text" class="form-control form-control-sm" data-display-name-for="${modelId}" value="${escapeHtml(displayName)}">
-                </div>
-                <div class="col-md-6">
-                    <label class="form-label small">Description (optional)</label>
-                    <input type="text" class="form-control form-control-sm" data-description-for="${modelId}" value="${escapeHtml(description)}">
-                </div>
-            </div>
-            <div class="d-flex gap-2 mt-2">
-                <button type="button" class="btn btn-sm btn-outline-secondary" data-action="test-model" data-model-id="${modelId}">Test Connection</button>
-                <button type="button" class="btn btn-sm btn-outline-danger" data-action="remove-model" data-model-id="${modelId}">Remove</button>
-            </div>
-        `;
+        const checkWrapper = createElement("div", "form-check mb-2");
+        const checkbox = document.createElement("input");
+        checkbox.className = "form-check-input";
+        checkbox.type = "checkbox";
+        checkbox.dataset.modelId = modelId;
+        checkbox.checked = !!model.enabled;
+        const checkboxLabel = createElement("label", "form-check-label");
+        checkboxLabel.appendChild(document.createTextNode(deploymentName));
+        if (modelName) {
+            checkboxLabel.appendChild(document.createTextNode(" "));
+            const modelNameLabel = createElement("span", "text-muted");
+            modelNameLabel.textContent = `(${modelName})`;
+            checkboxLabel.appendChild(modelNameLabel);
+        }
+        checkWrapper.appendChild(checkbox);
+        checkWrapper.appendChild(checkboxLabel);
+
+        const fieldsRow = createElement("div", "row g-2");
+        const deploymentCol = createElement("div", "col-md-4");
+        deploymentCol.appendChild(createSmallLabel("Deployment Name"));
+        deploymentCol.appendChild(createModelTextInput(modelId, "deploymentNameFor", deploymentName, Boolean(deploymentReadonly)));
+        const displayCol = createElement("div", "col-md-4");
+        displayCol.appendChild(createSmallLabel("Display Name"));
+        displayCol.appendChild(createModelTextInput(modelId, "displayNameFor", displayName));
+        const iconCol = createElement("div", "col-md-4");
+        iconCol.appendChild(createSmallLabel("Icon"));
+        iconCol.appendChild(createModelIconEditor(model, modelId));
+        const descriptionCol = createElement("div", "col-md-8");
+        descriptionCol.appendChild(createSmallLabel("Description (optional)"));
+        descriptionCol.appendChild(createModelTextInput(modelId, "descriptionFor", description));
+        fieldsRow.appendChild(deploymentCol);
+        fieldsRow.appendChild(displayCol);
+        fieldsRow.appendChild(iconCol);
+        fieldsRow.appendChild(descriptionCol);
+
+        const actions = createElement("div", "d-flex gap-2 mt-2");
+        const testButton = document.createElement("button");
+        testButton.type = "button";
+        testButton.className = "btn btn-sm btn-outline-secondary";
+        testButton.dataset.action = "test-model";
+        testButton.dataset.modelId = modelId;
+        testButton.textContent = "Test Connection";
+        const removeButton = document.createElement("button");
+        removeButton.type = "button";
+        removeButton.className = "btn btn-sm btn-outline-danger";
+        removeButton.dataset.action = "remove-model";
+        removeButton.dataset.modelId = modelId;
+        removeButton.textContent = "Remove";
+        actions.appendChild(testButton);
+        actions.appendChild(removeButton);
+
+        wrapper.appendChild(checkWrapper);
+        wrapper.appendChild(fieldsRow);
+        wrapper.appendChild(actions);
         fragment.appendChild(wrapper);
     });
 
@@ -581,9 +1224,11 @@ function collectModalModels() {
         const deploymentInput = modelsListEl.querySelector(`input[data-deployment-name-for="${model.id}"]`);
         const displayInput = modelsListEl.querySelector(`input[data-display-name-for="${model.id}"]`);
         const descriptionInput = modelsListEl.querySelector(`input[data-description-for="${model.id}"]`);
+        const iconEditor = findModelEditor(model.id);
         model.enabled = checkbox ? checkbox.checked : model.enabled;
         model.deploymentName = deploymentInput ? deploymentInput.value.trim() : model.deploymentName;
         model.displayName = displayInput ? displayInput.value.trim() : model.displayName;
+        model.icon = iconEditor ? getIconPayload(iconEditor, MODEL_ICON_CONTROL_CONFIG) : model.icon || {};
         model.description = descriptionInput ? descriptionInput.value.trim() : model.description;
     });
     return updated;
@@ -685,25 +1330,35 @@ function buildEndpointPayload() {
     const endpointId = endpointIdInput?.value.trim() || "";
     const name = endpointNameInput.value.trim();
     const endpoint = endpointUrlInput.value.trim();
-    const projectName = endpointProjectInput?.value.trim() || "";
-    const projectApiVersion = endpointProjectApiVersionInput?.value.trim() || "v1";
-    const openAiApiVersion = endpointOpenAiApiVersionInput.value.trim();
     const provider = endpointProviderSelect?.value || "aoai";
+    const projectNameFromEndpoint = isFoundryProvider(provider) ? syncProjectNameFromEndpoint() : "";
+    const projectName = projectNameFromEndpoint || endpointProjectInput?.value.trim() || "";
+    const projectApiVersion = getSelectedVersionValue(
+        endpointProjectApiVersionInput,
+        endpointProjectApiVersionCustomInput,
+        DEFAULT_FOUNDRY_PROJECT_API_VERSION
+    );
+    const openAiApiVersion = getSelectedVersionValue(
+        endpointOpenAiApiVersionInput,
+        endpointOpenAiApiVersionCustomInput,
+        getDefaultOpenAiApiVersion(provider)
+    );
     const subscriptionId = endpointSubscriptionInput?.value.trim() || "";
     const resourceGroup = endpointResourceGroupInput?.value.trim() || "";
     const authType = endpointAuthTypeSelect?.value || "managed_identity";
+    const existingEndpoint = modelEndpoints.find((savedEndpoint) => savedEndpoint.id === endpointId);
 
     if (!name || !endpoint || !openAiApiVersion) {
         showToast("Endpoint name, URL, and OpenAI API version are required.", "warning");
         return null;
     }
 
-    if ((provider === "aifoundry" || provider === "new_foundry") && !projectApiVersion) {
+    if (isFoundryProvider(provider) && !projectApiVersion) {
         showToast("Project API version is required for Foundry project discovery.", "warning");
         return null;
     }
 
-    if ((provider === "aifoundry" || provider === "new_foundry") && !endpoint.includes("/api/projects/") && !projectName) {
+    if (isFoundryProvider(provider) && !endpointIncludesProject(endpoint) && !projectName) {
         showToast("Foundry project name is required when the endpoint does not include /api/projects/.", "warning");
         return null;
     }
@@ -726,12 +1381,15 @@ function buildEndpointPayload() {
         foundry_scope: endpointFoundryScopeInput?.value.trim() || ""
     };
 
-    if (authType === "service_principal" && (!auth.tenant_id || !auth.client_id || !auth.client_secret)) {
+    const hasStoredApiKey = authType === "api_key" && Boolean(existingEndpoint?.has_api_key);
+    const hasStoredClientSecret = authType === "service_principal" && Boolean(existingEndpoint?.has_client_secret);
+
+    if (authType === "service_principal" && (!auth.tenant_id || !auth.client_id || (!auth.client_secret && !hasStoredClientSecret))) {
         showToast("Tenant ID, Client ID, and Client Secret are required for service principal auth.", "warning");
         return null;
     }
 
-    if ((provider === "aifoundry" || provider === "new_foundry") && authType === "service_principal" && auth.management_cloud === "custom") {
+    if (isFoundryProvider(provider) && authType === "service_principal" && auth.management_cloud === "custom") {
         if (!auth.custom_authority) {
             showToast("Custom authority is required when Management Cloud is set to Custom.", "warning");
             return null;
@@ -742,7 +1400,7 @@ function buildEndpointPayload() {
         }
     }
 
-    if (authType === "api_key" && !auth.api_key) {
+    if (authType === "api_key" && !auth.api_key && !hasStoredApiKey) {
         showToast("API key is required for API key authentication.", "warning");
         return null;
     }
@@ -757,7 +1415,7 @@ function buildEndpointPayload() {
         openai_api_version: openAiApiVersion
     };
 
-    if (provider === "aifoundry" || provider === "new_foundry") {
+    if (isFoundryProvider(provider)) {
         connection.project_api_version = projectApiVersion;
         if (projectName) {
             connection.project_name = projectName;
@@ -792,7 +1450,9 @@ function saveEndpoint() {
             id: endpointId,
             name: payload.name,
             provider: payload.provider,
-            enabled: true,
+            enabled: endpointModalEl?.dataset.duplicateDisabledDefault === 'true'
+                ? false
+                : (existingEndpoint ? existingEndpoint.enabled !== false : true),
             auth: payload.auth,
             connection: payload.connection,
             management: payload.management,
@@ -825,6 +1485,7 @@ function addManualModel() {
         deploymentName: "",
         modelName: "",
         displayName: "",
+        icon: {},
         description: "",
         enabled: true,
         isDiscovered: false
@@ -873,6 +1534,24 @@ function handleTableClick(event) {
         return;
     }
 
+    if (action === "govern") {
+        if (typeof window.openGovernanceDelegatedItemEditor === 'function') {
+            window.openGovernanceDelegatedItemEditor({
+                entityType: 'global_endpoint',
+                itemId: endpoint.id,
+                resourceLabel: endpoint.name || endpoint.id,
+            });
+        } else {
+            showToast('Governance editor is still loading. Try again in a moment.', 'warning');
+        }
+        return;
+    }
+
+    if (action === "duplicate") {
+        duplicateEndpoint(endpoint);
+        return;
+    }
+
     if (action === "toggle") {
         endpoint.enabled = !endpoint.enabled;
         renderEndpoints();
@@ -914,6 +1593,7 @@ function handleToggleChange() {
     if (!enabled) {
         setElementVisibility(migrationResults, false);
     }
+    buildMetadataExtractionModelOptions();
     markModified();
     handleMigrationConfigurationChange();
 }
@@ -1302,6 +1982,15 @@ function init() {
             syncOpenAiApiVersionForProvider();
         });
     }
+    if (endpointUrlInput) {
+        endpointUrlInput.addEventListener("input", updateAuthVisibility);
+    }
+    if (endpointProjectApiVersionInput) {
+        endpointProjectApiVersionInput.addEventListener("change", syncVersionCustomVisibility);
+    }
+    if (endpointOpenAiApiVersionInput) {
+        endpointOpenAiApiVersionInput.addEventListener("change", syncVersionCustomVisibility);
+    }
     if (miTypeSelect) {
         miTypeSelect.addEventListener("change", updateAuthVisibility);
     }
@@ -1337,6 +2026,18 @@ function init() {
 
     if (defaultModelSelect) {
         defaultModelSelect.addEventListener("change", handleDefaultModelChange);
+    }
+
+    if (metadataExtractionModelSelect) {
+        metadataExtractionModelSelect.addEventListener("change", handleMetadataExtractionModelChange);
+    }
+
+    if (legacyGptApimToggle) {
+        legacyGptApimToggle.addEventListener("change", buildMetadataExtractionModelOptions);
+    }
+
+    if (legacyApimGptDeploymentInput) {
+        legacyApimGptDeploymentInput.addEventListener("input", buildMetadataExtractionModelOptions);
     }
 
     if (previewMigrationBtn) {

@@ -4,11 +4,20 @@ import logging
 
 from config import *
 from functions_authentication import *
+from functions_governance import ensure_governance_access
 from functions_group import assert_group_role, get_group_model_endpoints, require_active_group, update_group_model_endpoints
 from functions_keyvault import SecretReturnType, keyvault_model_endpoint_cleanup_helper, keyvault_model_endpoint_delete_helper, keyvault_model_endpoint_get_helper, keyvault_model_endpoint_save_helper
 from functions_settings import *
-from foundry_agent_runtime import list_foundry_agents_from_endpoint, list_new_foundry_agents_from_endpoint, resolve_foundry_project_base, resolve_foundry_project_api_version, build_project_credential, resolve_authority
+from foundry_agent_runtime import FoundryAgentUserAuthenticationRequired, list_foundry_agents_from_endpoint, list_foundry_workflows_from_endpoint, list_new_foundry_agents_from_endpoint, resolve_foundry_project_base, resolve_foundry_project_api_version, build_project_credential, resolve_authority
 from functions_appinsights import log_event
+from model_endpoint_clients import (
+    MODEL_ENDPOINT_PROTOCOL_ANTHROPIC,
+    MODEL_ENDPOINT_PROTOCOL_AZURE_OPENAI,
+    MODEL_ENDPOINT_PROTOCOL_OPENAI_STYLE,
+    build_anthropic_chat_client,
+    build_openai_style_chat_client,
+    infer_model_endpoint_protocol,
+)
 from swagger_wrapper import swagger_route, get_auth_security
 from azure.identity import DefaultAzureCredential, ClientSecretCredential, get_bearer_token_provider
 import re
@@ -81,20 +90,60 @@ def register_route_backend_models(app):
     def resolve_scoped_model_endpoints(user_id, scope):
         settings = get_settings()
         endpoints = []
+
+        def get_governed_endpoints(candidate_endpoints, feature_key, endpoint_scope):
+            try:
+                ensure_governance_access(feature_key, user_id)
+            except PermissionError:
+                return []
+
+            governed_endpoints = []
+            for endpoint in candidate_endpoints or []:
+                if not isinstance(endpoint, dict):
+                    continue
+                endpoint_id = str(endpoint.get("id") or "").strip()
+                if endpoint_id:
+                    try:
+                        ensure_governance_access(
+                            feature_key,
+                            user_id,
+                            item_entity_type="global_endpoint",
+                            item_id=endpoint_id,
+                        )
+                    except PermissionError:
+                        continue
+                governed_endpoint = dict(endpoint)
+                governed_endpoint["_governance_endpoint_scope"] = endpoint_scope
+                governed_endpoints.append(governed_endpoint)
+            return governed_endpoints
+
         if scope == "group":
             if settings.get("allow_group_custom_endpoints", False):
                 group_id = require_active_group(user_id)
-                endpoints.extend(get_group_model_endpoints(group_id))
+                endpoints.extend(get_governed_endpoints(get_group_model_endpoints(group_id), "governance_group_endpoints", "group"))
         elif scope == "user":
             if settings.get("allow_user_custom_endpoints", False):
                 user_settings = get_user_settings(user_id)
-                endpoints.extend(user_settings.get("settings", {}).get("personal_model_endpoints", []))
-        endpoints.extend(settings.get("model_endpoints", []) or [])
+                endpoints.extend(get_governed_endpoints(user_settings.get("settings", {}).get("personal_model_endpoints", []), "governance_user_endpoints", "user"))
+        endpoints.extend(get_governed_endpoints(settings.get("model_endpoints", []) or [], "governance_global_endpoints", "global"))
         return endpoints
 
     def resolve_endpoint_by_id(user_id, scope, endpoint_id):
         endpoints = resolve_scoped_model_endpoints(user_id, scope)
-        return next((endpoint for endpoint in endpoints if endpoint.get("id") == endpoint_id), None)
+        endpoint = next((endpoint for endpoint in endpoints if endpoint.get("id") == endpoint_id), None)
+        if endpoint:
+            endpoint = dict(endpoint)
+            endpoint_scope = endpoint.pop("_governance_endpoint_scope", scope)
+            feature_key = "governance_global_endpoints"
+            if endpoint_scope in ("user", "group"):
+                feature_key = f"governance_{endpoint_scope}_endpoints"
+            ensure_governance_access(
+                feature_key,
+                user_id,
+                item_entity_type="global_endpoint",
+                item_id=endpoint_id,
+            )
+        return endpoint
 
     def resolve_endpoint_scope_value(endpoint_cfg, fallback_endpoint_id=""):
         endpoint_id = (fallback_endpoint_id or endpoint_cfg.get("id") or "").strip()
@@ -146,7 +195,7 @@ def register_route_backend_models(app):
             "responses_api_version": connection.get("openai_api_version") or connection.get("api_version") or "",
             "activity_api_version": connection.get("project_api_version") or connection.get("api_version") or "",
             "project_name": connection.get("project_name") or "",
-            "authentication_type": auth.get("type") or "managed_identity",
+            "authentication_type": "delegated_user",
             "managed_identity_type": auth.get("managed_identity_type") or "system_assigned",
             "managed_identity_client_id": auth.get("managed_identity_client_id") or "",
             "tenant_id": auth.get("tenant_id") or "",
@@ -154,6 +203,7 @@ def register_route_backend_models(app):
             "client_secret": auth.get("client_secret") or "",
             "cloud": auth.get("management_cloud") or "",
             "authority": auth.get("custom_authority") or "",
+            "foundry_scope": auth.get("foundry_scope") or "",
         }
 
     def resolve_foundry_scope(auth_settings):
@@ -209,12 +259,38 @@ def register_route_backend_models(app):
             subscription_id=subscription_id
         )
 
-    def build_inference_client(endpoint, api_version, auth_settings, provider="aoai"):
+    def get_aoai_account_name(endpoint):
+        endpoint_host = (endpoint or "").strip().replace("https://", "").replace("http://", "").split("/")[0]
+        return endpoint_host.split(".")[0].strip()
+
+    def get_management_cloud_for_environment():
+        if AZURE_ENVIRONMENT == "usgovernment":
+            return "government"
+        if AZURE_ENVIRONMENT == "custom":
+            return "custom"
+        return "public"
+
+    def build_legacy_aoai_discovery_auth_settings():
+        return {
+            "type": "service_principal",
+            "management_cloud": get_management_cloud_for_environment(),
+            "custom_authority": authority if AZURE_ENVIRONMENT == "custom" else "",
+            "tenant_id": TENANT_ID,
+            "client_id": CLIENT_ID,
+            "client_secret": MICROSOFT_PROVIDER_AUTHENTICATION_SECRET,
+        }
+
+    def build_inference_client(endpoint, api_version, auth_settings, provider="aoai", deployment_name=""):
         auth_type = (auth_settings.get("type") or "managed_identity").lower()
+        runtime_protocol = infer_model_endpoint_protocol(provider, endpoint, deployment_name)
         if auth_type == "api_key":
             api_key = auth_settings.get("api_key")
             if not api_key:
                 raise ValueError("API key is required for API key authentication.")
+            if runtime_protocol == MODEL_ENDPOINT_PROTOCOL_ANTHROPIC:
+                return build_anthropic_chat_client(endpoint=endpoint, api_key=api_key)
+            if runtime_protocol == MODEL_ENDPOINT_PROTOCOL_OPENAI_STYLE:
+                return build_openai_style_chat_client(api_key, endpoint, api_version)
             return AzureOpenAI(
                 api_version=api_version,
                 azure_endpoint=endpoint,
@@ -234,9 +310,18 @@ def register_route_backend_models(app):
             credential = DefaultAzureCredential(managed_identity_client_id=managed_identity_client_id)
 
         scope = cognitive_services_scope
-        if provider in ("aifoundry", "new_foundry"):
+        if provider in ("aifoundry", "new_foundry") or runtime_protocol != MODEL_ENDPOINT_PROTOCOL_AZURE_OPENAI:
             scope = resolve_foundry_scope(auth_settings)
-        log_models_debug(f"Inference token scope={scope} provider={provider}")
+        log_models_debug(f"Inference token scope={scope} provider={provider} protocol={runtime_protocol}")
+
+        if runtime_protocol == MODEL_ENDPOINT_PROTOCOL_ANTHROPIC:
+            token = credential.get_token(scope).token
+            return build_anthropic_chat_client(endpoint=endpoint, bearer_token=token)
+
+        if runtime_protocol == MODEL_ENDPOINT_PROTOCOL_OPENAI_STYLE:
+            token = credential.get_token(scope).token
+            return build_openai_style_chat_client(token, endpoint, api_version)
+
         token_provider = get_bearer_token_provider(credential, scope)
         return AzureOpenAI(
             api_version=api_version,
@@ -392,6 +477,7 @@ def register_route_backend_models(app):
             endpoint = connection.get("endpoint") or ""
             api_version = connection.get("openai_api_version") or connection.get("api_version") or ""
             deployment_name = model.get("deploymentName") or ""
+            runtime_protocol = infer_model_endpoint_protocol(provider, endpoint, deployment_name)
 
             auth_type = (auth_settings.get("type") or "managed_identity").lower()
             log_models_debug(
@@ -400,16 +486,25 @@ def register_route_backend_models(app):
                 f" endpoint={endpoint} deployment={deployment_name}"
             )
 
-            if not endpoint or not api_version or not deployment_name:
+            if not endpoint or not deployment_name:
+                return jsonify({"error": "Endpoint and deployment name are required."}), 400
+
+            if runtime_protocol == MODEL_ENDPOINT_PROTOCOL_AZURE_OPENAI and not api_version:
                 return jsonify({"error": "Endpoint, API version, and deployment name are required."}), 400
 
-            if provider not in ("aoai", "aifoundry", "new_foundry"):
+            if provider not in ("aoai", "aifoundry", "new_foundry", "anthropic", "claude"):
                 return jsonify({"error": "Model provider not found."}), 400
 
-            gpt_client = build_inference_client(endpoint, api_version, auth_settings, provider=provider)
+            gpt_client = build_inference_client(
+                endpoint,
+                api_version,
+                auth_settings,
+                provider=provider,
+                deployment_name=deployment_name,
+            )
             response = gpt_client.chat.completions.create(
                 model=deployment_name,
-                messages=[{"role": "system", "content": "Testing access."}]
+                messages=[{"role": "user", "content": "Testing access."}]
             )
 
             if response:
@@ -457,29 +552,16 @@ def register_route_backend_models(app):
         subscription_id = settings.get('azure_openai_gpt_subscription_id', '')
         resource_group = settings.get('azure_openai_gpt_resource_group', '')
         endpoint = settings.get('azure_openai_gpt_endpoint', '')
-        account_name = endpoint.split('.')[0].replace("https://", "")
+        account_name = get_aoai_account_name(endpoint)
         configured_models = _get_configured_models(settings, 'gpt_model')
 
         if _is_foundry_project_endpoint(endpoint) or not subscription_id or not resource_group or not account_name:
             return jsonify({"models": configured_models}), 200
 
-        if AZURE_ENVIRONMENT == "usgovernment" or AZURE_ENVIRONMENT == "custom":
-            
-            credential = ClientSecretCredential(TENANT_ID, CLIENT_ID, MICROSOFT_PROVIDER_AUTHENTICATION_SECRET, authority=authority)
-
-            client = CognitiveServicesManagementClient(
-                credential=credential,
-                subscription_id=subscription_id,
-                base_url=resource_manager,
-                credential_scopes=credential_scopes
-            )
-        else:
-            credential = ClientSecretCredential(TENANT_ID, CLIENT_ID, MICROSOFT_PROVIDER_AUTHENTICATION_SECRET)
-
-            client = CognitiveServicesManagementClient(
-                credential=credential,
-                subscription_id=subscription_id
-            )
+        client = build_cognitive_services_client(
+            subscription_id,
+            build_legacy_aoai_discovery_auth_settings()
+        )
 
         models = []
         try:
@@ -526,29 +608,16 @@ def register_route_backend_models(app):
         subscription_id = settings.get('azure_openai_embedding_subscription_id', '')
         resource_group = settings.get('azure_openai_embedding_resource_group', '')
         endpoint = settings.get('azure_openai_embedding_endpoint', '')
-        account_name = endpoint.split('.')[0].replace("https://", "")
+        account_name = get_aoai_account_name(endpoint)
         configured_models = _get_configured_models(settings, 'embedding_model')
 
         if _is_foundry_project_endpoint(endpoint) or not subscription_id or not resource_group or not account_name:
             return jsonify({"models": configured_models}), 200
 
-        if AZURE_ENVIRONMENT == "usgovernment" or AZURE_ENVIRONMENT == "custom":
-            
-            credential = ClientSecretCredential(TENANT_ID, CLIENT_ID, MICROSOFT_PROVIDER_AUTHENTICATION_SECRET, authority=authority)
-
-            client = CognitiveServicesManagementClient(
-                credential=credential,
-                subscription_id=subscription_id,
-                base_url=resource_manager,
-                credential_scopes=credential_scopes
-            )
-        else:
-            credential = ClientSecretCredential(TENANT_ID, CLIENT_ID, MICROSOFT_PROVIDER_AUTHENTICATION_SECRET)
-
-            client = CognitiveServicesManagementClient(
-                credential=credential,
-                subscription_id=subscription_id
-            )
+        client = build_cognitive_services_client(
+            subscription_id,
+            build_legacy_aoai_discovery_auth_settings()
+        )
 
         models = []
         try:
@@ -592,28 +661,16 @@ def register_route_backend_models(app):
 
         subscription_id = settings.get('azure_openai_image_gen_subscription_id', '')
         resource_group = settings.get('azure_openai_image_gen_resource_group', '')
-        account_name = settings.get('azure_openai_image_gen_endpoint', '').split('.')[0].replace("https://", "")
+        endpoint = settings.get('azure_openai_image_gen_endpoint', '')
+        account_name = get_aoai_account_name(endpoint)
 
         if not subscription_id or not resource_group or not account_name:
             return jsonify({"error": "Azure Image Model subscription/RG/endpoint not configured"}), 400
 
-        if AZURE_ENVIRONMENT == "usgovernment" or AZURE_ENVIRONMENT == "custom":
-            
-            credential = ClientSecretCredential(TENANT_ID, CLIENT_ID, MICROSOFT_PROVIDER_AUTHENTICATION_SECRET, authority=authority)
-
-            client = CognitiveServicesManagementClient(
-                credential=credential,
-                subscription_id=subscription_id,
-                base_url=resource_manager,
-                credential_scopes=credential_scopes
-            )
-        else:
-            credential = ClientSecretCredential(TENANT_ID, CLIENT_ID, MICROSOFT_PROVIDER_AUTHENTICATION_SECRET)
-
-            client = CognitiveServicesManagementClient(
-                credential=credential,
-                subscription_id=subscription_id
-            )
+        client = build_cognitive_services_client(
+            subscription_id,
+            build_legacy_aoai_discovery_auth_settings()
+        )
 
         models = []
         try:
@@ -709,6 +766,9 @@ def register_route_backend_models(app):
                 level=logging.WARNING,
             )
             return build_safe_error_response("The selected model endpoint could not be found.", 404)
+        except PermissionError as e:
+            log_models_exception("Test connection blocked by governance policy", e, level=logging.WARNING)
+            return build_safe_error_response(str(e), 403)
         except ValueError as e:
             log_models_exception("Test connection validation failed", e, level=logging.WARNING)
             return build_safe_error_response(
@@ -739,6 +799,10 @@ def register_route_backend_models(app):
     @enabled_required('allow_user_custom_endpoints')
     def get_user_model_endpoints():
         user_id = get_current_user_id()
+        try:
+            ensure_governance_access("governance_user_endpoints", user_id)
+        except PermissionError as exc:
+            return jsonify({"error": str(exc)}), 403
         user_settings = get_user_settings(user_id)
         endpoints = user_settings.get("settings", {}).get("personal_model_endpoints", [])
         return jsonify({
@@ -753,6 +817,10 @@ def register_route_backend_models(app):
     @enabled_required('allow_user_custom_endpoints')
     def save_user_model_endpoints():
         user_id = get_current_user_id()
+        try:
+            ensure_governance_access("governance_user_endpoints", user_id)
+        except PermissionError as exc:
+            return jsonify({"error": str(exc)}), 403
         data = request.get_json() or {}
         incoming = data.get("endpoints", [])
         if not isinstance(incoming, list):
@@ -817,6 +885,7 @@ def register_route_backend_models(app):
     def get_group_model_endpoints_route():
         user_id = get_current_user_id()
         try:
+            ensure_governance_access("governance_group_endpoints", user_id)
             group_id = require_active_group(user_id)
             assert_group_role(
                 user_id,
@@ -843,6 +912,10 @@ def register_route_backend_models(app):
     @enabled_required('allow_group_custom_endpoints')
     def save_group_model_endpoints():
         user_id = get_current_user_id()
+        try:
+            ensure_governance_access("governance_group_endpoints", user_id)
+        except PermissionError as exc:
+            return jsonify({"error": str(exc)}), 403
         data = request.get_json() or {}
         incoming = data.get("endpoints", [])
         if not isinstance(incoming, list):
@@ -932,7 +1005,10 @@ def register_route_backend_models(app):
             except PermissionError as exc:
                 return build_group_access_error_response(user_id, exc, "group Foundry agents")
 
-        endpoint_cfg = resolve_endpoint_by_id(user_id, scope, endpoint_id)
+        try:
+            endpoint_cfg = resolve_endpoint_by_id(user_id, scope, endpoint_id)
+        except PermissionError as exc:
+            return jsonify({"error": str(exc)}), 403
         if not endpoint_cfg:
             return jsonify({"error": "Model endpoint not found."}), 404
         endpoint_cfg = keyvault_model_endpoint_get_helper(
@@ -942,15 +1018,35 @@ def register_route_backend_models(app):
             return_type=SecretReturnType.VALUE,
         )
         provider = (endpoint_cfg.get("provider") or "aoai").lower()
-        if provider not in ("aifoundry", "new_foundry"):
+        requested_resource_type = str(data.get("resource_type") or "").strip().lower()
+        if provider not in ("aifoundry", "new_foundry", "foundry_workflow"):
             return jsonify({"error": "Selected endpoint is not a Foundry endpoint."}), 400
 
         foundry_settings = build_foundry_settings_from_endpoint(endpoint_cfg)
         try:
-            if provider == "new_foundry":
+            if provider == "foundry_workflow" or requested_resource_type == "workflow":
+                agents = list_foundry_workflows_from_endpoint(foundry_settings, get_settings())
+            elif provider == "new_foundry":
                 agents = list_new_foundry_agents_from_endpoint(foundry_settings, get_settings())
             else:
                 agents = list_foundry_agents_from_endpoint(foundry_settings, get_settings())
+        except FoundryAgentUserAuthenticationRequired as exc:
+            log_models_exception(
+                "Foundry delegated user authentication required",
+                exc,
+                extra={"scope": scope, "provider": provider, "endpoint_id": endpoint_id},
+                level=logging.WARNING,
+            )
+            auth_response = getattr(exc, "auth_response", {}) or {}
+            payload = {
+                "error": str(exc),
+                "auth_required": True,
+                "scopes": auth_response.get("scopes") or [],
+            }
+            if auth_response.get("consent_url") or auth_response.get("auth_url"):
+                payload["consent_url"] = auth_response.get("consent_url") or auth_response.get("auth_url")
+                payload["auth_url"] = auth_response.get("auth_url") or auth_response.get("consent_url")
+            return jsonify(payload), 401
         except Exception as exc:
             log_models_exception(
                 "Foundry agent list failed",
@@ -964,7 +1060,7 @@ def register_route_backend_models(app):
 
         connection = endpoint_cfg.get("connection", {}) or {}
         responses_api_version = ""
-        if provider == "new_foundry":
+        if provider in ("new_foundry", "foundry_workflow") or requested_resource_type == "workflow":
             responses_api_version = str(
                 connection.get("openai_api_version")
                 or connection.get("api_version")

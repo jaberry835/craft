@@ -114,6 +114,46 @@ variable "param_deploy_video_indexer_service" {
   default     = false
 }
 
+variable "param_cosmos_capacity_mode" {
+  description = "Cosmos DB capacity mode. Defaults to provisioned throughput; use serverless only for short-lived MVP/evaluation environments."
+  type        = string
+  default     = "provisioned"
+  validation {
+    condition     = contains(["provisioned", "serverless"], lower(var.param_cosmos_capacity_mode))
+    error_message = "param_cosmos_capacity_mode must be 'provisioned' or 'serverless'."
+  }
+}
+
+variable "param_cosmos_autoscale_max_throughput" {
+  description = "Maximum RU/s for each SimpleChat Cosmos DB container when provisioned throughput is used."
+  type        = number
+  default     = 1000
+  validation {
+    condition     = var.param_cosmos_autoscale_max_throughput >= 1000
+    error_message = "param_cosmos_autoscale_max_throughput must be at least 1000."
+  }
+}
+
+variable "param_search_sku" {
+  description = "Azure AI Search SKU. Defaults to standard (S1); use free only for short-lived MVP/evaluation environments."
+  type        = string
+  default     = "standard"
+  validation {
+    condition     = contains(["free", "basic", "standard", "standard2", "standard3", "storage_optimized_l1", "storage_optimized_l2"], lower(var.param_search_sku))
+    error_message = "param_search_sku must be a valid Azure AI Search SKU."
+  }
+}
+
+variable "param_search_semantic_search_sku" {
+  description = "Azure AI Search semantic ranker SKU. Defaults to standard to avoid free semantic query quota exhaustion."
+  type        = string
+  default     = "standard"
+  validation {
+    condition     = contains(["free", "standard"], lower(var.param_search_semantic_search_sku))
+    error_message = "param_search_semantic_search_sku must be 'free' or 'standard'."
+  }
+}
+
 variable "param_custom_identity_url" {
   description = "Custom cloud login endpoint used by the app when global_which_azure_platform is Custom."
   type        = string
@@ -314,6 +354,65 @@ locals {
   existing_openai_subscription_id       = var.param_existing_azure_openai_subscription_id != "" ? var.param_existing_azure_openai_subscription_id : var.param_subscription_id
   use_existing_openai_resource_metadata = var.param_use_existing_openai_instance && var.param_existing_azure_openai_resource_name != "" && var.param_existing_azure_openai_resource_group_name != ""
   enable_openai_rbac_assignments        = !var.param_use_existing_openai_instance || local.use_existing_openai_resource_metadata
+  cosmos_containers = {
+    conversations                 = { partition_key_path = "/id", default_ttl = null }
+    messages                      = { partition_key_path = "/conversation_id", default_ttl = null }
+    tabular_export_runs           = { partition_key_path = "/user_id", default_ttl = null }
+    personal_workflows            = { partition_key_path = "/user_id", default_ttl = null }
+    personal_workflow_runs        = { partition_key_path = "/user_id", default_ttl = null }
+    personal_workflow_run_items   = { partition_key_path = "/run_id", default_ttl = null }
+    group_workflows               = { partition_key_path = "/group_id", default_ttl = null }
+    group_workflow_runs           = { partition_key_path = "/group_id", default_ttl = null }
+    group_workflow_run_items      = { partition_key_path = "/run_id", default_ttl = null }
+    group_conversations           = { partition_key_path = "/id", default_ttl = null }
+    group_messages                = { partition_key_path = "/conversation_id", default_ttl = null }
+    collaboration_conversations   = { partition_key_path = "/id", default_ttl = null }
+    collaboration_messages        = { partition_key_path = "/conversation_id", default_ttl = null }
+    collaboration_user_state      = { partition_key_path = "/user_id", default_ttl = null }
+    settings                      = { partition_key_path = "/id", default_ttl = null }
+    groups                        = { partition_key_path = "/id", default_ttl = null }
+    public_workspaces             = { partition_key_path = "/id", default_ttl = null }
+    documents                     = { partition_key_path = "/id", default_ttl = null }
+    group_documents               = { partition_key_path = "/id", default_ttl = null }
+    public_documents              = { partition_key_path = "/id", default_ttl = null }
+    personal_file_sync_sources    = { partition_key_path = "/user_id", default_ttl = null }
+    group_file_sync_sources       = { partition_key_path = "/group_id", default_ttl = null }
+    public_file_sync_sources      = { partition_key_path = "/public_workspace_id", default_ttl = null }
+    personal_workspace_identities = { partition_key_path = "/user_id", default_ttl = null }
+    group_workspace_identities    = { partition_key_path = "/group_id", default_ttl = null }
+    public_workspace_identities   = { partition_key_path = "/public_workspace_id", default_ttl = null }
+    global_workspace_identities   = { partition_key_path = "/global_id", default_ttl = null }
+    personal_file_sync_items      = { partition_key_path = "/source_id", default_ttl = null }
+    group_file_sync_items         = { partition_key_path = "/source_id", default_ttl = null }
+    public_file_sync_items        = { partition_key_path = "/source_id", default_ttl = null }
+    personal_file_sync_runs       = { partition_key_path = "/source_id", default_ttl = null }
+    group_file_sync_runs          = { partition_key_path = "/source_id", default_ttl = null }
+    public_file_sync_runs         = { partition_key_path = "/source_id", default_ttl = null }
+    user_settings                 = { partition_key_path = "/id", default_ttl = null }
+    safety                        = { partition_key_path = "/id", default_ttl = null }
+    feedback                      = { partition_key_path = "/id", default_ttl = null }
+    archived_conversations        = { partition_key_path = "/id", default_ttl = null }
+    archived_messages             = { partition_key_path = "/conversation_id", default_ttl = null }
+    prompts                       = { partition_key_path = "/id", default_ttl = null }
+    group_prompts                 = { partition_key_path = "/id", default_ttl = null }
+    public_prompts                = { partition_key_path = "/id", default_ttl = null }
+    file_processing               = { partition_key_path = "/document_id", default_ttl = null }
+    personal_agents               = { partition_key_path = "/user_id", default_ttl = null }
+    personal_actions              = { partition_key_path = "/user_id", default_ttl = null }
+    group_agents                  = { partition_key_path = "/group_id", default_ttl = null }
+    group_actions                 = { partition_key_path = "/group_id", default_ttl = null }
+    global_agents                 = { partition_key_path = "/id", default_ttl = null }
+    global_actions                = { partition_key_path = "/id", default_ttl = null }
+    agent_templates               = { partition_key_path = "/id", default_ttl = null }
+    agent_facts                   = { partition_key_path = "/scope_id", default_ttl = null }
+    search_cache                  = { partition_key_path = "/user_id", default_ttl = null }
+    activity_logs                 = { partition_key_path = "/user_id", default_ttl = null }
+    notifications                 = { partition_key_path = "/user_id", default_ttl = -1 }
+    approvals                     = { partition_key_path = "/group_id", default_ttl = -1 }
+    msgraph_pending_actions       = { partition_key_path = "/user_id", default_ttl = -1 }
+    thoughts                      = { partition_key_path = "/user_id", default_ttl = null }
+    archive_thoughts              = { partition_key_path = "/user_id", default_ttl = null }
+  }
 
   # Tags for resources
   common_tags = {
@@ -474,10 +573,10 @@ resource "azurerm_service_plan" "asp" {
   location            = azurerm_resource_group.rg.location
   resource_group_name = azurerm_resource_group.rg.name
   os_type             = "Linux" # Script uses --is-linux
-  sku_name            = "P1v3"  # Basic tier, 1 core, 1.75GB RAM.
-  # ["B1" "B2" "B3" "S1" "S2" "S3" "P1v2" "P2v2" "P3v2" "P0v3" "P1v3" "P2v3" "P3v3" 
-  # "P1mv3" "P2mv3" "P3mv3" "P4mv3" "P5mv3" "Y1" "EP1" "EP2" "EP3" "FC1" "F1" 
-  # "I1" "I2" "I3" "I1v2" "I2v2" "I3v2" "I4v2" "I5v2" "I6v2" "I1mv2" "I2mv2" 
+  sku_name            = "P1v3"  # Premium V3 tier.
+  # ["B1" "B2" "B3" "S1" "S2" "S3" "P1v2" "P2v2" "P3v2" "P0v3" "P1v3" "P2v3" "P3v3"
+  # "P1mv3" "P2mv3" "P3mv3" "P4mv3" "P5mv3" "Y1" "EP1" "EP2" "EP3" "FC1" "F1"
+  # "I1" "I2" "I3" "I1v2" "I2v2" "I3v2" "I4v2" "I5v2" "I6v2" "I1mv2" "I2mv2"
   # "I3mv2" "I4mv2" "I5mv2" "D1" "SHARED" "WS1" "WS2" "WS3"]
   tags = local.common_tags
 }
@@ -656,7 +755,7 @@ resource "azuread_application_api_access" "api_permissions" {
 }
 
 ##################################################################
-# **** Not working in Azure Government **** 
+# **** Not working in Azure Government ****
 # Grant admin consent - this is a manual step in the script for sovereign clouds.
 # "azuread_application" "app_registration"
 # "azuread_service_principal" "app_registration_sp"
@@ -686,6 +785,24 @@ resource "azuread_application_app_role" "app_registration_user" {
   display_name         = "Users"
   value                = "User"
   role_id              = "633746c6-3d03-480f-b273-58ece728be52"
+}
+
+resource "azuread_application_app_role" "app_registration_chat_file_upload_user" {
+  application_id       = azuread_application.app_registration.id
+  allowed_member_types = ["User"]
+  description          = "Allows chat file uploads when the chat upload app role requirement is enabled."
+  display_name         = "Chat File Upload User"
+  value                = "ChatFileUploadUser"
+  role_id              = "3f6ec07d-db95-4c0e-ab03-0645b95736e3"
+}
+
+resource "azuread_application_app_role" "app_registration_workflow_user" {
+  application_id       = azuread_application.app_registration.id
+  allowed_member_types = ["User"]
+  description          = "Allows personal workflow access when the workflow app role requirement is enabled."
+  display_name         = "Workflow User"
+  value                = "WorkflowUser"
+  role_id              = "7d42c0b7-5a95-43b6-9e38-2fb06988901e"
 }
 
 resource "azuread_application_app_role" "app_registration_feedbackadmin" {
@@ -753,8 +870,11 @@ resource "azurerm_cosmosdb_account" "cosmos" {
 
   offer_type = "Standard"
 
-  capabilities {
-    name = "EnableServerless" # Or specify Provisioned Throughput
+  dynamic "capabilities" {
+    for_each = lower(var.param_cosmos_capacity_mode) == "serverless" ? [1] : []
+    content {
+      name = "EnableServerless"
+    }
   }
 
   consistency_policy {
@@ -767,6 +887,29 @@ resource "azurerm_cosmosdb_account" "cosmos" {
   }
 
   tags = local.common_tags
+}
+
+resource "azurerm_cosmosdb_sql_database" "simplechat" {
+  name                = "SimpleChat"
+  resource_group_name = azurerm_resource_group.rg.name
+  account_name        = azurerm_cosmosdb_account.cosmos.name
+}
+
+resource "azurerm_cosmosdb_sql_container" "simplechat" {
+  for_each            = local.cosmos_containers
+  name                = each.key
+  resource_group_name = azurerm_resource_group.rg.name
+  account_name        = azurerm_cosmosdb_account.cosmos.name
+  database_name       = azurerm_cosmosdb_sql_database.simplechat.name
+  partition_key_paths = [each.value.partition_key_path]
+  default_ttl         = each.value.default_ttl
+
+  dynamic "autoscale_settings" {
+    for_each = lower(var.param_cosmos_capacity_mode) == "provisioned" ? [1] : []
+    content {
+      max_throughput = var.param_cosmos_autoscale_max_throughput
+    }
+  }
 }
 
 # --- Azure OpenAI Service (Cognitive Services) ---
@@ -807,10 +950,10 @@ resource "azurerm_search_service" "search" {
   name                          = local.search_service_name
   location                      = azurerm_resource_group.rg.location
   resource_group_name           = azurerm_resource_group.rg.name
-  sku                           = "basic" # Other options: standard, standard2, standard3
+  sku                           = lower(var.param_search_sku)
   replica_count                 = 1
   partition_count               = 1
-  semantic_search_sku           = "standard" #other options:  free
+  semantic_search_sku           = lower(var.param_search_semantic_search_sku)
   public_network_access_enabled = var.param_enable_private_networking ? false : true
   tags                          = local.common_tags
 }
@@ -889,6 +1032,14 @@ resource "azurerm_role_assignment" "app_reg_sp_openai_contributor" {
   count                = local.enable_openai_rbac_assignments ? 1 : 0
   scope                = var.param_use_existing_openai_instance ? data.azurerm_cognitive_account.existing_openai[0].id : azurerm_cognitive_account.openai[0].id
   role_definition_name = "Cognitive Services OpenAI Contributor"
+  principal_id         = azuread_service_principal.app_registration_sp.object_id
+}
+
+# Cognitive Services User on OpenAI for app registration deployment discovery
+resource "azurerm_role_assignment" "app_reg_sp_openai_management_user" {
+  count                = local.enable_openai_rbac_assignments ? 1 : 0
+  scope                = var.param_use_existing_openai_instance ? data.azurerm_cognitive_account.existing_openai[0].id : azurerm_cognitive_account.openai[0].id
+  role_definition_name = "Cognitive Services User"
   principal_id         = azuread_service_principal.app_registration_sp.object_id
 }
 

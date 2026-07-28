@@ -9,7 +9,11 @@ import {
   setActiveConversation as setSidebarActiveConversation,
   setConversationUnreadState as setSidebarConversationUnreadState,
 } from "./chat-sidebar-conversations.js";
-import { toggleConversationInfoButton } from "./chat-conversation-info-button.js";
+import {
+  hideWorkflowActivityButton,
+  toggleConversationInfoButton,
+  updateWorkflowActivityButton,
+} from "./chat-conversation-info-button.js";
 import { restoreScopeLockState, resetScopeLock } from "./chat-documents.js";
 import { loadUserSettings } from "./chat-layout.js";
 import { setUserSetting } from "../agents_common.js";
@@ -23,6 +27,28 @@ const conversationsList = document.getElementById("conversations-list");
 const currentConversationTitleEl = document.getElementById("current-conversation-title");
 const currentConversationClassificationsEl = document.getElementById("current-conversation-classifications");
 const chatbox = document.getElementById("chatbox");
+const deleteConversationModalEl = document.getElementById("delete-conversation-modal");
+const deleteConversationMessageEl = document.getElementById("delete-conversation-message");
+const deleteConversationSharedWarningEl = document.getElementById("delete-conversation-shared-warning");
+const deleteConversationOwnerOptionsEl = document.getElementById("delete-conversation-owner-options");
+const deleteConversationTransferOptionEl = document.getElementById("delete-conversation-transfer-option");
+const deleteConversationOwnerSelectContainerEl = document.getElementById("delete-conversation-owner-select-container");
+const deleteConversationNewOwnerSelectEl = document.getElementById("delete-conversation-new-owner-select");
+const deleteConversationLinkedDocumentsContainerEl = document.getElementById("delete-conversation-linked-documents-container");
+const deleteConversationLinkedDocumentsListEl = document.getElementById("delete-conversation-linked-documents-list");
+const deleteConversationLinkedDocumentsSelectAllEl = document.getElementById("delete-conversation-linked-documents-select-all");
+const deleteConversationImpactNoteEl = document.getElementById("delete-conversation-impact-note");
+const confirmDeleteConversationBtn = document.getElementById("confirm-delete-conversation-btn");
+
+function notifyConversationContextChanged(reason, conversationId = null, options = {}) {
+  window.dispatchEvent(new CustomEvent("chat:conversation-context-changed", {
+    detail: {
+      reason,
+      conversationId,
+      preserveSelections: Boolean(options.preserveSelections),
+    },
+  }));
+}
 
 // Track selected conversations
 let selectedConversations = new Set();
@@ -92,8 +118,15 @@ let allConversations = []; // Store all conversations for client-side filtering
 let isLoadingConversations = false; // Prevent concurrent loads
 let showQuickSearch = false; // Track if quick search input is visible
 let quickSearchTerm = ""; // Current search term
+let quickSearchDebounceTimer = null;
+let conversationFeedNextCursor = null;
+let conversationFeedHasMore = false;
+let conversationFeedHiddenCount = 0;
 let pendingConversationCreation = null; // Reuse a single in-flight create request
 const markConversationReadRequests = new Map();
+let pendingDeleteConversationContext = null;
+const CONVERSATION_FEED_PAGE_SIZE = 20;
+const CONVERSATION_LOAD_MORE_SCROLL_THRESHOLD = 120;
 
 function createUnreadDotElement() {
   const unreadDot = document.createElement("span");
@@ -226,13 +259,46 @@ export function applyConversationMetadataUpdate(conversationId, updates = {}) {
     convoItem.setAttribute('data-conversation-title', updates.title);
     const titleElement = convoItem.querySelector('.conversation-title');
     if (titleElement) {
-      const pinIcon = titleElement.querySelector('.bi-pin-angle');
+      const existingIcons = Array.from(titleElement.querySelectorAll('i')).map(icon => icon.cloneNode(true));
       titleElement.innerHTML = '';
-      if (pinIcon) {
-        titleElement.appendChild(pinIcon);
-      }
+      existingIcons.forEach(icon => titleElement.appendChild(icon));
       titleElement.appendChild(document.createTextNode(updates.title));
       titleElement.title = updates.title;
+    }
+  }
+
+  if (updates.conversation_kind) {
+    convoItem.dataset.conversationKind = updates.conversation_kind;
+  }
+  if (Object.prototype.hasOwnProperty.call(updates, 'membership_status') && updates.membership_status) {
+    convoItem.dataset.membershipStatus = updates.membership_status;
+  }
+  if (Object.prototype.hasOwnProperty.call(updates, 'can_manage_members')) {
+    convoItem.dataset.canManageMembers = updates.can_manage_members ? 'true' : 'false';
+  }
+  if (Object.prototype.hasOwnProperty.call(updates, 'can_manage_roles')) {
+    convoItem.dataset.canManageRoles = updates.can_manage_roles ? 'true' : 'false';
+  }
+  if (Object.prototype.hasOwnProperty.call(updates, 'can_accept_invite')) {
+    convoItem.dataset.canAcceptInvite = updates.can_accept_invite ? 'true' : 'false';
+  }
+  if (Object.prototype.hasOwnProperty.call(updates, 'can_post_messages')) {
+    convoItem.dataset.canPostMessages = updates.can_post_messages === false ? 'false' : 'true';
+  }
+  if (Object.prototype.hasOwnProperty.call(updates, 'can_delete_conversation')) {
+    convoItem.dataset.canDeleteConversation = updates.can_delete_conversation ? 'true' : 'false';
+  }
+  if (Object.prototype.hasOwnProperty.call(updates, 'can_leave_conversation')) {
+    convoItem.dataset.canLeaveConversation = updates.can_leave_conversation ? 'true' : 'false';
+  }
+  if (Object.prototype.hasOwnProperty.call(updates, 'current_user_role')) {
+    convoItem.dataset.currentUserRole = updates.current_user_role || '';
+  }
+  if (Object.prototype.hasOwnProperty.call(updates, 'workflow_id')) {
+    if (updates.workflow_id) {
+      convoItem.dataset.workflowId = updates.workflow_id;
+    } else {
+      delete convoItem.dataset.workflowId;
     }
   }
 
@@ -252,6 +318,16 @@ export function applyConversationMetadataUpdate(conversationId, updates = {}) {
     classification: updates.classification,
     context: updates.context,
     chat_type: updates.chat_type,
+    conversation_kind: updates.conversation_kind,
+    membership_status: updates.membership_status,
+    can_manage_members: updates.can_manage_members,
+    can_manage_roles: updates.can_manage_roles,
+    can_accept_invite: updates.can_accept_invite,
+    can_post_messages: updates.can_post_messages,
+    can_delete_conversation: updates.can_delete_conversation,
+    can_leave_conversation: updates.can_leave_conversation,
+    current_user_role: updates.current_user_role,
+    workflow_id: updates.workflow_id,
   });
 
   applySidebarConversationMetadataUpdate(conversationId, updates);
@@ -269,6 +345,10 @@ export function applyConversationMetadataUpdate(conversationId, updates = {}) {
     }
 
     renderConversationHeaderBadges(convoItem);
+    updateWorkflowActivityButton(conversationId, {
+      chat_type: updates.chat_type || convoItem.getAttribute('data-chat-type') || '',
+      workflow_id: updates.workflow_id || convoItem.dataset.workflowId || '',
+    });
 
     if (hasContextUpdate) {
       void refreshAgentsAndModelsForActiveConversation();
@@ -377,6 +457,26 @@ document.addEventListener('DOMContentLoaded', () => {
   if (deleteSelectedBtn) {
     deleteSelectedBtn.style.display = "none";
   }
+
+  if (confirmDeleteConversationBtn) {
+    confirmDeleteConversationBtn.addEventListener('click', () => {
+      void executeDeleteConversationAction();
+    });
+  }
+
+  if (deleteConversationModalEl) {
+    deleteConversationModalEl.addEventListener('hidden.bs.modal', () => {
+      resetDeleteConversationModalState();
+    });
+    deleteConversationModalEl.querySelectorAll('input[name="delete-conversation-action"]').forEach(input => {
+      input.addEventListener('change', toggleDeleteConversationTransferInputs);
+    });
+  }
+  if (deleteConversationLinkedDocumentsSelectAllEl) {
+    deleteConversationLinkedDocumentsSelectAllEl.addEventListener('change', () => {
+      setDeleteConversationLinkedDocumentsSelection(deleteConversationLinkedDocumentsSelectAllEl.checked);
+    });
+  }
   
   // Set up quick search event listeners
   const searchBtn = document.getElementById('sidebar-search-btn');
@@ -392,9 +492,9 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   
   if (searchInput) {
-    searchInput.addEventListener('keyup', (e) => {
+    searchInput.addEventListener('input', (e) => {
       quickSearchTerm = e.target.value;
-      loadConversations();
+      scheduleConversationSearchReload();
     });
     
     // Prevent conversation toggle when clicking in input
@@ -561,19 +661,12 @@ function toggleQuickSearch() {
   }
 }
 
-function applyQuickSearchFilter(conversations) {
-  if (!quickSearchTerm || quickSearchTerm.trim() === '') {
-    return conversations;
-  }
-  
-  const searchLower = quickSearchTerm.toLowerCase().trim();
-  return conversations.filter(convo => {
-    const titleLower = (convo.title || '').toLowerCase();
-    return titleLower.includes(searchLower);
-  });
-}
-
 function clearQuickSearch() {
+  if (quickSearchDebounceTimer) {
+    clearTimeout(quickSearchDebounceTimer);
+    quickSearchDebounceTimer = null;
+  }
+
   quickSearchTerm = '';
   const searchInput = document.getElementById('sidebar-search-input');
   if (searchInput) {
@@ -582,84 +675,194 @@ function clearQuickSearch() {
   loadConversations();
 }
 
-export function loadConversations() {
-  if (!conversationsList) return;
-  
-  // Prevent concurrent loads
-  if (isLoadingConversations) {
-    console.log('Load already in progress, skipping...');
+function scheduleConversationSearchReload() {
+  if (quickSearchDebounceTimer) {
+    clearTimeout(quickSearchDebounceTimer);
+  }
+
+  quickSearchDebounceTimer = setTimeout(() => {
+    quickSearchDebounceTimer = null;
+    loadConversations();
+  }, 250);
+}
+
+function setConversationListMessage(message, isError = false) {
+  if (!conversationsList) {
     return;
   }
-  
-  isLoadingConversations = true;
-  conversationsList.innerHTML = '<div class="text-center p-3 text-muted">Loading conversations...</div>'; // Loading state
 
-  return fetch("/api/get_conversations")
-    .then(response => response.ok ? response.json() : response.json().then(err => Promise.reject(err)))
-    .then(data => {
-      conversationsList.innerHTML = ""; // Clear loading state
-      if (!data.conversations || data.conversations.length === 0) {
-          conversationsList.innerHTML = '<div class="text-center p-3 text-muted">No conversations yet.</div>';
-          allConversations = [];
-          updateHiddenToggleButton();
-          return;
-      }
-      
-      // Store all conversations for client-side operations
-      allConversations = data.conversations;
-      
-      // Sort conversations: pinned first (by last_updated), then unpinned (by last_updated)
-      const sortedConversations = [...allConversations].sort((a, b) => {
-        const aPinned = a.is_pinned || false;
-        const bPinned = b.is_pinned || false;
-        
-        // If pin status differs, pinned comes first
-        if (aPinned !== bPinned) {
-          return bPinned ? 1 : -1;
-        }
-        
-        // If same pin status, sort by last_updated (most recent first)
-        const aDate = new Date(a.last_updated);
-        const bDate = new Date(b.last_updated);
-        return bDate - aDate;
+  const messageEl = document.createElement('div');
+  messageEl.classList.add('text-center', 'p-3', isError ? 'text-danger' : 'text-muted');
+  messageEl.textContent = message;
+  conversationsList.replaceChildren(messageEl);
+}
+
+function getConversationFeedIncludeHidden() {
+  return showHiddenConversations || selectionModeActive;
+}
+
+function buildConversationFeedUrl(cursor = null) {
+  const params = new URLSearchParams();
+  params.set('page_size', String(CONVERSATION_FEED_PAGE_SIZE));
+  params.set('include_hidden', getConversationFeedIncludeHidden() ? 'true' : 'false');
+
+  const normalizedSearchTerm = quickSearchTerm.trim();
+  if (normalizedSearchTerm) {
+    params.set('search', normalizedSearchTerm);
+  }
+  if (cursor) {
+    params.set('cursor', cursor);
+  }
+
+  return `/api/conversations/feed?${params.toString()}`;
+}
+
+async function fetchConversationFeedPage(cursor = null) {
+  const response = await fetch(buildConversationFeedUrl(cursor));
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload.success === false) {
+    throw new Error(payload.error || 'Failed to load conversations');
+  }
+  return payload;
+}
+
+function mergeConversationPages(existingConversations, incomingConversations) {
+  const seenIds = new Set();
+  const mergedConversations = [];
+
+  [...existingConversations, ...incomingConversations].forEach(conversation => {
+    const conversationId = String(conversation?.id || '').trim();
+    if (!conversationId || seenIds.has(conversationId)) {
+      return;
+    }
+
+    seenIds.add(conversationId);
+    mergedConversations.push(conversation);
+  });
+
+  return mergedConversations;
+}
+
+function createLoadMoreConversationsButton() {
+  const loadMoreButton = document.createElement('button');
+  loadMoreButton.type = 'button';
+  loadMoreButton.classList.add('list-group-item', 'list-group-item-action', 'text-center', 'text-primary');
+  loadMoreButton.dataset.conversationLoadMore = 'true';
+  loadMoreButton.textContent = 'Load more conversations';
+  loadMoreButton.addEventListener('click', () => {
+    void loadMoreConversations();
+  });
+  return loadMoreButton;
+}
+
+function appendConversationLoadMoreButton(container) {
+  if (!container || !conversationFeedHasMore || !conversationFeedNextCursor) {
+    return;
+  }
+
+  container.appendChild(createLoadMoreConversationsButton());
+}
+
+function setConversationLoadMoreButtonsLoading(isLoading) {
+  document.querySelectorAll('[data-conversation-load-more="true"]').forEach(button => {
+    button.disabled = isLoading;
+    button.textContent = isLoading ? 'Loading...' : 'Load more conversations';
+  });
+}
+
+function renderLoadedConversations() {
+  if (!conversationsList) {
+    return;
+  }
+
+  conversationsList.replaceChildren();
+  if (allConversations.length === 0) {
+    const searchActive = quickSearchTerm.trim() !== '';
+    const emptyMessage = searchActive
+      ? 'No matching conversations.'
+      : getConversationFeedIncludeHidden()
+        ? 'No conversations yet.'
+        : 'No visible conversations. Click the eye icon to show hidden conversations.';
+    setConversationListMessage(emptyMessage);
+    return;
+  }
+
+  allConversations.forEach(conversation => {
+    conversationsList.appendChild(createConversationItem(conversation));
+  });
+  appendConversationLoadMoreButton(conversationsList);
+}
+
+function maybeLoadMoreConversationsFromScroll(container) {
+  if (!container || isLoadingConversations || !conversationFeedHasMore || !conversationFeedNextCursor) {
+    return;
+  }
+
+  const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+  if (distanceFromBottom <= CONVERSATION_LOAD_MORE_SCROLL_THRESHOLD) {
+    void loadMoreConversations();
+  }
+}
+
+export async function loadConversations(options = {}) {
+  const { syncSidebar = true, append = false, cursor = null } = options;
+
+  if (!conversationsList) return null;
+
+  if (isLoadingConversations) {
+    console.log('Load already in progress, skipping...');
+    return null;
+  }
+
+  isLoadingConversations = true;
+  setConversationLoadMoreButtonsLoading(true);
+  if (!append) {
+    setConversationListMessage('Loading conversations...');
+  }
+
+  try {
+    const payload = await fetchConversationFeedPage(append ? cursor : null);
+    const incomingConversations = Array.isArray(payload.conversations) ? payload.conversations : [];
+
+    conversationFeedNextCursor = payload.next_cursor || null;
+    conversationFeedHasMore = Boolean(payload.has_more && conversationFeedNextCursor);
+    conversationFeedHiddenCount = Number(payload.hidden_count || 0);
+    allConversations = append
+      ? mergeConversationPages(allConversations, incomingConversations)
+      : incomingConversations;
+
+    renderLoadedConversations();
+    updateHiddenToggleButton();
+
+    if (syncSidebar && window.chatSidebarConversations && window.chatSidebarConversations.loadSidebarConversations) {
+      window.chatSidebarConversations.loadSidebarConversations({
+        conversations: allConversations,
+        hasMore: conversationFeedHasMore,
+        hiddenCount: conversationFeedHiddenCount,
       });
-      
-      // Filter conversations based on show/hide mode and selection mode
-      let filteredConversations = sortedConversations.filter(convo => {
-        const isHidden = convo.is_hidden || false;
-        // Show hidden conversations if toggle is on OR if we're in selection mode
-        return !isHidden || showHiddenConversations || selectionModeActive;
-      });
-      
-      // Apply quick search filter
-      filteredConversations = applyQuickSearchFilter(filteredConversations);
-      
-      if (filteredConversations.length === 0) {
-        conversationsList.innerHTML = '<div class="text-center p-3 text-muted">No visible conversations. Click the eye icon to show hidden conversations.</div>';
-      } else {
-        filteredConversations.forEach(convo => {
-          conversationsList.appendChild(createConversationItem(convo));
-        });
-      }
-      
-      // Update the show/hide toggle button
-      updateHiddenToggleButton();
-      
-      // Also load sidebar conversations if the sidebar exists
-      if (window.chatSidebarConversations && window.chatSidebarConversations.loadSidebarConversations) {
-        window.chatSidebarConversations.loadSidebarConversations();
-      }
-      
-      // Reset loading flag
-      isLoadingConversations = false;
-      
-      // Optionally, select the first conversation or highlight the active one if ID is known
-    })
-    .catch(error => {
-      console.error("Error loading conversations:", error);
-      conversationsList.innerHTML = `<div class="text-center p-3 text-danger">Error loading conversations: ${error.error || 'Unknown error'}</div>`;
-      isLoadingConversations = false; // Reset flag on error too
-    });
+    }
+
+    return payload;
+  } catch (error) {
+    console.error('Error loading conversations:', error);
+    if (append) {
+      showToast(`Error loading more conversations: ${error.message}`, 'danger');
+    } else {
+      setConversationListMessage(`Error loading conversations: ${error.message}`, true);
+    }
+    return null;
+  } finally {
+    isLoadingConversations = false;
+    setConversationLoadMoreButtonsLoading(false);
+  }
+}
+
+export function loadMoreConversations() {
+  if (!conversationFeedHasMore || !conversationFeedNextCursor) {
+    return Promise.resolve(null);
+  }
+
+  return loadConversations({ append: true, cursor: conversationFeedNextCursor });
 }
 
 // Ensure a conversation exists in the list; fetch metadata if missing
@@ -671,18 +874,27 @@ export async function ensureConversationPresent(conversationId) {
   if (existing) return existing;
 
   // Fetch metadata to validate ownership and get details
+  let metadata = null;
   const res = await fetch(`/api/conversations/${conversationId}/metadata`);
-  if (!res.ok) {
+  if (res.ok) {
+    metadata = await res.json();
+  } else if (window.chatCollaboration?.fetchConversationMetadata) {
+    try {
+        metadata = await window.chatCollaboration.fetchConversationMetadata(conversationId);
+    } catch (error) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(error.message || err.error || `Failed to load conversation ${conversationId}`);
+    }
+  } else {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.error || `Failed to load conversation ${conversationId}`);
   }
-  const metadata = await res.json();
 
   // Build a conversation object compatible with createConversationItem
   const convo = {
     id: conversationId,
     title: metadata.title || 'Conversation',
-    last_updated: metadata.last_updated || new Date().toISOString(),
+    last_updated: metadata.last_updated || metadata.updated_at || new Date().toISOString(),
     classification: metadata.classification || [],
     context: metadata.context || [],
     chat_type: metadata.chat_type || null,
@@ -691,6 +903,15 @@ export async function ensureConversationPresent(conversationId) {
     has_unread_assistant_response: metadata.has_unread_assistant_response || false,
     last_unread_assistant_message_id: metadata.last_unread_assistant_message_id || null,
     last_unread_assistant_at: metadata.last_unread_assistant_at || null,
+    conversation_kind: metadata.conversation_kind || null,
+    membership_status: metadata.membership_status || null,
+    can_manage_members: metadata.can_manage_members || false,
+    can_manage_roles: metadata.can_manage_roles || false,
+    can_accept_invite: metadata.can_accept_invite || false,
+    can_post_messages: metadata.can_post_messages !== false,
+    can_delete_conversation: metadata.can_delete_conversation || false,
+    can_leave_conversation: metadata.can_leave_conversation || false,
+    current_user_role: metadata.current_user_role || '',
   };
 
   // Keep allConversations in sync
@@ -701,7 +922,11 @@ export async function ensureConversationPresent(conversationId) {
 
   // Refresh sidebar so it appears there too
   if (window.chatSidebarConversations && window.chatSidebarConversations.loadSidebarConversations) {
-    window.chatSidebarConversations.loadSidebarConversations();
+    window.chatSidebarConversations.loadSidebarConversations({
+      conversations: allConversations,
+      hasMore: conversationFeedHasMore,
+      hiddenCount: conversationFeedHiddenCount,
+    });
   }
 
   return convoItem;
@@ -712,7 +937,36 @@ export function createConversationItem(convo) {
   convoItem.classList.add("list-group-item", "list-group-item-action", "conversation-item", "d-flex", "align-items-center"); // Use action class
   convoItem.setAttribute("data-conversation-id", convo.id);
   convoItem.setAttribute("data-conversation-title", convo.title); // Store title too
+  if (convo.workflow_id) {
+    convoItem.dataset.workflowId = convo.workflow_id;
+  }
   convoItem.dataset.hasUnreadAssistantResponse = convo.has_unread_assistant_response ? "true" : "false";
+  const isCollaborativeConversation = convo.conversation_kind === 'collaborative';
+  const conversationChatType = convo.chat_type === 'personal' ? 'personal_single_user' : convo.chat_type;
+  const canManageMembers = isCollaborativeConversation
+    ? Boolean(convo.can_manage_members)
+    : ['personal_single_user', 'group-single-user'].includes(conversationChatType || '');
+  const canManageRoles = isCollaborativeConversation ? Boolean(convo.can_manage_roles) : false;
+  const canEditCollaborativeTitle = !isCollaborativeConversation || canManageRoles;
+  const canShowAddParticipants = ['personal_single_user', 'personal_multi_user', 'group-single-user', 'group_multi_user'].includes(conversationChatType || '')
+    && canManageMembers;
+  const canDeleteCollaborativeConversation = Boolean(convo.can_delete_conversation);
+  const canLeaveCollaborativeConversation = Boolean(convo.can_leave_conversation);
+  const collaborativeDeleteLabel = canDeleteCollaborativeConversation ? 'Delete / Leave' : 'Leave';
+
+  if (isCollaborativeConversation) {
+    convoItem.dataset.conversationKind = 'collaborative';
+  }
+  if (convo.membership_status) {
+    convoItem.dataset.membershipStatus = convo.membership_status;
+  }
+  convoItem.dataset.canManageMembers = canManageMembers ? 'true' : 'false';
+  convoItem.dataset.canManageRoles = canManageRoles ? 'true' : 'false';
+  convoItem.dataset.canAcceptInvite = convo.can_accept_invite ? 'true' : 'false';
+  convoItem.dataset.canPostMessages = convo.can_post_messages === false ? 'false' : 'true';
+  convoItem.dataset.canDeleteConversation = canDeleteCollaborativeConversation ? 'true' : 'false';
+  convoItem.dataset.canLeaveConversation = canLeaveCollaborativeConversation ? 'true' : 'false';
+  convoItem.dataset.currentUserRole = convo.current_user_role || '';
 
   // *** Store classification data as stringified JSON ***
   convoItem.dataset.classifications = JSON.stringify(convo.classification || []);
@@ -826,6 +1080,13 @@ export function createConversationItem(convo) {
     pinIcon.classList.add("bi", "bi-pin-angle", "me-1");
     titleSpan.appendChild(pinIcon);
   }
+
+  if (isCollaborativeConversation) {
+    const collaborationIcon = document.createElement("i");
+    collaborationIcon.classList.add("bi", "bi-people", "me-1");
+    collaborationIcon.title = "Collaborative conversation";
+    titleSpan.appendChild(collaborationIcon);
+  }
   
   titleSpan.appendChild(document.createTextNode(convo.title));
   titleSpan.title = convo.title; // Tooltip for full title
@@ -867,6 +1128,17 @@ export function createConversationItem(convo) {
   detailsA.href = "#";
   detailsA.innerHTML = '<i class="bi bi-info-circle me-2"></i>Details';
   detailsLi.appendChild(detailsA);
+
+  let addParticipantsA = null;
+  let addParticipantsLi = null;
+  if (canShowAddParticipants) {
+    addParticipantsLi = document.createElement("li");
+    addParticipantsA = document.createElement("a");
+    addParticipantsA.classList.add("dropdown-item", "add-participants-btn");
+    addParticipantsA.href = "#";
+    addParticipantsA.innerHTML = '<i class="bi bi-person-plus me-2"></i>Add participants';
+    addParticipantsLi.appendChild(addParticipantsA);
+  }
 
   // Add Pin option
   const pinLi = document.createElement("li");
@@ -915,17 +1187,35 @@ export function createConversationItem(convo) {
   const deleteA = document.createElement("a");
   deleteA.classList.add("dropdown-item", "delete-btn", "text-danger");
   deleteA.href = "#";
-  deleteA.innerHTML = '<i class="bi bi-trash-fill me-2"></i>Delete';
+  const deleteIcon = document.createElement("i");
+  deleteIcon.className = "bi bi-trash-fill me-2";
+  deleteA.appendChild(deleteIcon);
+  deleteA.appendChild(document.createTextNode(isCollaborativeConversation ? collaborativeDeleteLabel : 'Delete'));
   deleteLi.appendChild(deleteA);
 
   dropdownMenu.appendChild(detailsLi);
-  dropdownMenu.appendChild(pinLi);
-  dropdownMenu.appendChild(hideLi);
-  dropdownMenu.appendChild(selectLi);
-  dropdownMenu.appendChild(exportLi);
-
-  dropdownMenu.appendChild(editLi);
-  dropdownMenu.appendChild(deleteLi);
+  if (addParticipantsLi) {
+    dropdownMenu.appendChild(addParticipantsLi);
+  }
+  if (isCollaborativeConversation) {
+    dropdownMenu.appendChild(pinLi);
+    dropdownMenu.appendChild(hideLi);
+    dropdownMenu.appendChild(selectLi);
+    dropdownMenu.appendChild(exportLi);
+    if (canEditCollaborativeTitle) {
+      dropdownMenu.appendChild(editLi);
+    }
+    if (canDeleteCollaborativeConversation || canLeaveCollaborativeConversation) {
+      dropdownMenu.appendChild(deleteLi);
+    }
+  } else {
+    dropdownMenu.appendChild(pinLi);
+    dropdownMenu.appendChild(hideLi);
+    dropdownMenu.appendChild(selectLi);
+    dropdownMenu.appendChild(exportLi);
+    dropdownMenu.appendChild(editLi);
+    dropdownMenu.appendChild(deleteLi);
+  }
   rightDiv.appendChild(dropdownBtn);
   rightDiv.appendChild(dropdownMenu);
 
@@ -950,6 +1240,15 @@ export function createConversationItem(convo) {
     
     selectConversation(convo.id);
   });
+
+  if (addParticipantsA) {
+    addParticipantsA.addEventListener("click", event => {
+      event.preventDefault();
+      event.stopPropagation();
+      closeDropdownMenu(dropdownBtn);
+      window.chatCollaboration?.openParticipantPicker?.({ conversationId: convo.id });
+    });
+  }
 
   editA.addEventListener("click", (event) => {
     event.preventDefault();
@@ -1124,7 +1423,13 @@ export function exitEditMode(convoItem, convo, dropdownBtn, rightDiv, dateSpan, 
 
   const newSpan = document.createElement("span");
   newSpan.classList.add("conversation-title", "text-truncate");
-  newSpan.textContent = convo.title;
+  if (convoItem.dataset.conversationKind === 'collaborative') {
+    const collaborationIcon = document.createElement("i");
+    collaborationIcon.classList.add("bi", "bi-people", "me-1");
+    collaborationIcon.title = "Collaborative conversation";
+    newSpan.appendChild(collaborationIcon);
+  }
+  newSpan.appendChild(document.createTextNode(convo.title));
   newSpan.title = convo.title; // Add tooltip back
 
   input.replaceWith(newSpan); // Replace input with updated span
@@ -1137,7 +1442,10 @@ export function exitEditMode(convoItem, convo, dropdownBtn, rightDiv, dateSpan, 
 }
 
 export async function updateConversationTitle(conversationId, newTitle) {
-  const response = await fetch(`/api/conversations/${conversationId}`, {
+  const convoItem = document.querySelector(`.conversation-item[data-conversation-id="${conversationId}"]`)
+    || document.querySelector(`.sidebar-conversation-item[data-conversation-id="${conversationId}"]`);
+  const isCollaborativeConversation = convoItem?.dataset?.conversationKind === 'collaborative';
+  const response = await fetch(isCollaborativeConversation ? `/api/collaboration/conversations/${conversationId}` : `/api/conversations/${conversationId}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ title: newTitle }),
@@ -1194,6 +1502,7 @@ export function addConversationToList(conversationId, title = null, classificati
 export async function selectConversation(conversationId) {
   currentConversationId = conversationId;
   window.currentConversationId = conversationId;
+  notifyConversationContextChanged("select", conversationId);
 
   const convoItem = document.querySelector(`.conversation-item[data-conversation-id="${conversationId}"]`);
   if (!convoItem) {
@@ -1204,16 +1513,26 @@ export async function selectConversation(conversationId) {
       if (chatbox) chatbox.innerHTML = '<div class="text-center p-5 text-muted">Conversation not found.</div>';
       highlightSelectedConversation(null); // Deselect all visually
       toggleConversationInfoButton(false); // Hide the info button
+        hideWorkflowActivityButton();
       return;
   }
 
   const conversationTitle = convoItem.getAttribute("data-conversation-title") || "Conversation"; // Use stored title
+  const isCollaborativeConversation = convoItem.dataset.conversationKind === 'collaborative';
+  let metadata = null;
 
   // Fetch the latest conversation metadata to get accurate chat_type, pin, and hide status
   try {
-    const response = await fetch(`/api/conversations/${conversationId}/metadata`);
-    if (response.ok) {
-      const metadata = await response.json();
+    if (isCollaborativeConversation && window.chatCollaboration?.fetchConversationMetadata) {
+      metadata = await window.chatCollaboration.fetchConversationMetadata(conversationId);
+    } else {
+      const response = await fetch(`/api/conversations/${conversationId}/metadata`);
+      if (response.ok) {
+        metadata = await response.json();
+      }
+    }
+
+    if (metadata) {
       
       // Update Header Title with pin icon and hidden status
       if (currentConversationTitleEl) {
@@ -1324,6 +1643,21 @@ export async function selectConversation(conversationId) {
       const metaScopeLocked = metadata.scope_locked !== undefined ? metadata.scope_locked : null;
       const metaLockedContexts = metadata.locked_contexts || [];
       restoreScopeLockState(metaScopeLocked, metaLockedContexts);
+
+      convoItem.dataset.canManageMembers = metadata.can_manage_members ? 'true' : 'false';
+      convoItem.dataset.canAcceptInvite = metadata.can_accept_invite ? 'true' : 'false';
+      convoItem.dataset.canPostMessages = metadata.can_post_messages === false ? 'false' : 'true';
+      if (metadata.membership_status) {
+        convoItem.dataset.membershipStatus = metadata.membership_status;
+      }
+      if (metadata.conversation_kind) {
+        convoItem.dataset.conversationKind = metadata.conversation_kind;
+      }
+      if (metadata.workflow_id) {
+        convoItem.dataset.workflowId = metadata.workflow_id;
+      } else {
+        delete convoItem.dataset.workflowId;
+      }
     }
   } catch (error) {
     console.warn('Failed to fetch conversation metadata:', error);
@@ -1335,20 +1669,29 @@ export async function selectConversation(conversationId) {
     renderConversationHeaderBadges(convoItem);
   }
 
-  await loadMessages(conversationId);
-  try {
-    const streamingModule = await import('./chat-streaming.js');
-    await streamingModule.reattachStreamingConversation(conversationId);
-  } catch (error) {
-    console.warn('Failed to reattach active stream for conversation:', error);
+  if (isCollaborativeConversation && window.chatCollaboration?.activateConversation) {
+    await window.chatCollaboration.activateConversation(conversationId, metadata);
+  } else {
+    window.chatCollaboration?.deactivateConversation?.();
+    await loadMessages(conversationId);
+    try {
+      const streamingModule = await import('./chat-streaming.js');
+      await streamingModule.reattachStreamingConversation(conversationId);
+    } catch (error) {
+      console.warn('Failed to reattach active stream for conversation:', error);
+    }
+    markConversationRead(conversationId, { force: true, suppressErrorToast: true }).catch(error => {
+      console.warn('Failed to clear unread state for conversation:', error);
+    });
   }
-  markConversationRead(conversationId, { force: true, suppressErrorToast: true }).catch(error => {
-    console.warn('Failed to clear unread state for conversation:', error);
-  });
   highlightSelectedConversation(conversationId);
   
   // Show the conversation info button since we have an active conversation
   toggleConversationInfoButton(true);
+  updateWorkflowActivityButton(conversationId, {
+    chat_type: metadata?.chat_type || convoItem.getAttribute('data-chat-type') || '',
+    workflow_id: metadata?.workflow_id || convoItem.dataset.workflowId || '',
+  });
   
   // Update sidebar active conversation if sidebar exists
   if (setSidebarActiveConversation) {
@@ -1388,45 +1731,420 @@ export function highlightSelectedConversation(conversationId) {
   });
 }
 
-// Delete a conversation
-export function deleteConversation(conversationId) {
-  if (!confirm("Are you sure you want to delete this conversation? This action cannot be undone.")) {
+function getConversationFromCache(conversationId) {
+  return allConversations.find(conversation => conversation.id === conversationId) || null;
+}
+
+function toggleDeleteConversationTransferInputs() {
+  if (!deleteConversationOwnerSelectContainerEl || !deleteConversationModalEl || !confirmDeleteConversationBtn) {
     return;
   }
 
-  // Optionally show loading state on the item being deleted
+  const selectedAction = deleteConversationModalEl.querySelector('input[name="delete-conversation-action"]:checked')?.value;
+  deleteConversationOwnerSelectContainerEl.classList.toggle('d-none', selectedAction !== 'leave');
 
-  fetch(`/api/conversations/${conversationId}`, { method: "DELETE" })
-    .then(response => {
-      if (response.ok) {
-        const convoItem = document.querySelector(`.conversation-item[data-conversation-id="${conversationId}"]`);
-        if (convoItem) convoItem.remove();
+  if (selectedAction === 'leave') {
+    confirmDeleteConversationBtn.classList.remove('btn-danger');
+    confirmDeleteConversationBtn.classList.add('btn-warning');
+    confirmDeleteConversationBtn.innerHTML = '<i class="bi bi-box-arrow-left me-1"></i>Assign Owner & Leave';
+    return;
+  }
 
-        // If the deleted conversation was the current one, reset the chat view
-        if (currentConversationId === conversationId) {
-          currentConversationId = null;
-          if (currentConversationTitleEl) currentConversationTitleEl.textContent = "Select or start a conversation";
-          if (currentConversationClassificationsEl) currentConversationClassificationsEl.innerHTML = ""; // Clear classifications
-          if (chatbox) chatbox.innerHTML = '<div class="text-center p-5 text-muted">Select a conversation to view messages.</div>'; // Reset chatbox
-          highlightSelectedConversation(null); // Deselect all
-          toggleConversationInfoButton(false); // Hide the info button
-        }
-        
-        // Also reload sidebar conversations if the sidebar exists
-        if (window.chatSidebarConversations && window.chatSidebarConversations.loadSidebarConversations) {
-          window.chatSidebarConversations.loadSidebarConversations();
-        }
-        
-         showToast("Conversation deleted.", "success");
-      } else {
-         return response.json().then(err => Promise.reject(err)); // Pass error details
+  confirmDeleteConversationBtn.classList.remove('btn-warning');
+  confirmDeleteConversationBtn.classList.add('btn-danger');
+  confirmDeleteConversationBtn.innerHTML = '<i class="bi bi-trash me-1"></i>Delete Conversation';
+}
+
+function normalizeDeleteConversationLinkedDocuments(metadata = {}) {
+  const documents = Array.isArray(metadata.linked_workspace_documents)
+    ? metadata.linked_workspace_documents
+    : [];
+
+  return documents
+    .map(documentItem => ({
+      ...documentItem,
+      id: String(documentItem?.id || '').trim(),
+    }))
+    .filter(documentItem => documentItem.id);
+}
+
+function getDeleteConversationLinkedDocumentCheckboxes() {
+  if (!deleteConversationLinkedDocumentsListEl) {
+    return [];
+  }
+
+  return Array.from(deleteConversationLinkedDocumentsListEl.querySelectorAll('.delete-conversation-linked-document-checkbox'));
+}
+
+function updateDeleteConversationLinkedDocumentsSelectAllState() {
+  if (!deleteConversationLinkedDocumentsSelectAllEl) {
+    return;
+  }
+
+  const selectableCheckboxes = getDeleteConversationLinkedDocumentCheckboxes()
+    .filter(checkbox => !checkbox.disabled);
+  const selectedCheckboxes = selectableCheckboxes.filter(checkbox => checkbox.checked);
+
+  deleteConversationLinkedDocumentsSelectAllEl.disabled = selectableCheckboxes.length === 0;
+  deleteConversationLinkedDocumentsSelectAllEl.checked = selectableCheckboxes.length > 0
+    && selectedCheckboxes.length === selectableCheckboxes.length;
+  deleteConversationLinkedDocumentsSelectAllEl.indeterminate = selectedCheckboxes.length > 0
+    && selectedCheckboxes.length < selectableCheckboxes.length;
+}
+
+function setDeleteConversationLinkedDocumentsSelection(checked) {
+  getDeleteConversationLinkedDocumentCheckboxes().forEach(checkbox => {
+    if (!checkbox.disabled) {
+      checkbox.checked = checked;
+    }
+  });
+  updateDeleteConversationLinkedDocumentsSelectAllState();
+}
+
+function getSelectedDeleteConversationLinkedDocumentIds() {
+  return getDeleteConversationLinkedDocumentCheckboxes()
+    .filter(checkbox => checkbox.checked && !checkbox.disabled)
+    .map(checkbox => checkbox.value)
+    .filter(Boolean);
+}
+
+function buildDeleteConversationLinkedDocumentDetails(documentItem) {
+  const details = [];
+  const title = String(documentItem.title || '').trim();
+  const fileName = String(documentItem.file_name || '').trim();
+
+  if (fileName && fileName !== title) {
+    details.push(fileName);
+  }
+  if (documentItem.status) {
+    details.push(`Status: ${documentItem.status}`);
+  }
+  if (Number(documentItem.number_of_pages) > 0) {
+    const pageCount = Number(documentItem.number_of_pages);
+    details.push(`${pageCount} page${pageCount === 1 ? '' : 's'}`);
+  }
+  if (documentItem.can_delete_with_conversation === false) {
+    details.push('Retained by policy');
+  }
+
+  return details.join(' | ');
+}
+
+function renderDeleteConversationLinkedDocuments(documents) {
+  if (!deleteConversationLinkedDocumentsContainerEl || !deleteConversationLinkedDocumentsListEl) {
+    return;
+  }
+
+  deleteConversationLinkedDocumentsListEl.replaceChildren();
+
+  if (!documents.length) {
+    deleteConversationLinkedDocumentsContainerEl.classList.add('d-none');
+    updateDeleteConversationLinkedDocumentsSelectAllState();
+    return;
+  }
+
+  documents.forEach((documentItem, index) => {
+    const item = document.createElement('label');
+    item.className = 'list-group-item d-flex align-items-start gap-2';
+    item.setAttribute('for', `delete-conversation-linked-document-${index}`);
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.className = 'form-check-input mt-1 delete-conversation-linked-document-checkbox';
+    checkbox.id = `delete-conversation-linked-document-${index}`;
+    checkbox.value = documentItem.id;
+    checkbox.disabled = documentItem.can_delete_with_conversation === false;
+    checkbox.addEventListener('change', updateDeleteConversationLinkedDocumentsSelectAllState);
+
+    const body = document.createElement('span');
+    body.className = 'd-block flex-grow-1';
+
+    const name = document.createElement('span');
+    name.className = 'fw-semibold d-block';
+    name.textContent = documentItem.title || documentItem.file_name || 'Workspace document';
+
+    const detailsText = buildDeleteConversationLinkedDocumentDetails(documentItem);
+    if (detailsText) {
+      const details = document.createElement('span');
+      details.className = 'text-muted d-block';
+      details.textContent = detailsText;
+      body.append(name, details);
+    } else {
+      body.append(name);
+    }
+
+    item.append(checkbox, body);
+    deleteConversationLinkedDocumentsListEl.append(item);
+  });
+
+  if (deleteConversationLinkedDocumentsSelectAllEl) {
+    deleteConversationLinkedDocumentsSelectAllEl.checked = false;
+    deleteConversationLinkedDocumentsSelectAllEl.indeterminate = false;
+  }
+  deleteConversationLinkedDocumentsContainerEl.classList.remove('d-none');
+  updateDeleteConversationLinkedDocumentsSelectAllState();
+}
+
+function resetDeleteConversationModalState() {
+  pendingDeleteConversationContext = null;
+
+  if (deleteConversationMessageEl) {
+    deleteConversationMessageEl.textContent = 'Are you sure you want to delete this conversation?';
+  }
+  if (deleteConversationSharedWarningEl) {
+    deleteConversationSharedWarningEl.classList.add('d-none');
+  }
+  if (deleteConversationOwnerOptionsEl) {
+    deleteConversationOwnerOptionsEl.classList.add('d-none');
+  }
+  if (deleteConversationTransferOptionEl) {
+    deleteConversationTransferOptionEl.classList.add('d-none');
+  }
+  if (deleteConversationOwnerSelectContainerEl) {
+    deleteConversationOwnerSelectContainerEl.classList.add('d-none');
+  }
+  if (deleteConversationNewOwnerSelectEl) {
+    deleteConversationNewOwnerSelectEl.innerHTML = '';
+  }
+  if (deleteConversationLinkedDocumentsContainerEl) {
+    deleteConversationLinkedDocumentsContainerEl.classList.add('d-none');
+  }
+  if (deleteConversationLinkedDocumentsListEl) {
+    deleteConversationLinkedDocumentsListEl.replaceChildren();
+  }
+  if (deleteConversationLinkedDocumentsSelectAllEl) {
+    deleteConversationLinkedDocumentsSelectAllEl.checked = false;
+    deleteConversationLinkedDocumentsSelectAllEl.indeterminate = false;
+    deleteConversationLinkedDocumentsSelectAllEl.disabled = false;
+  }
+  if (deleteConversationImpactNoteEl) {
+    deleteConversationImpactNoteEl.textContent = 'This action cannot be undone.';
+  }
+  if (confirmDeleteConversationBtn) {
+    confirmDeleteConversationBtn.disabled = false;
+    confirmDeleteConversationBtn.innerHTML = '<i class="bi bi-trash me-1"></i>Delete Conversation';
+    confirmDeleteConversationBtn.classList.remove('btn-warning');
+    confirmDeleteConversationBtn.classList.add('btn-danger');
+  }
+
+  const deleteRadio = document.getElementById('delete-conversation-action-delete');
+  if (deleteRadio) {
+    deleteRadio.checked = true;
+  }
+}
+
+async function buildDeleteConversationContext(conversationId) {
+  const cachedConversation = getConversationFromCache(conversationId) || {};
+  const isCollaborativeConversation = cachedConversation.conversation_kind === 'collaborative'
+    || document.querySelector(`.conversation-item[data-conversation-id="${conversationId}"]`)?.dataset?.conversationKind === 'collaborative'
+    || document.querySelector(`.sidebar-conversation-item[data-conversation-id="${conversationId}"]`)?.dataset?.conversationKind === 'collaborative';
+
+  if (isCollaborativeConversation && window.chatCollaboration?.fetchConversationMetadata) {
+    return window.chatCollaboration.fetchConversationMetadata(conversationId);
+  }
+
+  const response = await fetch(`/api/conversations/${conversationId}/metadata`);
+  if (!response.ok) {
+    const errorPayload = await response.json().catch(() => ({}));
+    throw new Error(errorPayload.error || 'Failed to load conversation metadata');
+  }
+  return response.json();
+}
+
+function configureDeleteConversationModal(conversationId, metadata = {}) {
+  resetDeleteConversationModalState();
+
+  const isCollaborativeConversation = metadata.conversation_kind === 'collaborative';
+  const currentUserId = String(window.currentUser?.id || window.currentUser?.user_id || '').trim();
+  const activeParticipants = Array.isArray(metadata.participants)
+    ? metadata.participants.filter(participant => participant?.status === 'accepted')
+    : [];
+  const transferableParticipants = activeParticipants.filter(participant => participant?.user_id && participant.user_id !== currentUserId);
+  const linkedWorkspaceDocuments = normalizeDeleteConversationLinkedDocuments(metadata);
+
+  pendingDeleteConversationContext = {
+    conversationId,
+    isCollaborativeConversation,
+    metadata,
+    transferableParticipants,
+    linkedWorkspaceDocuments,
+  };
+
+  if (!isCollaborativeConversation) {
+    if (deleteConversationMessageEl) {
+      deleteConversationMessageEl.textContent = 'Are you sure you want to delete this conversation?';
+    }
+    if (deleteConversationImpactNoteEl) {
+      deleteConversationImpactNoteEl.textContent = linkedWorkspaceDocuments.length > 0
+        ? 'Deleting removes the conversation. Unselected workspace documents remain available and follow the document retention policy.'
+        : 'This action cannot be undone.';
+    }
+    if (confirmDeleteConversationBtn) {
+      confirmDeleteConversationBtn.innerHTML = '<i class="bi bi-trash me-1"></i>Delete Conversation';
+    }
+    renderDeleteConversationLinkedDocuments(linkedWorkspaceDocuments);
+    return;
+  }
+
+  if (deleteConversationSharedWarningEl) {
+    deleteConversationSharedWarningEl.classList.remove('d-none');
+  }
+
+  if (metadata.can_delete_conversation) {
+    if (deleteConversationMessageEl) {
+      deleteConversationMessageEl.textContent = 'This is a multi-user conversation. Do you want to delete it for everyone, or assign another owner and leave the conversation?';
+    }
+    if (deleteConversationOwnerOptionsEl) {
+      deleteConversationOwnerOptionsEl.classList.remove('d-none');
+    }
+    if (deleteConversationImpactNoteEl) {
+      deleteConversationImpactNoteEl.textContent = 'Deleting removes the shared conversation for every participant.';
+    }
+    if (deleteConversationTransferOptionEl && transferableParticipants.length > 0) {
+      deleteConversationTransferOptionEl.classList.remove('d-none');
+    }
+    if (deleteConversationNewOwnerSelectEl) {
+      deleteConversationNewOwnerSelectEl.replaceChildren();
+      transferableParticipants.forEach((participant) => {
+        const option = document.createElement('option');
+        option.value = String(participant.user_id || '');
+        option.textContent = participant.display_name || participant.email || participant.user_id || '';
+        deleteConversationNewOwnerSelectEl.appendChild(option);
+      });
+    }
+    return;
+  }
+
+  if (deleteConversationMessageEl) {
+    deleteConversationMessageEl.textContent = 'Are you sure you want to leave this shared conversation?';
+  }
+  if (deleteConversationImpactNoteEl) {
+    deleteConversationImpactNoteEl.textContent = 'Leaving removes this conversation from your list, but other participants will keep it.';
+  }
+  if (confirmDeleteConversationBtn) {
+    confirmDeleteConversationBtn.classList.remove('btn-danger');
+    confirmDeleteConversationBtn.classList.add('btn-warning');
+    confirmDeleteConversationBtn.innerHTML = '<i class="bi bi-box-arrow-left me-1"></i>Leave Conversation';
+  }
+}
+
+export function removeConversationFromUi(conversationId, options = {}) {
+  if (!conversationId) {
+    return;
+  }
+
+  allConversations = allConversations.filter(conversation => conversation.id !== conversationId);
+  document.querySelector(`.conversation-item[data-conversation-id="${conversationId}"]`)?.remove();
+  document.querySelector(`.sidebar-conversation-item[data-conversation-id="${conversationId}"]`)?.remove();
+
+  if (currentConversationId === conversationId || window.currentConversationId === conversationId) {
+    currentConversationId = null;
+    window.currentConversationId = null;
+    if (currentConversationTitleEl) currentConversationTitleEl.textContent = "Select or start a conversation";
+    if (currentConversationClassificationsEl) currentConversationClassificationsEl.innerHTML = "";
+    if (chatbox) {
+      chatbox.innerHTML = '<div class="text-center p-5 text-muted">Select a conversation to view messages.</div>';
+    }
+    highlightSelectedConversation(null);
+    toggleConversationInfoButton(false);
+    hideWorkflowActivityButton();
+    window.chatCollaboration?.deactivateConversation?.();
+    setSidebarActiveConversation(null);
+  }
+
+  window.hideConversationDetails?.();
+
+  if (!options.skipToast) {
+    showToast(options.toastMessage || 'Conversation removed.', 'success');
+  }
+
+  if (options.refreshList !== false) {
+    loadConversations();
+  }
+}
+
+async function executeDeleteConversationAction() {
+  if (!pendingDeleteConversationContext || !confirmDeleteConversationBtn) {
+    return;
+  }
+
+  const { conversationId, isCollaborativeConversation, metadata } = pendingDeleteConversationContext;
+  confirmDeleteConversationBtn.disabled = true;
+
+  try {
+    if (!isCollaborativeConversation) {
+      const response = await fetch(`/api/conversations/${conversationId}`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'same-origin',
+        body: JSON.stringify({
+          delete_workspace_document_ids: getSelectedDeleteConversationLinkedDocumentIds(),
+        }),
+      });
+      if (!response.ok) {
+        const errorPayload = await response.json().catch(() => ({}));
+        throw new Error(errorPayload.error || 'Failed to delete conversation');
       }
-    })
-    .catch(error => {
-      console.error("Error deleting conversation:", error);
-      showToast(`Error deleting conversation: ${error.error || 'Unknown error'}`, "danger");
-      // Re-enable button if loading state was shown
+
+      bootstrap.Modal.getOrCreateInstance(deleteConversationModalEl)?.hide();
+      removeConversationFromUi(conversationId, { toastMessage: 'Conversation deleted.' });
+      return;
+    }
+
+    let action = metadata.can_delete_conversation ? 'delete' : 'leave';
+    let newOwnerUserId = null;
+    if (metadata.can_delete_conversation) {
+      action = deleteConversationModalEl?.querySelector('input[name="delete-conversation-action"]:checked')?.value || 'delete';
+      if (action === 'leave') {
+        newOwnerUserId = deleteConversationNewOwnerSelectEl?.value || null;
+        if (!newOwnerUserId) {
+          throw new Error('Choose a new owner before leaving the shared conversation.');
+        }
+      }
+    }
+
+    const response = await fetch(`/api/collaboration/conversations/${conversationId}/delete-action`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      credentials: 'same-origin',
+      body: JSON.stringify({
+        action,
+        new_owner_user_id: newOwnerUserId,
+      }),
     });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.error || 'Failed to update the shared conversation');
+    }
+
+    bootstrap.Modal.getOrCreateInstance(deleteConversationModalEl)?.hide();
+    removeConversationFromUi(conversationId, {
+      toastMessage: action === 'delete' ? 'Shared conversation deleted for all participants.' : 'You left the shared conversation.',
+    });
+  } catch (error) {
+    showToast(error.message || 'Failed to update the conversation.', 'danger');
+  } finally {
+    confirmDeleteConversationBtn.disabled = false;
+  }
+}
+
+// Delete a conversation
+export async function deleteConversation(conversationId) {
+  if (!conversationId || !deleteConversationModalEl) {
+    return;
+  }
+
+  try {
+    const metadata = await buildDeleteConversationContext(conversationId);
+    configureDeleteConversationModal(conversationId, metadata);
+    bootstrap.Modal.getOrCreateInstance(deleteConversationModalEl).show();
+  } catch (error) {
+    showToast(error.message || 'Failed to prepare the delete dialog.', 'danger');
+  }
 }
 
 // Create a new conversation via API
@@ -1443,7 +2161,10 @@ export async function createNewConversation(callback, options = {}) {
       return;
     }
 
-  const { preserveSelections = false } = options;
+  const { preserveSelections = false, initialMessage = "" } = options;
+  if (!preserveSelections) {
+    notifyConversationContextChanged("new", null, { preserveSelections });
+  }
 
     // Disable new button? Show loading?
     if (newConversationBtn) newConversationBtn.disabled = true;
@@ -1457,12 +2178,19 @@ export async function createNewConversation(callback, options = {}) {
     
   try {
     pendingConversationCreation = (async () => {
+      const requestBody = {};
+      const normalizedInitialMessage = String(initialMessage || "").trim();
+      if (normalizedInitialMessage) {
+        requestBody.initial_message = normalizedInitialMessage;
+      }
+
       const response = await fetch("/api/create_conversation", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         credentials: "same-origin",
+        body: JSON.stringify(requestBody),
       });
       if (!response.ok) {
         const errData = await response.json().catch(() => ({}));
@@ -1686,6 +2414,7 @@ async function deleteSelectedConversations() {
         if (chatbox) chatbox.innerHTML = '<div class="text-center p-5 text-muted">Select a conversation to view messages.</div>';
         highlightSelectedConversation(null);
         toggleConversationInfoButton(false); // Hide the info button
+        hideWorkflowActivityButton();
       }
     });
     
@@ -1711,7 +2440,10 @@ async function deleteSelectedConversations() {
 // Toggle conversation pin status
 async function toggleConversationPin(conversationId) {
   try {
-    const response = await fetch(`/api/conversations/${conversationId}/pin`, {
+    const convoItem = document.querySelector(`.conversation-item[data-conversation-id="${conversationId}"]`)
+      || document.querySelector(`.sidebar-conversation-item[data-conversation-id="${conversationId}"]`);
+    const isCollaborativeConversation = convoItem?.dataset?.conversationKind === 'collaborative';
+    const response = await fetch(isCollaborativeConversation ? `/api/collaboration/conversations/${conversationId}/pin` : `/api/conversations/${conversationId}/pin`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -1743,7 +2475,10 @@ async function toggleConversationPin(conversationId) {
 // Toggle conversation hide status
 async function toggleConversationHide(conversationId) {
   try {
-    const response = await fetch(`/api/conversations/${conversationId}/hide`, {
+    const convoItem = document.querySelector(`.conversation-item[data-conversation-id="${conversationId}"]`)
+      || document.querySelector(`.sidebar-conversation-item[data-conversation-id="${conversationId}"]`);
+    const isCollaborativeConversation = convoItem?.dataset?.conversationKind === 'collaborative';
+    const response = await fetch(isCollaborativeConversation ? `/api/collaboration/conversations/${conversationId}/hide` : `/api/conversations/${conversationId}/hide`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -1777,7 +2512,7 @@ function updateHiddenToggleButton() {
   let toggleBtn = document.getElementById("toggle-hidden-btn");
   
   // Count hidden conversations
-  const hiddenCount = allConversations.filter(c => c.is_hidden || false).length;
+  const hiddenCount = conversationFeedHiddenCount;
   
   if (hiddenCount > 0) {
     // Create button if it doesn't exist
@@ -1801,12 +2536,22 @@ function updateHiddenToggleButton() {
     
     // Update button content based on current state
     const icon = showHiddenConversations ? "bi-eye-slash" : "bi-eye";
-    toggleBtn.innerHTML = `<i class="bi ${icon}"></i> <span class="badge bg-secondary">${hiddenCount}</span>`;
-    toggleBtn.style.display = "inline-block";
+    toggleBtn.replaceChildren();
+
+    const iconEl = document.createElement('i');
+    iconEl.classList.add('bi', icon);
+    toggleBtn.appendChild(iconEl);
+    toggleBtn.appendChild(document.createTextNode(' '));
+
+    const countBadge = document.createElement('span');
+    countBadge.classList.add('badge', 'bg-secondary');
+    countBadge.textContent = String(hiddenCount);
+    toggleBtn.appendChild(countBadge);
+    toggleBtn.classList.remove('d-none');
   } else {
     // Hide button if no hidden conversations
     if (toggleBtn) {
-      toggleBtn.style.display = "none";
+      toggleBtn.classList.add('d-none');
     }
   }
 }
@@ -1846,60 +2591,29 @@ if (exportSelectedBtn) {
   });
 }
 
+if (conversationsList) {
+  conversationsList.addEventListener('scroll', () => {
+    maybeLoadMoreConversationsFromScroll(conversationsList);
+  });
+}
+
 // Helper function to set show hidden conversations state and return a promise
 export function setShowHiddenConversations(value) {
   showHiddenConversations = value;
-  
-  // If enabling hidden conversations and the list is already loaded, just re-render
-  if (value && allConversations.length > 0) {
-    // Re-filter and render without fetching
-    const sortedConversations = [...allConversations].sort((a, b) => {
-      const aPinned = a.is_pinned || false;
-      const bPinned = b.is_pinned || false;
-      if (aPinned !== bPinned) return bPinned ? 1 : -1;
-      const aDate = new Date(a.last_updated);
-      const bDate = new Date(b.last_updated);
-      return bDate - aDate;
-    });
-    
-    let filteredConversations = sortedConversations.filter(convo => {
-      const isHidden = convo.is_hidden || false;
-      return !isHidden || showHiddenConversations || selectionModeActive;
-    });
-    
-    filteredConversations = applyQuickSearchFilter(filteredConversations);
-    
-    if (conversationsList) {
-      conversationsList.innerHTML = "";
-      if (filteredConversations.length === 0) {
-        conversationsList.innerHTML = '<div class="text-center p-3 text-muted">No visible conversations.</div>';
-      } else {
-        filteredConversations.forEach(convo => {
-          conversationsList.appendChild(createConversationItem(convo));
-        });
-      }
-    }
-    
-    updateHiddenToggleButton();
-    
-    if (window.chatSidebarConversations && window.chatSidebarConversations.loadSidebarConversations) {
-      window.chatSidebarConversations.loadSidebarConversations();
-    }
-  } else {
-    // Otherwise do a full reload
-    loadConversations();
-  }
+  loadConversations();
 }
 
 // Expose functions globally for sidebar integration
 window.chatConversations = {
   selectConversation,
   loadConversations,
+  loadMoreConversations,
   highlightSelectedConversation,
   addConversationToList,
   markConversationRead,
   setConversationUnreadState,
   deleteConversation,
+  removeConversationFromUi,
   toggleConversationSelection,
   deleteSelectedConversations,
   bulkPinConversations,
@@ -2016,6 +2730,13 @@ function addChatTypeBadges(convoItem, classificationsEl) {
   // Don't show badges for Model-only conversations
   if (chatType === 'personal' || chatType === 'personal_single_user') {
     return;
+  } else if (chatType === 'personal_multi_user') {
+    const sharedBadge = document.createElement("span");
+    sharedBadge.classList.add("badge", "bg-primary-subtle", "text-primary-emphasis");
+    sharedBadge.textContent = 'shared';
+
+    appendBadgeSpacer();
+    classificationsEl.appendChild(sharedBadge);
   } else if (chatType && chatType.startsWith('group')) {
     // Group workspace was used
     const groupBadge = document.createElement("span");

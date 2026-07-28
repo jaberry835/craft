@@ -1,6 +1,6 @@
 [
   {
-    "allowedMemberTypes": ["User"],
+    "allowedMemberTypes": ["User", "Application"],
     "description": "Allows access to view user feedback admin page.",
     "displayName": "Feedback Admin",
     "id": "12e32860-88a8-421e-8a6f-faf08e3efe2e",
@@ -22,6 +22,14 @@
     "id": "3a614cbb-7f8b-47e1-8e55-5b3c4f71a1c8",
     "isEnabled": true,
     "value": "CreateGroups"
+  },
+  {
+    "allowedMemberTypes": ["User"],
+    "description": "Allows user to create public workspaces (if enabled).",
+    "displayName": "Create Public Workspace",
+    "id": "cdde6011-a59e-4b76-ae33-1dc878ea5c96",
+    "isEnabled": true,
+    "value": "CreatePublicWorkspaces"
   },
   {
     "allowedMemberTypes": ["User"],
@@ -62,6 +70,62 @@
     "id": "6399b062-9114-49ec-a291-c445a0b2b33e",
     "isEnabled": true,
     "value": "ControlCenterDashboardReader"
+  },
+  {
+    "allowedMemberTypes": [ "User" ],
+    "description": "Allows use of Deep Research when the Deep Research app role requirement is enabled.",
+    "displayName": "Deep Research User",
+    "id": "25558b2f-8e53-47a2-83da-022e0dfee800",
+    "isEnabled": true,
+    "value": "DeepResearchUser"
+  },
+  {
+    "allowedMemberTypes": [ "User" ],
+    "description": "Allows use of URL Access when the URL Access app role requirement is enabled.",
+    "displayName": "URL Access User",
+    "id": "6faea62e-2595-48b2-92e2-842a56347c9f",
+    "isEnabled": true,
+    "value": "UrlAccessUser"
+  },
+  {
+    "allowedMemberTypes": [ "User" ],
+    "description": "Allows chat file uploads when the chat upload app role requirement is enabled.",
+    "displayName": "Chat File Upload User",
+    "id": "3f6ec07d-db95-4c0e-ab03-0645b95736e3",
+    "isEnabled": true,
+    "value": "ChatFileUploadUser"
+  },
+  {
+    "allowedMemberTypes": [ "User" ],
+    "description": "Allows personal workflow access when the workflow app role requirement is enabled.",
+    "displayName": "Workflow User",
+    "id": "7d42c0b7-5a95-43b6-9e38-2fb06988901e",
+    "isEnabled": true,
+    "value": "WorkflowUser"
+  },
+  {
+    "allowedMemberTypes": [ "User" ],
+    "description": "Allows personal File Sync source management when the personal sync app role requirement is enabled.",
+    "displayName": "Personal File Sync User",
+    "id": "eba309b8-baf2-4171-aa8e-16b76e5ebc7d",
+    "isEnabled": true,
+    "value": "PersonalFileSyncUser"
+  },
+  {
+    "allowedMemberTypes": [ "User" ],
+    "description": "Allows group File Sync source management when the group sync app role requirement is enabled.",
+    "displayName": "Group File Sync User",
+    "id": "1ce1805b-38d7-497c-933d-80ac9c9c3e30",
+    "isEnabled": true,
+    "value": "GroupFileSyncUser"
+  },
+  {
+    "allowedMemberTypes": [ "User" ],
+    "description": "Allows public workspace File Sync source management when the public sync app role requirement is enabled.",
+    "displayName": "Public Workspace File Sync User",
+    "id": "bda20c0d-c305-4c81-a9b2-66e245ee2354",
+    "isEnabled": true,
+    "value": "PublicWorkspaceFileSyncUser"
   }
 
 ]

@@ -1,3 +1,287 @@
+// agents_common.js
+
+import { showToast } from './chat/chat-toast.js';
+
+const AGENT_ICON_FALLBACK_CLASSES = Object.freeze([
+	'bi-robot',
+	'bi-stars',
+	'bi-lightbulb',
+	'bi-search',
+	'bi-graph-up',
+	'bi-shield-check',
+	'bi-code-square',
+	'bi-database',
+	'bi-envelope',
+	'bi-calendar-check',
+	'bi-file-earmark-text',
+	'bi-bar-chart',
+	'bi-diagram-3',
+	'bi-globe',
+	'bi-gear',
+	'bi-person-workspace'
+]);
+const AGENT_ICON_IMAGE_MAX_SIZE = 128;
+const AGENT_ICON_IMAGE_MAX_DATA_URL_LENGTH = 350000;
+const AGENT_ICON_CLASS_PATTERN = /^bi-[a-z0-9][a-z0-9-]{0,80}$/;
+const DEFAULT_ICON_CONTROL_SELECTORS = Object.freeze({
+	editor: '.agent-icon-editor',
+	mode: '#agent-icon-mode',
+	classInput: '#agent-icon-class',
+	imageData: '#agent-icon-image-data',
+	preview: '#agent-icon-preview',
+	typeBootstrap: '#agent-icon-type-bootstrap',
+	typeImage: '#agent-icon-type-image',
+	bootstrapControls: '#agent-bootstrap-icon-controls',
+	imageControls: '#agent-image-icon-controls',
+	pickerButton: '#agent-icon-picker-button',
+	pickerLabel: '#agent-icon-picker-label',
+	pickerSearch: '#agent-icon-picker-search',
+	pickerList: '#agent-icon-picker-list',
+	imageFile: '#agent-icon-image-file',
+	imageClear: '#agent-icon-image-clear',
+	defaultBootstrapIcon: 'bi-robot'
+});
+let bootstrapIconClassesPromise = null;
+
+function getIconControlConfig(options = {}) {
+	return { ...DEFAULT_ICON_CONTROL_SELECTORS, ...(options || {}) };
+}
+
+function getScopedElement(root, selector) {
+	if (!root || !selector) return null;
+	const normalizedSelector = /^[#.\[]/.test(selector) ? selector : `#${selector}`;
+	return root.querySelector(normalizedSelector);
+}
+
+function normalizeBootstrapIconClass(value, fallbackIcon = 'bi-robot') {
+	const normalizedFallback = AGENT_ICON_CLASS_PATTERN.test(fallbackIcon) ? fallbackIcon : 'bi-robot';
+	const iconClass = String(value || '').replace(/^bi\s+/, '').trim();
+	return AGENT_ICON_CLASS_PATTERN.test(iconClass) ? iconClass : normalizedFallback;
+}
+
+async function loadBootstrapIconClasses() {
+	if (!bootstrapIconClassesPromise) {
+		bootstrapIconClassesPromise = fetch('/static/css/bootstrap-icons.css')
+			.then(response => response.ok ? response.text() : '')
+			.then(cssText => {
+				const matches = new Set();
+				const iconPattern = /\.bi-([a-z0-9][a-z0-9-]*)::before/g;
+				let match = iconPattern.exec(cssText);
+				while (match) {
+					matches.add(`bi-${match[1]}`);
+					match = iconPattern.exec(cssText);
+				}
+				return Array.from(matches).sort((left, right) => left.localeCompare(right));
+			})
+			.catch(() => []);
+	}
+
+	const iconClasses = await bootstrapIconClassesPromise;
+	return iconClasses.length ? iconClasses : Array.from(AGENT_ICON_FALLBACK_CLASSES);
+}
+
+function setIconPreview(root, options = {}) {
+	const config = getIconControlConfig(options);
+	const mode = getScopedElement(root, config.mode)?.value || 'bootstrap';
+	const preview = getScopedElement(root, config.preview);
+	if (!preview) return;
+	preview.textContent = '';
+
+	if (mode === 'image') {
+		const imageData = getScopedElement(root, config.imageData)?.value || '';
+		if (/^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/.test(imageData)) {
+			const image = document.createElement('img');
+			image.src = imageData;
+			image.alt = '';
+			preview.appendChild(image);
+			return;
+		}
+	}
+
+	const iconElement = document.createElement('i');
+	iconElement.className = `bi ${normalizeBootstrapIconClass(getScopedElement(root, config.classInput)?.value, config.defaultBootstrapIcon)}`;
+	iconElement.setAttribute('aria-hidden', 'true');
+	preview.appendChild(iconElement);
+}
+
+function setBootstrapIcon(root, iconClass, options = {}) {
+	const config = getIconControlConfig(options);
+	const normalizedIcon = normalizeBootstrapIconClass(iconClass, config.defaultBootstrapIcon);
+	const classInput = getScopedElement(root, config.classInput);
+	const pickerLabel = getScopedElement(root, config.pickerLabel);
+	const pickerButtonIcon = getScopedElement(root, config.pickerButton)?.querySelector('i');
+	if (classInput) classInput.value = normalizedIcon;
+	if (pickerLabel) pickerLabel.textContent = normalizedIcon;
+	if (pickerButtonIcon) pickerButtonIcon.className = `bi ${normalizedIcon} me-1`;
+	setIconPreview(root, config);
+}
+
+function setIconMode(root, mode, options = {}) {
+	const config = getIconControlConfig(options);
+	const normalizedMode = mode === 'image' ? 'image' : 'bootstrap';
+	const modeInput = getScopedElement(root, config.mode);
+	const bootstrapRadio = getScopedElement(root, config.typeBootstrap);
+	const imageRadio = getScopedElement(root, config.typeImage);
+	const bootstrapControls = getScopedElement(root, config.bootstrapControls);
+	const imageControls = getScopedElement(root, config.imageControls);
+	if (modeInput) modeInput.value = normalizedMode;
+	if (bootstrapRadio) bootstrapRadio.checked = normalizedMode === 'bootstrap';
+	if (imageRadio) imageRadio.checked = normalizedMode === 'image';
+	bootstrapControls?.classList.toggle('d-none', normalizedMode !== 'bootstrap');
+	imageControls?.classList.toggle('d-none', normalizedMode !== 'image');
+	setIconPreview(root, config);
+}
+
+function createImageFromUrl(imageUrl) {
+	return new Promise((resolve, reject) => {
+		const image = new Image();
+		image.onload = () => resolve(image);
+		image.onerror = () => reject(new Error('Unable to load image.'));
+		image.src = imageUrl;
+	});
+}
+
+async function resizeIconFileToDataUrl(file) {
+	if (!file || !['image/png', 'image/jpeg'].includes(file.type)) {
+		throw new Error('Choose a PNG or JPEG image.');
+	}
+
+	const objectUrl = URL.createObjectURL(file);
+	try {
+		const image = await createImageFromUrl(objectUrl);
+		const scale = Math.min(1, AGENT_ICON_IMAGE_MAX_SIZE / Math.max(image.width, image.height));
+		const width = Math.max(1, Math.round(image.width * scale));
+		const height = Math.max(1, Math.round(image.height * scale));
+		const canvas = document.createElement('canvas');
+		canvas.width = width;
+		canvas.height = height;
+		const context = canvas.getContext('2d');
+		context.drawImage(image, 0, 0, width, height);
+		const dataUrl = canvas.toDataURL('image/png');
+		if (dataUrl.length > AGENT_ICON_IMAGE_MAX_DATA_URL_LENGTH) {
+			throw new Error('The icon image is too large after resizing.');
+		}
+		return dataUrl;
+	} finally {
+		URL.revokeObjectURL(objectUrl);
+	}
+}
+
+async function renderIconPickerOptions(root, filterText = '', options = {}) {
+	const config = getIconControlConfig(options);
+	const list = getScopedElement(root, config.pickerList);
+	if (!list) return;
+	list.textContent = '';
+	const normalizedFilter = String(filterText || '').trim().toLowerCase();
+	const iconClasses = await loadBootstrapIconClasses();
+	const filteredIcons = iconClasses.filter(iconClass => !normalizedFilter || iconClass.includes(normalizedFilter));
+
+	if (!filteredIcons.length) {
+		const empty = document.createElement('div');
+		empty.className = 'text-muted small px-2 py-1';
+		empty.textContent = 'No matching icons';
+		list.appendChild(empty);
+		return;
+	}
+
+	const fragment = document.createDocumentFragment();
+	filteredIcons.forEach(iconClass => {
+		const option = document.createElement('button');
+		option.type = 'button';
+		option.className = 'dropdown-item agent-icon-picker-option';
+		option.dataset.iconClass = iconClass;
+		option.setAttribute('role', 'option');
+
+		const icon = document.createElement('i');
+		icon.className = `bi ${iconClass}`;
+		icon.setAttribute('aria-hidden', 'true');
+		const label = document.createElement('span');
+		label.textContent = iconClass;
+		option.appendChild(icon);
+		option.appendChild(label);
+		fragment.appendChild(option);
+	});
+	list.appendChild(fragment);
+}
+
+export function initializeIconControls(root = document, options = {}) {
+	const config = getIconControlConfig(options);
+	const editor = getScopedElement(root, config.preview)?.closest(config.editor);
+	if (!editor || editor.dataset.iconControlsBound === 'true') {
+		return;
+	}
+	editor.dataset.iconControlsBound = 'true';
+
+	getScopedElement(root, config.typeBootstrap)?.addEventListener('change', () => setIconMode(root, 'bootstrap', config));
+	getScopedElement(root, config.typeImage)?.addEventListener('change', () => setIconMode(root, 'image', config));
+	getScopedElement(root, config.pickerSearch)?.addEventListener('input', event => {
+		renderIconPickerOptions(root, event.target.value, config);
+	});
+	getScopedElement(root, config.pickerList)?.addEventListener('click', event => {
+		const option = event.target.closest('.agent-icon-picker-option[data-icon-class]');
+		if (!option) return;
+		setBootstrapIcon(root, option.dataset.iconClass, config);
+		window.bootstrap?.Dropdown?.getInstance(getScopedElement(root, config.pickerButton))?.hide();
+	});
+	getScopedElement(root, config.imageFile)?.addEventListener('change', async event => {
+		const file = event.target.files?.[0];
+		if (!file) return;
+		try {
+			const dataUrl = await resizeIconFileToDataUrl(file);
+			const imageDataInput = getScopedElement(root, config.imageData);
+			if (imageDataInput) imageDataInput.value = dataUrl;
+			setIconMode(root, 'image', config);
+		} catch (error) {
+			showToast(error.message || 'Unable to load icon image.', 'warning');
+			event.target.value = '';
+		}
+	});
+	getScopedElement(root, config.imageClear)?.addEventListener('click', () => {
+		const imageDataInput = getScopedElement(root, config.imageData);
+		const fileInput = getScopedElement(root, config.imageFile);
+		if (imageDataInput) imageDataInput.value = '';
+		if (fileInput) fileInput.value = '';
+		setIconMode(root, 'bootstrap', config);
+	});
+
+	renderIconPickerOptions(root, '', config);
+}
+
+export function setIconPayload(root, iconPayload, options = {}) {
+	const config = getIconControlConfig(options);
+	initializeIconControls(root, config);
+	if (iconPayload && iconPayload.kind === 'image' && iconPayload.value) {
+		const imageDataInput = getScopedElement(root, config.imageData);
+		if (imageDataInput) imageDataInput.value = iconPayload.value;
+		setIconMode(root, 'image', config);
+		return;
+	}
+	setBootstrapIcon(root, iconPayload && iconPayload.kind === 'bootstrap' ? iconPayload.value : config.defaultBootstrapIcon, config);
+	setIconMode(root, 'bootstrap', config);
+}
+
+function setAgentIconPayload(root, iconPayload) {
+	setIconPayload(root, iconPayload);
+}
+
+export function getIconPayload(root, options = {}) {
+	const config = getIconControlConfig(options);
+	const mode = getScopedElement(root, config.mode)?.value || 'bootstrap';
+	if (mode === 'image') {
+		const imageData = getScopedElement(root, config.imageData)?.value || '';
+		if (/^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/.test(imageData)) {
+			const mimeType = imageData.startsWith('data:image/jpeg') ? 'image/jpeg' : 'image/png';
+			return { kind: 'image', value: imageData, mime_type: mimeType };
+		}
+	}
+	const iconClass = getScopedElement(root, config.classInput)?.value || '';
+	return { kind: 'bootstrap', value: normalizeBootstrapIconClass(iconClass, config.defaultBootstrapIcon) };
+}
+
+export function getAgentIconPayload(root) {
+	return getIconPayload(root);
+}
+
 /**
  * Attaches a shared onchange handler to the custom connection toggle.
  * @param {HTMLInputElement} toggleEl - The custom connection toggle element
@@ -49,6 +333,8 @@ export function setAgentModalFields(agent, opts = {}) {
 	setValue('agent-name', agent.name || '');
 	setValue('agent-display-name', agent.display_name || '');
 	setValue('agent-description', agent.description || '');
+	setValue('agent-tags', Array.isArray(agent.tags) ? agent.tags.join(', ') : '');
+	setAgentIconPayload(root, agent.icon || {});
 	setValue('agent-gpt-endpoint', agent.azure_openai_gpt_endpoint || '');
 	setValue('agent-gpt-key', agent.azure_openai_gpt_key || '');
 	setValue('agent-gpt-deployment', agent.azure_openai_gpt_deployment || '');
@@ -96,7 +382,7 @@ export function getAgentModalFields(opts = {}) {
 		const settingsRaw = getValue('agent-additional-settings');
 		if (settingsRaw) additionalSettings = JSON.parse(settingsRaw);
 	} catch (e) {
-		showToast('error', 'Additional Settings must be a valid JSON object.');
+		showToast('Additional Settings must be a valid JSON object.', 'error');
 		throw e;
 	}
 	// Actions handled here - support both old multiselect and new stepper action cards
@@ -119,6 +405,11 @@ export function getAgentModalFields(opts = {}) {
 		name: getValue('agent-name'),
 		display_name: getValue('agent-display-name'),
 		description: getValue('agent-description'),
+		tags: getValue('agent-tags')
+			.split(',')
+			.map(tag => tag.trim())
+			.filter(Boolean),
+		icon: getAgentIconPayload(root),
 		azure_openai_gpt_endpoint: getValue('agent-gpt-endpoint'),
 		azure_openai_gpt_key: getValue('agent-gpt-key'),
 		azure_openai_gpt_deployment: getValue('agent-gpt-deployment'),
@@ -407,6 +698,9 @@ export function getAvailableModels({ apimEnabled, settings, agent }) {
 				return;
 			}
 			if (agentType === 'new_foundry' && provider !== 'new_foundry') {
+				return;
+			}
+			if (agentType === 'foundry_workflow' && !['foundry_workflow', 'new_foundry', 'aifoundry'].includes(provider)) {
 				return;
 			}
 			const endpointId = endpoint.id || '';

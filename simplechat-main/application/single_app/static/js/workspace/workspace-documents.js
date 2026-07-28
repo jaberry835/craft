@@ -1,7 +1,7 @@
 // static/js/workspace/workspace-documents.js
 
-import { escapeHtml } from "./workspace-utils.js";
-import { initializeTags, renderTagBadges, loadWorkspaceTags } from "./workspace-tags.js";
+import { escapeHtml, getDocumentSyncBadgeHtml, getDocumentSyncDetailsHtml, setDocumentSyncStatusElement } from "./workspace-utils.js";
+import { initializeTags, renderTagBadges, loadWorkspaceTags, currentView } from "./workspace-tags.js";
 import { getSelectedTagsArray, setSelectedTags, clearSelectedTags, updateDocumentTagsDisplay, loadWorkspaceTags as loadTagManagementTags } from './workspace-tag-management.js';
 
 // ------------- State Variables -------------
@@ -16,9 +16,11 @@ let docsTagsFilter = ''; // Added for Tags filter
 let docsSortBy = '_ts';    // Current sort field
 let docsSortOrder = 'desc'; // Current sort order
 const activePolls = new Set();
+let personalWorkspaceFileDownloadsEnabled = false;
 
 // ------------- DOM Elements (Documents Tab) -------------
 const documentsTableBody = document.querySelector("#documents-table tbody");
+const documentsCardView = document.getElementById("documents-card-view");
 const docsPaginationContainer = document.getElementById("docs-pagination-container");
 const docsPageSizeSelect = document.getElementById("docs-page-size-select");
 const fileInput = document.getElementById("workspace-file-input");
@@ -28,6 +30,8 @@ const docMetadataModalEl = document.getElementById("docMetadataModal") ? new boo
 const docMetadataForm = document.getElementById("doc-metadata-form");
 const docsSharedOnlyFilter = document.getElementById("docs-shared-only-filter");
 const deleteSelectedBtn = document.getElementById("delete-selected-btn");
+const downloadSelectedBtn = document.getElementById("download-selected-btn");
+const chatSelectedBtn = document.getElementById("chat-selected-btn");
 const clearSelectionBtn = document.getElementById("clear-selection-btn");
 const documentDeleteModalElement = document.getElementById("documentDeleteModal");
 const documentDeleteModal = documentDeleteModalElement ? new bootstrap.Modal(documentDeleteModalElement) : null;
@@ -39,6 +43,210 @@ const documentDeleteAllBtn = document.getElementById("documentDeleteAllBtn");
 // Selection mode variables
 let selectionModeActive = false;
 let selectedDocuments = new Set();
+let lastCardSelectionAnchorId = null;
+
+function getDocumentConversationUrl(doc) {
+    if (doc && doc.conversation_url) {
+        return doc.conversation_url;
+    }
+    if (doc && doc.conversation_id) {
+        return `/chats?conversation_id=${encodeURIComponent(doc.conversation_id)}`;
+    }
+    return "";
+}
+
+function setDocumentConversationStatusElement(element, doc) {
+    if (!element) {
+        return;
+    }
+
+    const isChatUpload = Boolean(doc && doc.created_from_chat_upload && doc.conversation_id);
+    element.classList.toggle("d-none", !isChatUpload);
+    element.replaceChildren();
+
+    if (!isChatUpload) {
+        return;
+    }
+
+    const wrapper = document.createElement("div");
+    wrapper.className = "d-flex align-items-center gap-2 flex-wrap";
+
+    const label = document.createElement("strong");
+    label.textContent = "Conversation:";
+    wrapper.appendChild(label);
+
+    const link = document.createElement("a");
+    link.href = getDocumentConversationUrl(doc);
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.textContent = doc.conversation_title_at_upload || doc.conversation_id || "Open conversation";
+    wrapper.appendChild(link);
+
+    const badge = document.createElement("span");
+    badge.className = "badge bg-info text-dark";
+    badge.textContent = "chat upload";
+    wrapper.appendChild(badge);
+
+    element.appendChild(wrapper);
+}
+
+function getDocumentSelectionTables() {
+    return [
+        document.getElementById("documents-table"),
+        document.getElementById("folder-docs-table"),
+    ].filter(Boolean);
+}
+
+function getVisibleDocumentCheckboxes() {
+    return Array.from(document.querySelectorAll("#documents-table .document-checkbox, #folder-docs-table .document-checkbox, #documents-card-view .document-checkbox, #folder-documents-card-view .document-checkbox"))
+        .filter(checkbox => checkbox.offsetParent !== null);
+}
+
+function getDocumentSelectAllCheckboxes() {
+    return Array.from(document.querySelectorAll("#documents-table .document-select-all-checkbox, #folder-docs-table .document-select-all-checkbox"));
+}
+
+function syncDocumentCheckboxesWithSelection() {
+    const visibleCheckboxes = getVisibleDocumentCheckboxes();
+    const expandContainers = document.querySelectorAll('#documents-table .expand-collapse-container, #folder-docs-table .expand-collapse-container');
+    const selectedVisibleCount = visibleCheckboxes.reduce((count, checkbox) => {
+        const documentId = checkbox.getAttribute("data-document-id");
+        const isSelected = selectedDocuments.has(documentId);
+        checkbox.checked = isSelected;
+        return count + (isSelected ? 1 : 0);
+    }, 0);
+
+    getDocumentSelectionTables().forEach((table) => {
+        table.classList.toggle("selection-mode", selectionModeActive);
+    });
+
+    expandContainers.forEach((container) => {
+        container.classList.toggle('d-none', selectionModeActive);
+        container.classList.toggle('d-inline-block', !selectionModeActive);
+    });
+
+    getDocumentSelectAllCheckboxes().forEach((checkbox) => {
+        const hasVisibleDocuments = visibleCheckboxes.length > 0;
+        checkbox.checked = hasVisibleDocuments && selectedVisibleCount === visibleCheckboxes.length;
+        checkbox.indeterminate = selectedVisibleCount > 0 && selectedVisibleCount < visibleCheckboxes.length;
+        checkbox.disabled = !selectionModeActive || !hasVisibleDocuments;
+    });
+}
+
+window.syncDocumentSelectionUI = function() {
+    syncDocumentSelectionModeUI();
+};
+
+window.isDocumentSelectionModeActive = function() {
+    return selectionModeActive;
+};
+
+window.toggleSelectAllDocuments = function(isSelected) {
+    if (isSelected && !selectionModeActive) {
+        selectionModeActive = true;
+        syncDocumentSelectionModeUI();
+    }
+
+    getVisibleDocumentCheckboxes().forEach((checkbox) => {
+        const documentId = checkbox.getAttribute("data-document-id");
+        checkbox.checked = isSelected;
+        if (isSelected) {
+            selectedDocuments.add(documentId);
+        } else {
+            selectedDocuments.delete(documentId);
+        }
+    });
+
+    window.syncDocumentSelectionUI();
+};
+
+function getVisibleDocumentCards() {
+    return Array.from(document.querySelectorAll('#documents-card-view .document-item-card, #folder-documents-card-view .document-item-card'))
+        .filter(card => card.offsetParent !== null);
+}
+
+function isDocumentCardActionTarget(target) {
+    return Boolean(target.closest('a, button, input, label, select, textarea, .dropdown-menu, .tag-badge'));
+}
+
+function openDocumentCardDropdown(card) {
+    const dropdownToggle = card.querySelector('.action-dropdown [data-bs-toggle="dropdown"]');
+    if (!dropdownToggle || !window.bootstrap?.Dropdown) {
+        return;
+    }
+
+    window.bootstrap.Dropdown.getOrCreateInstance(dropdownToggle).show();
+}
+
+function setDocumentSelectionModeActive(isActive) {
+    if (selectionModeActive === isActive) {
+        return;
+    }
+
+    selectionModeActive = isActive;
+    if (!selectionModeActive) {
+        selectedDocuments.clear();
+        lastCardSelectionAnchorId = null;
+    }
+    syncDocumentSelectionModeUI();
+}
+
+function selectDocumentCardRange(documentId) {
+    const documentIds = getVisibleDocumentCards()
+        .map(card => card.getAttribute('data-document-id'))
+        .filter(Boolean);
+    const currentIndex = documentIds.indexOf(documentId);
+    const anchorIndex = documentIds.indexOf(lastCardSelectionAnchorId);
+
+    if (currentIndex === -1) {
+        return;
+    }
+
+    if (anchorIndex === -1) {
+        selectedDocuments.add(documentId);
+        lastCardSelectionAnchorId = documentId;
+        return;
+    }
+
+    const startIndex = Math.min(anchorIndex, currentIndex);
+    const endIndex = Math.max(anchorIndex, currentIndex);
+    documentIds.slice(startIndex, endIndex + 1).forEach(id => selectedDocuments.add(id));
+}
+
+function handleDocumentCardClick(event) {
+    const card = event.target.closest('.document-item-card');
+    if (!card || isDocumentCardActionTarget(event.target)) {
+        return;
+    }
+
+    const documentId = card.getAttribute('data-document-id');
+    if (!documentId) {
+        return;
+    }
+
+    if (event.shiftKey || event.ctrlKey || event.metaKey || selectionModeActive) {
+        event.preventDefault();
+        if (!selectionModeActive) {
+            setDocumentSelectionModeActive(true);
+        }
+
+        if (event.shiftKey) {
+            selectDocumentCardRange(documentId);
+        } else {
+            if (selectedDocuments.has(documentId)) {
+                selectedDocuments.delete(documentId);
+            } else {
+                selectedDocuments.add(documentId);
+            }
+            lastCardSelectionAnchorId = documentId;
+        }
+
+        syncDocumentSelectionModeUI();
+        return;
+    }
+
+    openDocumentCardDropdown(card);
+}
 
 // --- Filter elements ---
 const docsSearchInput = document.getElementById('docs-search-input');
@@ -59,6 +267,9 @@ window.docsCurrentPage = docsCurrentPage;
 window.docsTagsFilter = docsTagsFilter;
 window.selectedDocuments = selectedDocuments;
 window.fetchUserDocuments = fetchUserDocuments;
+window.lastFetchedDocs = window.lastFetchedDocs || [];
+window.lastFetchedDocsError = null;
+window.hasFetchedUserDocuments = window.hasFetchedUserDocuments || false;
 
 // ------------- Helper Functions -------------
 function isColorLight(hexColor) {
@@ -89,6 +300,471 @@ function isColorLight(hexColor) {
     const luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
     return luminance > 0.5;
 }
+
+function truncateDocumentText(text, maxLength = 150) {
+    if (!text) {
+        return "";
+    }
+
+    return text.length > maxLength ? `${text.slice(0, maxLength).trimEnd()}…` : text;
+}
+
+function getDocumentProcessingState(doc) {
+    const pctString = String(doc?.percentage_complete ?? "");
+    const pct = /^\d+(\.\d+)?$/.test(pctString) ? parseFloat(pctString) : 0;
+    const docStatus = doc?.status || "";
+    const normalizedStatus = docStatus.toLowerCase();
+    const hasError = normalizedStatus.includes("error");
+    const isComplete = pct >= 100 || normalizedStatus.includes("complete") || hasError;
+
+    return { pct, docStatus, hasError, isComplete };
+}
+
+function getPersonalDocumentAccess(doc) {
+    const currentUserId = window.current_user_id;
+    const isOwner = doc.user_id === currentUserId;
+    let sharedUserEntry = null;
+
+    if (!isOwner) {
+        sharedUserEntry = (doc.shared_user_ids || []).find(
+            entry => entry.startsWith(`${currentUserId},`)
+        ) || null;
+    }
+
+    return {
+        isOwner,
+        sharedUserEntry,
+        requiresApproval: Boolean(!isOwner && sharedUserEntry && sharedUserEntry.endsWith(",not_approved")),
+        hasApprovedAccess: isOwner || (!sharedUserEntry || sharedUserEntry.endsWith(",approved"))
+    };
+}
+
+function getDocumentCardIcon(fileName = "") {
+    const extension = (fileName.split('.').pop() || '').toLowerCase();
+    const iconMap = {
+        pdf: 'bi-filetype-pdf',
+        doc: 'bi-file-earmark-word',
+        docx: 'bi-file-earmark-word',
+        ppt: 'bi-file-earmark-slides',
+        pptx: 'bi-file-earmark-slides',
+        xls: 'bi-file-earmark-spreadsheet',
+        xlsx: 'bi-file-earmark-spreadsheet',
+        xlsm: 'bi-file-earmark-spreadsheet',
+        csv: 'bi-filetype-csv',
+        png: 'bi-file-earmark-image',
+        jpg: 'bi-file-earmark-image',
+        jpeg: 'bi-file-earmark-image',
+        gif: 'bi-file-earmark-image',
+        txt: 'bi-file-earmark-text',
+        md: 'bi-file-earmark-richtext',
+        html: 'bi-filetype-html',
+        json: 'bi-filetype-json',
+        xml: 'bi-filetype-xml'
+    };
+
+    return iconMap[extension] || 'bi-file-earmark-text';
+}
+
+function getDocumentClassificationBadge(doc) {
+    if (!(window.enable_document_classification === true || window.enable_document_classification === "true")) {
+        return '';
+    }
+
+    const currentLabel = doc.document_classification || null;
+    const categories = window.classification_categories || [];
+    const category = categories.find(cat => cat.label === currentLabel);
+
+    if (category) {
+        const bgColor = category.color || '#6c757d';
+        const textColorClass = isColorLight(bgColor) ? 'text-dark' : '';
+        return `<span class="classification-badge ${textColorClass}" style="background-color: ${escapeHtml(bgColor)};">${escapeHtml(category.label)}</span>`;
+    }
+
+    if (currentLabel) {
+        return `<span class="badge bg-warning text-dark">${escapeHtml(currentLabel)}</span>`;
+    }
+
+    return '<span class="badge bg-secondary">None</span>';
+}
+
+function isPdfDocument(doc) {
+    return String(doc?.file_name || '').toLowerCase().endsWith('.pdf');
+}
+
+const DOCUMENT_EXTRACTION_STANDARD_TOOLTIP = 'Standard extraction uses Document Intelligence Read for faster text extraction. Best for plain text PDFs and images.';
+const DOCUMENT_EXTRACTION_ENHANCED_TOOLTIP = 'Enhanced extraction uses Document Intelligence Layout to preserve tables, page structure, forms, and checkbox states. Adds latency and higher cost.';
+const DOCUMENT_CITATION_STANDARD_TOOLTIP = 'Standard citations reference indexed text chunks.';
+const DOCUMENT_CITATION_ENHANCED_TOOLTIP = 'Enhanced citations preserve source-file context for richer citation previews and supported file workflows.';
+
+function getDocumentExtractionModeLabelFromMode(mode) {
+    return mode === 'layout' ? 'Enhanced' : 'Standard';
+}
+
+function getDocumentExtractionModeTooltipFromMode(mode) {
+    return mode === 'layout' ? DOCUMENT_EXTRACTION_ENHANCED_TOOLTIP : DOCUMENT_EXTRACTION_STANDARD_TOOLTIP;
+}
+
+function getDocumentExtractionModeIcon(mode) {
+    return mode === 'layout' ? 'bi-layout-text-window-reverse' : 'bi-file-earmark-text';
+}
+
+function getDocumentTargetExtractionMode(doc) {
+    const currentMode = String(doc?.document_intelligence_extraction_mode || '').trim().toLowerCase();
+    return currentMode === 'layout' ? 'read' : 'layout';
+}
+
+function getDocumentExtractionChangeTooltip(targetMode) {
+    return targetMode === 'layout'
+        ? `Extract again with Enhanced extraction. ${DOCUMENT_EXTRACTION_ENHANCED_TOOLTIP}`
+        : `Extract again with Standard extraction. ${DOCUMENT_EXTRACTION_STANDARD_TOOLTIP}`;
+}
+
+function getDocumentExtractionModeLabel(doc) {
+    const mode = String(doc?.document_intelligence_extraction_mode || '').trim().toLowerCase();
+    return getDocumentExtractionModeLabelFromMode(mode);
+}
+
+function getDocumentExtractionModeTooltip(doc) {
+    const mode = String(doc?.document_intelligence_extraction_mode || '').trim().toLowerCase();
+    return getDocumentExtractionModeTooltipFromMode(mode);
+}
+
+function getDocumentCitationTooltip(doc) {
+    return doc?.enhanced_citations ? DOCUMENT_CITATION_ENHANCED_TOOLTIP : DOCUMENT_CITATION_STANDARD_TOOLTIP;
+}
+
+function getDocumentExtractionModeBadge(doc) {
+    if (!isPdfDocument(doc)) {
+        return '';
+    }
+
+    const label = getDocumentExtractionModeLabel(doc);
+    const badgeClass = label === 'Enhanced' ? 'bg-primary' : 'bg-secondary';
+    const tooltip = getDocumentExtractionModeTooltip(doc);
+    return `<span class="badge ${badgeClass}" title="${escapeHtml(tooltip)}"><i class="bi bi-file-earmark-text me-1"></i>${label}</span>`;
+}
+
+function getDocumentReprocessDropdownItems(doc) {
+    if (!isPdfDocument(doc)) {
+        return '';
+    }
+
+    const docId = escapeHtml(String(doc.id || ''));
+    const targetMode = getDocumentTargetExtractionMode(doc);
+    const targetLabel = getDocumentExtractionModeLabelFromMode(targetMode);
+    const targetIcon = getDocumentExtractionModeIcon(targetMode);
+    const targetTooltip = getDocumentExtractionChangeTooltip(targetMode);
+
+    return `
+        <li><hr class="dropdown-divider"></li>
+        <li><h6 class="dropdown-header">Change Extraction</h6></li>
+        <li><a class="dropdown-item" href="#" title="${escapeHtml(targetTooltip)}" onclick="window.reprocessDocumentExtraction('${docId}', '${targetMode}', event); return false;">
+            <i class="bi ${targetIcon} me-2"></i>Change to ${targetLabel}
+        </a></li>`;
+}
+
+    window.isWorkspacePdfDocument = isPdfDocument;
+    window.getWorkspaceDocumentExtractionModeLabel = getDocumentExtractionModeLabel;
+    window.getWorkspaceDocumentExtractionModeBadge = getDocumentExtractionModeBadge;
+    window.getWorkspaceDocumentReprocessDropdownItems = getDocumentReprocessDropdownItems;
+
+function getDocumentMetaPills(doc) {
+    const pills = [];
+    const authors = Array.isArray(doc.authors)
+        ? doc.authors.filter(Boolean)
+        : (doc.authors ? [doc.authors] : []);
+
+    if (doc.version) {
+        pills.push(`<span class="document-meta-pill"><i class="bi bi-layers"></i>v${escapeHtml(String(doc.version))}</span>`);
+    }
+    if (doc.number_of_pages) {
+        pills.push(`<span class="document-meta-pill"><i class="bi bi-file-earmark-text"></i>${escapeHtml(String(doc.number_of_pages))} pages</span>`);
+    }
+    if (isPdfDocument(doc)) {
+        pills.push(`<span class="document-meta-pill"><i class="bi bi-file-earmark-richtext"></i>${getDocumentExtractionModeLabel(doc)}</span>`);
+    }
+    if (authors.length) {
+        const authorLabel = authors.length > 2
+            ? `${authors.slice(0, 2).join(', ')} +${authors.length - 2}`
+            : authors.join(', ');
+        pills.push(`<span class="document-meta-pill"><i class="bi bi-people"></i>${escapeHtml(authorLabel)}</span>`);
+    }
+    if (doc.publication_date) {
+        pills.push(`<span class="document-meta-pill"><i class="bi bi-calendar-event"></i>${escapeHtml(String(doc.publication_date))}</span>`);
+    }
+
+    return pills.join('');
+}
+
+function getDocumentSummaryText(doc) {
+    const abstractText = truncateDocumentText((doc.abstract || '').trim(), 165);
+    if (abstractText) {
+        return abstractText;
+    }
+
+    const keywords = Array.isArray(doc.keywords)
+        ? doc.keywords.filter(Boolean).join(', ')
+        : (doc.keywords || '');
+
+    if (keywords) {
+        return `Keywords: ${truncateDocumentText(keywords, 165)}`;
+    }
+
+    return 'Use chat, metadata tools, and sharing actions directly from this document card.';
+}
+
+function renderDocumentsEmptyState(filtersActive) {
+    const message = filtersActive
+        ? 'No documents found matching the current filters.'
+        : 'No documents found. Upload a document to get started.';
+    const resetHtml = filtersActive
+        ? '<br /><button class="btn btn-link btn-sm p-0 docs-reset-filter-msg-btn" type="button">Clear filters</button> to see all documents.'
+        : '';
+
+    documentsTableBody.innerHTML = `
+        <tr>
+            <td colspan="4" class="text-center p-4 text-muted">${message}${resetHtml}</td>
+        </tr>`;
+
+    if (documentsCardView) {
+        documentsCardView.innerHTML = `
+            <div class="col-12 text-center text-muted py-5">
+                <i class="bi bi-folder2-open display-6 mb-2 d-block"></i>
+                <p class="mb-2">${message}</p>
+                ${filtersActive ? '<button class="btn btn-link btn-sm p-0 docs-reset-filter-msg-btn" type="button">Clear filters</button>' : ''}
+            </div>`;
+    }
+
+    document.querySelectorAll('.docs-reset-filter-msg-btn').forEach(button => {
+        if (button.dataset.bound === 'true') {
+            return;
+        }
+
+        button.dataset.bound = 'true';
+        button.addEventListener('click', () => {
+            docsClearFiltersBtn?.click();
+        });
+    });
+}
+
+function renderDocumentsErrorState(message) {
+    documentsTableBody.innerHTML = `<tr><td colspan="4" class="text-center text-danger p-4">${message}</td></tr>`;
+
+    if (documentsCardView) {
+        documentsCardView.innerHTML = `
+            <div class="col-12 text-center text-danger py-5">
+                <i class="bi bi-exclamation-triangle display-6 mb-2 d-block"></i>
+                <p class="mb-0">${message}</p>
+            </div>`;
+    }
+}
+
+function createDocumentCard(doc) {
+    const docId = doc.id;
+    const { pct, docStatus, hasError, isComplete } = getDocumentProcessingState(doc);
+    const access = getPersonalDocumentAccess(doc);
+    const displayTitle = doc.title && doc.title !== doc.file_name ? doc.title : (doc.file_name || 'Untitled');
+    const subtitle = doc.title && doc.title !== doc.file_name ? (doc.file_name || '') : '';
+    const selected = selectedDocuments.has(docId);
+    const checkboxClass = selectionModeActive ? '' : ' d-none';
+
+    let statusBadge = '<span class="badge bg-success">Ready</span>';
+    if (access.requiresApproval) {
+        statusBadge = '<span class="badge bg-warning text-dark">Pending Approval</span>';
+    } else if (hasError) {
+        statusBadge = '<span class="badge bg-danger">Error</span>';
+    } else if (!isComplete) {
+        statusBadge = `<span class="badge bg-info text-dark">Processing ${pct.toFixed(0)}%</span>`;
+    }
+
+    let primaryButtonsHtml = '';
+    if (access.requiresApproval) {
+        primaryButtonsHtml += `
+            <button class="btn btn-sm btn-success me-1" onclick="window.approveSharedDocument('${docId}', this, '${escapeHtml(doc.owner_id || doc.user_id)}')">
+                <i class="bi bi-check-circle me-1"></i>Approve
+            </button>`;
+    } else if (isComplete && !hasError && access.hasApprovedAccess) {
+        primaryButtonsHtml += `
+            <button class="btn btn-sm btn-primary me-1" onclick="window.redirectToChat('${docId}')">
+                <i class="bi bi-chat-dots me-1"></i>Chat
+            </button>
+            <button class="btn btn-sm btn-outline-secondary me-1" onclick="window.onEditDocument('${docId}')">
+                <i class="bi bi-pencil me-1"></i>Edit
+            </button>`;
+    }
+
+    let dropdownItems = '';
+    if (isComplete && !hasError) {
+        dropdownItems += `
+            <li><a class="dropdown-item select-btn" href="#" onclick="window.toggleSelectionMode(); return false;">
+                <i class="bi bi-check-square me-2"></i>Select
+            </a></li>`;
+
+        if (access.hasApprovedAccess) {
+            dropdownItems += `
+                <li><a class="dropdown-item" href="#" onclick="window.redirectToChat('${docId}'); return false;">
+                    <i class="bi bi-chat-dots-fill me-2"></i>Chat
+                </a></li>
+                <li><a class="dropdown-item" href="#" onclick="window.onEditDocument('${docId}'); return false;">
+                    <i class="bi bi-pencil-fill me-2"></i>Edit Metadata
+                </a></li>`;
+            if (personalWorkspaceFileDownloadsEnabled) {
+                dropdownItems += `
+                <li><a class="dropdown-item" href="#" onclick="window.downloadDocumentFile('${docId}', event); return false;">
+                    <i class="bi bi-download me-2"></i>Download file
+                </a></li>`;
+            }
+        }
+
+        if (window.enable_extract_meta_data === true || window.enable_extract_meta_data === "true") {
+            dropdownItems += `
+                <li><a class="dropdown-item" href="#" onclick="window.onExtractMetadata('${docId}', event); return false;">
+                    <i class="bi bi-magic me-2"></i>Extract Metadata
+                </a></li>`;
+        }
+
+        if (access.isOwner) {
+            dropdownItems += getDocumentReprocessDropdownItems(doc);
+        }
+
+        if (access.isOwner && (window.enable_file_sharing === true || window.enable_file_sharing === "true")) {
+            const shareCount = Array.isArray(doc.shared_user_ids) ? doc.shared_user_ids.length : 0;
+            dropdownItems += `
+                <li><a class="dropdown-item" href="#" onclick="window.shareDocument('${docId}', '${escapeHtml(doc.file_name || '')}'); return false;">
+                    <i class="bi bi-share-fill me-2"></i>Share
+                    <span class="badge bg-secondary ms-1">${shareCount}</span>
+                </a></li>`;
+        }
+
+        if (access.isOwner) {
+            dropdownItems += `
+                <li><hr class="dropdown-divider"></li>
+                <li><a class="dropdown-item text-danger" href="#" onclick="window.deleteDocument('${docId}', event); return false;">
+                    <i class="bi bi-trash-fill me-2"></i>Delete
+                </a></li>`;
+        } else if (access.sharedUserEntry && !access.requiresApproval) {
+            dropdownItems += `
+                <li><hr class="dropdown-divider"></li>
+                <li><a class="dropdown-item text-danger" href="#" onclick="window.removeSelfFromDocument('${docId}', event); return false;">
+                    <i class="bi bi-x-circle-fill me-2"></i>Remove
+                </a></li>`;
+        }
+    } else if (access.isOwner) {
+        dropdownItems += `
+            <li><a class="dropdown-item text-danger" href="#" onclick="window.deleteDocument('${docId}', event); return false;">
+                <i class="bi bi-trash-fill me-2"></i>Delete
+            </a></li>`;
+    }
+
+    const dropdownHtml = dropdownItems
+        ? `
+            <div class="dropdown action-dropdown d-inline-block ms-auto">
+                <button class="btn btn-sm btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+                    <i class="bi bi-three-dots-vertical"></i>
+                </button>
+                <ul class="dropdown-menu dropdown-menu-end">${dropdownItems}</ul>
+            </div>`
+        : '';
+
+    const progressHtml = hasError
+        ? `<div class="alert alert-danger py-2 px-3 small mb-0"><i class="bi bi-exclamation-triangle-fill me-1"></i>${escapeHtml(docStatus || 'Processing error')}</div>`
+        : (!isComplete
+            ? `<div class="document-item-card__progress"><div class="progress" style="height: 10px;"><div class="progress-bar progress-bar-striped progress-bar-animated bg-info" role="progressbar" style="width: ${pct}%" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"></div></div><span class="document-item-card__progress-label">${escapeHtml(docStatus)} (${pct.toFixed(0)}%)</span></div>`
+            : '');
+
+    const cardColumn = document.createElement('div');
+    cardColumn.className = 'col-12 col-md-6 col-xl-4';
+    cardColumn.innerHTML = `
+        <div class="card item-card document-item-card h-100${selected ? ' is-selected' : ''}" data-document-id="${docId}">
+            <div class="card-body d-flex flex-column">
+                <div class="document-item-card__header">
+                    <div class="document-item-card__check">
+                        <input type="checkbox" class="form-check-input document-checkbox${checkboxClass}" data-document-id="${docId}" ${selected ? 'checked' : ''} />
+                    </div>
+                    <div class="item-card-icon"><i class="bi ${getDocumentCardIcon(doc.file_name || '')}" style="font-size: 1.75rem;"></i></div>
+                    <div class="document-item-card__title-wrap">
+                        <div class="document-item-card__eyebrow">Personal document</div>
+                        <h6 class="card-title mb-1" title="${escapeHtml(displayTitle)}">${escapeHtml(truncateDocumentText(displayTitle, 60))}</h6>
+                        ${subtitle ? `<div class="document-item-card__subtitle" title="${escapeHtml(subtitle)}">${escapeHtml(subtitle)}</div>` : ''}
+                    </div>
+                    <div class="document-item-card__status">${statusBadge}</div>
+                </div>
+                <div class="document-item-card__summary">${escapeHtml(getDocumentSummaryText(doc))}</div>
+                <div class="document-item-card__meta">${getDocumentMetaPills(doc)}</div>
+                <div class="document-item-card__badges">
+                    ${getDocumentClassificationBadge(doc)}
+                    <span class="badge ${doc.enhanced_citations ? 'bg-success' : 'bg-secondary'}" title="${escapeHtml(getDocumentCitationTooltip(doc))}">${doc.enhanced_citations ? 'Enhanced citations' : 'Standard citations'}</span>
+                    ${getDocumentSyncBadgeHtml(doc)}
+                </div>
+                <div class="document-item-card__tags">${renderTagBadges(doc.tags || [], 4)}</div>
+                ${progressHtml}
+                <div class="item-card-buttons mt-auto d-flex flex-wrap gap-1">
+                    ${primaryButtonsHtml}
+                    ${dropdownHtml}
+                </div>
+            </div>
+        </div>`;
+
+    return cardColumn;
+}
+
+function renderDocumentCards(docs) {
+    if (!documentsCardView) {
+        return;
+    }
+
+    documentsCardView.innerHTML = '';
+    docs.forEach(doc => {
+        documentsCardView.appendChild(createDocumentCard(doc));
+    });
+}
+
+window.createWorkspaceDocumentCard = createDocumentCard;
+window.renderWorkspaceDocumentCardsInto = function(docs, target) {
+    if (!target) {
+        return;
+    }
+
+    target.innerHTML = '';
+    docs.forEach(doc => {
+        target.appendChild(createDocumentCard(doc));
+    });
+    syncDocumentSelectionModeUI();
+};
+
+function renderWorkspaceDocumentView() {
+    const docs = Array.isArray(window.lastFetchedDocs) ? window.lastFetchedDocs : [];
+    const filtersActive = docsSearchTerm || docsClassificationFilter || docsAuthorFilter || docsKeywordsFilter || docsAbstractFilter || docsTagsFilter;
+
+    if (!window.hasFetchedUserDocuments && !window.lastFetchedDocsError) {
+        return;
+    }
+
+    if (window.lastFetchedDocsError) {
+        renderDocumentsErrorState(window.lastFetchedDocsError);
+        return;
+    }
+
+    documentsTableBody.innerHTML = '';
+    if (documentsCardView) {
+        documentsCardView.innerHTML = '';
+    }
+
+    if (!docs.length) {
+        renderDocumentsEmptyState(filtersActive);
+        return;
+    }
+
+    if (currentView === 'cards') {
+        renderDocumentCards(docs);
+    } else {
+        docs.forEach(doc => renderDocumentRow(doc));
+    }
+
+    syncDocumentSelectionModeUI();
+}
+
+window.renderWorkspaceDocumentView = renderWorkspaceDocumentView;
 
 function getDocumentDeleteModalContent(documentCount) {
     if (documentCount === 1) {
@@ -177,6 +853,104 @@ function showDocumentDeleteFeedback(message, variant = "danger") {
     container.appendChild(alertElement);
 }
 
+function getDownloadFileNameFromResponse(response, fallbackFileName) {
+    const disposition = response.headers.get("Content-Disposition") || response.headers.get("content-disposition") || "";
+    const encodedMatch = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+    if (encodedMatch && encodedMatch[1]) {
+        try {
+            return decodeURIComponent(encodedMatch[1].replace(/"/g, ""));
+        } catch (error) {
+            console.warn("Unable to decode download filename", error);
+        }
+    }
+
+    const plainMatch = disposition.match(/filename="?([^";]+)"?/i);
+    if (plainMatch && plainMatch[1]) {
+        return plainMatch[1];
+    }
+
+    return fallbackFileName;
+}
+
+async function downloadWorkspaceFile(endpoint, options = {}, fallbackFileName = "document") {
+    const response = await fetch(endpoint, options);
+    if (!response.ok) {
+        let message = "Unable to download document";
+        try {
+            const errorData = await response.json();
+            message = errorData.error || message;
+        } catch (error) {
+            message = response.statusText || message;
+        }
+        throw new Error(message);
+    }
+
+    const blob = await response.blob();
+    const fileName = getDownloadFileNameFromResponse(response, fallbackFileName);
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = objectUrl;
+    link.download = fileName;
+    link.classList.add("d-none");
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(objectUrl);
+}
+
+window.downloadDocumentFile = async function(documentId, event) {
+    if (event) {
+        event.preventDefault();
+        event.stopPropagation();
+    }
+    if (!personalWorkspaceFileDownloadsEnabled) {
+        showDocumentDeleteFeedback("File downloads are disabled for personal workspaces.", "warning");
+        return;
+    }
+
+    try {
+        await downloadWorkspaceFile(`/api/documents/${encodeURIComponent(documentId)}/download`);
+    } catch (error) {
+        console.error("Error downloading document:", error);
+        showDocumentDeleteFeedback(error.message || "Unable to download document", "danger");
+    }
+};
+
+window.downloadSelectedDocuments = async function() {
+    if (selectedDocuments.size === 0) {
+        return;
+    }
+    if (!personalWorkspaceFileDownloadsEnabled) {
+        showDocumentDeleteFeedback("File downloads are disabled for personal workspaces.", "warning");
+        return;
+    }
+
+    if (downloadSelectedBtn) {
+        downloadSelectedBtn.disabled = true;
+        downloadSelectedBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>Downloading...';
+    }
+
+    try {
+        await downloadWorkspaceFile(
+            "/api/documents/download",
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ document_ids: Array.from(selectedDocuments) })
+            },
+            selectedDocuments.size === 1 ? "document" : "personal_documents.zip"
+        );
+    } catch (error) {
+        console.error("Error downloading selected documents:", error);
+        showDocumentDeleteFeedback(error.message || "Unable to download selected documents", "danger");
+    } finally {
+        if (downloadSelectedBtn) {
+            downloadSelectedBtn.disabled = false;
+            downloadSelectedBtn.innerHTML = '<i class="bi bi-download me-1"></i>Download Selected';
+        }
+    }
+};
+
 function isDocumentDeleteModalReady() {
     return Boolean(
         documentDeleteModal &&
@@ -189,6 +963,18 @@ function isDocumentDeleteModalReady() {
         documentDeleteAllBtn &&
         documentDeleteAllBtn.isConnected
     );
+}
+
+function releaseDocumentDeleteModalFocus() {
+    const activeElement = document.activeElement;
+    if (activeElement && documentDeleteModalElement && documentDeleteModalElement.contains(activeElement) && typeof activeElement.blur === "function") {
+        activeElement.blur();
+    }
+}
+
+function hideDocumentDeleteModal() {
+    releaseDocumentDeleteModalFocus();
+    documentDeleteModal.hide();
 }
 
 function promptDocumentDeleteMode(documentCount = 1) {
@@ -205,6 +991,7 @@ function promptDocumentDeleteMode(documentCount = 1) {
 
     return new Promise((resolve) => {
         let settled = false;
+        let selectedValue = null;
 
         const cleanup = () => {
             documentDeleteModalElement.removeEventListener("hidden.bs.modal", handleHidden);
@@ -212,24 +999,26 @@ function promptDocumentDeleteMode(documentCount = 1) {
             documentDeleteAllBtn.removeEventListener("click", handleAllVersions);
         };
 
-        const finalize = (value) => {
+        const finalize = () => {
             if (settled) {
                 return;
             }
             settled = true;
             cleanup();
-            resolve(value);
+            resolve(selectedValue);
         };
 
-        const handleHidden = () => finalize(null);
-        const handleCurrentOnly = () => {
-            documentDeleteModal.hide();
-            finalize("current_only");
+        const hideWithValue = (value) => {
+            if (selectedValue) {
+                return;
+            }
+            selectedValue = value;
+            hideDocumentDeleteModal();
         };
-        const handleAllVersions = () => {
-            documentDeleteModal.hide();
-            finalize("all_versions");
-        };
+
+        const handleHidden = () => finalize();
+        const handleCurrentOnly = () => hideWithValue("current_only");
+        const handleAllVersions = () => hideWithValue("all_versions");
 
         documentDeleteModalElement.addEventListener("hidden.bs.modal", handleHidden);
         documentDeleteCurrentBtn.addEventListener("click", handleCurrentOnly);
@@ -238,8 +1027,167 @@ function promptDocumentDeleteMode(documentCount = 1) {
     });
 }
 
-async function requestDocumentDeletion(documentId, deleteMode) {
+function promptSyncedDocumentDeleteAction(deleteInfo) {
+    if (!isDocumentDeleteModalReady()) {
+        showDocumentDeleteFeedback("Delete confirmation dialog is unavailable. Refresh the page and try again.");
+        return Promise.resolve(null);
+    }
+
+    if (documentDeleteModalTitle) {
+        documentDeleteModalTitle.textContent = "Delete Synced Document";
+    }
+
+    const body = document.createElement("div");
+    const intro = document.createElement("p");
+    intro.className = "mb-2";
+    intro.textContent = deleteInfo.message || "This document was created by File Sync.";
+    body.appendChild(intro);
+
+    if (deleteInfo.file_sync && deleteInfo.file_sync.relative_path) {
+        const path = document.createElement("p");
+        path.className = "mb-2 small text-muted";
+        path.textContent = deleteInfo.file_sync.relative_path;
+        body.appendChild(path);
+    }
+
+    const choice = document.createElement("p");
+    choice.className = "mb-0";
+    choice.textContent = "Choose whether this remote file should be ignored by future sync runs.";
+    body.appendChild(choice);
+    documentDeleteModalBody.replaceChildren(body);
+
+    const currentLabel = documentDeleteCurrentBtn.textContent;
+    const allLabel = documentDeleteAllBtn.textContent;
+    documentDeleteCurrentBtn.textContent = "Delete Only";
+    documentDeleteAllBtn.textContent = "Delete and Ignore Remote";
+
+    return new Promise((resolve) => {
+        let settled = false;
+        let selectedValue = null;
+
+        const cleanup = () => {
+            documentDeleteModalElement.removeEventListener("hidden.bs.modal", handleHidden);
+            documentDeleteCurrentBtn.removeEventListener("click", handleDeleteOnly);
+            documentDeleteAllBtn.removeEventListener("click", handleIgnoreRemote);
+            documentDeleteCurrentBtn.textContent = currentLabel;
+            documentDeleteAllBtn.textContent = allLabel;
+        };
+
+        const finalize = () => {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            cleanup();
+            resolve(selectedValue);
+        };
+
+        const hideWithValue = (value) => {
+            if (selectedValue) {
+                return;
+            }
+            selectedValue = value;
+            hideDocumentDeleteModal();
+        };
+
+        const handleHidden = () => finalize();
+        const handleDeleteOnly = () => hideWithValue("delete_only");
+        const handleIgnoreRemote = () => hideWithValue("ignore_remote");
+
+        documentDeleteModalElement.addEventListener("hidden.bs.modal", handleHidden);
+        documentDeleteCurrentBtn.addEventListener("click", handleDeleteOnly);
+        documentDeleteAllBtn.addEventListener("click", handleIgnoreRemote);
+        documentDeleteModal.show();
+    });
+}
+
+function promptConversationLinkedDocumentDeleteAction(deleteInfo) {
+    if (!isDocumentDeleteModalReady()) {
+        showDocumentDeleteFeedback("Delete confirmation dialog is unavailable. Refresh the page and try again.");
+        return Promise.resolve(false);
+    }
+
+    if (documentDeleteModalTitle) {
+        documentDeleteModalTitle.textContent = "Delete Conversation Document";
+    }
+
+    const conversation = deleteInfo.conversation || {};
+    const conversationUrl = conversation.url || (conversation.id ? `/chats?conversation_id=${encodeURIComponent(conversation.id)}` : "/chats");
+    const body = document.createElement("div");
+    const intro = document.createElement("p");
+    intro.className = "mb-2";
+    intro.textContent = deleteInfo.message || "This document is part of a conversation.";
+    body.appendChild(intro);
+
+    const linkParagraph = document.createElement("p");
+    linkParagraph.className = "mb-2";
+    linkParagraph.appendChild(document.createTextNode("Conversation: "));
+    const link = document.createElement("a");
+    link.href = conversationUrl;
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.textContent = conversation.title || conversation.id || "Open conversation";
+    linkParagraph.appendChild(link);
+    body.appendChild(linkParagraph);
+
+    const choice = document.createElement("p");
+    choice.className = "mb-0";
+    choice.textContent = "Deleting this workspace document will remove the saved workspace copy, but the conversation will remain.";
+    body.appendChild(choice);
+    documentDeleteModalBody.replaceChildren(body);
+
+    const currentLabel = documentDeleteCurrentBtn.textContent;
+    const allLabel = documentDeleteAllBtn.textContent;
+    documentDeleteCurrentBtn.textContent = "Open Conversation";
+    documentDeleteAllBtn.textContent = "Delete Workspace Copy";
+
+    return new Promise((resolve) => {
+        let settled = false;
+        let selectedValue = false;
+
+        const cleanup = () => {
+            documentDeleteModalElement.removeEventListener("hidden.bs.modal", handleHidden);
+            documentDeleteCurrentBtn.removeEventListener("click", handleOpenConversation);
+            documentDeleteAllBtn.removeEventListener("click", handleDeleteWorkspaceCopy);
+            documentDeleteCurrentBtn.textContent = currentLabel;
+            documentDeleteAllBtn.textContent = allLabel;
+        };
+
+        const finalize = () => {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            cleanup();
+            resolve(selectedValue);
+        };
+
+        const handleHidden = () => finalize();
+        const handleOpenConversation = () => {
+            window.open(conversationUrl, "_blank", "noopener");
+            selectedValue = false;
+            hideDocumentDeleteModal();
+        };
+        const handleDeleteWorkspaceCopy = () => {
+            selectedValue = true;
+            hideDocumentDeleteModal();
+        };
+
+        documentDeleteModalElement.addEventListener("hidden.bs.modal", handleHidden);
+        documentDeleteCurrentBtn.addEventListener("click", handleOpenConversation);
+        documentDeleteAllBtn.addEventListener("click", handleDeleteWorkspaceCopy);
+        documentDeleteModal.show();
+    });
+}
+
+async function requestDocumentDeletion(documentId, deleteMode, fileSyncDeleteAction = null, conversationLinkedDeleteConfirmed = false) {
     const query = new URLSearchParams({ delete_mode: deleteMode });
+    if (fileSyncDeleteAction) {
+        query.set("file_sync_delete_action", fileSyncDeleteAction);
+    }
+    if (conversationLinkedDeleteConfirmed) {
+        query.set("conversation_linked_delete_confirmed", "true");
+    }
     const response = await fetch(`/api/documents/${documentId}?${query.toString()}`, { method: "DELETE" });
 
     let responseData = {};
@@ -250,6 +1198,20 @@ async function requestDocumentDeletion(documentId, deleteMode) {
     }
 
     if (!response.ok) {
+        if (response.status === 409 && responseData.error === "synced_document_delete_requires_action" && !fileSyncDeleteAction) {
+            const syncAction = await promptSyncedDocumentDeleteAction(responseData);
+            if (!syncAction) {
+                throw { error: "Deletion canceled" };
+            }
+            return requestDocumentDeletion(documentId, deleteMode, syncAction, conversationLinkedDeleteConfirmed);
+        }
+        if (response.status === 409 && responseData.error === "conversation_linked_document_delete_requires_confirmation" && !conversationLinkedDeleteConfirmed) {
+            const deleteConfirmed = await promptConversationLinkedDocumentDeleteAction(responseData);
+            if (!deleteConfirmed) {
+                throw { error: "Deletion canceled" };
+            }
+            return requestDocumentDeletion(documentId, deleteMode, fileSyncDeleteAction, true);
+        }
         throw responseData.error ? responseData : { error: `Server responded with status ${response.status}` };
     }
 
@@ -661,6 +1623,13 @@ function fetchUserDocuments() {
                 Loading documents...
             </td>
         </tr>`;
+    if (documentsCardView) {
+        documentsCardView.innerHTML = `
+            <div class="col-12 text-center text-muted py-5">
+                <div class="spinner-border spinner-border-sm me-2" role="status"><span class="visually-hidden">Loading...</span></div>
+                Loading documents...
+            </div>`;
+    }
     if (docsPaginationContainer) docsPaginationContainer.innerHTML = ''; // Clear pagination
 
     // Build query parameters - Include all active filters
@@ -709,50 +1678,26 @@ function fetchUserDocuments() {
                 showLegacyUpdatePrompt();
               }
 
-            documentsTableBody.innerHTML = ""; // Clear loading/existing rows
-            if (!data.documents || data.documents.length === 0) {
-                // Check if any filters are active
-                const filtersActive = docsSearchTerm || docsClassificationFilter || docsAuthorFilter || docsKeywordsFilter || docsAbstractFilter || docsTagsFilter;
-                documentsTableBody.innerHTML = `
-                    <tr>
-                        <td colspan="4" class="text-center p-4 text-muted">
-                            ${ filtersActive
-                                ? 'No documents found matching the current filters.'
-                                : 'No documents found. Upload a document to get started.'
-                            }
-                            ${ filtersActive
-                                ? '<br><button class="btn btn-link btn-sm p-0" id="docs-reset-filter-msg-btn">Clear filters</button> to see all documents.'
-                                : ''
-                            }
-                        </td>
-                    </tr>`;
-                 // Add event listener for the reset button within the message
-                 const resetButton = document.getElementById('docs-reset-filter-msg-btn');
-                 if (resetButton && docsClearFiltersBtn) { // Ensure clear button exists
-                     resetButton.addEventListener('click', () => {
-                         docsClearFiltersBtn.click(); // Simulate clicking the main clear button
-                     });
-                 }
-            } else {
-                // If backend does not support shared_only, filter client-side as fallback
-                let docs = data.documents;
-                if (docsSharedOnlyFilter && docsSharedOnlyFilter.checked) {
-                    docs = docs.filter(doc =>
-                        Array.isArray(doc.shared_user_ids) && doc.shared_user_ids.length > 0
-                    );
-                }
-                // Client-side sort to ensure correct order
-                if (docsSortBy !== '_ts') {
-                    docs.sort((a, b) => {
-                        const valA = (a[docsSortBy] || '').toLowerCase();
-                        const valB = (b[docsSortBy] || '').toLowerCase();
-                        const cmp = valA.localeCompare(valB);
-                        return docsSortOrder === 'asc' ? cmp : -cmp;
-                    });
-                }
-                window.lastFetchedDocs = docs;
-                docs.forEach(doc => renderDocumentRow(doc));
+            let docs = data.documents || [];
+            if (docsSharedOnlyFilter && docsSharedOnlyFilter.checked) {
+                docs = docs.filter(doc =>
+                    Array.isArray(doc.shared_user_ids) && doc.shared_user_ids.length > 0
+                );
             }
+            if (docsSortBy !== '_ts') {
+                docs.sort((a, b) => {
+                    const valA = String(a[docsSortBy] || '').toLowerCase();
+                    const valB = String(b[docsSortBy] || '').toLowerCase();
+                    const cmp = valA.localeCompare(valB);
+                    return docsSortOrder === 'asc' ? cmp : -cmp;
+                });
+            }
+
+            window.lastFetchedDocs = docs;
+            window.lastFetchedDocsError = null;
+            window.hasFetchedUserDocuments = true;
+            personalWorkspaceFileDownloadsEnabled = Boolean(data.file_downloads_enabled);
+            renderWorkspaceDocumentView();
             renderDocsPaginationControls(data.page, data.page_size, data.total_count);
         })
         .catch(error => {
@@ -765,7 +1710,10 @@ function fetchUserDocuments() {
             } else {
                 displayMsg = `Error loading documents: ${escapeHtml(error.error || error.message || 'Unknown error')}`;
             }
-            documentsTableBody.innerHTML = `<tr><td colspan="4" class="text-center text-danger p-4">${displayMsg}</td></tr>`;
+            window.lastFetchedDocs = [];
+            window.lastFetchedDocsError = displayMsg;
+            window.hasFetchedUserDocuments = true;
+            renderDocumentsErrorState(displayMsg);
             renderDocsPaginationControls(1, docsPageSize, 0); // Show empty pagination on error
         });
 }
@@ -796,11 +1744,12 @@ function renderDocumentRow(doc) {
             entry => entry.startsWith(currentUserId + ",")
         );
     }
+    const pendingSharedApproval = !isOwner && Boolean(sharedUserEntry && sharedUserEntry.endsWith(",not_approved"));
     
     // First column with checkbox and expand/collapse
     let firstColumnHtml = `
         <td class="align-middle">
-            <input type="checkbox" class="document-checkbox" data-document-id="${docId}" style="display: none;">
+            <input type="checkbox" class="form-check-input document-checkbox${selectionModeActive ? '' : ' d-none'}" data-document-id="${docId}" ${selectedDocuments.has(docId) ? 'checked' : ''}>
             <span class="expand-collapse-container">
             ${isComplete && !hasError ?
                 `<button class="btn btn-link p-0" onclick="window.toggleDetails('${docId}')" title="Show/Hide Details">
@@ -818,7 +1767,7 @@ function renderDocumentRow(doc) {
     let chatButton = '';
     
     // Chat button for everyone with access (outside dropdown)
-    if (isComplete && !hasError && (isOwner || (!sharedUserEntry || sharedUserEntry.endsWith(",approved")))) {
+    if (isComplete && !hasError && !pendingSharedApproval && (isOwner || (!sharedUserEntry || sharedUserEntry.endsWith(",approved")))) {
         chatButton = `
             <button class="btn btn-sm btn-primary me-1 action-btn-wide text-start"
                 onclick="window.redirectToChat('${docId}')"
@@ -831,7 +1780,7 @@ function renderDocumentRow(doc) {
         `;
     }
     
-    if (isComplete && !hasError) {
+    if (isComplete && !hasError && !pendingSharedApproval) {
         actionsDropdown = `
         <div class="dropdown action-dropdown d-inline-block">
             <button class="btn btn-sm btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
@@ -855,6 +1804,10 @@ function renderDocumentRow(doc) {
                 </a></li>
             `;
         }
+
+        if (isOwner) {
+            actionsDropdown += getDocumentReprocessDropdownItems(doc);
+        }
         
         // Add Chat option
         actionsDropdown += `
@@ -862,6 +1815,13 @@ function renderDocumentRow(doc) {
                 <i class="bi bi-chat-dots-fill me-2"></i>Chat
             </a></li>
         `;
+        if (personalWorkspaceFileDownloadsEnabled) {
+            actionsDropdown += `
+                <li><a class="dropdown-item" href="#" onclick="window.downloadDocumentFile('${docId}', event); return false;">
+                    <i class="bi bi-download me-2"></i>Download file
+                </a></li>
+            `;
+        }
         
         if (isOwner) {
             // Owner actions
@@ -896,6 +1856,19 @@ function renderDocumentRow(doc) {
             </ul>
         </div>
         `;
+    } else if (isComplete && !hasError && pendingSharedApproval) {
+        actionsDropdown = `
+        <div class="dropdown action-dropdown d-inline-block">
+            <button class="btn btn-sm btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="More shared document actions">
+                <i class="bi bi-three-dots-vertical"></i>
+            </button>
+            <ul class="dropdown-menu dropdown-menu-end">
+                <li><a class="dropdown-item select-btn" href="#" onclick="window.toggleSelectionMode(); return false;">
+                    <i class="bi bi-check-square me-2"></i>Select
+                </a></li>
+            </ul>
+        </div>
+        `;
     } else if (isOwner) {
         // Only owners can delete incomplete/error documents
         actionsDropdown = `
@@ -916,8 +1889,8 @@ function renderDocumentRow(doc) {
     let approvalButton = '';
     if (!isOwner && sharedUserEntry && sharedUserEntry.endsWith(",not_approved")) {
         approvalButton = `
-            <button class="btn btn-sm btn-success me-1 action-btn-wide text-start"
-                onclick="window.approveSharedDocument('${docId}', this, '${escapeHtml(doc.owner_id || doc.user_id)}')"
+            <button type="button" class="btn btn-sm btn-success me-1"
+                onclick="window.approveSharedDocument('${docId}', '${escapeHtml(doc.owner_id || doc.user_id)}')"
                 title="Approve access to this shared document"
                 aria-label="Approve access to shared document: ${escapeHtml(doc.file_name || 'Untitled')}"
             >
@@ -928,11 +1901,12 @@ function renderDocumentRow(doc) {
     }
     
     // Complete row HTML
+    // xss-check: ignore reviewed legacy document row shell; document fields are escaped and action fragments are built by local helpers.
     docRow.innerHTML = `
         ${firstColumnHtml}
-        <td class="align-middle" title="${escapeHtml(doc.file_name || "")}">${escapeHtml(doc.file_name || "")}</td>
-        <td class="align-middle" title="${escapeHtml(doc.title || "")}">${escapeHtml(doc.title || "N/A")}</td>
-        <td class="align-middle">
+        <td class="align-middle document-file-cell" title="${escapeHtml(doc.file_name || "")}">${getDocumentSyncBadgeHtml(doc, true)}${escapeHtml(doc.file_name || "")}</td>
+        <td class="align-middle document-title-cell" title="${escapeHtml(doc.title || "")}">${escapeHtml(doc.title || "N/A")}</td>
+        <td class="align-middle document-actions-cell">
             ${approvalButton}
             ${chatButton}
             ${actionsDropdown}
@@ -945,6 +1919,7 @@ function renderDocumentRow(doc) {
     if (isComplete && !hasError) {
         const detailsRow = document.createElement("tr");
         detailsRow.id = `details-row-${docId}`;
+        detailsRow.classList.add("document-details-row");
         detailsRow.style.display = "none"; // Initially hidden
 
         let classificationDisplayHTML = '';
@@ -972,10 +1947,12 @@ function renderDocumentRow(doc) {
             <td colspan="4">
                 <div class="bg-light p-3 border rounded small">
                     ${classificationDisplayHTML}
+                    ${getDocumentSyncDetailsHtml(doc)}
                     <p class="mb-1"><strong>Version:</strong> ${escapeHtml(doc.version || "N/A")}</p>
                     <p class="mb-1"><strong>Authors:</strong> ${escapeHtml(Array.isArray(doc.authors) ? doc.authors.join(", ") : doc.authors || "N/A")}</p>
                     <p class="mb-1"><strong>Pages:</strong> ${escapeHtml(doc.number_of_pages || "N/A")}</p>
-                    <p class="mb-1"><strong>Citations:</strong> ${doc.enhanced_citations ? '<span class="badge bg-success">Enhanced</span>' : '<span class="badge bg-secondary">Standard</span>'}</p>
+                    ${isPdfDocument(doc) ? `<p class="mb-1"><strong>Extraction:</strong> ${getDocumentExtractionModeBadge(doc)}</p>` : ''}
+                    <p class="mb-1"><strong>Citations:</strong> ${doc.enhanced_citations ? `<span class="badge bg-success" title="${escapeHtml(getDocumentCitationTooltip(doc))}">Enhanced</span>` : `<span class="badge bg-secondary" title="${escapeHtml(getDocumentCitationTooltip(doc))}">Standard</span>`}</p>
                     <p class="mb-1"><strong>Publication Date:</strong> ${escapeHtml(doc.publication_date || "N/A")}</p>
                     <p class="mb-1"><strong>Keywords:</strong> ${escapeHtml(Array.isArray(doc.keywords) ? doc.keywords.join(", ") : doc.keywords || "N/A")}</p>
                     <p class="mb-1"><strong>Tags:</strong> ${renderTagBadges(doc.tags || [])}</p>
@@ -996,6 +1973,19 @@ function renderDocumentRow(doc) {
             `;
         }
 
+        if (isOwner && isPdfDocument(doc)) {
+            const reprocessDocId = escapeHtml(String(docId || ''));
+            const extractionActionMode = getDocumentTargetExtractionMode(doc);
+            const extractionActionLabel = getDocumentExtractionModeLabelFromMode(extractionActionMode);
+            const extractionActionIcon = getDocumentExtractionModeIcon(extractionActionMode);
+            const extractionActionTooltip = getDocumentExtractionChangeTooltip(extractionActionMode);
+            detailsHtml += `
+                <button class="btn btn-sm btn-outline-secondary" onclick="window.reprocessDocumentExtraction('${reprocessDocId}', '${extractionActionMode}', event)" title="${escapeHtml(extractionActionTooltip)}">
+                    <i class="bi ${extractionActionIcon}"></i> Change to ${extractionActionLabel}
+                </button>
+            `;
+        }
+
         detailsHtml += `</div></div></td>`;
         detailsRow.innerHTML = detailsHtml;
         documentsTableBody.appendChild(detailsRow);
@@ -1005,6 +1995,7 @@ function renderDocumentRow(doc) {
     if (!isComplete || hasError) {
         const statusRow = document.createElement("tr");
         statusRow.id = `status-row-${docId}`;
+        statusRow.classList.add("document-status-row");
         if (hasError) {
              statusRow.innerHTML = `
                 <td colspan="4">
@@ -1347,6 +2338,8 @@ window.onEditDocument = function(docId) {
             if (docKeywordsInput) docKeywordsInput.value = Array.isArray(doc.keywords) ? doc.keywords.join(", ") : (doc.keywords || "");
             if (docPubDateInput) docPubDateInput.value = doc.publication_date || "";
             if (docAuthorsInput) docAuthorsInput.value = Array.isArray(doc.authors) ? doc.authors.join(", ") : (doc.authors || "");
+            setDocumentSyncStatusElement(document.getElementById("doc-sync-status"), doc);
+            setDocumentConversationStatusElement(document.getElementById("doc-conversation-link-status"), doc);
             
             // Set selected tags in the new tag management system
             const docTags = doc.tags || [];
@@ -1517,6 +2510,84 @@ window.chatWithSelected = function() {
     window.location.href = `/chats?search_documents=true&doc_scope=personal&document_ids=${idsParam}`;
 }
 
+async function requestDocumentExtractionReprocess(documentIds, extractionMode) {
+    const response = await fetch('/api/documents/reprocess_extraction', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            document_ids: documentIds,
+            extraction_mode: extractionMode,
+        }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok && !(Array.isArray(data.queued) && data.queued.length > 0)) {
+        throw new Error(data.error || data.message || 'Unable to queue PDF extraction change.');
+    }
+    return data;
+}
+
+function showDocumentReprocessResult(data, extractionMode) {
+    const queuedCount = Array.isArray(data.queued) ? data.queued.length : 0;
+    const errorCount = Array.isArray(data.errors) ? data.errors.length : 0;
+    const modeLabel = extractionMode === 'layout' ? 'Enhanced' : 'Standard';
+    const message = errorCount > 0
+        ? `Queued ${queuedCount} PDF(s) to extract again with ${modeLabel}; ${errorCount} item(s) were skipped.`
+        : (data.message || `Queued ${queuedCount} PDF(s) to extract again with ${modeLabel}.`);
+
+    if (window.showToast) {
+        window.showToast(message, errorCount > 0 ? 'warning' : 'success');
+    } else {
+        alert(message);
+    }
+}
+
+window.reprocessDocumentExtraction = async function(documentId, extractionMode, event) {
+    if (event) {
+        event.preventDefault();
+    }
+    const modeLabel = extractionMode === 'layout' ? 'Enhanced' : 'Standard';
+    if (!confirm(`Queue this PDF to extract again with ${modeLabel}?`)) {
+        return;
+    }
+
+    try {
+        const data = await requestDocumentExtractionReprocess([documentId], extractionMode);
+        showDocumentReprocessResult(data, extractionMode);
+        fetchUserDocuments();
+    } catch (error) {
+        if (window.showToast) {
+            window.showToast(error.message, 'danger');
+        } else {
+            alert(error.message);
+        }
+    }
+};
+
+window.reprocessSelectedDocumentExtraction = async function(extractionMode) {
+    const documentIds = Array.from(selectedDocuments);
+    if (documentIds.length === 0) {
+        return;
+    }
+    const modeLabel = extractionMode === 'layout' ? 'Enhanced' : 'Standard';
+    if (!confirm(`Queue ${documentIds.length} selected document(s) to extract again with ${modeLabel}?`)) {
+        return;
+    }
+
+    try {
+        const data = await requestDocumentExtractionReprocess(documentIds, extractionMode);
+        showDocumentReprocessResult(data, extractionMode);
+        selectedDocuments.clear();
+        syncDocumentSelectionModeUI();
+        fetchUserDocuments();
+    } catch (error) {
+        if (window.showToast) {
+            window.showToast(error.message, 'danger');
+        } else {
+            alert(error.message);
+        }
+    }
+};
+
 // Make fetchUserDocuments globally available for workspace-init.js
 window.fetchUserDocuments = fetchUserDocuments;
 
@@ -1524,70 +2595,34 @@ window.fetchUserDocuments = fetchUserDocuments;
 
 // Toggle selection mode
 window.toggleSelectionMode = function() {
-    selectionModeActive = !selectionModeActive;
-    
-    const documentsTable = document.getElementById("documents-table");
-    const checkboxes = document.querySelectorAll('.document-checkbox');
-    const expandContainers = document.querySelectorAll('.expand-collapse-container');
-    const bulkActionsBar = document.getElementById('bulkActionsBar');
-    
-    if (selectionModeActive) {
-        // Enter selection mode
-        documentsTable.classList.add('selection-mode');
-        
-        // Show checkboxes and hide expand buttons
-        checkboxes.forEach(checkbox => {
-            checkbox.classList.remove('d-none');
-            checkbox.classList.add('d-inline-block');
-        });
-        
-        expandContainers.forEach(container => {
-            container.classList.remove('d-inline-block');
-            container.classList.add('d-none');
-        });
-    } else {
-        // Exit selection mode
-        documentsTable.classList.remove('selection-mode');
-        
-        // Hide checkboxes and show expand buttons
-        checkboxes.forEach(checkbox => {
-            checkbox.classList.remove('d-inline-block');
-            checkbox.classList.add('d-none');
-            checkbox.checked = false;
-        });
-        
-        expandContainers.forEach(container => {
-            container.classList.remove('d-none');
-            container.classList.add('d-inline-block');
-        });
-        
-        // Hide bulk actions bar
-        if (bulkActionsBar) {
-            bulkActionsBar.classList.remove('d-block');
-            bulkActionsBar.classList.add('d-none');
-        }
-        
-        // Clear selected documents
-        selectedDocuments.clear();
-    }
+    setDocumentSelectionModeActive(!selectionModeActive);
 };
 
 // Update selected documents
 window.updateSelectedDocuments = function(documentId, isSelected) {
     if (isSelected) {
         selectedDocuments.add(documentId);
+        lastCardSelectionAnchorId = documentId;
     } else {
         selectedDocuments.delete(documentId);
     }
-    
-    // Show/hide appropriate action buttons based on selection
+
+    document.querySelectorAll(`.document-checkbox[data-document-id="${documentId}"]`).forEach(checkbox => {
+        checkbox.checked = isSelected;
+    });
+    document.querySelectorAll(`.document-item-card[data-document-id="${documentId}"]`).forEach(card => {
+        card.classList.toggle('is-selected', isSelected);
+    });
+
     updateBulkActionButtons();
+    window.syncDocumentSelectionUI();
 };
 
 // Update bulk action buttons visibility
 function updateBulkActionButtons() {
     const bulkActionsBar = document.getElementById('bulkActionsBar');
     const selectedCountSpan = document.getElementById('selectedCount');
+    const downloadBtn = document.getElementById('download-selected-btn');
     
     if (selectedDocuments.size > 0) {
         // Show bulk actions bar with count
@@ -1598,23 +2633,60 @@ function updateBulkActionButtons() {
         if (selectedCountSpan) {
             selectedCountSpan.textContent = selectedDocuments.size;
         }
+        if (downloadBtn) {
+            downloadBtn.classList.toggle('d-none', !personalWorkspaceFileDownloadsEnabled);
+        }
         
-        // Check if any selected documents are shared (for remove button logic if needed in future)
-        const hasSharedDocuments = Array.from(selectedDocuments).some(docId => {
-            const docRow = document.getElementById(`doc-row-${docId}`);
-            if (docRow && docRow.__docData) {
-                const doc = docRow.__docData;
-                return doc.user_id !== window.current_user_id;
-            }
-            return false;
-        });
     } else {
         // Hide bulk actions bar
         if (bulkActionsBar) {
             bulkActionsBar.classList.remove('d-block');
             bulkActionsBar.classList.add('d-none');
         }
+        if (downloadBtn) {
+            downloadBtn.classList.add('d-none');
+        }
     }
+}
+
+function syncDocumentSelectionModeUI() {
+    const bulkActionsBar = document.getElementById('bulkActionsBar');
+    const toggleSelectionBtn = document.getElementById('workspace-toggle-selection-btn');
+    const folderCardView = document.getElementById('folder-documents-card-view');
+
+    getDocumentSelectionTables().forEach((table) => {
+        table.classList.toggle('selection-mode', selectionModeActive);
+    });
+    documentsCardView?.classList.toggle('selection-mode', selectionModeActive);
+    folderCardView?.classList.toggle('selection-mode', selectionModeActive);
+
+    document.querySelectorAll('.document-checkbox').forEach(checkbox => {
+        checkbox.classList.toggle('d-none', !selectionModeActive);
+        checkbox.checked = selectionModeActive && selectedDocuments.has(checkbox.getAttribute('data-document-id'));
+    });
+
+    document.querySelectorAll('.expand-collapse-container').forEach(container => {
+        container.classList.toggle('d-none', selectionModeActive);
+        container.classList.toggle('d-inline-block', !selectionModeActive);
+    });
+
+    document.querySelectorAll('.document-item-card').forEach(card => {
+        const documentId = card.getAttribute('data-document-id');
+        card.classList.toggle('is-selected', selectedDocuments.has(documentId));
+    });
+
+    if (!selectionModeActive && bulkActionsBar) {
+        bulkActionsBar.classList.remove('d-block');
+        bulkActionsBar.classList.add('d-none');
+    }
+
+    if (toggleSelectionBtn) {
+        toggleSelectionBtn.classList.toggle('active', selectionModeActive);
+        toggleSelectionBtn.setAttribute('aria-pressed', String(selectionModeActive));
+    }
+
+    syncDocumentCheckboxesWithSelection();
+    updateBulkActionButtons();
 }
 
 // Delete selected documents
@@ -1721,12 +2793,9 @@ window.removeSelectedDocuments = function() {
 
 // Clear selection handler
 window.clearDocumentSelection = function() {
-    const checkboxes = document.querySelectorAll('.document-checkbox');
-    checkboxes.forEach(checkbox => {
-        checkbox.checked = false;
-    });
     selectedDocuments.clear();
-    updateBulkActionButtons();
+    lastCardSelectionAnchorId = null;
+    syncDocumentSelectionModeUI();
 };
 
 // Add event listeners for selection functionality
@@ -1735,25 +2804,38 @@ document.addEventListener('DOMContentLoaded', function() {
     if (deleteSelectedBtn) {
         deleteSelectedBtn.addEventListener('click', window.deleteSelectedDocuments);
     }
+
+    if (downloadSelectedBtn) {
+        downloadSelectedBtn.addEventListener('click', window.downloadSelectedDocuments);
+    }
+
+    if (chatSelectedBtn) {
+        chatSelectedBtn.addEventListener('click', window.chatWithSelected);
+    }
     
     // Clear selection button
     if (clearSelectionBtn) {
         clearSelectionBtn.addEventListener('click', window.clearDocumentSelection);
     }
+
+    document.getElementById('workspace-toggle-selection-btn')?.addEventListener('click', window.toggleSelectionMode);
     
-    // Delegate event listener for checkboxes (they're dynamically created)
-    if (documentsTableBody) {
-        documentsTableBody.addEventListener('change', function(event) {
-            if (event.target.classList.contains('document-checkbox')) {
-                const documentId = event.target.getAttribute('data-document-id');
-                window.updateSelectedDocuments(documentId, event.target.checked);
-            }
-        });
-    }
+    document.addEventListener('change', function(event) {
+        if (event.target.classList.contains('document-checkbox')) {
+            const documentId = event.target.getAttribute('data-document-id');
+            window.updateSelectedDocuments(documentId, event.target.checked);
+        }
+
+        if (event.target.classList.contains('document-select-all-checkbox')) {
+            window.toggleSelectAllDocuments(event.target.checked);
+        }
+    });
+
+    document.addEventListener('click', handleDocumentCardClick);
 });
 
 // Approve shared document handler
-window.approveSharedDocument = async function(documentId, btn, ownerOid) {
+window.approveSharedDocument = async function(documentId, ownerOid) {
     let ownerInfo = { display_name: "the owner", email: "" };
     if (ownerOid) {
         try {
@@ -1765,21 +2847,25 @@ window.approveSharedDocument = async function(documentId, btn, ownerOid) {
             }
         } catch (e) {}
     }
-    let msg = `This file was shared with you by <strong>${escapeHtml(ownerInfo.display_name)}</strong>`;
-    if (ownerInfo.email) msg += ` (<span class="text-muted">${escapeHtml(ownerInfo.email)}</span>)`;
-    msg += ".<br>Do you want to approve access to this shared document?";
-
     // Populate and show the modal
     const modalEl = document.getElementById("approveSharedModal");
-    const modalBody = document.getElementById("approveSharedModalBody");
+    const ownerNameEl = document.getElementById("approveSharedModalOwnerName");
+    const ownerEmailEl = document.getElementById("approveSharedModalOwnerEmail");
+    const ownerEmailWrapperEl = document.getElementById("approveSharedModalOwnerEmailWrapper");
     const approveBtn = document.getElementById("approveSharedModalApproveBtn");
     const cancelBtn = document.getElementById("approveSharedModalCancelBtn");
     const denyBtn = document.getElementById("approveSharedModalDenyBtn");
-    if (!modalEl || !modalBody || !approveBtn || !denyBtn) {
-        alert("Approval modal not found in the page.");
+    if (!modalEl || !ownerNameEl || !ownerEmailEl || !ownerEmailWrapperEl || !approveBtn || !cancelBtn || !denyBtn) {
+        if (window.showToast) {
+            window.showToast('Approval modal is unavailable on this page.', 'danger');
+        } else {
+            console.error('Approval modal not found in the page.');
+        }
         return;
     }
-    modalBody.innerHTML = msg;
+    ownerNameEl.textContent = ownerInfo.display_name || 'the owner';
+    ownerEmailEl.textContent = ownerInfo.email || '';
+    ownerEmailWrapperEl.classList.toggle('d-none', !ownerInfo.email);
     approveBtn.disabled = false;
     approveBtn.innerHTML = "Approve";
     denyBtn.disabled = false;
@@ -1802,12 +2888,16 @@ window.approveSharedDocument = async function(documentId, btn, ownerOid) {
                 bootstrap.Modal.getOrCreateInstance(modalEl).hide();
                 fetchUserDocuments();
             } else {
-                alert(data.error || "Failed to approve document");
+                if (window.showToast) {
+                    window.showToast(data.error || 'Failed to approve document', 'danger');
+                }
                 approveBtn.disabled = false;
                 approveBtn.innerHTML = "Approve";
             }
         } catch (err) {
-            alert("Error approving document: " + (err.error || err.message || "Unknown error"));
+            if (window.showToast) {
+                window.showToast(`Error approving document: ${err.error || err.message || 'Unknown error'}`, 'danger');
+            }
             approveBtn.disabled = false;
             approveBtn.innerHTML = "Approve";
         }
@@ -1825,12 +2915,16 @@ window.approveSharedDocument = async function(documentId, btn, ownerOid) {
                 bootstrap.Modal.getOrCreateInstance(modalEl).hide();
                 fetchUserDocuments();
             } else {
-                alert(data.error || "Failed to deny access");
+                if (window.showToast) {
+                    window.showToast(data.error || 'Failed to deny access', 'danger');
+                }
                 denyBtn.disabled = false;
                 denyBtn.innerHTML = "Deny";
             }
         } catch (err) {
-            alert("Error denying access: " + (err.error || err.message || "Unknown error"));
+            if (window.showToast) {
+                window.showToast(`Error denying access: ${err.error || err.message || 'Unknown error'}`, 'danger');
+            }
             denyBtn.disabled = false;
             denyBtn.innerHTML = "Deny";
         }

@@ -42,3 +42,4 @@ Curated Demo Code
 | 2026-06-13 13:27 UTC | SecureChatExtension | main | ~7 |
 | 2026-06-13 13:27 UTC | GenerateRichDocs | main | ~2 |
 | 2026-07-28 13:49 UTC | junior-web | main | +5, ~14 |
+| 2026-07-28 13:51 UTC | simplechat | main | +1194, ~343, -8 |

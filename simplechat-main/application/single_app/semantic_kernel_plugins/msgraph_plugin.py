@@ -1,31 +1,104 @@
 # msgraph_plugin.py
 
+import re
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 import requests
+from flask import g, has_request_context
 from requests import RequestException
 
-from functions_authentication import get_valid_access_token_for_plugins
+from functions_authentication import get_current_user_info, get_valid_access_token_for_plugins
 from functions_debug import debug_print
 from semantic_kernel.functions import kernel_function
+from semantic_kernel.functions.kernel_plugin import KernelPlugin
+from functions_group import assert_group_role, find_group_by_id, require_active_group
+from functions_msgraph_operations import (
+    MSGRAPH_CALENDAR_SEND_MODE_AUTO_SEND,
+    MSGRAPH_CALENDAR_SEND_MODE_DRAFT_DELAYED,
+    MSGRAPH_CALENDAR_SEND_MODE_DRAFT_MANUAL,
+    MSGRAPH_CAPABILITY_DEFINITIONS,
+    MSGRAPH_DEFAULT_ENDPOINT,
+    MSGRAPH_MAIL_SEND_MODE_AUTO_SEND,
+    MSGRAPH_MAIL_SEND_MODE_DRAFT_DELAYED,
+    MSGRAPH_MAIL_SEND_MODE_DRAFT_MANUAL,
+    MSGRAPH_PLUGIN_TYPE,
+    get_msgraph_enabled_function_names,
+    normalize_msgraph_calendar_send_options,
+    normalize_msgraph_mail_send_options,
+    normalize_msgraph_capabilities,
+)
+from functions_msgraph_pending_actions import (
+    MSGRAPH_PENDING_ACTION_DELAYED,
+    MSGRAPH_PENDING_ACTION_MANUAL,
+    MSGRAPH_PENDING_OPERATION_CREATE_CALENDAR_INVITE,
+    MSGRAPH_PENDING_OPERATION_SEND_MAIL,
+    MSGRAPH_PENDING_RESOURCE_CALENDAR,
+    MSGRAPH_PENDING_RESOURCE_MAIL,
+    MSGRAPH_PENDING_STATUS_PENDING,
+    MSGRAPH_PENDING_STATUS_SCHEDULED,
+    build_calendar_pending_action_summary,
+    build_mail_pending_action_summary,
+    create_msgraph_pending_action,
+    sanitize_msgraph_pending_action_for_client,
+    schedule_msgraph_pending_action_auto_commit,
+)
 from semantic_kernel_plugins.base_plugin import BasePlugin
 from semantic_kernel_plugins.plugin_invocation_logger import plugin_function_logger
 
 
 class MSGraphPlugin(BasePlugin):
-    DEFAULT_ENDPOINT = "https://graph.microsoft.com"
+    DEFAULT_ENDPOINT = MSGRAPH_DEFAULT_ENDPOINT
     DEFAULT_TIMEOUT_SECONDS = 30
     MAX_ITEMS_PER_RESULT = 25
     MAX_PAGES_PER_REQUEST = 5
+    DEFERRED_DELIVERY_EXTENDED_PROPERTY_ID = "SystemTime 0x000F"
 
     def __init__(self, manifest: Optional[Dict[str, Any]] = None):
         super().__init__(manifest)
         self.manifest = manifest or {}
         self._metadata = self.manifest.get("metadata", {})
-        self._endpoint = self.manifest.get("endpoint", self.DEFAULT_ENDPOINT).rstrip("/")
+        self._endpoint = str(self.manifest.get("endpoint") or self.DEFAULT_ENDPOINT).rstrip("/")
+        additional_fields = self.manifest.get("additionalFields") if isinstance(self.manifest.get("additionalFields"), dict) else {}
         scope_overrides = self.manifest.get("scopes") or self._metadata.get("scopes") or {}
         self._scope_overrides = scope_overrides if isinstance(scope_overrides, dict) else {}
+        self._capabilities = normalize_msgraph_capabilities(
+            self.manifest.get("msgraph_capabilities")
+        )
+        mail_send_options = normalize_msgraph_mail_send_options({
+            **additional_fields,
+            "msgraph_mail_send_mode": self.manifest.get(
+                "msgraph_mail_send_mode",
+                additional_fields.get("msgraph_mail_send_mode"),
+            ),
+            "msgraph_mail_delay_seconds": self.manifest.get(
+                "msgraph_mail_delay_seconds",
+                additional_fields.get("msgraph_mail_delay_seconds"),
+            ),
+        })
+        self._mail_send_mode = mail_send_options["msgraph_mail_send_mode"]
+        self._mail_delay_seconds = mail_send_options["msgraph_mail_delay_seconds"]
+        calendar_send_options = normalize_msgraph_calendar_send_options({
+            **additional_fields,
+            "msgraph_calendar_send_mode": self.manifest.get(
+                "msgraph_calendar_send_mode",
+                additional_fields.get("msgraph_calendar_send_mode"),
+            ),
+            "msgraph_calendar_delay_seconds": self.manifest.get(
+                "msgraph_calendar_delay_seconds",
+                additional_fields.get("msgraph_calendar_delay_seconds"),
+            ),
+        })
+        self._calendar_send_mode = calendar_send_options["msgraph_calendar_send_mode"]
+        self._calendar_delay_seconds = calendar_send_options["msgraph_calendar_delay_seconds"]
+        self._enabled_function_names = set(
+            self.manifest.get("enabled_functions")
+            or get_msgraph_enabled_function_names(self._capabilities)
+        )
+        self._default_group_id = str(
+            self.manifest.get("group_id") or self.manifest.get("default_group_id") or ""
+        ).strip()
 
     @property
     def display_name(self) -> str:
@@ -33,141 +106,227 @@ class MSGraphPlugin(BasePlugin):
 
     @property
     def metadata(self) -> Dict[str, Any]:
+        enabled_methods = set(self.get_functions())
+        method_specs = {
+            "get_my_profile": {
+                "name": "get_my_profile",
+                "description": "Get the signed-in user's profile details.",
+                "parameters": [
+                    {
+                        "name": "select_fields",
+                        "type": "str",
+                        "description": "Optional comma-separated Graph fields to include.",
+                        "required": False,
+                    }
+                ],
+                "returns": {"type": "dict", "description": "User profile information from Microsoft Graph."},
+            },
+            "get_my_timezone": {
+                "name": "get_my_timezone",
+                "description": "Get the signed-in user's Microsoft 365 mailbox time zone and related formatting settings. Use this before answering timezone-sensitive questions.",
+                "parameters": [],
+                "returns": {"type": "dict", "description": "Mailbox timezone, date format, and time format settings from Microsoft Graph."},
+            },
+            "get_my_events": {
+                "name": "get_my_events",
+                "description": "Get upcoming calendar events for the signed-in user.",
+                "parameters": [
+                    {"name": "top", "type": "int", "description": "Maximum number of events to return.", "required": False},
+                    {
+                        "name": "start_datetime",
+                        "type": "str",
+                        "description": "Optional ISO datetime. If provided with end_datetime, uses calendarView.",
+                        "required": False,
+                    },
+                    {
+                        "name": "end_datetime",
+                        "type": "str",
+                        "description": "Optional ISO datetime. If provided with start_datetime, uses calendarView.",
+                        "required": False,
+                    },
+                    {
+                        "name": "select_fields",
+                        "type": "str",
+                        "description": "Optional comma-separated Graph fields to include.",
+                        "required": False,
+                    },
+                ],
+                "returns": {"type": "dict", "description": "Calendar event results from Microsoft Graph."},
+            },
+            "create_calendar_invite": {
+                "name": "create_calendar_invite",
+                "description": "Create a calendar invite for the signed-in user, optionally add current group members as attendees, and turn it into a Microsoft Teams meeting.",
+                "parameters": [
+                    {"name": "subject", "type": "str", "description": "Subject for the calendar invite.", "required": True},
+                    {"name": "start_datetime", "type": "str", "description": "Event start as an ISO 8601 datetime string.", "required": True},
+                    {"name": "end_datetime", "type": "str", "description": "Event end as an ISO 8601 datetime string.", "required": True},
+                    {"name": "body_content", "type": "str", "description": "Optional plain-text body content for the invite.", "required": False},
+                    {"name": "location", "type": "str", "description": "Optional location display name.", "required": False},
+                    {"name": "attendee_emails", "type": "str", "description": "Optional attendee emails separated by commas, semicolons, or new lines.", "required": False},
+                    {"name": "include_group_members", "type": "bool", "description": "If true, include current group members as required attendees.", "required": False},
+                    {"name": "group_id", "type": "str", "description": "Optional group id to use when include_group_members is true. Defaults to the action or active group context.", "required": False},
+                    {"name": "make_teams_meeting", "type": "bool", "description": "If true, create the invite as a Microsoft Teams meeting.", "required": False},
+                    {"name": "timezone", "type": "str", "description": "Optional Outlook time zone name for the event. Defaults to the user's mailbox time zone or UTC.", "required": False},
+                    {"name": "allow_new_time_proposals", "type": "bool", "description": "If true, attendees can propose a new time.", "required": False},
+                ],
+                "returns": {"type": "dict", "description": "Created event result from Microsoft Graph."},
+            },
+            "get_my_messages": {
+                "name": "get_my_messages",
+                "description": "Get recent mail messages for the signed-in user.",
+                "parameters": [
+                    {"name": "top", "type": "int", "description": "Maximum number of messages to return.", "required": False},
+                    {"name": "folder", "type": "str", "description": "Optional mail folder name, such as inbox.", "required": False},
+                    {"name": "unread_only", "type": "bool", "description": "If true, only unread messages are returned.", "required": False},
+                    {
+                        "name": "select_fields",
+                        "type": "str",
+                        "description": "Optional comma-separated Graph fields to include.",
+                        "required": False,
+                    },
+                ],
+                "returns": {"type": "dict", "description": "Mail message results from Microsoft Graph."},
+            },
+            "mark_message_as_read": {
+                "name": "mark_message_as_read",
+                "description": "Mark a mail message as read or unread for the signed-in user. Requires Mail.ReadWrite delegated permission.",
+                "parameters": [
+                    {
+                        "name": "message_id",
+                        "type": "str",
+                        "description": "Microsoft Graph message id to update.",
+                        "required": True,
+                    },
+                    {
+                        "name": "is_read",
+                        "type": "bool",
+                        "description": "If true, marks the message as read. If false, marks it as unread.",
+                        "required": False,
+                    },
+                ],
+                "returns": {"type": "dict", "description": "Updated mail message result from Microsoft Graph."},
+            },
+            "send_mail": {
+                "name": "send_mail",
+                "description": "Create or send an email from the signed-in user's mailbox using this action's configured delivery mode: manual draft, delayed delivery, or automatic send.",
+                "parameters": [
+                    {
+                        "name": "to_recipients",
+                        "type": "str",
+                        "description": "Required recipient email addresses separated by commas, semicolons, or new lines.",
+                        "required": True,
+                    },
+                    {"name": "subject", "type": "str", "description": "Email subject.", "required": True},
+                    {"name": "body_content", "type": "str", "description": "Plain-text email body content.", "required": False},
+                    {
+                        "name": "cc_recipients",
+                        "type": "str",
+                        "description": "Optional CC recipient email addresses separated by commas, semicolons, or new lines.",
+                        "required": False,
+                    },
+                    {
+                        "name": "bcc_recipients",
+                        "type": "str",
+                        "description": "Optional BCC recipient email addresses separated by commas, semicolons, or new lines.",
+                        "required": False,
+                    },
+                    {
+                        "name": "save_to_sent_items",
+                        "type": "bool",
+                        "description": "For automatic send mode, save the message to Sent Items when true.",
+                        "required": False,
+                    },
+                ],
+                "returns": {"type": "dict", "description": "Draft or send status from Microsoft Graph."},
+            },
+            "search_users": {
+                "name": "search_users",
+                "description": "Search directory users by name or email prefix.",
+                "parameters": [
+                    {"name": "query", "type": "str", "description": "Search text for display name or email.", "required": True},
+                    {"name": "top", "type": "int", "description": "Maximum number of users to return.", "required": False},
+                    {
+                        "name": "select_fields",
+                        "type": "str",
+                        "description": "Optional comma-separated Graph fields to include.",
+                        "required": False,
+                    },
+                ],
+                "returns": {"type": "dict", "description": "Matching users from Microsoft Graph."},
+            },
+            "get_user_by_email": {
+                "name": "get_user_by_email",
+                "description": "Get a directory user by exact email address or UPN.",
+                "parameters": [
+                    {"name": "email", "type": "str", "description": "Exact email address or user principal name.", "required": True},
+                    {
+                        "name": "select_fields",
+                        "type": "str",
+                        "description": "Optional comma-separated Graph fields to include.",
+                        "required": False,
+                    },
+                ],
+                "returns": {"type": "dict", "description": "User match information from Microsoft Graph."},
+            },
+            "list_drive_items": {
+                "name": "list_drive_items",
+                "description": "List OneDrive items from the root or a child path for the signed-in user.",
+                "parameters": [
+                    {"name": "path", "type": "str", "description": "Optional path below the drive root.", "required": False},
+                    {"name": "top", "type": "int", "description": "Maximum number of items to return.", "required": False},
+                    {
+                        "name": "select_fields",
+                        "type": "str",
+                        "description": "Optional comma-separated Graph fields to include.",
+                        "required": False,
+                    },
+                ],
+                "returns": {"type": "dict", "description": "Drive item results from Microsoft Graph."},
+            },
+            "get_my_security_alerts": {
+                "name": "get_my_security_alerts",
+                "description": "Get recent security alerts for the signed-in user. Requires elevated Graph permissions.",
+                "parameters": [
+                    {"name": "top", "type": "int", "description": "Maximum number of alerts to return.", "required": False}
+                ],
+                "returns": {"type": "dict", "description": "Security alert results from Microsoft Graph."},
+            },
+        }
+
         return {
             "name": self.manifest.get("name", "msgraph_plugin"),
-            "type": "msgraph",
+            "type": MSGRAPH_PLUGIN_TYPE,
             "description": (
                 "Plugin for interacting with Microsoft Graph API. Supports user profile, "
-                "calendar, mailbox timezone settings, mail, directory, drive, and security alert operations."
+                "calendar reads and invite creation, mailbox timezone settings, mail, directory, "
+                "drive, and security alert operations."
             ),
             "methods": [
-                {
-                    "name": "get_my_profile",
-                    "description": "Get the signed-in user's profile details.",
-                    "parameters": [
-                        {
-                            "name": "select_fields",
-                            "type": "str",
-                            "description": "Optional comma-separated Graph fields to include.",
-                            "required": False,
-                        }
-                    ],
-                    "returns": {"type": "dict", "description": "User profile information from Microsoft Graph."},
-                },
-                {
-                    "name": "get_my_timezone",
-                    "description": "Get the signed-in user's Microsoft 365 mailbox time zone and related formatting settings. Use this before answering timezone-sensitive questions.",
-                    "parameters": [],
-                    "returns": {"type": "dict", "description": "Mailbox timezone, date format, and time format settings from Microsoft Graph."},
-                },
-                {
-                    "name": "get_my_events",
-                    "description": "Get upcoming calendar events for the signed-in user.",
-                    "parameters": [
-                        {"name": "top", "type": "int", "description": "Maximum number of events to return.", "required": False},
-                        {
-                            "name": "start_datetime",
-                            "type": "str",
-                            "description": "Optional ISO datetime. If provided with end_datetime, uses calendarView.",
-                            "required": False,
-                        },
-                        {
-                            "name": "end_datetime",
-                            "type": "str",
-                            "description": "Optional ISO datetime. If provided with start_datetime, uses calendarView.",
-                            "required": False,
-                        },
-                        {
-                            "name": "select_fields",
-                            "type": "str",
-                            "description": "Optional comma-separated Graph fields to include.",
-                            "required": False,
-                        },
-                    ],
-                    "returns": {"type": "dict", "description": "Calendar event results from Microsoft Graph."},
-                },
-                {
-                    "name": "get_my_messages",
-                    "description": "Get recent mail messages for the signed-in user.",
-                    "parameters": [
-                        {"name": "top", "type": "int", "description": "Maximum number of messages to return.", "required": False},
-                        {"name": "folder", "type": "str", "description": "Optional mail folder name, such as inbox.", "required": False},
-                        {"name": "unread_only", "type": "bool", "description": "If true, only unread messages are returned.", "required": False},
-                        {
-                            "name": "select_fields",
-                            "type": "str",
-                            "description": "Optional comma-separated Graph fields to include.",
-                            "required": False,
-                        },
-                    ],
-                    "returns": {"type": "dict", "description": "Mail message results from Microsoft Graph."},
-                },
-                {
-                    "name": "search_users",
-                    "description": "Search directory users by name or email prefix.",
-                    "parameters": [
-                        {"name": "query", "type": "str", "description": "Search text for display name or email.", "required": True},
-                        {"name": "top", "type": "int", "description": "Maximum number of users to return.", "required": False},
-                        {
-                            "name": "select_fields",
-                            "type": "str",
-                            "description": "Optional comma-separated Graph fields to include.",
-                            "required": False,
-                        },
-                    ],
-                    "returns": {"type": "dict", "description": "Matching users from Microsoft Graph."},
-                },
-                {
-                    "name": "get_user_by_email",
-                    "description": "Get a directory user by exact email address or UPN.",
-                    "parameters": [
-                        {"name": "email", "type": "str", "description": "Exact email address or user principal name.", "required": True},
-                        {
-                            "name": "select_fields",
-                            "type": "str",
-                            "description": "Optional comma-separated Graph fields to include.",
-                            "required": False,
-                        },
-                    ],
-                    "returns": {"type": "dict", "description": "User match information from Microsoft Graph."},
-                },
-                {
-                    "name": "list_drive_items",
-                    "description": "List OneDrive items from the root or a child path for the signed-in user.",
-                    "parameters": [
-                        {"name": "path", "type": "str", "description": "Optional path below the drive root.", "required": False},
-                        {"name": "top", "type": "int", "description": "Maximum number of items to return.", "required": False},
-                        {
-                            "name": "select_fields",
-                            "type": "str",
-                            "description": "Optional comma-separated Graph fields to include.",
-                            "required": False,
-                        },
-                    ],
-                    "returns": {"type": "dict", "description": "Drive item results from Microsoft Graph."},
-                },
-                {
-                    "name": "get_my_security_alerts",
-                    "description": "Get recent security alerts for the signed-in user. Requires elevated Graph permissions.",
-                    "parameters": [
-                        {"name": "top", "type": "int", "description": "Maximum number of alerts to return.", "required": False}
-                    ],
-                    "returns": {"type": "dict", "description": "Security alert results from Microsoft Graph."},
-                },
+                method_specs[definition["function_name"]]
+                for definition in MSGRAPH_CAPABILITY_DEFINITIONS
+                if definition["function_name"] in enabled_methods
             ],
         }
 
     def get_functions(self) -> List[str]:
         return [
-            "get_my_profile",
-            "get_my_timezone",
-            "get_my_events",
-            "get_my_messages",
-            "search_users",
-            "get_user_by_email",
-            "list_drive_items",
-            "get_my_security_alerts",
+            definition["function_name"]
+            for definition in MSGRAPH_CAPABILITY_DEFINITIONS
+            if definition["function_name"] in self._enabled_function_names
         ]
+
+    def get_kernel_plugin(self, plugin_name: str = "msgraph") -> KernelPlugin:
+        functions = {}
+        for function_name in self.get_functions():
+            bound_method = getattr(self, function_name, None)
+            if callable(bound_method) and hasattr(bound_method, "__kernel_function__"):
+                functions[function_name] = bound_method
+
+        return KernelPlugin.from_object(
+            plugin_name,
+            functions,
+            description=self.metadata.get("description"),
+        )
 
     def _get_scopes(self, operation_name: str, default_scopes: List[str]) -> List[str]:
         configured_scopes = self._scope_overrides.get(operation_name)
@@ -192,6 +351,340 @@ class MSGraphPlugin(BasePlugin):
         error_payload.setdefault("operation", operation_name)
         error_payload.setdefault("scopes", scopes)
         return None, scopes, error_payload
+
+    def _invalid_parameter_error(self, operation_name: str, message: str) -> Dict[str, Any]:
+        return {
+            "error": "invalid_parameters",
+            "message": message,
+            "operation": operation_name,
+        }
+
+    def _normalize_boolean_parameter(
+        self,
+        value: Any,
+        parameter_name: str,
+        operation_name: str,
+    ) -> Tuple[Optional[bool], Optional[Dict[str, Any]]]:
+        if isinstance(value, bool):
+            return value, None
+
+        if isinstance(value, (int, float)) and value in (0, 1):
+            return bool(value), None
+
+        if isinstance(value, str):
+            lowered_value = value.strip().lower()
+            if lowered_value in {"true", "1", "yes"}:
+                return True, None
+            if lowered_value in {"false", "0", "no"}:
+                return False, None
+
+        return None, self._invalid_parameter_error(
+            operation_name,
+            f"{parameter_name} must be a boolean value.",
+        )
+
+    def _resolve_event_timezone(self, timezone_value: str = "") -> str:
+        normalized_timezone = str(timezone_value or "").strip()
+        if normalized_timezone:
+            return normalized_timezone
+
+        mailbox_settings = self._perform_graph_request(
+            "resolve_calendar_timezone",
+            "GET",
+            "/v1.0/me/mailboxSettings",
+            ["MailboxSettings.Read"],
+        )
+        if isinstance(mailbox_settings, dict) and not mailbox_settings.get("error"):
+            mailbox_timezone = str(mailbox_settings.get("timeZone") or "").strip()
+            if mailbox_timezone:
+                return mailbox_timezone
+
+        return "UTC"
+
+    def _add_attendee_candidate(
+        self,
+        attendees_by_email: Dict[str, Dict[str, Any]],
+        invalid_entries: List[str],
+        email: str,
+        name: str = "",
+        attendee_type: str = "required",
+        current_user_email: str = "",
+        strict: bool = True,
+    ) -> bool:
+        normalized_email = str(email or "").strip()
+        if not normalized_email:
+            return False
+
+        lowered_email = normalized_email.lower()
+        if current_user_email and lowered_email == current_user_email.lower():
+            return False
+
+        if "@" not in normalized_email:
+            if strict:
+                invalid_entries.append(normalized_email)
+            return False
+
+        normalized_type = str(attendee_type or "required").strip().lower()
+        if normalized_type not in {"required", "optional", "resource"}:
+            normalized_type = "required"
+
+        if lowered_email in attendees_by_email:
+            return False
+
+        attendees_by_email[lowered_email] = {
+            "emailAddress": {
+                "address": normalized_email,
+                "name": str(name or normalized_email).strip() or normalized_email,
+            },
+            "type": normalized_type,
+        }
+        return True
+
+    def _collect_attendees(
+        self,
+        attendees_by_email: Dict[str, Dict[str, Any]],
+        raw_attendees: Any,
+        invalid_entries: List[str],
+        current_user_email: str = "",
+        strict: bool = True,
+    ) -> None:
+        if raw_attendees is None:
+            return
+
+        if isinstance(raw_attendees, str):
+            for raw_item in re.split(r"[,;\n]+", raw_attendees):
+                normalized_item = raw_item.strip()
+                if normalized_item:
+                    self._add_attendee_candidate(
+                        attendees_by_email,
+                        invalid_entries,
+                        normalized_item,
+                        current_user_email=current_user_email,
+                        strict=strict,
+                    )
+            return
+
+        if isinstance(raw_attendees, dict):
+            email_address = raw_attendees.get("emailAddress")
+            if isinstance(email_address, dict):
+                email = email_address.get("address")
+                name = email_address.get("name") or raw_attendees.get("displayName") or raw_attendees.get("name")
+                attendee_type = raw_attendees.get("type", "required")
+            else:
+                email = (
+                    raw_attendees.get("email")
+                    or raw_attendees.get("address")
+                    or raw_attendees.get("mail")
+                    or raw_attendees.get("userPrincipalName")
+                )
+                name = raw_attendees.get("displayName") or raw_attendees.get("name")
+                attendee_type = raw_attendees.get("type", "required")
+
+            self._add_attendee_candidate(
+                attendees_by_email,
+                invalid_entries,
+                email,
+                name=name or "",
+                attendee_type=attendee_type,
+                current_user_email=current_user_email,
+                strict=strict,
+            )
+            return
+
+        if isinstance(raw_attendees, (list, tuple, set)):
+            for entry in raw_attendees:
+                self._collect_attendees(
+                    attendees_by_email,
+                    entry,
+                    invalid_entries,
+                    current_user_email=current_user_email,
+                    strict=strict,
+                )
+            return
+
+        if strict and str(raw_attendees or "").strip():
+            invalid_entries.append(str(raw_attendees))
+
+    def _collect_mail_recipients(
+        self,
+        raw_recipients: Any,
+        parameter_name: str,
+        operation_name: str,
+    ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        recipients_by_email: Dict[str, Dict[str, Any]] = {}
+        invalid_entries: List[str] = []
+        self._collect_attendees(
+            recipients_by_email,
+            raw_recipients,
+            invalid_entries,
+            strict=True,
+        )
+        if invalid_entries:
+            invalid_sample = ", ".join(invalid_entries[:5])
+            return [], self._invalid_parameter_error(
+                operation_name,
+                f"{parameter_name} must contain valid email addresses. Invalid entries: {invalid_sample}",
+            )
+
+        return [
+            {"emailAddress": recipient.get("emailAddress", {})}
+            for recipient in recipients_by_email.values()
+        ], None
+
+    def _build_deferred_delivery_time(self, delay_seconds: int) -> str:
+        scheduled_time = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
+        return scheduled_time.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+    def _get_execution_context(self) -> Dict[str, str]:
+        context = {
+            "user_id": "",
+            "conversation_id": "",
+            "workflow_id": "",
+            "run_id": "",
+        }
+        current_user = get_current_user_info() or {}
+        context["user_id"] = str(
+            current_user.get("userId")
+            or current_user.get("oid")
+            or current_user.get("id")
+            or ""
+        ).strip()
+        if has_request_context():
+            context["conversation_id"] = str(getattr(g, "conversation_id", "") or "").strip()
+            context["workflow_id"] = str(getattr(g, "workflow_id", "") or "").strip()
+            context["run_id"] = str(getattr(g, "workflow_run_id", "") or "").strip()
+        return context
+
+    def _build_pending_action_tool_result(
+        self,
+        operation_name: str,
+        delivery_mode: str,
+        pending_action: Dict[str, Any],
+        status_key: str,
+        message: str,
+    ) -> Dict[str, Any]:
+        return {
+            "operation": operation_name,
+            "delivery_mode": delivery_mode,
+            status_key: pending_action.get("status") or MSGRAPH_PENDING_STATUS_PENDING,
+            "pending_user_action": True,
+            "pending_action": sanitize_msgraph_pending_action_for_client(pending_action),
+            "message": message,
+        }
+
+    def _create_mail_pending_action(
+        self,
+        message_payload: Dict[str, Any],
+        draft_result: Dict[str, Any],
+        action_mode: str,
+        auto_send_at_utc: str = "",
+        delay_seconds: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        execution_context = self._get_execution_context()
+        user_id = execution_context.get("user_id")
+        if not user_id:
+            return self._invalid_parameter_error("send_mail", "Signed-in user context is required to track the pending mail action.")
+
+        pending_action = create_msgraph_pending_action(
+            user_id,
+            operation=MSGRAPH_PENDING_OPERATION_SEND_MAIL,
+            graph_resource_type=MSGRAPH_PENDING_RESOURCE_MAIL,
+            action_mode=action_mode,
+            status=MSGRAPH_PENDING_STATUS_SCHEDULED if action_mode == MSGRAPH_PENDING_ACTION_DELAYED else MSGRAPH_PENDING_STATUS_PENDING,
+            graph_message_id=draft_result.get("id") or "",
+            summary=build_mail_pending_action_summary(message_payload),
+            conversation_id=execution_context.get("conversation_id", ""),
+            workflow_id=execution_context.get("workflow_id", ""),
+            run_id=execution_context.get("run_id", ""),
+            auto_send_at_utc=auto_send_at_utc,
+            delay_seconds=delay_seconds,
+            graph_endpoint=self._endpoint,
+            web_link=draft_result.get("webLink") or "",
+        )
+        return pending_action
+
+    def _create_calendar_pending_action(
+        self,
+        event_payload: Dict[str, Any],
+        action_mode: str,
+        auto_send_at_utc: str = "",
+        delay_seconds: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        execution_context = self._get_execution_context()
+        user_id = execution_context.get("user_id")
+        if not user_id:
+            return self._invalid_parameter_error("create_calendar_invite", "Signed-in user context is required to track the pending calendar invite.")
+
+        pending_action = create_msgraph_pending_action(
+            user_id,
+            operation=MSGRAPH_PENDING_OPERATION_CREATE_CALENDAR_INVITE,
+            graph_resource_type=MSGRAPH_PENDING_RESOURCE_CALENDAR,
+            action_mode=action_mode,
+            status=MSGRAPH_PENDING_STATUS_SCHEDULED if action_mode == MSGRAPH_PENDING_ACTION_DELAYED else MSGRAPH_PENDING_STATUS_PENDING,
+            graph_payload=event_payload,
+            summary=build_calendar_pending_action_summary(event_payload),
+            conversation_id=execution_context.get("conversation_id", ""),
+            workflow_id=execution_context.get("workflow_id", ""),
+            run_id=execution_context.get("run_id", ""),
+            auto_send_at_utc=auto_send_at_utc,
+            delay_seconds=delay_seconds,
+            graph_endpoint=self._endpoint,
+        )
+        return pending_action
+
+    def _resolve_group_attendees(
+        self,
+        group_id: str,
+        attendees_by_email: Dict[str, Dict[str, Any]],
+        current_user_email: str = "",
+    ) -> Tuple[str, int]:
+        current_user = get_current_user_info() or {}
+        current_user_id = str(current_user.get("userId") or "").strip()
+        if not current_user_id:
+            raise PermissionError("Signed-in user context is required to include group members.")
+
+        normalized_group_id = str(group_id or "").strip() or self._default_group_id
+        if not normalized_group_id:
+            normalized_group_id = require_active_group(current_user_id)
+
+        assert_group_role(
+            current_user_id,
+            normalized_group_id,
+            allowed_roles=("Owner", "Admin", "DocumentManager", "User"),
+        )
+
+        group_doc = find_group_by_id(normalized_group_id)
+        if not group_doc:
+            raise LookupError("Group not found")
+
+        added_count = 0
+        invalid_entries: List[str] = []
+
+        owner = group_doc.get("owner") if isinstance(group_doc.get("owner"), dict) else {}
+        if owner and self._add_attendee_candidate(
+            attendees_by_email,
+            invalid_entries,
+            owner.get("email"),
+            name=owner.get("displayName") or owner.get("email") or "",
+            current_user_email=current_user_email,
+            strict=False,
+        ):
+            added_count += 1
+
+        for member in group_doc.get("users", []):
+            if not isinstance(member, dict):
+                continue
+            if self._add_attendee_candidate(
+                attendees_by_email,
+                invalid_entries,
+                member.get("email"),
+                name=member.get("displayName") or member.get("email") or "",
+                current_user_email=current_user_email,
+                strict=False,
+            ):
+                added_count += 1
+
+        return normalized_group_id, added_count
 
     def _normalize_top(self, top: int) -> int:
         try:
@@ -328,6 +821,7 @@ class MSGraphPlugin(BasePlugin):
         paginate: bool = False,
         max_items: int = 5,
         additional_headers: Optional[Dict[str, str]] = None,
+        expect_json_response: bool = True,
     ) -> Dict[str, Any]:
         token, scopes, token_error = self._get_token(operation_name, default_scopes)
         if token_error:
@@ -379,6 +873,22 @@ class MSGraphPlugin(BasePlugin):
             pages_fetched += 1
             if response.status_code >= 400:
                 return self._build_graph_error(operation_name, scopes, response=response)
+
+            if not expect_json_response:
+                response_payload = None
+                try:
+                    response_payload = response.json()
+                except ValueError:
+                    response_payload = None
+
+                result_payload: Dict[str, Any] = {
+                    "operation": operation_name,
+                    "status_code": response.status_code,
+                    "accepted": response.status_code in {200, 201, 202, 204},
+                }
+                if response_payload is not None:
+                    result_payload["value"] = response_payload
+                return result_payload
 
             try:
                 payload = response.json()
@@ -500,6 +1010,204 @@ class MSGraphPlugin(BasePlugin):
         )
 
     @plugin_function_logger("MSGraphPlugin")
+    # bac-check: ignore - _resolve_group_attendees validates group_id with require_active_group/assert_group_role.
+    @kernel_function(description="Create a calendar invite for the signed-in user and optionally turn it into a Microsoft Teams meeting.")
+    def create_calendar_invite(
+        self,
+        subject: str,
+        start_datetime: str,
+        end_datetime: str,
+        body_content: str = "",
+        location: str = "",
+        attendee_emails: Any = "",
+        include_group_members: Any = False,
+        group_id: str = "",
+        make_teams_meeting: Any = False,
+        timezone: str = "",
+        allow_new_time_proposals: Any = True,
+    ) -> dict:
+        operation_name = "create_calendar_invite"
+        normalized_subject = str(subject or "").strip()
+        normalized_start = str(start_datetime or "").strip()
+        normalized_end = str(end_datetime or "").strip()
+        normalized_body = str(body_content or "").strip()
+        normalized_location = str(location or "").strip()
+
+        if not normalized_subject:
+            return self._invalid_parameter_error(operation_name, "subject is required to create a calendar invite.")
+        if not normalized_start or not normalized_end:
+            return self._invalid_parameter_error(operation_name, "start_datetime and end_datetime are required to create a calendar invite.")
+
+        normalized_include_group_members, boolean_error = self._normalize_boolean_parameter(
+            include_group_members,
+            "include_group_members",
+            operation_name,
+        )
+        if boolean_error:
+            return boolean_error
+
+        normalized_make_teams_meeting, boolean_error = self._normalize_boolean_parameter(
+            make_teams_meeting,
+            "make_teams_meeting",
+            operation_name,
+        )
+        if boolean_error:
+            return boolean_error
+
+        normalized_allow_new_time_proposals, boolean_error = self._normalize_boolean_parameter(
+            allow_new_time_proposals,
+            "allow_new_time_proposals",
+            operation_name,
+        )
+        if boolean_error:
+            return boolean_error
+
+        current_user = get_current_user_info() or {}
+        current_user_email = str(current_user.get("email") or "").strip()
+        attendees_by_email: Dict[str, Dict[str, Any]] = {}
+        invalid_entries: List[str] = []
+        self._collect_attendees(
+            attendees_by_email,
+            attendee_emails,
+            invalid_entries,
+            current_user_email=current_user_email,
+            strict=True,
+        )
+        if invalid_entries:
+            invalid_sample = ", ".join(invalid_entries[:5])
+            return self._invalid_parameter_error(
+                operation_name,
+                f"attendee_emails must contain valid email addresses. Invalid entries: {invalid_sample}",
+            )
+
+        resolved_group_id = ""
+        group_attendee_count = 0
+        if normalized_include_group_members:
+            try:
+                resolved_group_id, group_attendee_count = self._resolve_group_attendees(
+                    group_id,
+                    attendees_by_email,
+                    current_user_email=current_user_email,
+                )
+            except ValueError as exc:
+                return self._invalid_parameter_error(operation_name, str(exc))
+            except LookupError as exc:
+                return {
+                    "error": "not_found",
+                    "message": str(exc),
+                    "operation": operation_name,
+                }
+            except PermissionError as exc:
+                return {
+                    "error": "permission_denied",
+                    "message": str(exc),
+                    "operation": operation_name,
+                }
+
+        normalized_timezone = self._resolve_event_timezone(timezone)
+        attendees = list(attendees_by_email.values())
+        event_payload: Dict[str, Any] = {
+            "subject": normalized_subject,
+            "start": {
+                "dateTime": normalized_start,
+                "timeZone": normalized_timezone,
+            },
+            "end": {
+                "dateTime": normalized_end,
+                "timeZone": normalized_timezone,
+            },
+            "allowNewTimeProposals": bool(normalized_allow_new_time_proposals),
+        }
+
+        if normalized_body:
+            event_payload["body"] = {
+                "contentType": "Text",
+                "content": normalized_body,
+            }
+        if normalized_location:
+            event_payload["location"] = {"displayName": normalized_location}
+        if attendees:
+            event_payload["attendees"] = attendees
+        if normalized_make_teams_meeting:
+            event_payload["isOnlineMeeting"] = True
+            event_payload["onlineMeetingProvider"] = "teamsForBusiness"
+
+        if self._calendar_send_mode in {
+            MSGRAPH_CALENDAR_SEND_MODE_DRAFT_MANUAL,
+            MSGRAPH_CALENDAR_SEND_MODE_DRAFT_DELAYED,
+        }:
+            scheduled_send_time = ""
+            delay_seconds = None
+            action_mode = MSGRAPH_PENDING_ACTION_MANUAL
+            if self._calendar_send_mode == MSGRAPH_CALENDAR_SEND_MODE_DRAFT_DELAYED:
+                scheduled_send_time = self._build_deferred_delivery_time(self._calendar_delay_seconds)
+                delay_seconds = self._calendar_delay_seconds
+                action_mode = MSGRAPH_PENDING_ACTION_DELAYED
+                token, _, token_error = self._get_token("create_calendar_invite_delayed_delivery", ["Calendars.ReadWrite"])
+                if token_error:
+                    return token_error
+            else:
+                token = None
+
+            pending_action = self._create_calendar_pending_action(
+                event_payload,
+                action_mode,
+                auto_send_at_utc=scheduled_send_time,
+                delay_seconds=delay_seconds,
+            )
+            if pending_action.get("error"):
+                return pending_action
+            if token:
+                schedule_msgraph_pending_action_auto_commit(pending_action, token)
+
+            result = self._build_pending_action_tool_result(
+                operation_name,
+                self._calendar_send_mode,
+                pending_action,
+                "calendar_invite_status",
+                (
+                    "Calendar invite is waiting for the delayed send window. It can be cancelled or sent now before the timer ends."
+                    if action_mode == MSGRAPH_PENDING_ACTION_DELAYED
+                    else "Calendar invite is waiting for review. Send or cancel it from the action card."
+                ),
+            )
+            result["requested_attendee_count"] = len(attendees)
+            result["included_group_member_count"] = group_attendee_count
+            result["event_timezone"] = normalized_timezone
+            result["teams_meeting_requested"] = bool(normalized_make_teams_meeting)
+            if resolved_group_id:
+                result["group_id"] = resolved_group_id
+            if scheduled_send_time:
+                result["scheduled_send_time_utc"] = scheduled_send_time
+                result["delay_seconds"] = delay_seconds
+            return result
+
+        result = self._perform_graph_request(
+            operation_name,
+            "POST",
+            "/v1.0/me/events",
+            ["Calendars.ReadWrite"],
+            json_body=event_payload,
+            additional_headers={"Prefer": f'outlook.timezone="{normalized_timezone}"'},
+        )
+        if not isinstance(result, dict) or result.get("error"):
+            return result
+
+        result.setdefault("operation", operation_name)
+        result["requested_attendee_count"] = len(attendees)
+        result["included_group_member_count"] = group_attendee_count
+        result["event_timezone"] = normalized_timezone
+        result["teams_meeting_requested"] = bool(normalized_make_teams_meeting)
+        if resolved_group_id:
+            result["group_id"] = resolved_group_id
+
+        online_meeting = result.get("onlineMeeting") if isinstance(result.get("onlineMeeting"), dict) else {}
+        if online_meeting.get("joinUrl"):
+            result["join_url"] = online_meeting.get("joinUrl")
+
+        return result
+
+    @plugin_function_logger("MSGraphPlugin")
     @kernel_function(description="Get recent mail messages for the signed-in user.")
     def get_my_messages(
         self,
@@ -529,6 +1237,199 @@ class MSGraphPlugin(BasePlugin):
             paginate=True,
             max_items=top,
             additional_headers=headers,
+        )
+
+    @plugin_function_logger("MSGraphPlugin")
+    @kernel_function(description="Mark a mail message as read or unread for the signed-in user.")
+    def mark_message_as_read(self, message_id: str, is_read: bool = True) -> dict:
+        normalized_message_id = (message_id or "").strip()
+        if not normalized_message_id:
+            return {
+                "error": "invalid_parameters",
+                "message": "message_id is required to update a mail message.",
+                "operation": "mark_message_as_read",
+            }
+
+        normalized_is_read = is_read
+        if isinstance(is_read, str):
+            lowered_value = is_read.strip().lower()
+            if lowered_value in {"true", "1", "yes"}:
+                normalized_is_read = True
+            elif lowered_value in {"false", "0", "no"}:
+                normalized_is_read = False
+            else:
+                return {
+                    "error": "invalid_parameters",
+                    "message": "is_read must be a boolean value.",
+                    "operation": "mark_message_as_read",
+                }
+
+        return self._perform_graph_request(
+            "mark_message_as_read",
+            "PATCH",
+            f"/v1.0/me/messages/{quote(normalized_message_id, safe='')}",
+            ["Mail.ReadWrite"],
+            json_body={"isRead": bool(normalized_is_read)},
+        )
+
+    @plugin_function_logger("MSGraphPlugin")
+    @kernel_function(description="Create or send an email from the signed-in user's mailbox using this action's configured delivery mode.")
+    def send_mail(
+        self,
+        to_recipients: Any,
+        subject: str,
+        body_content: str = "",
+        cc_recipients: Any = "",
+        bcc_recipients: Any = "",
+        save_to_sent_items: Any = True,
+    ) -> dict:
+        operation_name = "send_mail"
+        normalized_subject = str(subject or "").strip()
+        normalized_body = str(body_content or "")
+
+        if not normalized_subject:
+            return self._invalid_parameter_error(operation_name, "subject is required to send mail.")
+
+        to_payload, recipient_error = self._collect_mail_recipients(
+            to_recipients,
+            "to_recipients",
+            operation_name,
+        )
+        if recipient_error:
+            return recipient_error
+        if not to_payload:
+            return self._invalid_parameter_error(operation_name, "to_recipients must include at least one valid email address.")
+
+        cc_payload, recipient_error = self._collect_mail_recipients(
+            cc_recipients,
+            "cc_recipients",
+            operation_name,
+        )
+        if recipient_error:
+            return recipient_error
+
+        bcc_payload, recipient_error = self._collect_mail_recipients(
+            bcc_recipients,
+            "bcc_recipients",
+            operation_name,
+        )
+        if recipient_error:
+            return recipient_error
+
+        normalized_save_to_sent_items, boolean_error = self._normalize_boolean_parameter(
+            save_to_sent_items,
+            "save_to_sent_items",
+            operation_name,
+        )
+        if boolean_error:
+            return boolean_error
+
+        message_payload: Dict[str, Any] = {
+            "subject": normalized_subject,
+            "body": {
+                "contentType": "Text",
+                "content": normalized_body,
+            },
+            "toRecipients": to_payload,
+        }
+        if cc_payload:
+            message_payload["ccRecipients"] = cc_payload
+        if bcc_payload:
+            message_payload["bccRecipients"] = bcc_payload
+
+        if self._mail_send_mode == MSGRAPH_MAIL_SEND_MODE_AUTO_SEND:
+            send_result = self._perform_graph_request(
+                operation_name,
+                "POST",
+                "/v1.0/me/sendMail",
+                ["Mail.Send"],
+                json_body={
+                    "message": message_payload,
+                    "saveToSentItems": bool(normalized_save_to_sent_items),
+                },
+                expect_json_response=False,
+            )
+            if not isinstance(send_result, dict) or send_result.get("error"):
+                return send_result
+
+            send_result.update({
+                "operation": operation_name,
+                "delivery_mode": self._mail_send_mode,
+                "mail_send_status": "sent",
+                "saved_to_sent_items": bool(normalized_save_to_sent_items),
+            })
+            return send_result
+
+        if self._mail_send_mode == MSGRAPH_MAIL_SEND_MODE_DRAFT_DELAYED:
+            scheduled_send_time = self._build_deferred_delivery_time(self._mail_delay_seconds)
+            draft_result = self._perform_graph_request(
+                operation_name,
+                "POST",
+                "/v1.0/me/messages",
+                ["Mail.ReadWrite"],
+                json_body=message_payload,
+            )
+            if not isinstance(draft_result, dict) or draft_result.get("error"):
+                return draft_result
+
+            message_id = str(draft_result.get("id") or "").strip()
+            if not message_id:
+                return self._invalid_parameter_error(
+                    operation_name,
+                    "Microsoft Graph created the mail draft but did not return a message id for delayed delivery.",
+                )
+
+            token, _, token_error = self._get_token("send_mail_delayed_delivery", ["Mail.Send"])
+            if token_error:
+                return token_error
+
+            pending_action = self._create_mail_pending_action(
+                message_payload,
+                draft_result,
+                MSGRAPH_PENDING_ACTION_DELAYED,
+                auto_send_at_utc=scheduled_send_time,
+                delay_seconds=self._mail_delay_seconds,
+            )
+            if pending_action.get("error"):
+                return pending_action
+            schedule_msgraph_pending_action_auto_commit(pending_action, token)
+
+            return {
+                "operation": operation_name,
+                "delivery_mode": self._mail_send_mode,
+                "mail_send_status": "scheduled_pending",
+                "message_id": message_id,
+                "delay_seconds": self._mail_delay_seconds,
+                "scheduled_send_time_utc": scheduled_send_time,
+                "pending_user_action": True,
+                "pending_action": sanitize_msgraph_pending_action_for_client(pending_action),
+                "message": "Mail draft is waiting for the delayed send window. It can be cancelled or sent now before the timer ends.",
+            }
+
+        draft_result = self._perform_graph_request(
+            operation_name,
+            "POST",
+            "/v1.0/me/messages",
+            ["Mail.ReadWrite"],
+            json_body=message_payload,
+        )
+        if not isinstance(draft_result, dict) or draft_result.get("error"):
+            return draft_result
+
+        pending_action = self._create_mail_pending_action(
+            message_payload,
+            draft_result,
+            MSGRAPH_PENDING_ACTION_MANUAL,
+        )
+        if pending_action.get("error"):
+            return pending_action
+
+        return self._build_pending_action_tool_result(
+            operation_name,
+            MSGRAPH_MAIL_SEND_MODE_DRAFT_MANUAL,
+            pending_action,
+            "mail_send_status",
+            "Mail draft is waiting for review. Send or cancel it from the action card.",
         )
 
     @plugin_function_logger("MSGraphPlugin")

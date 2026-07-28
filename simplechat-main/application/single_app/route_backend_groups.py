@@ -5,6 +5,29 @@ from functions_authentication import *
 from functions_group import *
 from functions_debug import debug_print
 from functions_notifications import create_notification
+from functions_simplechat_operations import (
+    add_group_member_for_current_user,
+    create_group_for_current_user,
+)
+from functions_stats_windows import (
+    build_stats_date_series,
+    resolve_stats_time_window,
+    stats_window_response_payload,
+    timestamp_to_stats_date_key,
+)
+from functions_workspace_branding import (
+    DEFAULT_WORKSPACE_HERO_COLOR,
+    decode_workspace_logo_base64,
+    get_workspace_logo_metadata,
+    is_allowed_workspace_logo_file,
+    normalize_workspace_hero_color,
+    prepare_workspace_logo_image_for_storage,
+)
+from functions_settings import (
+    get_settings,
+    is_group_workspace_file_download_admin_enabled,
+    is_group_workspace_file_download_enabled,
+)
 from swagger_wrapper import swagger_route, get_auth_security
 
 def register_route_backend_groups(app):
@@ -41,9 +64,10 @@ def register_route_backend_groups(app):
         for g in all_items:
             name = g.get("name", "").lower()
             desc = g.get("description", "").lower()
+            group_id = str(g.get("id", "")).lower()
 
             if search_query:
-                if search_query not in name and search_query not in desc:
+                if search_query not in name and search_query not in desc and search_query not in group_id:
                     continue
 
             if not show_all:
@@ -101,18 +125,31 @@ def register_route_backend_groups(app):
             total_count = len(all_matching_groups)
             paginated_groups = all_matching_groups[offset : offset + page_size]
 
-            # --- Get active group ID ---
-            user_settings_data = get_user_settings(user_id)
-            db_active_group_id = user_settings_data["settings"].get("activeGroupOid", "")
+            # --- Get active group ID through the authorization helper ---
+            try:
+                db_active_group_id = require_active_group(user_id)
+            except (ValueError, LookupError, PermissionError):
+                db_active_group_id = ""
 
             # --- Map results ---
             mapped_results = []
             for g in paginated_groups:
                 role = get_user_role_in_group(g, user_id)
+                logo_metadata = get_workspace_logo_metadata(g)
+                owner = g.get("owner", {}) or {}
                 mapped_results.append({
                     "id": g["id"],
                     "name": g.get("name", "Untitled Group"), # Provide default name
                     "description": g.get("description", ""),
+                    "owner": {
+                        "displayName": owner.get("displayName", ""),
+                        "email": owner.get("email", ""),
+                    },
+                    "heroColor": normalize_workspace_hero_color(
+                        g.get("heroColor"),
+                        DEFAULT_WORKSPACE_HERO_COLOR,
+                    ),
+                    **logo_metadata,
                     "userRole": role,
                     "isActive": (g["id"] == db_active_group_id),
                     "status": g.get("status", "active")  # Include group status
@@ -148,8 +185,10 @@ def register_route_backend_groups(app):
         description = data.get("description", "")
 
         try:
-            group_doc = create_group(name, description)
+            group_doc = create_group_for_current_user(name, description)
             return jsonify({"id": group_doc["id"], "name": group_doc["name"]}), 201
+        except PermissionError as ex:
+            return jsonify({"error": str(ex)}), 403
         except Exception as ex:
             return jsonify({"error": str(ex)}), 400
 
@@ -163,11 +202,75 @@ def register_route_backend_groups(app):
         GET /api/groups/<group_id>
         Returns the full group details for that group.
         """        
+        user_info = get_current_user_info()
+        user_id = user_info["userId"]
+
         group_doc = find_group_by_id(group_id)
         
         if not group_doc:
             return jsonify({"error": "Group not found"}), 404
-        return jsonify(group_doc), 200
+
+        if not get_user_role_in_group(group_doc, user_id):
+            return jsonify({"error": "You are not a member of this group"}), 403
+
+        response_doc = dict(group_doc)
+        response_doc["heroColor"] = normalize_workspace_hero_color(
+            group_doc.get("heroColor"),
+            DEFAULT_WORKSPACE_HERO_COLOR,
+        )
+        response_doc.update(get_workspace_logo_metadata(group_doc))
+        response_doc["disable_file_downloads"] = bool(group_doc.get("disable_file_downloads", False))
+        app_settings = get_settings()
+        response_doc["file_downloads_admin_enabled"] = is_group_workspace_file_download_admin_enabled(
+            app_settings,
+            group_doc,
+        )
+        response_doc["file_downloads_enabled"] = is_group_workspace_file_download_enabled(
+            app_settings,
+            group_doc,
+        )
+        response_doc.pop("logoBase64", None)
+
+        return jsonify(response_doc), 200
+
+    @app.route("/api/groups/<group_id>/download-settings", methods=["PATCH"])
+    @swagger_route(security=get_auth_security())
+    @login_required
+    @user_required
+    @enabled_required("enable_group_workspaces")
+    def api_update_group_download_settings(group_id):
+        user_info = get_current_user_info()
+        user_id = user_info["userId"]
+
+        try:
+            assert_group_role(user_id, group_id, allowed_roles=("Owner", "Admin"))
+        except LookupError:
+            return jsonify({"error": "Group not found"}), 404
+        except PermissionError:
+            return jsonify({"error": "Only group owners and admins can update download settings"}), 403
+
+        group_doc = find_group_by_id(group_id)
+        if not group_doc:
+            return jsonify({"error": "Group not found"}), 404
+
+        if not is_group_workspace_file_download_admin_enabled(get_settings(), group_doc):
+            return jsonify({
+                "error": "File downloads have not been enabled for this group by an administrator"
+            }), 403
+
+        data = request.get_json(silent=True) or {}
+        group_doc["disable_file_downloads"] = bool(data.get("disable_file_downloads", False))
+        group_doc["modifiedDate"] = datetime.utcnow().isoformat()
+        try:
+            cosmos_groups_container.upsert_item(group_doc)
+        except exceptions.CosmosHttpResponseError as ex:
+            return jsonify({"error": str(ex)}), 400
+
+        return jsonify({
+            "success": True,
+            "message": "Download settings updated",
+            "disable_file_downloads": group_doc["disable_file_downloads"],
+        }), 200
 
     @app.route("/api/groups/<group_id>", methods=["DELETE"])
     @swagger_route(security=get_auth_security())
@@ -220,9 +323,14 @@ def register_route_backend_groups(app):
         data = request.get_json()
         name = data.get("name", group_doc.get("name"))
         description = data.get("description", group_doc.get("description"))
+        hero_color = normalize_workspace_hero_color(
+            data.get("heroColor"),
+            group_doc.get("heroColor", DEFAULT_WORKSPACE_HERO_COLOR),
+        )
 
         group_doc["name"] = name
         group_doc["description"] = description
+        group_doc["heroColor"] = hero_color
         group_doc["modifiedDate"] = datetime.utcnow().isoformat()
         try:
             cosmos_groups_container.upsert_item(group_doc)
@@ -230,6 +338,84 @@ def register_route_backend_groups(app):
             return jsonify({"error": str(ex)}), 400
 
         return jsonify({"message": "Group updated", "id": group_id}), 200
+
+    @app.route("/api/groups/<group_id>/logo", methods=["GET"])
+    @swagger_route(security=get_auth_security())
+    @login_required
+    @user_required
+    @enabled_required("enable_group_workspaces")
+    def api_get_group_logo(group_id):
+        user_info = get_current_user_info()
+        user_id = user_info["userId"]
+
+        group_doc = find_group_by_id(group_id)
+        if not group_doc:
+            return jsonify({"error": "Group not found"}), 404
+
+        if not get_user_role_in_group(group_doc, user_id):
+            return jsonify({"error": "You are not a member of this group"}), 403
+
+        logo_base64 = str(group_doc.get("logoBase64") or "").strip()
+        if not logo_base64:
+            return jsonify({"error": "Group logo not found"}), 404
+
+        try:
+            logo_bytes = decode_workspace_logo_base64(logo_base64)
+        except (ValueError, TypeError):
+            return jsonify({"error": "Stored group logo is invalid"}), 500
+
+        return send_file(
+            BytesIO(logo_bytes),
+            mimetype="image/png",
+            max_age=3600,
+            download_name="group-logo.png",
+        )
+
+    @app.route("/api/groups/<group_id>/logo", methods=["POST"])
+    @swagger_route(security=get_auth_security())
+    @login_required
+    @user_required
+    @enabled_required("enable_group_workspaces")
+    def api_upload_group_logo(group_id):
+        user_info = get_current_user_info()
+        user_id = user_info["userId"]
+
+        group_doc = find_group_by_id(group_id)
+        if not group_doc:
+            return jsonify({"error": "Group not found"}), 404
+
+        if group_doc["owner"]["id"] != user_id:
+            return jsonify({"error": "Only the owner can update the group logo"}), 403
+
+        logo_file = request.files.get("logo_file")
+        if not logo_file or not logo_file.filename:
+            return jsonify({"error": "No logo file provided"}), 400
+
+        if not is_allowed_workspace_logo_file(logo_file.filename):
+            return jsonify({"error": "Unsupported image type. Allowed: png, jpg, jpeg"}), 400
+
+        try:
+            processed_logo = prepare_workspace_logo_image_for_storage(
+                logo_file.read(),
+                logo_file.filename,
+            )
+        except (ValueError, OSError) as ex:
+            return jsonify({"error": str(ex)}), 400
+
+        current_logo_version = get_workspace_logo_metadata(group_doc)["logoVersion"]
+        group_doc["logoBase64"] = processed_logo["base64_str"]
+        group_doc["logoVersion"] = current_logo_version + 1
+        group_doc["modifiedDate"] = datetime.utcnow().isoformat()
+
+        try:
+            cosmos_groups_container.upsert_item(group_doc)
+        except exceptions.CosmosHttpResponseError as ex:
+            return jsonify({"error": str(ex)}), 400
+
+        return jsonify({
+            "message": "Group logo updated",
+            "logoVersion": group_doc["logoVersion"],
+        }), 200
 
     @app.route("/api/groups/setActive", methods=["PATCH"])
     @swagger_route(security=get_auth_security())
@@ -385,101 +571,22 @@ def register_route_backend_groups(app):
         Body: { "userId": "<some_user_id>", "displayName": "...", etc. }
         Only Owner or Admin can add members directly (bypass request flow).
         """
-        user_info = get_current_user_info()
-        user_id = user_info["userId"]
-        user_email = user_info.get("email", "unknown")
-
-        group_doc = find_group_by_id(group_id)
-        
-        if not group_doc:
-            return jsonify({"error": "Group not found"}), 404
-
-        role = get_user_role_in_group(group_doc, user_id)
-        if role not in ["Owner", "Admin"]:
-            return jsonify({"error": "Only the owner or admin can add members"}), 403
-
         data = request.get_json()
-        new_user_id = data.get("userId")
-        if not new_user_id:
-            return jsonify({"error": "Missing userId"}), 400
-
-        if get_user_role_in_group(group_doc, new_user_id):
-            return jsonify({"error": "User is already a member"}), 400
-
-        # Get role from request, default to 'user'
-        member_role = data.get("role", "user").lower()
-        
-        # Validate role
-        valid_roles = ['admin', 'document_manager', 'user']
-        if member_role not in valid_roles:
-            return jsonify({"error": f"Invalid role. Must be: {', '.join(valid_roles)}"}), 400
-
-        new_member_doc = {
-            "userId": new_user_id,
-            "email": data.get("email", ""),
-            "displayName": data.get("displayName", "New User")
-        }
-        group_doc["users"].append(new_member_doc)
-        
-        # Add to appropriate role array
-        if member_role == 'admin':
-            if new_user_id not in group_doc.get('admins', []):
-                group_doc.setdefault('admins', []).append(new_user_id)
-        elif member_role == 'document_manager':
-            if new_user_id not in group_doc.get('documentManagers', []):
-                group_doc.setdefault('documentManagers', []).append(new_user_id)
-        
-        group_doc["modifiedDate"] = datetime.utcnow().isoformat()
-
-        cosmos_groups_container.upsert_item(group_doc)
-        
-        # Log activity for member addition
         try:
-            activity_record = {
-                'id': str(uuid.uuid4()),
-                'activity_type': 'add_member_directly',
-                'timestamp': datetime.utcnow().isoformat(),
-                'added_by_user_id': user_id,
-                'added_by_email': user_email,
-                'added_by_role': role,
-                'group_id': group_id,
-                'group_name': group_doc.get('name', 'Unknown'),
-                'member_user_id': new_user_id,
-                'member_email': new_member_doc.get('email', ''),
-                'member_name': new_member_doc.get('displayName', ''),
-                'member_role': member_role,
-                'description': f"{role} {user_email} added member {new_member_doc.get('displayName', '')} ({new_member_doc.get('email', '')}) to group {group_doc.get('name', group_id)} as {member_role}"
-            }
-            cosmos_activity_logs_container.create_item(body=activity_record)
-        except Exception as log_error:
-            debug_print(f"Failed to log member addition activity: {log_error}")
-        
-        # Create notification for the new member
-        try:
-            from functions_notifications import create_notification
-            role_display = {
-                'admin': 'Admin',
-                'document_manager': 'Document Manager',
-                'user': 'Member'
-            }.get(member_role, 'Member')
-            
-            create_notification(
-                user_id=new_user_id,
-                notification_type='system_announcement',
-                title='Added to Group',
-                message=f"You have been added to the group '{group_doc.get('name', 'Unknown')}' as {role_display} by {user_email}.",
-                link_url=f"/manage_group/{group_id}",
-                metadata={
-                    'group_id': group_id,
-                    'group_name': group_doc.get('name', 'Unknown'),
-                    'added_by': user_email,
-                    'role': member_role
-                }
+            result = add_group_member_for_current_user(
+                group_id=group_id,
+                user_id=data.get("userId", ""),
+                email=data.get("email", ""),
+                display_name=data.get("displayName", ""),
+                role=data.get("role", "user"),
             )
-        except Exception as notif_error:
-            debug_print(f"Failed to create member addition notification: {notif_error}")
-        
-        return jsonify({"message": "Member added", "success": True}), 200
+            return jsonify({"message": result.get("message", "Member added"), "success": True}), 200
+        except PermissionError as exc:
+            return jsonify({"error": str(exc)}), 403
+        except LookupError as exc:
+            return jsonify({"error": str(exc)}), 404
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
 
     @app.route("/api/groups/<group_id>/members/<member_id>", methods=["DELETE"])
     @swagger_route(security=get_auth_security())
@@ -943,7 +1050,6 @@ def register_route_backend_groups(app):
         Only accessible by owner and admins.
         """
         from functions_debug import debug_print
-        from datetime import datetime, timedelta
         
         info = get_current_user_info()
         user_id = info["userId"]
@@ -959,6 +1065,11 @@ def register_route_backend_groups(app):
         if not (is_owner or is_admin):
             return jsonify({"error": "Forbidden"}), 403
 
+        try:
+            stats_window = resolve_stats_time_window(request.args)
+        except ValueError as ex:
+            return jsonify({"error": str(ex)}), 400
+
         # Get metrics from group record
         metrics = group.get("metrics", {})
         document_metrics = metrics.get("document_metrics", {})
@@ -971,22 +1082,27 @@ def register_route_backend_groups(app):
         # Get member count
         total_members = len(group.get("users", []))
 
-        # Get token usage from activity logs (last 30 days)
-        thirty_days_ago = (datetime.utcnow() - timedelta(days=30)).isoformat()
+        start_date = stats_window['start_date_iso']
+        end_date = stats_window['end_date_iso']
         
         debug_print(f"[GROUP_STATS] Group ID: {group_id}")
-        debug_print(f"[GROUP_STATS] Start date: {thirty_days_ago}")
+        debug_print(f"[GROUP_STATS] Start date: {start_date}")
+        debug_print(f"[GROUP_STATS] End date: {end_date}")
         
         token_query = """
             SELECT a.usage
             FROM a 
             WHERE a.workspace_context.group_id = @groupId 
-            AND a.timestamp >= @startDate
+            AND (
+                (IS_DEFINED(a.timestamp) AND a.timestamp >= @startDate AND a.timestamp <= @endDate)
+                OR (IS_DEFINED(a.created_at) AND a.created_at >= @startDate AND a.created_at <= @endDate)
+            )
             AND a.activity_type = 'token_usage'
         """
         token_params = [
             {"name": "@groupId", "value": group_id},
-            {"name": "@startDate", "value": thirty_days_ago}
+            {"name": "@startDate", "value": start_date},
+            {"name": "@endDate", "value": end_date}
         ]
         
         total_tokens = 0
@@ -1009,12 +1125,13 @@ def register_route_backend_groups(app):
         doc_delete_data = []
         token_usage_labels = []
         token_usage_data = []
+        date_series = build_stats_date_series(stats_window['start_date'], stats_window['end_date'])
+        date_index_by_key = {}
         
-        # Generate labels for last 30 days
-        for i in range(29, -1, -1):
-            date = datetime.utcnow() - timedelta(days=i)
-            doc_activity_labels.append(date.strftime("%m/%d"))
-            token_usage_labels.append(date.strftime("%m/%d"))
+        for index, day in enumerate(date_series):
+            date_index_by_key[day['date']] = index
+            doc_activity_labels.append(day['label'])
+            token_usage_labels.append(day['label'])
             doc_upload_data.append(0)
             doc_delete_data.append(0)
             token_usage_data.append(0)
@@ -1024,7 +1141,10 @@ def register_route_backend_groups(app):
             SELECT a.timestamp, a.created_at
             FROM a
             WHERE a.workspace_context.group_id = @groupId
-            AND a.timestamp >= @startDate
+            AND (
+                (IS_DEFINED(a.timestamp) AND a.timestamp >= @startDate AND a.timestamp <= @endDate)
+                OR (IS_DEFINED(a.created_at) AND a.created_at >= @startDate AND a.created_at <= @endDate)
+            )
             AND a.activity_type = 'document_creation'
         """
         try:
@@ -1036,14 +1156,10 @@ def register_route_backend_groups(app):
             for item in activity_iter:
                 timestamp = item.get("timestamp") or item.get("created_at")
                 if timestamp:
-                    try:
-                        dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
-                        day_date = dt.strftime("%m/%d")
-                        if day_date in doc_activity_labels:
-                            idx = doc_activity_labels.index(day_date)
-                            doc_upload_data[idx] += 1
-                    except Exception as e:
-                        debug_print(f"[GROUP_STATS] Error parsing timestamp: {e}")
+                    date_key = timestamp_to_stats_date_key(timestamp)
+                    idx = date_index_by_key.get(date_key)
+                    if idx is not None:
+                        doc_upload_data[idx] += 1
         except Exception as e:
             debug_print(f"[GROUP_STATS] Error querying document uploads: {e}")
 
@@ -1052,7 +1168,10 @@ def register_route_backend_groups(app):
             SELECT a.timestamp, a.created_at
             FROM a
             WHERE a.workspace_context.group_id = @groupId
-            AND a.timestamp >= @startDate
+            AND (
+                (IS_DEFINED(a.timestamp) AND a.timestamp >= @startDate AND a.timestamp <= @endDate)
+                OR (IS_DEFINED(a.created_at) AND a.created_at >= @startDate AND a.created_at <= @endDate)
+            )
             AND a.activity_type = 'document_deletion'
         """
         try:
@@ -1064,14 +1183,10 @@ def register_route_backend_groups(app):
             for item in delete_iter:
                 timestamp = item.get("timestamp") or item.get("created_at")
                 if timestamp:
-                    try:
-                        dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
-                        day_date = dt.strftime("%m/%d")
-                        if day_date in doc_activity_labels:
-                            idx = doc_activity_labels.index(day_date)
-                            doc_delete_data[idx] += 1
-                    except Exception as e:
-                        debug_print(f"[GROUP_STATS] Error parsing timestamp: {e}")
+                    date_key = timestamp_to_stats_date_key(timestamp)
+                    idx = date_index_by_key.get(date_key)
+                    if idx is not None:
+                        doc_delete_data[idx] += 1
         except Exception as e:
             debug_print(f"[GROUP_STATS] Error querying document deletes: {e}")
 
@@ -1080,7 +1195,10 @@ def register_route_backend_groups(app):
             SELECT a.timestamp, a.created_at, a.usage
             FROM a
             WHERE a.workspace_context.group_id = @groupId
-            AND a.timestamp >= @startDate
+            AND (
+                (IS_DEFINED(a.timestamp) AND a.timestamp >= @startDate AND a.timestamp <= @endDate)
+                OR (IS_DEFINED(a.created_at) AND a.created_at >= @startDate AND a.created_at <= @endDate)
+            )
             AND a.activity_type = 'token_usage'
         """
         try:
@@ -1092,16 +1210,12 @@ def register_route_backend_groups(app):
             for item in token_activity_iter:
                 timestamp = item.get("timestamp") or item.get("created_at")
                 if timestamp:
-                    try:
-                        dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
-                        day_date = dt.strftime("%m/%d")
-                        if day_date in token_usage_labels:
-                            idx = token_usage_labels.index(day_date)
-                            usage = item.get("usage", {})
-                            tokens = usage.get("total_tokens", 0)
-                            token_usage_data[idx] += tokens
-                    except Exception as e:
-                        debug_print(f"[GROUP_STATS] Error parsing timestamp: {e}")
+                    date_key = timestamp_to_stats_date_key(timestamp)
+                    idx = date_index_by_key.get(date_key)
+                    if idx is not None:
+                        usage = item.get("usage", {})
+                        tokens = usage.get("total_tokens", 0)
+                        token_usage_data[idx] += tokens
         except Exception as e:
             debug_print(f"[GROUP_STATS] Error querying token usage: {e}")
 
@@ -1123,7 +1237,9 @@ def register_route_backend_groups(app):
             "tokenUsage": {
                 "labels": token_usage_labels,
                 "data": token_usage_data
-            }
+            },
+            "dateRange": [day['date'] for day in date_series],
+            "window": stats_window_response_payload(stats_window)
         }
 
         return jsonify(stats), 200

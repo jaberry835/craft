@@ -7,7 +7,7 @@
         <h5 class="modal-title" id="plugin-modal-title">Add Action</h5>
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
-      
+
       <!-- Progress Steps Indicator -->
       <div class="modal-body pb-0">
         <div class="d-flex justify-content-between mb-4">
@@ -55,24 +55,28 @@
             <div class="form-text">Human-readable name for this action. The action name will be generated automatically.</div>
           </div>
           <div class="mb-3">
+            <label for="plugin-name" class="form-label">Name</label>
+            <input type="text" class="form-control" id="plugin-name" name="plugin_name" />
+            <div class="form-text">Machine-friendly action name. It is generated from the display name and can be adjusted.</div>
+          </div>
+          <div class="mb-3">
             <label for="plugin-description" class="form-label">Description</label>
             <textarea class="form-control" id="plugin-description" rows="3" placeholder="Describe what this action does..."></textarea>
           </div>
           <!-- Hidden fields to store generated name and selected type -->
-          <input type="hidden" id="plugin-name" name="plugin_name" />
           <input type="hidden" id="plugin-type" name="plugin_type" />
         </div>
 
         <!-- Step 3: Authentication & Configuration -->
         <div class="plugin-step d-none" id="plugin-step-3">
           <h6 class="mb-3" id="step-3-title">Configuration</h6>
-          
+
           <!-- OpenAPI specific fields (will be shown/hidden based on plugin type) -->
           <div id="openapi-config-section" class="d-none">
             <div class="config-section-label">
               <i class="bi bi-file-earmark-code me-2"></i>OpenAPI Configuration
             </div>
-            
+
             <!-- File Upload Section -->
             <div id="openapi-file-section" class="mb-3">
               <label for="plugin-openapi-file" class="form-label">OpenAPI Specification File <span class="text-danger">*</span></label>
@@ -83,22 +87,22 @@
               </div>
               <div id="openapi-file-status" class="mt-2"></div>
             </div>
-            
+
             <div class="mb-3">
               <label for="plugin-endpoint" class="form-label">Base URL <span class="text-danger">*</span></label>
               <input type="text" class="form-control" id="plugin-endpoint" placeholder="https://api.example.com" />
               <div class="form-text">
-                Base URL of your API (without trailing slash). 
+                Base URL of your API (without trailing slash).
                 <br><small class="text-muted"><i class="bi bi-lightbulb me-1"></i>This will be auto-populated from your OpenAPI spec if available, but you can modify it as needed.</small>
               </div>
             </div>
-            
+
             <!-- API Info Display -->
             <div id="openapi-info-display" class="alert alert-info d-none">
               <h6><i class="bi bi-info-circle me-2"></i>API Information</h6>
               <div id="openapi-info-content"></div>
             </div>
-            
+
             <div class="auth-section">
               <div class="config-section-label">
                 <i class="bi bi-shield-lock me-2"></i>Authentication Configuration
@@ -115,7 +119,13 @@
                     <option value="oauth2">OAuth2</option>
                   </select>
                 </div>
-                
+
+                <div class="mb-3 d-none" id="openapi-action-identity-group">
+                  <label for="plugin-auth-identity-select" class="form-label">Reusable Identity</label>
+                  <select class="form-select" id="plugin-auth-identity-select"></select>
+                  <div class="form-text" id="plugin-auth-identity-status"></div>
+                </div>
+
                 <!-- API Key fields -->
                 <div class="input-group mb-2" id="auth-api-key-location-group" style="display:none;">
                   <span class="input-group-text">Location</span>
@@ -132,13 +142,13 @@
                   <span class="input-group-text">API Key</span>
                   <input type="password" class="form-control" id="plugin-auth-api-key-value" placeholder="your-api-key" autocomplete="new-password" data-bwignore="true" data-1p-ignore="true" data-lpignore="true" />
                 </div>
-                
+
                 <!-- Bearer Token fields -->
                 <div class="input-group mb-2" id="auth-bearer-group" style="display:none;">
                   <span class="input-group-text">Token</span>
                   <input type="password" class="form-control" id="plugin-auth-bearer-token" placeholder="your-bearer-token" autocomplete="new-password" data-bwignore="true" data-1p-ignore="true" data-lpignore="true" />
                 </div>
-                
+
                 <!-- Basic Auth fields -->
                 <div class="input-group mb-2" id="auth-basic-username-group" style="display:none;">
                   <span class="input-group-text">Username</span>
@@ -148,7 +158,7 @@
                   <span class="input-group-text">Password</span>
                   <input type="password" class="form-control" id="plugin-auth-basic-password" placeholder="password" autocomplete="new-password" data-bwignore="true" data-1p-ignore="true" data-lpignore="true" />
                 </div>
-                
+
                 <!-- OAuth2 fields -->
                 <div class="input-group mb-2" id="auth-oauth2-group" style="display:none;">
                   <span class="input-group-text">Access Token</span>
@@ -157,7 +167,7 @@
               </div>
             </div>
           </div>
-          
+
           <!-- Generic endpoint field for other plugin types -->
           <div id="generic-config-section">
             <div class="mb-3">
@@ -175,6 +185,11 @@
                   <option value="servicePrincipal">Service Principal</option>
                 </select>
               </div>
+              <div class="mb-3 d-none" id="generic-action-identity-group">
+                <label for="plugin-auth-identity-select-generic" class="form-label">Reusable Identity</label>
+                <select class="form-select" id="plugin-auth-identity-select-generic"></select>
+                <div class="form-text" id="plugin-auth-identity-status-generic"></div>
+              </div>
               <div class="input-group mb-2 d-none" id="auth-identity-group">
                 <span class="input-group-text" id="auth-identity-label">Identity</span>
                 <input type="text" class="form-control" id="plugin-auth-identity" />
@@ -189,13 +204,640 @@
               </div>
             </div>
           </div>
-          
+
+          <div id="databricks-config-section" class="d-none">
+            <div class="alert alert-info mb-3">
+              <strong>Azure Commercial Databricks action:</strong> Configure one Databricks SQL Warehouse and expose read-only SQL tools through the Statement Execution API.
+            </div>
+
+            <div class="simplechat-config-card mb-3">
+              <div class="config-section-label">
+                <i class="bi bi-bricks me-2"></i>Workspace and Warehouse
+              </div>
+              <div class="mb-3">
+                <label for="databricks-workspace-url" class="form-label">Workspace URL <span class="text-danger">*</span></label>
+                <input type="url" class="form-control" id="databricks-workspace-url" placeholder="https://adb-1234567890123456.7.azuredatabricks.net" />
+                <div class="form-text">Use the Azure Commercial Databricks workspace URL, not the SQL statement API path.</div>
+              </div>
+              <div class="row g-3">
+                <div class="col-md-6">
+                  <label for="databricks-cloud" class="form-label">Cloud</label>
+                  <select class="form-select" id="databricks-cloud" disabled>
+                    <option value="azure_commercial" selected>Azure Commercial</option>
+                  </select>
+                </div>
+                <div class="col-md-6">
+                  <label for="databricks-warehouse-id" class="form-label">SQL Warehouse ID <span class="text-danger">*</span></label>
+                  <input type="text" class="form-control" id="databricks-warehouse-id" placeholder="0123-456789-abcd123" />
+                </div>
+                <div class="col-md-6">
+                  <label for="databricks-catalog" class="form-label">Default Catalog</label>
+                  <input type="text" class="form-control" id="databricks-catalog" placeholder="main" />
+                </div>
+                <div class="col-md-6">
+                  <label for="databricks-schema" class="form-label">Default Schema</label>
+                  <input type="text" class="form-control" id="databricks-schema" placeholder="default" />
+                </div>
+              </div>
+            </div>
+
+            <div class="simplechat-config-card mb-3">
+              <div class="config-section-label">
+                <i class="bi bi-shield-lock me-2"></i>Authentication
+              </div>
+              <div class="mb-3 d-none" id="databricks-action-identity-group">
+                <label for="databricks-identity-select" class="form-label">Reusable Identity</label>
+                <select class="form-select" id="databricks-identity-select"></select>
+                <div class="form-text" id="databricks-identity-status"></div>
+              </div>
+              <div class="mb-3">
+                <label for="databricks-auth-method" class="form-label">Authentication Method</label>
+                <select class="form-select" id="databricks-auth-method">
+                  <option value="pat">Personal Access Token</option>
+                  <option value="bearer">Bearer Token</option>
+                  <option value="service_principal">Service Principal</option>
+                  <option value="managed_identity">Managed Identity</option>
+                </select>
+              </div>
+              <div class="mb-3" id="databricks-token-group">
+                <label for="databricks-token" class="form-label">Token <span class="text-danger">*</span></label>
+                <input type="password" class="form-control" id="databricks-token" placeholder="Databricks token" autocomplete="new-password" data-bwignore="true" data-1p-ignore="true" data-lpignore="true" />
+              </div>
+              <div class="row g-3 d-none" id="databricks-service-principal-group">
+                <div class="col-md-4">
+                  <label for="databricks-client-id" class="form-label">Client ID <span class="text-danger">*</span></label>
+                  <input type="text" class="form-control" id="databricks-client-id" placeholder="client-id" />
+                </div>
+                <div class="col-md-4">
+                  <label for="databricks-client-secret" class="form-label">Client Secret <span class="text-danger">*</span></label>
+                  <input type="password" class="form-control" id="databricks-client-secret" placeholder="client-secret" autocomplete="new-password" data-bwignore="true" data-1p-ignore="true" data-lpignore="true" />
+                </div>
+                <div class="col-md-4">
+                  <label for="databricks-tenant-id" class="form-label">Tenant ID <span class="text-danger">*</span></label>
+                  <input type="text" class="form-control" id="databricks-tenant-id" placeholder="tenant-id" />
+                </div>
+              </div>
+              <div class="alert alert-info mb-0 d-none" id="databricks-managed-identity-info">
+                <small>Managed Identity uses the app identity to request an Azure Databricks token in Azure Commercial.</small>
+              </div>
+            </div>
+
+            <div class="simplechat-config-card mb-0">
+              <div class="config-section-label">
+                <i class="bi bi-sliders me-2"></i>Execution Limits
+              </div>
+              <div class="row g-3">
+                <div class="col-md-4">
+                  <label for="databricks-max-rows" class="form-label">Max Rows</label>
+                  <input type="number" class="form-control" id="databricks-max-rows" value="1000" min="1" max="10000" />
+                </div>
+                <div class="col-md-4">
+                  <label for="databricks-timeout" class="form-label">Timeout (seconds)</label>
+                  <input type="number" class="form-control" id="databricks-timeout" value="30" min="1" max="300" />
+                </div>
+                <div class="col-md-4">
+                  <label for="databricks-wait-timeout" class="form-label">Wait Timeout (seconds)</label>
+                  <input type="number" class="form-control" id="databricks-wait-timeout" value="30" min="1" max="50" />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div id="snowflake-config-section" class="d-none">
+            <div class="alert alert-info mb-3">
+              <strong>Snowflake action:</strong> Configure one Snowflake warehouse for read-only data retrieval so agents can analyze rows, create charts, and prepare generated outputs.
+            </div>
+
+            <div class="simplechat-config-card mb-3">
+              <div class="config-section-label">
+                <i class="bi bi-snow2 me-2"></i>Account and Warehouse
+              </div>
+              <div class="row g-3">
+                <div class="col-md-6">
+                  <label for="snowflake-account" class="form-label">Account Identifier <span class="text-danger">*</span></label>
+                  <input type="text" class="form-control" id="snowflake-account" placeholder="organization-account" />
+                  <div class="form-text">Use the account identifier without the snowflakecomputing.com suffix.</div>
+                </div>
+                <div class="col-md-6">
+                  <label for="snowflake-warehouse" class="form-label">Warehouse <span class="text-danger">*</span></label>
+                  <input type="text" class="form-control" id="snowflake-warehouse" placeholder="COMPUTE_WH" />
+                </div>
+                <div class="col-md-6">
+                  <label for="snowflake-database" class="form-label">Default Database</label>
+                  <input type="text" class="form-control" id="snowflake-database" placeholder="ANALYTICS" />
+                </div>
+                <div class="col-md-6">
+                  <label for="snowflake-schema" class="form-label">Default Schema</label>
+                  <input type="text" class="form-control" id="snowflake-schema" placeholder="PUBLIC" />
+                </div>
+                <div class="col-md-6">
+                  <label for="snowflake-role" class="form-label">Role</label>
+                  <input type="text" class="form-control" id="snowflake-role" placeholder="ANALYST_ROLE" />
+                </div>
+                <div class="col-md-6">
+                  <label for="snowflake-user" class="form-label">Snowflake User</label>
+                  <input type="text" class="form-control" id="snowflake-user" placeholder="analyst@example.com" />
+                </div>
+              </div>
+            </div>
+
+            <div class="simplechat-config-card mb-3">
+              <div class="config-section-label">
+                <i class="bi bi-shield-lock me-2"></i>Authentication
+              </div>
+              <div class="mb-3 d-none" id="snowflake-action-identity-group">
+                <label for="snowflake-identity-select" class="form-label">Reusable Identity</label>
+                <select class="form-select" id="snowflake-identity-select"></select>
+                <div class="form-text" id="snowflake-identity-status"></div>
+              </div>
+              <div class="mb-3">
+                <label for="snowflake-auth-method" class="form-label">Authentication Method</label>
+                <select class="form-select" id="snowflake-auth-method">
+                  <option value="password">Password</option>
+                  <option value="key_pair">Key Pair</option>
+                  <option value="oauth">OAuth Token</option>
+                </select>
+              </div>
+              <div class="mb-3" id="snowflake-password-group">
+                <label for="snowflake-password" class="form-label">Password <span class="text-danger">*</span></label>
+                <input type="password" class="form-control" id="snowflake-password" placeholder="Snowflake password" autocomplete="new-password" data-bwignore="true" data-1p-ignore="true" data-lpignore="true" />
+              </div>
+              <div class="d-none" id="snowflake-private-key-group">
+                <div class="mb-3">
+                  <label for="snowflake-private-key" class="form-label">Private Key <span class="text-danger">*</span></label>
+                  <textarea class="form-control font-monospace" id="snowflake-private-key" rows="5" placeholder="-----BEGIN PRIVATE KEY-----"></textarea>
+                </div>
+                <div class="mb-3">
+                  <label for="snowflake-private-key-passphrase" class="form-label">Private Key Passphrase</label>
+                  <input type="password" class="form-control" id="snowflake-private-key-passphrase" placeholder="Optional passphrase" autocomplete="new-password" data-bwignore="true" data-1p-ignore="true" data-lpignore="true" />
+                </div>
+              </div>
+              <div class="mb-3 d-none" id="snowflake-oauth-token-group">
+                <label for="snowflake-oauth-token" class="form-label">OAuth Token <span class="text-danger">*</span></label>
+                <input type="password" class="form-control" id="snowflake-oauth-token" placeholder="Snowflake OAuth token" autocomplete="new-password" data-bwignore="true" data-1p-ignore="true" data-lpignore="true" />
+              </div>
+            </div>
+
+            <div class="simplechat-config-card mb-0">
+              <div class="config-section-label">
+                <i class="bi bi-sliders me-2"></i>Execution Limits
+              </div>
+              <div class="row g-3">
+                <div class="col-md-4">
+                  <label for="snowflake-max-rows" class="form-label">Max Rows</label>
+                  <input type="number" class="form-control" id="snowflake-max-rows" value="1000" min="1" max="10000" />
+                </div>
+                <div class="col-md-4">
+                  <label for="snowflake-timeout" class="form-label">Query Timeout (seconds)</label>
+                  <input type="number" class="form-control" id="snowflake-timeout" value="30" min="1" max="300" />
+                </div>
+                <div class="col-md-4">
+                  <label for="snowflake-login-timeout" class="form-label">Login Timeout (seconds)</label>
+                  <input type="number" class="form-control" id="snowflake-login-timeout" value="30" min="1" max="300" />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div id="tableau-config-section" class="d-none">
+            <div class="alert alert-info mb-3">
+              <strong>Tableau action:</strong> Configure a Tableau Server or Tableau Cloud site and expose read-only content discovery tools to agents.
+            </div>
+
+            <div class="simplechat-config-card mb-3">
+              <div class="config-section-label">
+                <i class="bi bi-bar-chart me-2"></i>Server and Site
+              </div>
+              <div class="mb-3">
+                <label for="tableau-server-url" class="form-label">Server URL <span class="text-danger">*</span></label>
+                <input type="url" class="form-control" id="tableau-server-url" placeholder="https://10ax.online.tableau.com" />
+                <div class="form-text">Use the Tableau Server or Tableau Cloud base URL without the site path.</div>
+              </div>
+              <div class="mb-0">
+                <label for="tableau-site-content-url" class="form-label">Site Content URL</label>
+                <input type="text" class="form-control" id="tableau-site-content-url" placeholder="my-site" />
+                <div class="form-text">Leave blank for the default Tableau Server site.</div>
+              </div>
+            </div>
+
+            <div class="simplechat-config-card mb-3">
+              <div class="config-section-label">
+                <i class="bi bi-shield-lock me-2"></i>Authentication
+              </div>
+              <div class="mb-3 d-none" id="tableau-action-identity-group">
+                <label for="tableau-identity-select" class="form-label">Reusable Identity</label>
+                <select class="form-select" id="tableau-identity-select"></select>
+                <div class="form-text" id="tableau-identity-status"></div>
+              </div>
+              <div class="mb-3">
+                <label for="tableau-auth-method" class="form-label">Authentication Method</label>
+                <select class="form-select" id="tableau-auth-method">
+                  <option value="personal_access_token">Personal Access Token</option>
+                  <option value="username_password">Username and Password</option>
+                </select>
+              </div>
+              <div id="tableau-pat-group">
+                <div class="mb-3">
+                  <label for="tableau-pat-name" class="form-label">PAT Name <span class="text-danger">*</span></label>
+                  <input type="text" class="form-control" id="tableau-pat-name" placeholder="simplechat-agent" />
+                </div>
+                <div class="mb-0" id="tableau-pat-secret-group">
+                  <label for="tableau-pat-secret" class="form-label">PAT Secret <span class="text-danger">*</span></label>
+                  <input type="password" class="form-control" id="tableau-pat-secret" placeholder="Personal access token secret" autocomplete="new-password" data-bwignore="true" data-1p-ignore="true" data-lpignore="true" />
+                </div>
+              </div>
+              <div class="row g-3 d-none" id="tableau-username-password-group">
+                <div class="col-md-6">
+                  <label for="tableau-username" class="form-label">Username <span class="text-danger">*</span></label>
+                  <input type="text" class="form-control" id="tableau-username" placeholder="user@example.com" autocomplete="username" />
+                </div>
+                <div class="col-md-6">
+                  <label for="tableau-password" class="form-label">Password <span class="text-danger">*</span></label>
+                  <input type="password" class="form-control" id="tableau-password" placeholder="Password" autocomplete="new-password" data-bwignore="true" data-1p-ignore="true" data-lpignore="true" />
+                </div>
+              </div>
+            </div>
+
+            <div class="simplechat-config-card mb-0">
+              <div class="config-section-label">
+                <i class="bi bi-sliders me-2"></i>Discovery Limits
+              </div>
+              <div class="row g-3">
+                <div class="col-md-4">
+                  <label for="tableau-page-size" class="form-label">Page Size</label>
+                  <input type="number" class="form-control" id="tableau-page-size" value="100" min="1" max="1000" />
+                </div>
+                <div class="col-md-4">
+                  <label for="tableau-max-results" class="form-label">Max Results</label>
+                  <input type="number" class="form-control" id="tableau-max-results" value="100" min="1" max="1000" />
+                </div>
+                <div class="col-md-4">
+                  <label for="tableau-timeout" class="form-label">Timeout (seconds)</label>
+                  <input type="number" class="form-control" id="tableau-timeout" value="30" min="1" max="300" />
+                </div>
+                <div class="col-12">
+                  <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="tableau-use-server-version" checked />
+                    <label class="form-check-label" for="tableau-use-server-version">Use Tableau server version negotiation</label>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div id="simplechat-config-section" class="d-none">
+            <div class="alert alert-primary mb-0">
+              <strong>Built-in action:</strong> SimpleChat does not require a URL or external credentials.
+              The capabilities below become the default operations exposed by this action. Agents can narrow them further per assignment.
+            </div>
+
+            <div class="simplechat-config-card">
+              <div class="config-section-label">
+                <i class="bi bi-chat-square-dots me-2"></i>Default SimpleChat Capabilities
+              </div>
+              <div id="simplechat-capabilities-list" class="d-grid gap-2"></div>
+            </div>
+          </div>
+
+          <div id="msgraph-config-section" class="d-none">
+            <div class="alert alert-info mb-0">
+              <strong>Built-in action:</strong> Microsoft Graph uses the signed-in user's delegated permissions and the standard Graph endpoint.
+              The capabilities below become the default operations exposed by this action. Agents can narrow them further per assignment.
+            </div>
+
+            <div class="simplechat-config-card">
+              <div class="config-section-label">
+                <i class="bi bi-calendar3 me-2"></i>Default Microsoft Graph Capabilities
+              </div>
+              <div id="msgraph-capabilities-list" class="d-grid gap-2"></div>
+            </div>
+          </div>
+
+          <div id="mcp-config-section" class="d-none">
+            <div class="alert alert-info mb-3">
+              <strong>MCP action:</strong> Connect to a Model Context Protocol server and expose selected server tools to agents through Semantic Kernel.
+            </div>
+
+            <div class="simplechat-config-card mb-3">
+              <div class="config-section-label">
+                <i class="bi bi-diagram-3 me-2"></i>MCP Server
+              </div>
+              <div class="row g-3">
+                <div class="col-md-6">
+                  <label for="mcp-transport" class="form-label">Transport <span class="text-danger">*</span></label>
+                  <select class="form-select" id="mcp-transport">
+                    <option value="streamable_http">Streamable HTTP</option>
+                    <option value="sse">Server-Sent Events</option>
+                    <option value="websocket">WebSocket</option>
+                    <option value="stdio">Stdio</option>
+                  </select>
+                </div>
+                <div class="col-md-6" id="mcp-endpoint-group">
+                  <label for="mcp-endpoint" class="form-label">Endpoint <span class="text-danger">*</span></label>
+                  <input type="text" class="form-control" id="mcp-endpoint" placeholder="https://example.com/mcp" />
+                </div>
+              </div>
+
+              <div id="mcp-stdio-group" class="d-none mt-3">
+                <div class="mb-3">
+                  <label for="mcp-command" class="form-label">Command <span class="text-danger">*</span></label>
+                  <input type="text" class="form-control" id="mcp-command" placeholder="python" />
+                </div>
+                <div class="mb-3">
+                  <label for="mcp-args" class="form-label">Arguments</label>
+                  <textarea class="form-control" id="mcp-args" rows="3" placeholder="-m&#10;my_mcp_server"></textarea>
+                  <div class="form-text">One argument per line.</div>
+                </div>
+                <div>
+                  <label for="mcp-env" class="form-label">Environment (JSON)</label>
+                  <textarea class="form-control" id="mcp-env" rows="3" placeholder="{}"></textarea>
+                </div>
+              </div>
+            </div>
+
+            <div class="simplechat-config-card mb-3">
+              <div class="config-section-label">
+                <i class="bi bi-shield-lock me-2"></i>Authentication
+              </div>
+              <div class="mb-3">
+                <label for="mcp-auth-method" class="form-label">Authentication Method</label>
+                <select class="form-select" id="mcp-auth-method">
+                  <option value="none">No Authentication</option>
+                  <option value="bearer">Bearer Token</option>
+                  <option value="api_key">API Key Header</option>
+                  <option value="basic">Basic Auth</option>
+                </select>
+              </div>
+
+              <div class="mb-3 d-none" id="mcp-action-identity-group">
+                <label for="mcp-identity-select" class="form-label">Reusable Identity</label>
+                <select class="form-select" id="mcp-identity-select"></select>
+                <div class="form-text" id="mcp-identity-status"></div>
+              </div>
+
+              <div id="mcp-bearer-token-group" class="d-none mb-3">
+                <label for="mcp-bearer-token" class="form-label">Bearer Token <span class="text-danger">*</span></label>
+                <input type="password" class="form-control" id="mcp-bearer-token" autocomplete="new-password" data-bwignore="true" data-1p-ignore="true" data-lpignore="true" />
+              </div>
+
+              <div id="mcp-api-key-group" class="d-none row g-3 mb-3">
+                <div class="col-md-6">
+                  <label for="mcp-api-key-header-name" class="form-label">Header Name <span class="text-danger">*</span></label>
+                  <input type="text" class="form-control" id="mcp-api-key-header-name" value="X-API-Key" />
+                </div>
+                <div class="col-md-6">
+                  <label for="mcp-api-key-value" class="form-label">API Key <span class="text-danger">*</span></label>
+                  <input type="password" class="form-control" id="mcp-api-key-value" autocomplete="new-password" data-bwignore="true" data-1p-ignore="true" data-lpignore="true" />
+                </div>
+              </div>
+
+              <div id="mcp-basic-auth-group" class="d-none row g-3">
+                <div class="col-md-6">
+                  <label for="mcp-basic-username" class="form-label">Username <span class="text-danger">*</span></label>
+                  <input type="text" class="form-control" id="mcp-basic-username" />
+                </div>
+                <div class="col-md-6">
+                  <label for="mcp-basic-password" class="form-label">Password <span class="text-danger">*</span></label>
+                  <input type="password" class="form-control" id="mcp-basic-password" autocomplete="new-password" data-bwignore="true" data-1p-ignore="true" data-lpignore="true" />
+                </div>
+              </div>
+            </div>
+
+            <div class="simplechat-config-card mb-3">
+              <div class="config-section-label">
+                <i class="bi bi-tools me-2"></i>Tool Exposure
+              </div>
+              <div class="row g-3 mb-3">
+                <div class="col-md-6">
+                  <div class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" role="switch" id="mcp-load-tools" checked />
+                    <label class="form-check-label" for="mcp-load-tools">Load tools</label>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" role="switch" id="mcp-load-prompts" />
+                    <label class="form-check-label" for="mcp-load-prompts">Load prompts</label>
+                  </div>
+                </div>
+              </div>
+              <div class="mb-3">
+                <label for="mcp-tool-names" class="form-label">Allowed Tool Names</label>
+                <textarea class="form-control" id="mcp-tool-names" rows="4" placeholder="search_repositories&#10;get_issue"></textarea>
+                <div class="form-text">Optional. Leave empty to expose all discovered tools.</div>
+              </div>
+              <div>
+                <label for="mcp-tool-metadata" class="form-label">Discovered Tool Metadata (JSON)</label>
+                <textarea class="form-control" id="mcp-tool-metadata" rows="5" placeholder="[]"></textarea>
+              </div>
+              <div class="mt-3 pt-3 border-top">
+                <div class="d-flex align-items-center gap-3">
+                  <button type="button" class="btn btn-outline-primary" id="mcp-discover-tools-btn">
+                    <i class="bi bi-search me-2"></i>Discover Tools
+                  </button>
+                  <span id="mcp-discover-spinner" class="spinner-border spinner-border-sm d-none" role="status" aria-hidden="true"></span>
+                  <span id="mcp-discover-status" class="small text-muted"></span>
+                </div>
+              </div>
+            </div>
+
+            <div class="simplechat-config-card mb-0">
+              <div class="config-section-label">
+                <i class="bi bi-speedometer2 me-2"></i>Timeouts
+              </div>
+              <div class="row g-3">
+                <div class="col-md-4">
+                  <label for="mcp-request-timeout" class="form-label">Request Timeout</label>
+                  <input type="number" class="form-control" id="mcp-request-timeout" value="30" min="1" max="300" />
+                </div>
+                <div class="col-md-4">
+                  <label for="mcp-connect-timeout" class="form-label">Connect Timeout</label>
+                  <input type="number" class="form-control" id="mcp-connect-timeout" value="10" min="1" max="300" />
+                </div>
+                <div class="col-md-4">
+                  <label for="mcp-sse-read-timeout" class="form-label">SSE Read Timeout</label>
+                  <input type="number" class="form-control" id="mcp-sse-read-timeout" value="300" min="1" max="300" />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div id="azure-maps-config-section" class="d-none">
+            <div class="alert alert-info mb-3">
+              <strong>Built-in action:</strong> This action prepares inline OpenLayers maps in chat and proxies Azure Maps raster tiles through SimpleChat.
+              Only the Azure Maps subscription key is required here.
+            </div>
+
+            <div class="card border-0 shadow-sm mb-0">
+              <div class="card-body p-3">
+                <div class="config-section-label">
+                  <i class="bi bi-geo-alt me-2"></i>Azure Maps Credentials
+                </div>
+                <div class="mb-0">
+                  <label for="azure-maps-key" class="form-label">Subscription Key <span class="text-danger">*</span></label>
+                  <input type="password" class="form-control" id="azure-maps-key" placeholder="Azure Maps subscription key" autocomplete="new-password" data-bwignore="true" data-1p-ignore="true" data-lpignore="true" />
+                  <div class="form-text">The browser receives only a short-lived proxy token. The raw subscription key stays in the stored action configuration.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div id="chart-config-section" class="d-none">
+            <div class="alert alert-warning mb-0">
+              <strong>Built-in action:</strong> Charts are rendered with SimpleChat's internal Chart.js bundle and the current user's chat session.
+              The chart types below become the default visualization options exposed by this action. Agents can narrow them further per assignment.
+            </div>
+
+            <div class="simplechat-config-card">
+              <div class="config-section-label">
+                <i class="bi bi-bar-chart-line me-2"></i>Default Chart Types
+              </div>
+              <div id="chart-capabilities-list" class="d-grid gap-2"></div>
+            </div>
+          </div>
+
+          <div id="document-search-config-section" class="d-none">
+            <div class="alert alert-info mb-3">
+              <i class="bi bi-search me-2"></i>
+              This action uses SimpleChat's internal document search and the current user's access. No external URL or stored credentials are required.
+            </div>
+
+            <div class="card border-0 shadow-sm mb-3">
+              <div class="card-body p-3">
+                <div class="config-section-label">
+                  <i class="bi bi-sliders me-2"></i>Search Defaults
+                </div>
+                <div class="row g-3">
+                  <div class="col-md-6">
+                    <label for="document-search-scope" class="form-label">Default Scope</label>
+                    <select class="form-select" id="document-search-scope">
+                      <option value="all">All Accessible Content</option>
+                      <option value="personal">Personal Workspace</option>
+                      <option value="group">Group Workspaces</option>
+                      <option value="public">Public Workspaces</option>
+                    </select>
+                    <div class="form-text">Used when the action is called without an explicit scope filter.</div>
+                  </div>
+                  <div class="col-md-6">
+                    <label for="document-search-top-n" class="form-label">Default Search Result Limit</label>
+                    <input type="number" class="form-control" id="document-search-top-n" value="12" min="1" max="500" />
+                    <div class="form-text">Maximum number of ranked results returned when a caller does not set <code>top_n</code>.</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="card border-0 shadow-sm mb-3">
+              <div class="card-body p-3">
+                <div class="config-section-label">
+                  <i class="bi bi-layout-split me-2"></i>Windowing Defaults
+                </div>
+                <p class="text-muted small mb-3">Chunk retrieval returns all chunks by default. Configure preferred windowing so downstream tools can plan comparisons and summaries consistently.</p>
+                <div class="row g-3">
+                  <div class="col-md-4">
+                    <label for="document-search-window-unit" class="form-label">Preferred Window Unit</label>
+                    <select class="form-select" id="document-search-window-unit">
+                      <option value="pages">Pages</option>
+                      <option value="chunks">Chunks</option>
+                    </select>
+                  </div>
+                  <div class="col-md-4">
+                    <label for="document-search-window-size" class="form-label">Preferred Window Size</label>
+                    <input type="number" class="form-control" id="document-search-window-size" min="1" max="100" placeholder="Optional" />
+                    <div class="form-text">Optional fixed number of pages or chunks per window. Takes precedence over percent.</div>
+                  </div>
+                  <div class="col-md-4">
+                    <label for="document-search-window-percent" class="form-label">Preferred Window Percent</label>
+                    <input type="number" class="form-control" id="document-search-window-percent" min="1" max="100" placeholder="Optional" />
+                    <div class="form-text">Optional percent of the document per window when size is not set.</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="card border-0 shadow-sm mb-0">
+              <div class="card-body p-3">
+                <div class="config-section-label">
+                  <i class="bi bi-card-text me-2"></i>Summary Defaults
+                </div>
+                <div class="mb-3">
+                  <label for="document-search-focus-instructions" class="form-label">Default Focus Instructions</label>
+                  <textarea class="form-control" id="document-search-focus-instructions" rows="3" placeholder="Optional guidance such as compare versions, highlight risks, or focus on assigned knowledge."></textarea>
+                  <div class="form-text">Applied when a summarization call does not include its own focus instructions.</div>
+                </div>
+                <div class="row g-3">
+                  <div class="col-md-6">
+                    <label for="document-search-window-target-length" class="form-label">Window Summary Target Length</label>
+                    <input type="text" class="form-control" id="document-search-window-target-length" value="2 pages" placeholder="2 pages" />
+                    <div class="form-text">Target length for first-pass summaries over each chunk window.</div>
+                  </div>
+                  <div class="col-md-6">
+                    <label for="document-search-final-target-length" class="form-label">Final Summary Target Length</label>
+                    <input type="text" class="form-control" id="document-search-final-target-length" value="2 pages" placeholder="2 pages" />
+                    <div class="form-text">Target length for the final summary output.</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div id="blob-storage-config-section" class="d-none">
+            <div class="alert alert-info mb-3">
+              <strong>Container-scoped action:</strong> Configure one Azure Blob container and optionally narrow the action to a blob prefix.
+              The connection string can be stored in Key Vault through the normal action secret flow, while the capability toggles below define the default operations exposed by this action.
+            </div>
+
+            <div class="simplechat-config-card mb-3">
+              <div class="config-section-label">
+                <i class="bi bi-cloud-arrow-down me-2"></i>Blob Storage Connection
+              </div>
+              <div class="mb-3">
+                <label for="blob-storage-connection-string" class="form-label">Connection String <span class="text-danger">*</span></label>
+                <textarea class="form-control" id="blob-storage-connection-string" rows="3" placeholder="DefaultEndpointsProtocol=https;AccountName=...;AccountKey=...;EndpointSuffix=core.windows.net"></textarea>
+                <div class="form-text">Use an Azure Storage account connection string with access to the target container.</div>
+              </div>
+              <div class="row g-3">
+                <div class="col-md-6">
+                  <label for="blob-storage-container-name" class="form-label">Container Name <span class="text-danger">*</span></label>
+                  <input type="text" class="form-control" id="blob-storage-container-name" placeholder="knowledge-base" />
+                  <div class="form-text">The action is scoped to this single container.</div>
+                </div>
+                <div class="col-md-6">
+                  <label for="blob-storage-blob-prefix" class="form-label">Blob Prefix</label>
+                  <input type="text" class="form-control" id="blob-storage-blob-prefix" placeholder="docs/markdown" />
+                  <div class="form-text">Optional. Restrict list, read, and upload operations to blobs under this prefix.</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="simplechat-config-card mb-3">
+              <div class="config-section-label">
+                <i class="bi bi-sliders me-2"></i>Default Blob Storage Capabilities
+              </div>
+              <div id="blob-storage-capabilities-list" class="d-grid gap-2"></div>
+            </div>
+
+            <div class="simplechat-config-card mb-0">
+              <div class="config-section-label">
+                <i class="bi bi-file-earmark-text me-2"></i>Supported File Types
+              </div>
+              <div id="blob-storage-read-file-types-section" class="mb-3">
+                <label class="form-label">Read File Types</label>
+                <div id="blob-storage-read-file-types-list" class="d-grid gap-2"></div>
+              </div>
+              <div id="blob-storage-upload-file-types-section">
+                <label class="form-label">Upload File Types</label>
+                <div id="blob-storage-upload-file-types-list" class="d-grid gap-2"></div>
+              </div>
+            </div>
+          </div>
+
           <!-- SQL Database Configuration -->
           <div id="sql-config-section" class="d-none">
             <div class="config-section-label">
               <i class="bi bi-database me-2"></i>SQL Database Configuration
             </div>
-            
+
             <!-- Database Type Selection -->
             <div class="mb-3">
               <label class="form-label">Database Type <span class="text-danger">*</span></label>
@@ -253,13 +895,13 @@
                 </div>
               </div>
             </div>
-            
+
             <!-- Database Connection Configuration -->
             <div class="sql-connection-config">
               <div class="config-section-label">
                 <i class="bi bi-plug me-2"></i>Connection Configuration
               </div>
-              
+
               <!-- Connection Method Selection -->
               <div class="mb-3">
                 <label class="form-label">Connection Method</label>
@@ -268,14 +910,14 @@
                   <label class="btn btn-outline-secondary" for="sql-conn-string">
                     <i class="bi bi-link-45deg me-1"></i>Connection String
                   </label>
-                  
+
                   <input type="radio" class="btn-check" name="sql-connection-method" id="sql-conn-params" value="parameters">
                   <label class="btn btn-outline-secondary" for="sql-conn-params">
                     <i class="bi bi-gear me-1"></i>Individual Parameters
                   </label>
                 </div>
               </div>
-              
+
               <!-- Connection String Section -->
               <div id="sql-connection-string-section" class="mb-3">
                 <label for="sql-connection-string" class="form-label">Connection String <span class="text-danger">*</span></label>
@@ -287,7 +929,7 @@
                   </div>
                 </div>
               </div>
-              
+
               <!-- Individual Parameters Section -->
               <div id="sql-connection-params-section" class="d-none">
                 <!-- Server field (not for SQLite) -->
@@ -296,39 +938,39 @@
                   <input type="text" class="form-control" id="sql-server" placeholder="server.database.windows.net" />
                   <div class="form-text">Database server hostname or IP address</div>
                 </div>
-                
+
                 <!-- Database field -->
                 <div class="mb-3" id="sql-database-field">
                   <label for="sql-database" class="form-label">Database <span class="text-danger">*</span></label>
                   <input type="text" class="form-control" id="sql-database" placeholder="database_name" />
                   <div class="form-text">Database name (or file path for SQLite)</div>
                 </div>
-                
+
                 <!-- Port field (optional, not for SQLite) -->
                 <div class="mb-3" id="sql-port-field">
                   <label for="sql-port" class="form-label">Port</label>
                   <input type="number" class="form-control" id="sql-port" placeholder="Auto-detect" />
                   <div class="form-text">Leave empty to use default port</div>
                 </div>
-                
+
                 <!-- Driver field (for SQL Server) -->
                 <div class="mb-3 d-none" id="sql-driver-field">
                   <label for="sql-driver" class="form-label">ODBC Driver</label>
                   <select class="form-select" id="sql-driver">
-                    <option value="ODBC Driver 17 for SQL Server">ODBC Driver 17 for SQL Server</option>
                     <option value="ODBC Driver 18 for SQL Server">ODBC Driver 18 for SQL Server</option>
+                    <option value="ODBC Driver 17 for SQL Server">ODBC Driver 17 for SQL Server</option>
                     <option value="SQL Server">SQL Server (Legacy)</option>
                   </select>
                 </div>
               </div>
             </div>
-            
+
             <!-- Authentication Configuration -->
             <div class="sql-auth-config">
               <div class="config-section-label">
                 <i class="bi bi-shield-lock me-2"></i>Authentication Configuration
               </div>
-              
+
               <div class="mb-3">
                 <label class="form-label">Authentication Type</label>
                 <select class="form-select" id="sql-auth-type">
@@ -339,7 +981,13 @@
                   <option value="connection_string_only">Connection String Only</option>
                 </select>
               </div>
-              
+
+              <div class="mb-3 d-none" id="sql-action-identity-group">
+                <label for="sql-identity-select" class="form-label">Reusable Identity</label>
+                <select class="form-select" id="sql-identity-select"></select>
+                <div class="form-text" id="sql-identity-status"></div>
+              </div>
+
               <!-- Username/Password fields -->
               <div id="sql-auth-credentials" class="row g-2">
                 <div class="col-md-6">
@@ -351,7 +999,7 @@
                   <input type="password" class="form-control" id="sql-password" placeholder="password" autocomplete="new-password" data-bwignore="true" data-1p-ignore="true" data-lpignore="true" />
                 </div>
               </div>
-              
+
               <!-- Service Principal fields -->
               <div id="sql-auth-service-principal" class="d-none">
                 <div class="row g-2">
@@ -369,19 +1017,19 @@
                   </div>
                 </div>
               </div>
-              
+
               <!-- Authentication info -->
               <div id="sql-auth-info" class="alert alert-info mt-2 d-none">
                 <small id="sql-auth-info-text"></small>
               </div>
             </div>
-            
+
             <!-- Query Plugin Specific Settings -->
             <div id="sql-query-settings" class="d-none">
               <div class="config-section-label">
                 <i class="bi bi-gear me-2"></i>Query Plugin Settings
               </div>
-              
+
               <div class="row g-3">
                 <div class="col-md-4">
                   <label for="sql-read-only" class="form-label">Read Only Mode</label>
@@ -403,13 +1051,13 @@
                 </div>
               </div>
             </div>
-            
+
             <!-- Schema Plugin Specific Settings -->
             <div id="sql-schema-settings" class="d-none">
               <div class="config-section-label">
                 <i class="bi bi-gear me-2"></i>Schema Plugin Settings
               </div>
-              
+
               <div class="row g-3">
                 <div class="col-md-6">
                   <label for="sql-include-system-tables" class="form-label">Include System Tables</label>
@@ -443,6 +1091,103 @@
               </div>
             </div>
           </div>
+
+          <!-- Azure Cosmos DB Configuration -->
+          <div id="cosmos-config-section" class="d-none">
+            <div class="config-section-label">
+              <i class="bi bi-database me-2"></i>Azure Cosmos DB Configuration
+            </div>
+
+            <div class="cosmos-config-card">
+              <div class="config-section-label">
+                <i class="bi bi-plug me-2"></i>Account and Container
+              </div>
+
+              <div class="mb-3">
+                <label for="cosmos-endpoint" class="form-label">Account Endpoint <span class="text-danger">*</span></label>
+                <input type="text" class="form-control" id="cosmos-endpoint" placeholder="https://your-account.documents.azure.com:443/" />
+                <div class="form-text">Use the Azure Cosmos DB account endpoint for the API for NoSQL account.</div>
+              </div>
+
+              <div class="row g-3">
+                <div class="col-md-6">
+                  <label for="cosmos-database-name" class="form-label">Database Name <span class="text-danger">*</span></label>
+                  <input type="text" class="form-control" id="cosmos-database-name" placeholder="SimpleChat" />
+                </div>
+                <div class="col-md-6">
+                  <label for="cosmos-container-name" class="form-label">Container Name <span class="text-danger">*</span></label>
+                  <input type="text" class="form-control" id="cosmos-container-name" placeholder="documents" />
+                </div>
+              </div>
+
+              <div class="mt-3">
+                <label for="cosmos-partition-key-path" class="form-label">Partition Key Path <span class="text-danger">*</span></label>
+                <input type="text" class="form-control" id="cosmos-partition-key-path" placeholder="/id" />
+                <div class="form-text">Enter the container partition key path exactly as configured in Cosmos DB.</div>
+              </div>
+            </div>
+
+            <div class="cosmos-config-card">
+              <div class="config-section-label">
+                <i class="bi bi-shield-lock me-2"></i>Authentication
+              </div>
+
+              <div class="mb-3">
+                <label for="cosmos-auth-type" class="form-label">Authentication Method <span class="text-danger">*</span></label>
+                <select class="form-select" id="cosmos-auth-type">
+                  <option value="identity">Managed Identity</option>
+                  <option value="key">Account Key</option>
+                </select>
+                <div class="form-text">Managed identity avoids stored secrets. Account keys can be stored in Key Vault when app secret storage is enabled.</div>
+              </div>
+
+              <div class="mb-3 d-none" id="cosmos-auth-key-group">
+                <label for="cosmos-auth-key" class="form-label">Account Key <span class="text-danger">*</span></label>
+                <input type="password" class="form-control" id="cosmos-auth-key" placeholder="Primary or secondary account key" autocomplete="new-password" />
+                <div class="form-text">If this action already uses a Key Vault-backed key, leave the stored value unchanged to preserve the existing secret.</div>
+              </div>
+
+              <div class="alert alert-info mb-0" id="cosmos-auth-info">
+                <span id="cosmos-auth-info-text">Managed Identity uses Azure AD authentication without storing credentials. Assign an Azure Cosmos DB built-in data reader role to the application identity for the target account.</span>
+              </div>
+            </div>
+
+            <div class="cosmos-config-card">
+              <div class="config-section-label">
+                <i class="bi bi-gear me-2"></i>Query Guidance
+              </div>
+
+              <div class="mb-3">
+                <label for="cosmos-field-hints" class="form-label">Field Hints</label>
+                <textarea class="form-control" id="cosmos-field-hints" rows="4" placeholder="id&#10;title&#10;user_id"></textarea>
+                <div class="form-text">Optional. Add one field name per line so the model knows which document properties are relevant.</div>
+              </div>
+
+              <div class="row g-3">
+                <div class="col-md-6">
+                  <label for="cosmos-max-items" class="form-label">Max Items</label>
+                  <input type="number" class="form-control" id="cosmos-max-items" value="100" min="1" max="1000" />
+                  <div class="form-text">Hard cap for documents returned per query.</div>
+                </div>
+                <div class="col-md-6">
+                  <label for="cosmos-timeout" class="form-label">Timeout (seconds)</label>
+                  <input type="number" class="form-control" id="cosmos-timeout" value="30" min="1" max="120" />
+                  <div class="form-text">Absolute timeout for Cosmos client requests.</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="mt-4 pt-3 border-top" id="cosmos-test-connection-section">
+              <div class="d-flex align-items-center gap-3">
+                <button type="button" class="btn btn-outline-primary" id="cosmos-test-connection-btn">
+                  <i class="bi bi-plug me-2"></i>Test Cosmos Connection
+                </button>
+              </div>
+              <div id="cosmos-test-connection-result" class="mt-2 d-none">
+                <div class="alert mb-0 py-2 px-3 small" id="cosmos-test-connection-alert" role="alert"></div>
+              </div>
+            </div>
+          </div>
         </div>
 
         <!-- Step 4: Advanced -->
@@ -472,7 +1217,7 @@
         <!-- Step 5: Summary -->
         <div class="plugin-step d-none" id="plugin-step-5">
           <h6 class="mb-4">Action Summary</h6>
-          
+
           <!-- Basic Information Section -->
           <div class="card mb-3 border-0 shadow-sm">
             <div class="card-header text-white p-3" style="background: linear-gradient(135deg, #007bff 0%, #0056b3 100%);">
@@ -572,6 +1317,54 @@
             </div>
           </div>
 
+          <div class="card mb-3 border-0 shadow-sm d-none" id="summary-mcp-section">
+            <div class="card-header text-white p-3" style="background: linear-gradient(135deg, #0f766e 0%, #115e59 100%);">
+              <h6 class="mb-0 fw-bold">
+                <i class="bi bi-diagram-3 me-2"></i>MCP Configuration
+              </h6>
+            </div>
+            <div class="card-body p-3">
+              <div class="row g-3">
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Transport</label>
+                    <span class="fw-medium" id="summary-mcp-transport">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Load Mode</label>
+                    <span class="fw-medium" id="summary-mcp-load-mode">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Request Timeout</label>
+                    <span class="fw-medium" id="summary-mcp-request-timeout">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Connect Timeout</label>
+                    <span class="fw-medium" id="summary-mcp-connect-timeout">-</span>
+                  </div>
+                </div>
+                <div class="col-12">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Allowed Tools</label>
+                    <span class="fw-medium" id="summary-mcp-tool-names">-</span>
+                  </div>
+                </div>
+                <div class="col-12">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Cached Tool Metadata</label>
+                    <span class="fw-medium" id="summary-mcp-tool-metadata">-</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <!-- SQL Database Configuration Section -->
           <div class="card mb-3 border-0 shadow-sm" id="summary-sql-section" style="display: none;">
             <div class="card-header text-white p-3" style="background: linear-gradient(135deg, #dc3545 0%, #c82333 100%);">
@@ -609,6 +1402,421 @@
                   <div class="d-flex flex-column">
                     <label class="text-muted small mb-1">Include System Tables</label>
                     <span class="fw-medium" id="summary-sql-include-system">-</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Cosmos DB Configuration Section -->
+          <div class="card mb-3 border-0 shadow-sm" id="summary-cosmos-section" style="display: none;">
+            <div class="card-header text-white p-3" style="background: linear-gradient(135deg, #17a2b8 0%, #11707f 100%);">
+              <h6 class="mb-0 fw-bold">
+                <i class="fas fa-database me-2"></i>Cosmos DB Configuration
+              </h6>
+            </div>
+            <div class="card-body p-3">
+              <div class="row g-3">
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Authentication</label>
+                    <span class="fw-medium" id="summary-cosmos-auth-type">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Database Name</label>
+                    <span class="fw-medium" id="summary-cosmos-database-name">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Container Name</label>
+                    <span class="fw-medium" id="summary-cosmos-container-name">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Partition Key Path</label>
+                    <span class="fw-medium font-monospace" id="summary-cosmos-partition-key-path">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Max Items</label>
+                    <span class="fw-medium" id="summary-cosmos-max-items">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Timeout</label>
+                    <span class="fw-medium" id="summary-cosmos-timeout">-</span>
+                  </div>
+                </div>
+                <div class="col-12">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Field Hints</label>
+                    <span class="fw-medium" id="summary-cosmos-field-hints">-</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card mb-3 border-0 shadow-sm" id="summary-blob-storage-section" style="display: none;">
+            <div class="card-header text-white p-3" style="background: linear-gradient(135deg, #0dcaf0 0%, #087990 100%);">
+              <h6 class="mb-0 fw-bold">
+                <i class="bi bi-cloud me-2"></i>Blob Storage Configuration
+              </h6>
+            </div>
+            <div class="card-body p-3">
+              <div class="row g-3">
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Container Name</label>
+                    <span class="fw-medium" id="summary-blob-storage-container-name">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Blob Prefix</label>
+                    <span class="fw-medium font-monospace" id="summary-blob-storage-blob-prefix">-</span>
+                  </div>
+                </div>
+                <div class="col-12">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Enabled By Default</label>
+                    <span class="fw-medium" id="summary-blob-storage-enabled-list">-</span>
+                  </div>
+                </div>
+                <div class="col-12">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Disabled By Default</label>
+                    <span class="fw-medium" id="summary-blob-storage-disabled-list">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Readable File Types</label>
+                    <span class="fw-medium" id="summary-blob-storage-read-file-types">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Uploadable File Types</label>
+                    <span class="fw-medium" id="summary-blob-storage-upload-file-types">-</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card mb-3 border-0 shadow-sm d-none" id="summary-databricks-section">
+            <div class="card-header text-white p-3" style="background: linear-gradient(135deg, #6c757d 0%, #343a40 100%);">
+              <h6 class="mb-0 fw-bold">
+                <i class="bi bi-bricks me-2"></i>Databricks Configuration
+              </h6>
+            </div>
+            <div class="card-body p-3">
+              <div class="row g-3">
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Cloud</label>
+                    <span class="fw-medium" id="summary-databricks-cloud">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">SQL Warehouse ID</label>
+                    <span class="fw-medium font-monospace" id="summary-databricks-warehouse-id">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Default Namespace</label>
+                    <span class="fw-medium font-monospace" id="summary-databricks-namespace">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Max Rows</label>
+                    <span class="fw-medium" id="summary-databricks-max-rows">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Timeout</label>
+                    <span class="fw-medium" id="summary-databricks-timeout">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Wait Timeout</label>
+                    <span class="fw-medium" id="summary-databricks-wait-timeout">-</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card mb-3 border-0 shadow-sm d-none" id="summary-snowflake-section">
+            <div class="card-header text-white p-3" style="background: linear-gradient(135deg, #0f766e 0%, #134e4a 100%);">
+              <h6 class="mb-0 fw-bold">
+                <i class="bi bi-snow2 me-2"></i>Snowflake Configuration
+              </h6>
+            </div>
+            <div class="card-body p-3">
+              <div class="row g-3">
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Account</label>
+                    <span class="fw-medium font-monospace" id="summary-snowflake-account">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">User</label>
+                    <span class="fw-medium font-monospace" id="summary-snowflake-user">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Authentication</label>
+                    <span class="fw-medium" id="summary-snowflake-auth-method">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Warehouse</label>
+                    <span class="fw-medium font-monospace" id="summary-snowflake-warehouse">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Default Namespace</label>
+                    <span class="fw-medium font-monospace" id="summary-snowflake-namespace">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Role</label>
+                    <span class="fw-medium font-monospace" id="summary-snowflake-role">-</span>
+                  </div>
+                </div>
+                <div class="col-md-4">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Max Rows</label>
+                    <span class="fw-medium" id="summary-snowflake-max-rows">-</span>
+                  </div>
+                </div>
+                <div class="col-md-4">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Query Timeout</label>
+                    <span class="fw-medium" id="summary-snowflake-timeout">-</span>
+                  </div>
+                </div>
+                <div class="col-md-4">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Login Timeout</label>
+                    <span class="fw-medium" id="summary-snowflake-login-timeout">-</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card mb-3 border-0 shadow-sm d-none" id="summary-tableau-section">
+            <div class="card-header text-white p-3" style="background: linear-gradient(135deg, #0d6efd 0%, #0a58ca 100%);">
+              <h6 class="mb-0 fw-bold">
+                <i class="bi bi-bar-chart me-2"></i>Tableau Configuration
+              </h6>
+            </div>
+            <div class="card-body p-3">
+              <div class="row g-3">
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Site Content URL</label>
+                    <span class="fw-medium" id="summary-tableau-site-content-url">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Authentication</label>
+                    <span class="fw-medium" id="summary-tableau-auth-method">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Page Size</label>
+                    <span class="fw-medium" id="summary-tableau-page-size">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Max Results</label>
+                    <span class="fw-medium" id="summary-tableau-max-results">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Timeout</label>
+                    <span class="fw-medium" id="summary-tableau-timeout">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Server Version Negotiation</label>
+                    <span class="fw-medium" id="summary-tableau-use-server-version">-</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card mb-3 border-0 shadow-sm" id="summary-simplechat-section" style="display: none;">
+            <div class="card-header text-white p-3" style="background: linear-gradient(135deg, #0d6efd 0%, #084298 100%);">
+              <h6 class="mb-0 fw-bold">
+                <i class="fas fa-comments me-2"></i>SimpleChat Capabilities
+              </h6>
+            </div>
+            <div class="card-body p-3">
+              <div class="row g-3">
+                <div class="col-12">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Enabled By Default</label>
+                    <span class="fw-medium" id="summary-simplechat-enabled-list">-</span>
+                  </div>
+                </div>
+                <div class="col-12">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Disabled By Default</label>
+                    <span class="fw-medium" id="summary-simplechat-disabled-list">-</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card mb-3 border-0 shadow-sm" id="summary-msgraph-section" style="display: none;">
+            <div class="card-header text-white p-3" style="background: linear-gradient(135deg, #198754 0%, #146c43 100%);">
+              <h6 class="mb-0 fw-bold">
+                <i class="bi bi-calendar3 me-2"></i>Microsoft Graph Capabilities
+              </h6>
+            </div>
+            <div class="card-body p-3">
+              <div class="row g-3">
+                <div class="col-12">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Enabled By Default</label>
+                    <span class="fw-medium" id="summary-msgraph-enabled-list">-</span>
+                  </div>
+                </div>
+                <div class="col-12">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Disabled By Default</label>
+                    <span class="fw-medium" id="summary-msgraph-disabled-list">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6" id="summary-msgraph-mail-mode-row">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Default Mail Delivery</label>
+                    <span class="fw-medium" id="summary-msgraph-mail-send-mode">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6" id="summary-msgraph-mail-delay-row">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Mail Delay</label>
+                    <span class="fw-medium" id="summary-msgraph-mail-delay-seconds">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6" id="summary-msgraph-calendar-mode-row">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Default Calendar Invite Delivery</label>
+                    <span class="fw-medium" id="summary-msgraph-calendar-send-mode">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6" id="summary-msgraph-calendar-delay-row">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Calendar Invite Delay</label>
+                    <span class="fw-medium" id="summary-msgraph-calendar-delay-seconds">-</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card mb-3 border-0 shadow-sm" id="summary-chart-section" style="display: none;">
+            <div class="card-header text-white p-3" style="background: linear-gradient(135deg, #fd7e14 0%, #b45309 100%);">
+              <h6 class="mb-0 fw-bold">
+                <i class="bi bi-bar-chart-line me-2"></i>Chart Types
+              </h6>
+            </div>
+            <div class="card-body p-3">
+              <div class="row g-3">
+                <div class="col-12">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Enabled By Default</label>
+                    <span class="fw-medium" id="summary-chart-enabled-list">-</span>
+                  </div>
+                </div>
+                <div class="col-12">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Disabled By Default</label>
+                    <span class="fw-medium" id="summary-chart-disabled-list">-</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card mb-3 border-0 shadow-sm" id="summary-document-search-section" style="display: none;">
+            <div class="card-header text-white p-3" style="background: linear-gradient(135deg, #198754 0%, #146c43 100%);">
+              <h6 class="mb-0 fw-bold">
+                <i class="fas fa-search me-2"></i>Document Search Defaults
+              </h6>
+            </div>
+            <div class="card-body p-3">
+              <div class="row g-3">
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Default Scope</label>
+                    <span class="fw-medium" id="summary-search-scope">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Search Result Limit</label>
+                    <span class="fw-medium" id="summary-search-top-n">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Chunk Retrieval</label>
+                    <span class="fw-medium" id="summary-search-chunk-behavior">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Preferred Windowing</label>
+                    <span class="fw-medium" id="summary-search-windowing">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Window Summary Target</label>
+                    <span class="fw-medium" id="summary-search-window-target-length">-</span>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Final Summary Target</label>
+                    <span class="fw-medium" id="summary-search-final-target-length">-</span>
+                  </div>
+                </div>
+                <div class="col-12">
+                  <div class="d-flex flex-column">
+                    <label class="text-muted small mb-1">Default Focus Instructions</label>
+                    <span class="fw-medium" id="summary-search-focus-instructions">-</span>
                   </div>
                 </div>
               </div>
@@ -673,7 +1881,7 @@
 
         <div id="plugin-modal-error" class="alert alert-danger d-none"></div>
       </div>
-      
+
       <div class="modal-footer">
         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
         <button type="button" class="btn btn-outline-secondary d-none" id="plugin-modal-prev">Previous</button>
@@ -804,6 +2012,13 @@
   background-color: #f8f9fa;
 }
 
+#cosmos-config-section {
+  border: 1px solid #d7eef5;
+  border-radius: 8px;
+  padding: 1rem;
+  background-color: #f8f9fa;
+}
+
 /* Advanced toggle chevron animation */
 #plugin-advanced-toggle-icon {
   transition: transform 0.3s ease;
@@ -813,8 +2028,24 @@
   transform: rotate(180deg);
 }
 
-.sql-connection-config, 
+.sql-connection-config,
 .sql-auth-config {
+  background-color: white;
+  border-radius: 6px;
+  padding: 1rem;
+  margin-top: 1rem;
+  border: 1px solid #e9ecef;
+}
+
+.cosmos-config-card {
+  background-color: white;
+  border-radius: 6px;
+  padding: 1rem;
+  margin-top: 1rem;
+  border: 1px solid #e9ecef;
+}
+
+.simplechat-config-card {
   background-color: white;
   border-radius: 6px;
   padding: 1rem;
@@ -895,6 +2126,10 @@
   border-left: 4px solid #0dcaf0;
 }
 
+#cosmos-auth-info {
+  border-left: 4px solid #17a2b8;
+}
+
 /* Plugin type selection styling */
 .btn-outline-info small,
 .btn-outline-success small {
@@ -939,8 +2174,15 @@
   background-color: #343a40;
 }
 
+[data-bs-theme="dark"] #cosmos-config-section {
+  border-color: #495057;
+  background-color: #343a40;
+}
+
 [data-bs-theme="dark"] .sql-connection-config,
 [data-bs-theme="dark"] .sql-auth-config,
+[data-bs-theme="dark"] .simplechat-config-card,
+[data-bs-theme="dark"] .cosmos-config-card,
 [data-bs-theme="dark"] .auth-section {
   background-color: #2d3237;
   border-color: #495057;
@@ -964,6 +2206,12 @@
 }
 
 [data-bs-theme="dark"] #sql-auth-info {
+  background-color: #1f3a4a;
+  border-color: #17a2b8;
+  color: #b3e5fc;
+}
+
+[data-bs-theme="dark"] #cosmos-auth-info {
   background-color: #1f3a4a;
   border-color: #17a2b8;
   color: #b3e5fc;

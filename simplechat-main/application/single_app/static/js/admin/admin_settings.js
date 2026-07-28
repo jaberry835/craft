@@ -16,6 +16,9 @@ let enableDocumentClassification = window.enableDocumentClassification || false;
 let externalLinks = window.externalLinks || [];
 let enableExternalLinks = window.enableExternalLinks || false;
 let externalLinksMenuName = window.externalLinksMenuName || 'External Links';
+let agentsPagePromotedPopularAgents = Array.isArray(window.agentsPagePromotedPopularAgents)
+    ? window.agentsPagePromotedPopularAgents
+    : [];
 let releaseNotificationsRegistration = window.releaseNotificationsRegistration || {
     registered: false,
     name: '',
@@ -29,6 +32,22 @@ let releaseNotificationsRegistration = window.releaseNotificationsRegistration |
 
 // Track whether form has been modified since last save
 let formModified = false;
+let currentCosmosContainers = [];
+let currentCosmosMetricsWindowMinutes = 0;
+let currentCosmosStatusLoaded = false;
+let currentCosmosContainerSort = { field: 'container_name', direction: 'asc' };
+
+const COSMOS_CONTAINER_SORT_FIELDS = new Set([
+    'container_name',
+    'current_ru',
+    'ru_utilization',
+    'request_units',
+    'policy'
+]);
+const COSMOS_CONTAINER_TEXT_SORT_FIELDS = new Set(['container_name', 'policy']);
+const COSMOS_THROUGHPUT_SIMPLECHAT_MAX_RU = 10000;
+const COSMOS_THROUGHPUT_PORTAL_MANAGED_MESSAGE = 'Throughput above 10,000 RU/s is monitored only in SimpleChat. Use the Azure portal to change capacity; capacity changes above this level can take 4 to 6 hours.';
+const GROUP_WORKFLOW_ASSIGNMENT_PARSE_DEPTH_LIMIT = 5;
 
 const enableClassificationToggle = document.getElementById('enable_document_classification');
 const classificationSettingsDiv = document.getElementById('document_classification_settings');
@@ -41,6 +60,13 @@ const externalLinksSettingsDiv = document.getElementById('external_links_setting
 const externalLinksTbody = document.getElementById('external-links-tbody');
 const addExternalLinkBtn = document.getElementById('add-external-link-btn');
 const externalLinksJsonInput = document.getElementById('external_links_json');
+const promotedPopularAgentsInput = document.getElementById('agents_page_promoted_popular_agents_json');
+const promotedPopularAgentsSelect = document.getElementById('agents-page-promoted-agent-select');
+const promotedPopularAgentsAddButton = document.getElementById('agents-page-promoted-agent-add');
+const promotedPopularAgentsBody = document.getElementById('agents-page-promoted-popular-tbody');
+const promotedPopularAgentsEmpty = document.getElementById('agents-page-promoted-popular-empty');
+const promotedPopularAgentsLoadError = document.getElementById('agents-page-promoted-popular-load-error');
+let agentsPagePromotedAvailableAgents = [];
 
 const enableSupportMenuToggle = document.getElementById('enable_support_menu');
 const supportMenuSettingsDiv = document.getElementById('support_menu_settings');
@@ -53,6 +79,32 @@ const adminForm = document.getElementById('admin-settings-form');
 const saveButton = document.getElementById('floating-save-btn') || (adminForm ? adminForm.querySelector('button[type="submit"]') : null);
 const enableGroupWorkspacesToggle = document.getElementById('enable_group_workspaces');
 const createGroupPermissionSettingDiv = document.getElementById('create_group_permission_setting');
+const groupWorkflowAssignmentsInput = document.getElementById('group_workflow_allowed_group_ids');
+const groupWorkflowAssignmentSummary = document.getElementById('group-workflow-assignment-summary');
+const groupWorkflowAssignmentModal = document.getElementById('groupWorkflowAssignmentModal');
+const groupWorkflowGroupSearchInput = document.getElementById('group-workflow-group-search');
+const groupWorkflowGroupSearchBtn = document.getElementById('group-workflow-group-search-btn');
+const groupWorkflowAssignmentStatus = document.getElementById('group-workflow-assignment-status');
+const groupWorkflowAssignmentError = document.getElementById('group-workflow-assignment-error');
+const groupWorkflowAssignmentGroupsBody = document.getElementById('group-workflow-assignment-groups-body');
+const groupWorkflowAssignedGroupIds = new Set();
+const groupWorkflowDiscoveredGroups = new Map();
+const fileDownloadGroupAssignmentsInput = document.getElementById('file_download_allowed_group_ids');
+const fileDownloadGroupAssignmentSummary = document.getElementById('file-download-group-assignment-summary');
+const fileDownloadGroupAssignmentModal = document.getElementById('fileDownloadGroupAssignmentModal');
+const fileDownloadGroupSearchInput = document.getElementById('file-download-group-assignment-search');
+const fileDownloadGroupSearchBtn = document.getElementById('file-download-group-assignment-search-btn');
+const fileDownloadGroupAssignmentStatus = document.getElementById('file-download-group-assignment-status');
+const fileDownloadGroupAssignmentError = document.getElementById('file-download-group-assignment-error');
+const fileDownloadGroupAssignmentBody = document.getElementById('file-download-group-assignment-body');
+const fileDownloadPublicAssignmentsInput = document.getElementById('file_download_allowed_public_workspace_ids');
+const fileDownloadPublicAssignmentSummary = document.getElementById('file-download-public-workspace-assignment-summary');
+const fileDownloadPublicAssignmentModal = document.getElementById('fileDownloadPublicWorkspaceAssignmentModal');
+const fileDownloadPublicSearchInput = document.getElementById('file-download-public-workspace-assignment-search');
+const fileDownloadPublicSearchBtn = document.getElementById('file-download-public-workspace-assignment-search-btn');
+const fileDownloadPublicAssignmentStatus = document.getElementById('file-download-public-workspace-assignment-status');
+const fileDownloadPublicAssignmentError = document.getElementById('file-download-public-workspace-assignment-error');
+const fileDownloadPublicAssignmentBody = document.getElementById('file-download-public-workspace-assignment-body');
 
 function setupAdminFormAutofillMetadata() {
     if (!adminForm) {
@@ -83,6 +135,2732 @@ function setupAdminFormAutofillMetadata() {
     });
 }
 
+function parsePolicyListValue(value) {
+    return String(value || '')
+        .split(/[\n,;]+/)
+        .map(item => item.trim())
+        .filter(Boolean);
+}
+
+function normalizeDomainPolicyValue(value) {
+    let normalizedValue = String(value || '').trim().toLowerCase();
+    if (!normalizedValue) {
+        return '';
+    }
+
+    normalizedValue = normalizedValue.replace(/^https?:\/\//i, '');
+    normalizedValue = normalizedValue.split('/')[0].split('?')[0].split('#')[0].trim();
+    normalizedValue = normalizedValue.replace(/\s+/g, '');
+    return normalizedValue.replace(/\.+$/, '');
+}
+
+function normalizeUserPolicyValue(value) {
+    return String(value || '').trim().toLowerCase();
+}
+
+function normalizePolicyValue(value, policyKind) {
+    return policyKind === 'domain'
+        ? normalizeDomainPolicyValue(value)
+        : normalizeUserPolicyValue(value);
+}
+
+function createIconButton(iconClass, label, buttonClass = 'btn-outline-secondary') {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `btn btn-sm ${buttonClass}`;
+    button.title = label;
+    button.setAttribute('aria-label', label);
+
+    const icon = document.createElement('i');
+    icon.className = iconClass;
+    icon.setAttribute('aria-hidden', 'true');
+    button.appendChild(icon);
+
+    return button;
+}
+
+function normalizeAdminText(value) {
+    return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function getAdminAgentDisplayName(agent) {
+    return normalizeAdminText(agent?.display_name || agent?.displayName || agent?.name || 'Unnamed Agent') || 'Unnamed Agent';
+}
+
+function getAdminAgentScopeType(agent) {
+    const scopeType = normalizeAdminText(agent?.scope_type).toLowerCase();
+    if (agent?.is_group || scopeType === 'group') {
+        return 'group';
+    }
+    if (agent?.is_global || scopeType === 'global' || scopeType === 'enterprise') {
+        return 'global';
+    }
+    return 'personal';
+}
+
+function getAdminAgentScopeLabel(agent) {
+    const scopeType = getAdminAgentScopeType(agent);
+    if (scopeType === 'group') {
+        return normalizeAdminText(agent?.group_name || agent?.scope_name || 'Group');
+    }
+    if (scopeType === 'global') {
+        return 'Enterprise';
+    }
+    return 'Personal';
+}
+
+function normalizePromotedPopularWindow(value) {
+    const normalizedValue = normalizeAdminText(value).toLowerCase().replace(/-/g, '_');
+    if (normalizedValue === 'all' || normalizedValue === 'alltime') {
+        return 'all_time';
+    }
+    if (normalizedValue === '30' || normalizedValue === 'last30' || normalizedValue === 'last_30_days') {
+        return '30_days';
+    }
+    return ['all_time', '30_days', 'both'].includes(normalizedValue) ? normalizedValue : 'both';
+}
+
+function normalizePromotedPopularAgent(candidate) {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+        return null;
+    }
+    const catalogKey = normalizeAdminText(candidate.catalog_key);
+    if (!catalogKey) {
+        return null;
+    }
+    return {
+        catalog_key: catalogKey,
+        display_name: getAdminAgentDisplayName(candidate),
+        scope_label: normalizeAdminText(candidate.scope_label || candidate.scope_name || getAdminAgentScopeLabel(candidate)),
+        scope_type: getAdminAgentScopeType(candidate),
+        window: normalizePromotedPopularWindow(candidate.window),
+    };
+}
+
+function normalizePromotedPopularAgents(candidates) {
+    const seenCatalogKeys = new Set();
+    const normalizedAgents = [];
+    (Array.isArray(candidates) ? candidates : []).forEach(candidate => {
+        const normalizedAgent = normalizePromotedPopularAgent(candidate);
+        if (!normalizedAgent || seenCatalogKeys.has(normalizedAgent.catalog_key)) {
+            return;
+        }
+        seenCatalogKeys.add(normalizedAgent.catalog_key);
+        normalizedAgents.push(normalizedAgent);
+    });
+    return normalizedAgents;
+}
+
+function setPromotedPopularLoadError(message) {
+    if (!promotedPopularAgentsLoadError) {
+        return;
+    }
+    promotedPopularAgentsLoadError.textContent = message || '';
+    promotedPopularAgentsLoadError.classList.toggle('d-none', !message);
+}
+
+function syncPromotedPopularAgentsInput() {
+    agentsPagePromotedPopularAgents = normalizePromotedPopularAgents(agentsPagePromotedPopularAgents);
+    if (promotedPopularAgentsInput) {
+        promotedPopularAgentsInput.value = JSON.stringify(agentsPagePromotedPopularAgents);
+    }
+}
+
+function renderPromotedPopularAgentSelect() {
+    if (!promotedPopularAgentsSelect) {
+        return;
+    }
+
+    promotedPopularAgentsSelect.textContent = '';
+    const promotedKeys = new Set(agentsPagePromotedPopularAgents.map(agent => agent.catalog_key));
+    const availableAgents = agentsPagePromotedAvailableAgents
+        .map(agent => normalizePromotedPopularAgent(agent))
+        .filter(agent => agent && !promotedKeys.has(agent.catalog_key))
+        .sort((left, right) => left.display_name.localeCompare(right.display_name, undefined, { sensitivity: 'base' }));
+
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = availableAgents.length ? 'Select an agent to promote...' : 'No additional agents available';
+    promotedPopularAgentsSelect.appendChild(placeholder);
+
+    availableAgents.forEach(agent => {
+        const option = document.createElement('option');
+        option.value = agent.catalog_key;
+        option.textContent = `${agent.display_name} (${agent.scope_label})`;
+        promotedPopularAgentsSelect.appendChild(option);
+    });
+
+    if (promotedPopularAgentsAddButton) {
+        promotedPopularAgentsAddButton.disabled = availableAgents.length === 0;
+    }
+}
+
+function createPromotedPopularWindowSelect(agent, index) {
+    const select = document.createElement('select');
+    select.className = 'form-select form-select-sm';
+    select.setAttribute('aria-label', `Popular tab time range for ${agent.display_name}`);
+    [
+        ['both', 'Both'],
+        ['all_time', 'All Time'],
+        ['30_days', 'Last 30 Days'],
+    ].forEach(([value, label]) => {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = label;
+        option.selected = agent.window === value;
+        select.appendChild(option);
+    });
+    select.addEventListener('change', () => {
+        agentsPagePromotedPopularAgents[index].window = normalizePromotedPopularWindow(select.value);
+        syncPromotedPopularAgentsInput();
+        markFormAsModified();
+    });
+    return select;
+}
+
+function renderPromotedPopularAgents() {
+    if (!promotedPopularAgentsBody) {
+        return;
+    }
+
+    syncPromotedPopularAgentsInput();
+    promotedPopularAgentsBody.textContent = '';
+    promotedPopularAgentsEmpty?.classList.toggle('d-none', agentsPagePromotedPopularAgents.length > 0);
+
+    agentsPagePromotedPopularAgents.forEach((agent, index) => {
+        const row = document.createElement('tr');
+
+        const agentCell = document.createElement('td');
+        const nameElement = document.createElement('div');
+        nameElement.className = 'fw-semibold';
+        nameElement.textContent = agent.display_name;
+        const scopeElement = document.createElement('div');
+        scopeElement.className = 'text-muted small';
+        scopeElement.textContent = agent.scope_label;
+        agentCell.appendChild(nameElement);
+        agentCell.appendChild(scopeElement);
+
+        const windowCell = document.createElement('td');
+        windowCell.appendChild(createPromotedPopularWindowSelect(agent, index));
+
+        const actionsCell = document.createElement('td');
+        actionsCell.className = 'text-end text-nowrap';
+        const moveUpButton = createIconButton('bi bi-arrow-up', `Move ${agent.display_name} up`);
+        moveUpButton.disabled = index === 0;
+        moveUpButton.addEventListener('click', () => {
+            const previousAgent = agentsPagePromotedPopularAgents[index - 1];
+            agentsPagePromotedPopularAgents[index - 1] = agent;
+            agentsPagePromotedPopularAgents[index] = previousAgent;
+            renderPromotedPopularAgents();
+            markFormAsModified();
+        });
+        const moveDownButton = createIconButton('bi bi-arrow-down', `Move ${agent.display_name} down`);
+        moveDownButton.disabled = index === agentsPagePromotedPopularAgents.length - 1;
+        moveDownButton.addEventListener('click', () => {
+            const nextAgent = agentsPagePromotedPopularAgents[index + 1];
+            agentsPagePromotedPopularAgents[index + 1] = agent;
+            agentsPagePromotedPopularAgents[index] = nextAgent;
+            renderPromotedPopularAgents();
+            markFormAsModified();
+        });
+        const removeButton = createIconButton('bi bi-trash', `Remove ${agent.display_name}`, 'btn-outline-danger');
+        removeButton.addEventListener('click', () => {
+            agentsPagePromotedPopularAgents.splice(index, 1);
+            renderPromotedPopularAgents();
+            renderPromotedPopularAgentSelect();
+            markFormAsModified();
+        });
+        actionsCell.appendChild(moveUpButton);
+        actionsCell.appendChild(document.createTextNode(' '));
+        actionsCell.appendChild(moveDownButton);
+        actionsCell.appendChild(document.createTextNode(' '));
+        actionsCell.appendChild(removeButton);
+
+        row.appendChild(agentCell);
+        row.appendChild(windowCell);
+        row.appendChild(actionsCell);
+        promotedPopularAgentsBody.appendChild(row);
+    });
+
+    renderPromotedPopularAgentSelect();
+}
+
+async function loadPromotedPopularAvailableAgents() {
+    if (!promotedPopularAgentsSelect) {
+        return;
+    }
+    try {
+        const response = await fetch('/api/agents/catalog?include_usage=true');
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            throw new Error(payload.error || 'Failed to load available agents.');
+        }
+        agentsPagePromotedAvailableAgents = Array.isArray(payload.agents) ? payload.agents : [];
+        setPromotedPopularLoadError('');
+    } catch (error) {
+        agentsPagePromotedAvailableAgents = [];
+        setPromotedPopularLoadError(error.message || 'Failed to load available agents.');
+    }
+    renderPromotedPopularAgentSelect();
+}
+
+function setupAgentsPagePromotedPopularAgents() {
+    if (!promotedPopularAgentsInput || !promotedPopularAgentsBody) {
+        return;
+    }
+
+    try {
+        const storedAgents = JSON.parse(promotedPopularAgentsInput.value || '[]');
+        agentsPagePromotedPopularAgents = normalizePromotedPopularAgents(storedAgents);
+    } catch (error) {
+        agentsPagePromotedPopularAgents = normalizePromotedPopularAgents(agentsPagePromotedPopularAgents);
+    }
+
+    promotedPopularAgentsAddButton?.addEventListener('click', () => {
+        const catalogKey = normalizeAdminText(promotedPopularAgentsSelect?.value);
+        if (!catalogKey) {
+            return;
+        }
+        const selectedAgent = agentsPagePromotedAvailableAgents.find(agent => normalizeAdminText(agent?.catalog_key) === catalogKey);
+        const normalizedAgent = normalizePromotedPopularAgent(selectedAgent);
+        if (!normalizedAgent) {
+            return;
+        }
+        agentsPagePromotedPopularAgents.push(normalizedAgent);
+        renderPromotedPopularAgents();
+        markFormAsModified();
+    });
+
+    renderPromotedPopularAgents();
+    loadPromotedPopularAvailableAgents();
+}
+
+function getFieldValue(fieldId) {
+    return document.getElementById(fieldId)?.value || '';
+}
+
+function isFieldChecked(fieldId) {
+    return Boolean(document.getElementById(fieldId)?.checked);
+}
+
+function setButtonBusy(button, isBusy, busyText) {
+    if (!button) {
+        return;
+    }
+
+    if (!button.dataset.originalText) {
+        button.dataset.originalText = button.textContent.trim();
+    }
+    if (!button.dataset.originalHtml) {
+        button.dataset.originalHtml = button.innerHTML;
+    }
+
+    button.disabled = isBusy;
+    if (isBusy) {
+        button.textContent = busyText;
+    } else {
+        button.innerHTML = button.dataset.originalHtml;
+    }
+}
+
+function setElementText(elementId, value) {
+    const element = document.getElementById(elementId);
+    if (element) {
+        element.textContent = value || 'Not loaded';
+    }
+}
+
+function formatNumber(value) {
+    if (value === null || value === undefined || value === '') {
+        return 'Not available';
+    }
+    const numericValue = Number(value);
+    if (Number.isNaN(numericValue)) {
+        return 'Not available';
+    }
+    return numericValue.toLocaleString();
+}
+
+function formatRu(value) {
+    const formattedValue = formatNumber(value);
+    return formattedValue === 'Not available' ? formattedValue : `${formattedValue} RU/s`;
+}
+
+function formatRequestUnits(value) {
+    return formatNumber(value);
+}
+
+function isCosmosThroughputPortalManaged(target) {
+    const currentRu = getNullableNumber(target?.current_ru);
+    return Boolean(target?.portal_managed_scaling_required) || (
+        Boolean(target?.is_scalable)
+        && currentRu !== null
+        && currentRu > COSMOS_THROUGHPUT_SIMPLECHAT_MAX_RU
+    );
+}
+
+function isCosmosScaleUpBlockedBySimpleChatLimit(target) {
+    const currentRu = getNullableNumber(target?.current_ru);
+    return Boolean(target?.is_scalable)
+        && currentRu !== null
+        && currentRu >= COSMOS_THROUGHPUT_SIMPLECHAT_MAX_RU;
+}
+
+function getCosmosPortalManagedMessage(target) {
+    return target?.portal_managed_message || COSMOS_THROUGHPUT_PORTAL_MANAGED_MESSAGE;
+}
+
+function createCosmosPortalManagedBadge(target) {
+    const badge = document.createElement('span');
+    badge.className = 'badge text-bg-info ms-2 align-middle';
+    badge.title = getCosmosPortalManagedMessage(target);
+    badge.setAttribute('aria-label', 'Monitor only in SimpleChat');
+
+    const icon = document.createElement('i');
+    icon.className = 'bi bi-info-circle me-1';
+    icon.setAttribute('aria-hidden', 'true');
+    badge.appendChild(icon);
+    badge.appendChild(document.createTextNode('Monitor only'));
+    return badge;
+}
+
+function getNumericFieldValue(fieldId, fallbackValue) {
+    const numericValue = Number(getFieldValue(fieldId));
+    return Number.isNaN(numericValue) ? fallbackValue : numericValue;
+}
+
+function getNullableNumber(value) {
+    if (value === null || value === undefined || value === '') {
+        return null;
+    }
+    const numericValue = Number(value);
+    return Number.isNaN(numericValue) ? null : numericValue;
+}
+
+function formatPercent(value) {
+    if (value === null || value === undefined || value === '') {
+        return 'Not available';
+    }
+    const numericValue = Number(value);
+    if (Number.isNaN(numericValue)) {
+        return 'Not available';
+    }
+    return `${numericValue.toFixed(1)}%`;
+}
+
+function setCosmosThroughputMessage(message, variant = 'info') {
+    const messageElement = document.getElementById('cosmos-throughput-message');
+    if (!messageElement) {
+        return;
+    }
+
+    messageElement.textContent = message || '';
+    messageElement.className = `alert alert-${variant} mt-3`;
+    messageElement.classList.toggle('d-none', !message);
+}
+
+function setCosmosThroughputValidationResult(data) {
+    const messageElement = document.getElementById('cosmos-throughput-message');
+    if (!messageElement) {
+        return;
+    }
+
+    messageElement.replaceChildren();
+    messageElement.className = `alert alert-${data?.variant || (data?.success ? 'success' : 'danger')} mt-3`;
+
+    const summary = document.createElement('div');
+    summary.className = 'fw-semibold mb-2';
+    summary.textContent = data?.message || 'Cosmos throughput access validation completed.';
+    messageElement.appendChild(summary);
+
+    const checks = Array.isArray(data?.checks) ? data.checks : [];
+    if (checks.length > 0) {
+        const list = document.createElement('ul');
+        list.className = 'mb-0 ps-3 small';
+        checks.forEach(check => {
+            const item = document.createElement('li');
+            const statusText = check?.passed ? 'Passed' : 'Failed';
+            item.textContent = `${statusText} - ${check?.label || 'Check'}: ${check?.message || 'No detail returned.'}`;
+            list.appendChild(item);
+        });
+        messageElement.appendChild(list);
+    }
+
+    messageElement.classList.remove('d-none');
+}
+
+function setCosmosThroughputValidationMessage(errors) {
+    const messageElement = document.getElementById('cosmos-throughput-validation-message');
+    if (!messageElement) {
+        return;
+    }
+
+    messageElement.textContent = Array.isArray(errors) && errors.length > 0 ? errors.join(' ') : '';
+    messageElement.className = 'alert alert-danger';
+    messageElement.classList.toggle('d-none', !errors || errors.length === 0);
+}
+
+const COSMOS_THROUGHPUT_VALIDATION_FIELD_IDS = [
+    'cosmos_throughput_metrics_window_minutes',
+    'cosmos_throughput_scale_up_threshold_percent',
+    'cosmos_throughput_scale_down_threshold_percent',
+    'cosmos_throughput_scale_up_cooldown_minutes',
+    'cosmos_throughput_scale_down_cooldown_minutes'
+];
+
+function clearCosmosThroughputValidationState() {
+    COSMOS_THROUGHPUT_VALIDATION_FIELD_IDS.forEach(fieldId => {
+        const field = document.getElementById(fieldId);
+        if (!field) {
+            return;
+        }
+        field.classList.remove('is-invalid');
+        field.setCustomValidity('');
+    });
+
+    document.querySelectorAll('.cosmos-container-policy-input.is-invalid').forEach(input => {
+        input.classList.remove('is-invalid');
+        input.setCustomValidity('');
+    });
+    setCosmosThroughputValidationMessage([]);
+}
+
+function getPolicyNumericValue(policy, fieldName, fallbackValue) {
+    const numericValue = Number(policy?.[fieldName]);
+    return Number.isNaN(numericValue) ? fallbackValue : numericValue;
+}
+
+function markCosmosFieldInvalid(fieldId, message) {
+    const field = document.getElementById(fieldId);
+    if (!field) {
+        return null;
+    }
+    field.classList.add('is-invalid');
+    field.setCustomValidity(message);
+    return field;
+}
+
+function markCosmosContainerPolicyFieldsInvalid(containerName, fieldNames, message) {
+    const markedInputs = [];
+    const inputs = document.querySelectorAll('.cosmos-container-policy-input[data-container-name][data-policy-field]');
+    inputs.forEach(input => {
+        if (input.dataset.containerName !== containerName || !fieldNames.includes(input.dataset.policyField)) {
+            return;
+        }
+        input.classList.add('is-invalid');
+        input.setCustomValidity(message);
+        markedInputs.push(input);
+    });
+    return markedInputs;
+}
+
+function validateCosmosThroughputSettings(options = {}) {
+    clearCosmosThroughputValidationState();
+    if (!isFieldChecked('cosmos_throughput_autoscale_enabled')) {
+        return { isValid: true, errors: [] };
+    }
+
+    const errors = [];
+    const invalidFields = [];
+    const metricsWindow = getNumericFieldValue('cosmos_throughput_metrics_window_minutes', 5);
+    const scaleUpThreshold = getNumericFieldValue('cosmos_throughput_scale_up_threshold_percent', 90);
+    const scaleDownThreshold = getNumericFieldValue('cosmos_throughput_scale_down_threshold_percent', 70);
+    const scaleUpInterval = getNumericFieldValue('cosmos_throughput_scale_up_cooldown_minutes', 5);
+    const scaleDownInterval = getNumericFieldValue('cosmos_throughput_scale_down_cooldown_minutes', 20);
+
+    function addGlobalError(message, fieldIds) {
+        errors.push(`Cosmos throughput policy: ${message}`);
+        fieldIds.forEach(fieldId => {
+            const field = markCosmosFieldInvalid(fieldId, message);
+            if (field) {
+                invalidFields.push(field);
+            }
+        });
+    }
+
+    if (scaleUpThreshold <= scaleDownThreshold) {
+        addGlobalError('Scale Up At must be higher than Scale Down At.', [
+            'cosmos_throughput_scale_up_threshold_percent',
+            'cosmos_throughput_scale_down_threshold_percent'
+        ]);
+    }
+    if (scaleUpInterval < metricsWindow) {
+        addGlobalError('Scale Up Interval must be greater than or equal to the Metrics Window.', [
+            'cosmos_throughput_metrics_window_minutes',
+            'cosmos_throughput_scale_up_cooldown_minutes'
+        ]);
+    }
+    if (scaleDownInterval < metricsWindow) {
+        addGlobalError('Scale Down Interval must be greater than or equal to the Metrics Window.', [
+            'cosmos_throughput_metrics_window_minutes',
+            'cosmos_throughput_scale_down_cooldown_minutes'
+        ]);
+    }
+
+    if (!isCosmosContainerPolicyEnforced()) {
+        const policies = collectCosmosContainerPolicies();
+        Object.entries(policies).forEach(([containerName, policy]) => {
+            if (policy?.enabled === false) {
+                return;
+            }
+
+            const policyScaleUpThreshold = getPolicyNumericValue(policy, 'scale_up_threshold_percent', scaleUpThreshold);
+            const policyScaleDownThreshold = getPolicyNumericValue(policy, 'scale_down_threshold_percent', scaleDownThreshold);
+            const policyScaleUpInterval = getPolicyNumericValue(policy, 'scale_up_cooldown_minutes', scaleUpInterval);
+            const policyScaleDownInterval = getPolicyNumericValue(policy, 'scale_down_cooldown_minutes', scaleDownInterval);
+
+            function addContainerError(message, fieldNames) {
+                errors.push(`Container '${containerName}' policy: ${message}`);
+                invalidFields.push(...markCosmosContainerPolicyFieldsInvalid(containerName, fieldNames, message));
+            }
+
+            if (policyScaleUpThreshold <= policyScaleDownThreshold) {
+                addContainerError('Scale Up At must be higher than Scale Down At.', [
+                    'scale_up_threshold_percent',
+                    'scale_down_threshold_percent'
+                ]);
+            }
+            if (policyScaleUpInterval < metricsWindow) {
+                addContainerError('Scale Up Interval must be greater than or equal to the Metrics Window.', [
+                    'scale_up_cooldown_minutes'
+                ]);
+            }
+            if (policyScaleDownInterval < metricsWindow) {
+                addContainerError('Scale Down Interval must be greater than or equal to the Metrics Window.', [
+                    'scale_down_cooldown_minutes'
+                ]);
+            }
+        });
+    }
+
+    if (errors.length === 0) {
+        return { isValid: true, errors: [] };
+    }
+
+    setCosmosThroughputValidationMessage(errors);
+    if (options.report && invalidFields.length > 0) {
+        document.getElementById('scale-tab')?.click();
+        invalidFields[0].focus({ preventScroll: false });
+        invalidFields[0].reportValidity();
+    }
+    return { isValid: false, errors };
+}
+
+function readCosmosContainerPolicies() {
+    const policyField = document.getElementById('cosmos_throughput_container_policies_json');
+    if (!policyField) {
+        return {};
+    }
+
+    try {
+        const parsedPolicies = JSON.parse(policyField.value || '{}');
+        return parsedPolicies && typeof parsedPolicies === 'object' && !Array.isArray(parsedPolicies)
+            ? parsedPolicies
+            : {};
+    } catch (error) {
+        return {};
+    }
+}
+
+function writeCosmosContainerPolicies(policies) {
+    const policyField = document.getElementById('cosmos_throughput_container_policies_json');
+    if (!policyField) {
+        return;
+    }
+
+    policyField.value = JSON.stringify(policies || {});
+    markFormAsModified();
+}
+
+function isCosmosContainerPolicyEnforced() {
+    return isFieldChecked('cosmos_throughput_enforce_container_defaults');
+}
+
+function buildGlobalCosmosContainerPolicy(containerName = '') {
+    return {
+        container_name: containerName,
+        enabled: true,
+        auto_scale_up_enabled: isFieldChecked('cosmos_throughput_auto_scale_up_enabled'),
+        auto_scale_down_enabled: isFieldChecked('cosmos_throughput_auto_scale_down_enabled'),
+        scale_up_threshold_percent: getNumericFieldValue('cosmos_throughput_scale_up_threshold_percent', 90),
+        scale_down_threshold_percent: getNumericFieldValue('cosmos_throughput_scale_down_threshold_percent', 70),
+        scale_up_step_ru: getNumericFieldValue('cosmos_throughput_scale_up_step_ru', 1000),
+        scale_down_step_ru: getNumericFieldValue('cosmos_throughput_scale_down_step_ru', 1000),
+        scale_up_cooldown_minutes: getNumericFieldValue('cosmos_throughput_scale_up_cooldown_minutes', 5),
+        scale_down_cooldown_minutes: getNumericFieldValue('cosmos_throughput_scale_down_cooldown_minutes', 20),
+        min_ru: getNumericFieldValue('cosmos_throughput_min_ru', 1000),
+        max_ru: getNumericFieldValue('cosmos_throughput_max_ru', COSMOS_THROUGHPUT_SIMPLECHAT_MAX_RU),
+        ignore_min_limit: isFieldChecked('cosmos_throughput_ignore_min_limit'),
+        ignore_max_limit: isFieldChecked('cosmos_throughput_ignore_max_limit'),
+        convert_manual_to_autoscale_enabled: isFieldChecked('cosmos_throughput_convert_manual_to_autoscale_enabled')
+    };
+}
+
+function mergeRuntimePolicyFields(policy, existingPolicy) {
+    const mergedPolicy = { ...policy };
+    if (existingPolicy?.last_scale_up_at) {
+        mergedPolicy.last_scale_up_at = existingPolicy.last_scale_up_at;
+    }
+    if (existingPolicy?.last_scale_down_at) {
+        mergedPolicy.last_scale_down_at = existingPolicy.last_scale_down_at;
+    }
+    if (existingPolicy?.last_mode_conversion_at) {
+        mergedPolicy.last_mode_conversion_at = existingPolicy.last_mode_conversion_at;
+    }
+    return mergedPolicy;
+}
+
+function getCosmosContainerPolicy(container) {
+    const savedPolicies = readCosmosContainerPolicies();
+    const containerName = container?.container_name || '';
+    if (isCosmosContainerPolicyEnforced()) {
+        const existingPolicy = savedPolicies[containerName] || container?.policy || {};
+        return mergeRuntimePolicyFields(buildGlobalCosmosContainerPolicy(containerName), existingPolicy);
+    }
+
+    return {
+        ...(container?.policy || {}),
+        ...(savedPolicies[containerName] || {}),
+        container_name: containerName
+    };
+}
+
+function createPolicyCheckbox(containerName, fieldName, checked, label) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'form-check form-switch mb-1';
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.className = 'form-check-input cosmos-container-policy-input';
+    checkbox.checked = Boolean(checked);
+    checkbox.dataset.containerName = containerName;
+    checkbox.dataset.policyField = fieldName;
+
+    const checkboxLabel = document.createElement('label');
+    checkboxLabel.className = 'form-check-label small';
+    checkboxLabel.textContent = label;
+
+    wrapper.appendChild(checkbox);
+    wrapper.appendChild(checkboxLabel);
+    return wrapper;
+}
+
+function createPolicyNumberInput(containerName, fieldName, value, min, max, step, label) {
+    const wrapper = document.createElement('label');
+    wrapper.className = 'form-label small d-block mb-1';
+    wrapper.textContent = label;
+
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.className = 'form-control form-control-sm cosmos-container-policy-input mt-1';
+    input.value = value ?? '';
+    input.min = String(min);
+    if (max !== null && max !== undefined) {
+        input.max = String(max);
+    }
+    input.step = String(step);
+    input.dataset.containerName = containerName;
+    input.dataset.policyField = fieldName;
+    input.dataset.policyType = 'number';
+    input.addEventListener('input', () => {
+        input.classList.remove('is-invalid');
+        input.setCustomValidity('');
+    });
+
+    wrapper.appendChild(input);
+    return wrapper;
+}
+
+function createManualContainerScaleButton(containerName, direction, disabled, disabledReason = '') {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = direction === 'up' ? 'btn btn-outline-primary btn-sm' : 'btn btn-outline-secondary btn-sm';
+    button.disabled = disabled;
+    button.textContent = direction === 'up' ? 'Up' : 'Down';
+    const actionLabel = direction === 'up' ? 'Scale this container up' : 'Scale this container down';
+    button.title = disabledReason || actionLabel;
+    button.setAttribute('aria-label', disabledReason ? `${actionLabel}: ${disabledReason}` : actionLabel);
+    button.addEventListener('click', () => manuallyScaleCosmosThroughput(direction, containerName, button));
+    return button;
+}
+
+function createCosmosAutoscaleConversionButton(containerName, mode, isScalable, buttonClass = 'btn-outline-secondary', disabledReason = '') {
+    const disabled = mode !== 'manual' || !isScalable || Boolean(disabledReason);
+    const button = createIconButton('bi bi-lightning-charge', `Convert ${containerName || 'database'} manual throughput to Cosmos autoscale`, buttonClass);
+    button.disabled = disabled;
+    if (disabledReason) {
+        button.title = disabledReason;
+        button.setAttribute('aria-label', `Convert ${containerName || 'database'} manual throughput to Cosmos autoscale: ${disabledReason}`);
+    }
+    button.addEventListener('click', () => convertCosmosThroughputToAutoscale(containerName, button));
+    return button;
+}
+
+function collectCosmosContainerPolicies() {
+    const policies = readCosmosContainerPolicies();
+    const inputs = document.querySelectorAll('.cosmos-container-policy-input[data-container-name][data-policy-field]');
+    inputs.forEach(input => {
+        const containerName = input.dataset.containerName;
+        const policyField = input.dataset.policyField;
+        if (!containerName || !policyField) {
+            return;
+        }
+
+        policies[containerName] = policies[containerName] || { container_name: containerName };
+        if (input.type === 'checkbox') {
+            policies[containerName][policyField] = input.checked;
+        } else if (input.dataset.policyType === 'number') {
+            policies[containerName][policyField] = Number(input.value || 0);
+        } else {
+            policies[containerName][policyField] = input.value;
+        }
+    });
+
+    return policies;
+}
+
+function getContainerRuUtilization(container) {
+    const utilizationValue = getContainerRuUtilizationValue(container);
+    return utilizationValue === null ? 'Not available' : `${utilizationValue.toFixed(1)}%${container?.normalized_ru_percent === null || container?.normalized_ru_percent === undefined || container?.normalized_ru_percent === '' ? ' est.' : ''}`;
+}
+
+function getContainerRuUtilizationValue(container) {
+    const normalizedValue = getNullableNumber(container?.normalized_ru_percent);
+    if (normalizedValue !== null) {
+        return normalizedValue;
+    }
+
+    const requestUnitsValue = container?.request_units;
+    const currentRuValue = container?.current_ru;
+    const windowMinutes = Number(currentCosmosMetricsWindowMinutes);
+    if (
+        requestUnitsValue !== null
+        && requestUnitsValue !== undefined
+        && currentRuValue !== null
+        && currentRuValue !== undefined
+        && windowMinutes > 0
+    ) {
+        const requestUnits = Number(requestUnitsValue);
+        const currentRu = Number(currentRuValue);
+        if (!Number.isNaN(requestUnits) && !Number.isNaN(currentRu) && currentRu > 0) {
+            const averageRuPerSecond = requestUnits / (windowMinutes * 60);
+            return (averageRuPerSecond / currentRu) * 100;
+        }
+    }
+
+    return null;
+}
+
+function getCosmosContainerPolicyLabel(container) {
+    if (isCosmosThroughputPortalManaged(container)) {
+        return 'Monitor only';
+    }
+    const policy = getCosmosContainerPolicy(container);
+    if (isCosmosContainerPolicyEnforced()) {
+        return 'Global policy';
+    }
+    return policy.enabled === false ? 'Disabled' : `${policy.min_ru || 'min'}-${policy.max_ru || 'max'} RU/s`;
+}
+
+function getCosmosContainerSortValue(container, fieldName) {
+    switch (fieldName) {
+        case 'container_name':
+            return String(container?.container_name || 'database').toLowerCase();
+        case 'current_ru':
+            return getNullableNumber(container?.current_ru);
+        case 'ru_utilization':
+            return getContainerRuUtilizationValue(container);
+        case 'request_units':
+            return getNullableNumber(container?.request_units);
+        case 'policy':
+            return getCosmosContainerPolicyLabel(container).toLowerCase();
+        default:
+            return '';
+    }
+}
+
+function compareCosmosContainerValues(firstValue, secondValue, fieldName, direction) {
+    const firstMissing = firstValue === null || firstValue === undefined || firstValue === '';
+    const secondMissing = secondValue === null || secondValue === undefined || secondValue === '';
+    if (firstMissing && secondMissing) {
+        return 0;
+    }
+    if (firstMissing) {
+        return 1;
+    }
+    if (secondMissing) {
+        return -1;
+    }
+
+    const multiplier = direction === 'desc' ? -1 : 1;
+    if (COSMOS_CONTAINER_TEXT_SORT_FIELDS.has(fieldName)) {
+        return String(firstValue).localeCompare(String(secondValue), undefined, { sensitivity: 'base', numeric: true }) * multiplier;
+    }
+    return (Number(firstValue) - Number(secondValue)) * multiplier;
+}
+
+function getFilteredCosmosContainers(containers) {
+    const filterValue = String(document.getElementById('cosmos-throughput-container-filter')?.value || '').trim().toLowerCase();
+    if (!filterValue) {
+        return Array.isArray(containers) ? [...containers] : [];
+    }
+
+    return (Array.isArray(containers) ? containers : []).filter(container => (
+        String(container?.container_name || 'database').toLowerCase().includes(filterValue)
+    ));
+}
+
+function getFilteredCosmosPolicyContainers(containers) {
+    const filterValue = String(document.getElementById('cosmos-throughput-container-policy-filter')?.value || '').trim().toLowerCase();
+    if (!filterValue) {
+        return Array.isArray(containers) ? [...containers] : [];
+    }
+
+    return (Array.isArray(containers) ? containers : []).filter(container => (
+        String(container?.container_name || 'database').toLowerCase().includes(filterValue)
+    ));
+}
+
+function updateCosmosContainerPolicyFilterControls(totalCount, visibleCount) {
+    const countElement = document.getElementById('cosmos-throughput-container-policy-filter-count');
+    if (countElement) {
+        countElement.textContent = totalCount > 0 ? `Showing ${visibleCount} of ${totalCount} containers` : '';
+    }
+}
+
+function setCosmosContainerPolicyFilter(containerName = '') {
+    const filterInput = document.getElementById('cosmos-throughput-container-policy-filter');
+    if (filterInput) {
+        filterInput.value = containerName;
+    }
+}
+
+function getSortedCosmosContainers(containers) {
+    const fieldName = COSMOS_CONTAINER_SORT_FIELDS.has(currentCosmosContainerSort.field)
+        ? currentCosmosContainerSort.field
+        : 'container_name';
+    const direction = currentCosmosContainerSort.direction === 'desc' ? 'desc' : 'asc';
+    return [...containers].sort((firstContainer, secondContainer) => {
+        const primaryComparison = compareCosmosContainerValues(
+            getCosmosContainerSortValue(firstContainer, fieldName),
+            getCosmosContainerSortValue(secondContainer, fieldName),
+            fieldName,
+            direction,
+        );
+        if (primaryComparison !== 0) {
+            return primaryComparison;
+        }
+
+        return compareCosmosContainerValues(
+            getCosmosContainerSortValue(firstContainer, 'container_name'),
+            getCosmosContainerSortValue(secondContainer, 'container_name'),
+            'container_name',
+            'asc',
+        );
+    });
+}
+
+function updateCosmosContainerTableControls(totalCount, visibleCount) {
+    const countElement = document.getElementById('cosmos-throughput-container-filter-count');
+    if (countElement) {
+        countElement.textContent = totalCount > 0 ? `Showing ${visibleCount} of ${totalCount} containers` : '';
+    }
+
+    document.querySelectorAll('.cosmos-throughput-container-sort').forEach(button => {
+        const fieldName = button.dataset.sortField;
+        const isActive = fieldName === currentCosmosContainerSort.field;
+        const direction = currentCosmosContainerSort.direction === 'desc' ? 'desc' : 'asc';
+        const headerCell = button.closest('th');
+        if (headerCell) {
+            headerCell.setAttribute('aria-sort', isActive ? (direction === 'desc' ? 'descending' : 'ascending') : 'none');
+        }
+        const icon = button.querySelector('i');
+        if (icon) {
+            icon.className = isActive
+                ? `bi ${direction === 'desc' ? 'bi-arrow-down-short' : 'bi-arrow-up-short'} ms-1`
+                : 'bi bi-arrow-down-up ms-1';
+        }
+    });
+}
+
+function renderCosmosContainerMetrics(containers) {
+    const tableBody = document.getElementById('cosmos-throughput-containers-body');
+    if (!tableBody) {
+        return;
+    }
+
+    tableBody.replaceChildren();
+    const sourceContainers = Array.isArray(containers) ? containers : [];
+    const visibleContainers = getSortedCosmosContainers(getFilteredCosmosContainers(sourceContainers));
+    updateCosmosContainerTableControls(sourceContainers.length, visibleContainers.length);
+
+    if (sourceContainers.length === 0) {
+        const row = document.createElement('tr');
+        const cell = document.createElement('td');
+        cell.colSpan = 7;
+        cell.className = 'text-muted';
+        cell.textContent = 'No containers were returned for the configured Cosmos database.';
+        row.appendChild(cell);
+        tableBody.appendChild(row);
+        return;
+    }
+
+    if (visibleContainers.length === 0) {
+        const row = document.createElement('tr');
+        const cell = document.createElement('td');
+        cell.colSpan = 7;
+        cell.className = 'text-muted';
+        cell.textContent = 'No containers match the current filter.';
+        row.appendChild(cell);
+        tableBody.appendChild(row);
+        return;
+    }
+
+    visibleContainers.forEach(container => {
+        const row = document.createElement('tr');
+        const containerName = container.container_name || 'database';
+        const portalManaged = isCosmosThroughputPortalManaged(container);
+        const policyLabel = getCosmosContainerPolicyLabel(container);
+
+        const containerCell = document.createElement('td');
+        const containerNameText = document.createElement('span');
+        containerNameText.textContent = containerName;
+        containerCell.appendChild(containerNameText);
+        if (portalManaged) {
+            containerCell.appendChild(createCosmosPortalManagedBadge(container));
+            const helper = document.createElement('div');
+            helper.className = 'small text-muted mt-1';
+            helper.textContent = 'Capacity changes must be made in the Azure portal.';
+            containerCell.appendChild(helper);
+        }
+        row.appendChild(containerCell);
+
+        [
+            container.mode || 'unknown',
+            formatRu(container.current_ru),
+            getContainerRuUtilization(container),
+            formatRequestUnits(container.request_units),
+            policyLabel
+        ].forEach(value => {
+            const cell = document.createElement('td');
+            cell.textContent = value;
+            row.appendChild(cell);
+        });
+
+        const actionCell = document.createElement('td');
+        actionCell.className = 'text-nowrap';
+        const actionGroup = document.createElement('div');
+        actionGroup.className = 'btn-group btn-group-sm';
+        actionGroup.setAttribute('role', 'group');
+        actionGroup.setAttribute('aria-label', `Actions for ${containerName}`);
+        const configureButton = createIconButton('bi bi-gear', `Configure ${containerName} throughput policy`);
+        configureButton.setAttribute('data-bs-toggle', 'modal');
+        configureButton.setAttribute('data-bs-target', '#cosmosThroughputContainerModal');
+        configureButton.addEventListener('click', () => {
+            setCosmosContainerPolicyFilter(containerName);
+            renderCosmosContainerPolicyModal(currentCosmosContainers);
+        });
+        actionGroup.appendChild(configureButton);
+        const portalManagedMessage = portalManaged ? getCosmosPortalManagedMessage(container) : '';
+        const scaleUpDisabledReason = portalManagedMessage || (isCosmosScaleUpBlockedBySimpleChatLimit(container) ? COSMOS_THROUGHPUT_PORTAL_MANAGED_MESSAGE : '');
+        actionGroup.appendChild(createCosmosAutoscaleConversionButton(containerName, container.mode, container.is_scalable, 'btn-outline-secondary', portalManagedMessage));
+        actionGroup.appendChild(createManualContainerScaleButton(containerName, 'up', !container.is_scalable || Boolean(scaleUpDisabledReason), scaleUpDisabledReason));
+        actionGroup.appendChild(createManualContainerScaleButton(containerName, 'down', !container.is_scalable || portalManaged, portalManagedMessage));
+        actionCell.appendChild(actionGroup);
+        row.appendChild(actionCell);
+
+        tableBody.appendChild(row);
+    });
+}
+
+function renderCosmosContainerPolicyModal(containers) {
+    const tableBody = document.getElementById('cosmos-throughput-container-policies-body');
+    if (!tableBody) {
+        return;
+    }
+
+    const globalPolicyEnforced = isCosmosContainerPolicyEnforced();
+    tableBody.replaceChildren();
+    const sourceContainers = Array.isArray(containers) ? containers : [];
+    const visibleContainers = getFilteredCosmosPolicyContainers(sourceContainers);
+    updateCosmosContainerPolicyFilterControls(sourceContainers.length, visibleContainers.length);
+    if (sourceContainers.length === 0) {
+        const row = document.createElement('tr');
+        const cell = document.createElement('td');
+        cell.colSpan = 8;
+        cell.className = 'text-muted';
+        cell.textContent = 'Refresh Cosmos throughput status to load containers.';
+        row.appendChild(cell);
+        tableBody.appendChild(row);
+        return;
+    }
+
+    if (visibleContainers.length === 0) {
+        const row = document.createElement('tr');
+        const cell = document.createElement('td');
+        cell.colSpan = 8;
+        cell.className = 'text-muted';
+        cell.textContent = 'No container policies match the current filter.';
+        row.appendChild(cell);
+        tableBody.appendChild(row);
+        return;
+    }
+
+    visibleContainers.forEach(container => {
+        const containerName = container.container_name || '';
+        const policy = getCosmosContainerPolicy(container);
+        const portalManaged = isCosmosThroughputPortalManaged(container);
+        const row = document.createElement('tr');
+
+        const nameCell = document.createElement('td');
+        const nameText = document.createElement('div');
+        nameText.className = 'fw-semibold';
+        nameText.textContent = containerName;
+        if (portalManaged) {
+            nameText.appendChild(createCosmosPortalManagedBadge(container));
+        }
+        const metaText = document.createElement('div');
+        metaText.className = 'small text-muted';
+        metaText.textContent = portalManaged
+            ? `${container.mode || 'unknown'} | ${formatRu(container.current_ru)} | monitor only in SimpleChat`
+            : globalPolicyEnforced
+            ? `${container.mode || 'unknown'} | ${formatRu(container.current_ru)} | global policy enforced`
+            : `${container.mode || 'unknown'} | ${formatRu(container.current_ru)}`;
+        nameCell.appendChild(nameText);
+        nameCell.appendChild(metaText);
+        row.appendChild(nameCell);
+
+        const enabledCell = document.createElement('td');
+        enabledCell.appendChild(createPolicyCheckbox(containerName, 'enabled', policy.enabled !== false, 'Enabled'));
+        row.appendChild(enabledCell);
+
+        const upCell = document.createElement('td');
+        upCell.appendChild(createPolicyCheckbox(containerName, 'auto_scale_up_enabled', policy.auto_scale_up_enabled !== false, 'Auto'));
+        upCell.appendChild(createPolicyNumberInput(containerName, 'scale_up_threshold_percent', policy.scale_up_threshold_percent || 90, 1, 100, 1, 'At %'));
+        upCell.appendChild(createPolicyNumberInput(containerName, 'scale_up_step_ru', policy.scale_up_step_ru || 1000, 100, null, 100, 'Step RU/s'));
+        upCell.appendChild(createPolicyNumberInput(containerName, 'scale_up_cooldown_minutes', policy.scale_up_cooldown_minutes || 5, 1, 1440, 1, 'Interval min'));
+        row.appendChild(upCell);
+
+        const downCell = document.createElement('td');
+        downCell.appendChild(createPolicyCheckbox(containerName, 'auto_scale_down_enabled', policy.auto_scale_down_enabled !== false, 'Auto'));
+        downCell.appendChild(createPolicyNumberInput(containerName, 'scale_down_threshold_percent', policy.scale_down_threshold_percent || 70, 0, 99, 1, 'At %'));
+        downCell.appendChild(createPolicyNumberInput(containerName, 'scale_down_step_ru', policy.scale_down_step_ru || 1000, 100, null, 100, 'Step RU/s'));
+        downCell.appendChild(createPolicyNumberInput(containerName, 'scale_down_cooldown_minutes', policy.scale_down_cooldown_minutes || 20, 1, 1440, 1, 'Interval min'));
+        row.appendChild(downCell);
+
+        const autoscaleCell = document.createElement('td');
+        autoscaleCell.appendChild(createPolicyCheckbox(containerName, 'convert_manual_to_autoscale_enabled', policy.convert_manual_to_autoscale_enabled, 'Convert manual'));
+        if (policy.last_mode_conversion_at) {
+            const helper = document.createElement('div');
+            helper.className = 'small text-muted mt-1';
+            helper.textContent = `Last converted ${policy.last_mode_conversion_at}`;
+            autoscaleCell.appendChild(helper);
+        }
+        row.appendChild(autoscaleCell);
+
+        const minCell = document.createElement('td');
+        minCell.appendChild(createPolicyNumberInput(containerName, 'min_ru', policy.min_ru || 1000, 100, null, 100, 'Min'));
+        minCell.appendChild(createPolicyCheckbox(containerName, 'ignore_min_limit', policy.ignore_min_limit, 'Ignore'));
+        row.appendChild(minCell);
+
+        const maxCell = document.createElement('td');
+        maxCell.appendChild(createPolicyNumberInput(containerName, 'max_ru', policy.max_ru || COSMOS_THROUGHPUT_SIMPLECHAT_MAX_RU, 100, COSMOS_THROUGHPUT_SIMPLECHAT_MAX_RU, 100, 'Max'));
+        maxCell.appendChild(createPolicyCheckbox(containerName, 'ignore_max_limit', policy.ignore_max_limit, 'Ignore'));
+        row.appendChild(maxCell);
+
+        const manualCell = document.createElement('td');
+        const portalManagedMessage = portalManaged ? getCosmosPortalManagedMessage(container) : '';
+        const scaleUpDisabledReason = portalManagedMessage || (isCosmosScaleUpBlockedBySimpleChatLimit(container) ? COSMOS_THROUGHPUT_PORTAL_MANAGED_MESSAGE : '');
+        manualCell.appendChild(createCosmosAutoscaleConversionButton(containerName, container.mode, container.is_scalable, 'btn-outline-primary', portalManagedMessage));
+        manualCell.appendChild(createManualContainerScaleButton(containerName, 'up', !container.is_scalable || Boolean(scaleUpDisabledReason), scaleUpDisabledReason));
+        manualCell.appendChild(createManualContainerScaleButton(containerName, 'down', !container.is_scalable || portalManaged, portalManagedMessage));
+        if (portalManaged || !container.is_scalable) {
+            const helper = document.createElement('div');
+            helper.className = 'small text-muted mt-1';
+            helper.textContent = portalManaged ? 'Use Azure portal for capacity changes.' : 'Shared throughput';
+            manualCell.appendChild(helper);
+        }
+        row.appendChild(manualCell);
+
+        if (globalPolicyEnforced || portalManaged) {
+            row.querySelectorAll('.cosmos-container-policy-input').forEach(input => {
+                input.disabled = true;
+            });
+        }
+
+        tableBody.appendChild(row);
+    });
+}
+
+function applyGlobalCosmosContainerPolicyToCurrentContainers() {
+    if (!Array.isArray(currentCosmosContainers) || currentCosmosContainers.length === 0) {
+        setCosmosThroughputMessage('Refresh Cosmos throughput status before applying the global policy to containers.', 'warning');
+        return;
+    }
+
+    const policies = readCosmosContainerPolicies();
+    currentCosmosContainers.forEach(container => {
+        const containerName = container?.container_name || '';
+        if (!containerName) {
+            return;
+        }
+        const existingPolicy = policies[containerName] || container?.policy || {};
+        policies[containerName] = mergeRuntimePolicyFields(buildGlobalCosmosContainerPolicy(containerName), existingPolicy);
+    });
+
+    writeCosmosContainerPolicies(policies);
+    renderCosmosContainerMetrics(currentCosmosContainers);
+    renderCosmosContainerPolicyModal(currentCosmosContainers);
+    setCosmosThroughputMessage('Global container policy is staged for the currently discovered containers. Save Admin Settings to persist it.', 'info');
+}
+
+function updateCosmosThroughputStatusPanel(status) {
+    const throughput = status?.throughput || {};
+    const metrics = status?.metrics || {};
+    currentCosmosContainers = status?.containers || [];
+    currentCosmosStatusLoaded = true;
+    currentCosmosMetricsWindowMinutes = metrics?.window_minutes || Number(document.getElementById('cosmos_throughput_metrics_window_minutes')?.value || 0);
+    setElementText('cosmos-throughput-mode', status?.capacity_scope === 'container' ? 'container targeted' : throughput.mode || 'Unknown');
+    setElementText('cosmos-throughput-current-ru', formatRu(throughput.current_ru));
+    setElementText('cosmos-throughput-utilization', formatPercent(metrics.normalized_ru_percent));
+    setElementText('cosmos-throughput-last-checked', status?.last_checked_at || 'Not loaded');
+    renderCosmosContainerMetrics(currentCosmosContainers);
+    renderCosmosContainerPolicyModal(currentCosmosContainers);
+
+    const databasePortalManaged = isCosmosThroughputPortalManaged(throughput);
+    const globalScaleButtonsDisabled = status?.capacity_scope === 'container' || !throughput.is_scalable || databasePortalManaged;
+    const globalScaleUpButtonDisabled = globalScaleButtonsDisabled || isCosmosScaleUpBlockedBySimpleChatLimit(throughput);
+    const globalConvertButtonDisabled = status?.capacity_scope === 'container' || throughput.mode !== 'manual' || !throughput.is_scalable || databasePortalManaged;
+    document.getElementById('cosmos-throughput-convert-autoscale-btn')?.toggleAttribute('disabled', globalConvertButtonDisabled);
+    document.getElementById('cosmos-throughput-scale-up-btn')?.toggleAttribute('disabled', globalScaleUpButtonDisabled);
+    document.getElementById('cosmos-throughput-scale-down-btn')?.toggleAttribute('disabled', globalScaleButtonsDisabled);
+}
+
+function hasContainerLevelCosmosMetrics(status) {
+    return (status?.containers || []).some(container => (
+        container?.normalized_ru_percent !== null
+        && container?.normalized_ru_percent !== undefined
+    ) || (
+        container?.request_units !== null
+        && container?.request_units !== undefined
+    ));
+}
+
+function hasPortalManagedCosmosThroughput(status) {
+    return Boolean(status?.throughput?.portal_managed_scaling_required) || (status?.containers || []).some(container => (
+        isCosmosThroughputPortalManaged(container)
+    ));
+}
+
+function getCachedCosmosThroughputStatus() {
+    const cachedStatus = window.cosmosThroughputCachedStatus;
+    if (!cachedStatus || typeof cachedStatus !== 'object' || Array.isArray(cachedStatus)) {
+        return null;
+    }
+
+    const hasStatusData = Boolean(
+        cachedStatus.last_checked_at
+        || cachedStatus.capacity_scope
+        || (Array.isArray(cachedStatus.containers) && cachedStatus.containers.length > 0)
+    );
+    return hasStatusData ? cachedStatus : null;
+}
+
+function initializeCosmosThroughputStatusView() {
+    const cachedStatus = getCachedCosmosThroughputStatus();
+    const automationEnabled = isFieldChecked('cosmos_throughput_autoscale_enabled');
+
+    if (cachedStatus) {
+        updateCosmosThroughputStatusPanel(cachedStatus);
+        const refreshText = automationEnabled
+            ? 'Background automation refreshes this saved view on the Metrics Window cadence while enabled.'
+            : 'Automation is currently disabled; use Refresh to update this saved view.';
+        setCosmosThroughputMessage(`Showing last saved Cosmos throughput status. ${refreshText}`, 'info');
+        return;
+    }
+
+    if (automationEnabled) {
+        setCosmosThroughputMessage('No saved Cosmos throughput status is available yet. Loading the first status check now...', 'info');
+        loadCosmosThroughputStatus();
+    }
+}
+
+async function loadCosmosThroughputStatus(event = null) {
+    const triggerButton = event?.currentTarget || document.getElementById('cosmos-throughput-refresh-btn');
+    if (triggerButton) {
+        setButtonBusy(triggerButton, true, 'Loading...');
+    }
+    setCosmosThroughputMessage('Loading Cosmos throughput status...', 'info');
+
+    try {
+        const response = await fetch('/api/admin/settings/cosmos-throughput/status', {
+            method: 'GET',
+            headers: { 'Accept': 'application/json' },
+            credentials: 'same-origin'
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error || 'Failed to load Cosmos throughput status.');
+        }
+
+        updateCosmosThroughputStatusPanel(data);
+        if (!data.configured) {
+            setCosmosThroughputMessage(data.error || 'Cosmos throughput management needs subscription, resource group, account, and database settings.', 'warning');
+        } else if (data.throughput_error) {
+            setCosmosThroughputMessage(`Cosmos database throughput could not be read. ${data.throughput_error}`, 'danger');
+        } else if (data.capacity_scope === 'container' && data.metrics?.normalized_ru_percent !== null && data.metrics?.normalized_ru_percent !== undefined && !hasContainerLevelCosmosMetrics(data)) {
+            setCosmosThroughputMessage('Azure Monitor returned aggregate RU utilization, but not per-container metric dimensions for this window. Container autoscale waits for per-container utilization before scaling individual containers; Refresh again after a few minutes.', 'warning');
+        } else if (hasPortalManagedCosmosThroughput(data)) {
+            setCosmosThroughputMessage('One or more Cosmos throughput targets are above 10,000 RU/s. SimpleChat will monitor utilization and request units only; use the Azure portal for capacity changes, which can take 4 to 6 hours.', 'warning');
+        } else if (data.capacity_scope === 'container') {
+            setCosmosThroughputMessage('Container-targeted throughput is active. Dedicated-throughput containers can be monitored and scaled individually; containers sharing database throughput remain view-only.', 'info');
+        } else if (data.metric_error) {
+            setCosmosThroughputMessage('Throughput loaded, but Azure Monitor metrics are unavailable. Check the app identity permissions and Cosmos metrics availability.', 'warning');
+        } else {
+            setCosmosThroughputMessage('Cosmos throughput status loaded.', 'success');
+        }
+    } catch (error) {
+        setCosmosThroughputMessage(error.message || 'Failed to load Cosmos throughput status.', 'danger');
+    } finally {
+        if (triggerButton) {
+            setButtonBusy(triggerButton, false);
+        }
+    }
+}
+
+function buildCosmosThroughputAccessPayload() {
+    return {
+        cosmos_throughput_autoscale_enabled: isFieldChecked('cosmos_throughput_autoscale_enabled'),
+        cosmos_throughput_auto_scale_up_enabled: isFieldChecked('cosmos_throughput_auto_scale_up_enabled'),
+        cosmos_throughput_auto_scale_down_enabled: isFieldChecked('cosmos_throughput_auto_scale_down_enabled'),
+        cosmos_throughput_subscription_id: getFieldValue('cosmos_throughput_subscription_id'),
+        cosmos_throughput_resource_group: getFieldValue('cosmos_throughput_resource_group'),
+        cosmos_throughput_account_name: getFieldValue('cosmos_throughput_account_name'),
+        cosmos_throughput_database_name: getFieldValue('cosmos_throughput_database_name'),
+        cosmos_throughput_metrics_window_minutes: getNumericFieldValue('cosmos_throughput_metrics_window_minutes', 5),
+        cosmos_throughput_scale_up_threshold_percent: getNumericFieldValue('cosmos_throughput_scale_up_threshold_percent', 90),
+        cosmos_throughput_scale_down_threshold_percent: getNumericFieldValue('cosmos_throughput_scale_down_threshold_percent', 70),
+        cosmos_throughput_scale_up_step_ru: getNumericFieldValue('cosmos_throughput_scale_up_step_ru', 1000),
+        cosmos_throughput_scale_down_step_ru: getNumericFieldValue('cosmos_throughput_scale_down_step_ru', 1000),
+        cosmos_throughput_scale_up_cooldown_minutes: getNumericFieldValue('cosmos_throughput_scale_up_cooldown_minutes', 5),
+        cosmos_throughput_scale_down_cooldown_minutes: getNumericFieldValue('cosmos_throughput_scale_down_cooldown_minutes', 20),
+        cosmos_throughput_min_ru: getNumericFieldValue('cosmos_throughput_min_ru', 1000),
+        cosmos_throughput_max_ru: getNumericFieldValue('cosmos_throughput_max_ru', COSMOS_THROUGHPUT_SIMPLECHAT_MAX_RU),
+        cosmos_throughput_ignore_min_limit: isFieldChecked('cosmos_throughput_ignore_min_limit'),
+        cosmos_throughput_ignore_max_limit: isFieldChecked('cosmos_throughput_ignore_max_limit'),
+        cosmos_throughput_convert_manual_to_autoscale_enabled: isFieldChecked('cosmos_throughput_convert_manual_to_autoscale_enabled'),
+        cosmos_throughput_enforce_container_defaults: isFieldChecked('cosmos_throughput_enforce_container_defaults'),
+        cosmos_throughput_container_policies: collectCosmosContainerPolicies()
+    };
+}
+
+async function validateCosmosThroughputAccess(triggerButton = null) {
+    const button = triggerButton || document.getElementById('cosmos-throughput-validate-access-btn');
+    if (button) {
+        setButtonBusy(button, true, 'Validating...');
+    }
+    setCosmosThroughputMessage('Validating Cosmos throughput configuration and access...', 'info');
+
+    try {
+        const response = await fetch('/api/admin/settings/cosmos-throughput/validate-access', {
+            method: 'POST',
+            headers: {
+                'Accept': 'application/json',
+                'Content-Type': 'application/json'
+            },
+            credentials: 'same-origin',
+            body: JSON.stringify(buildCosmosThroughputAccessPayload())
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error || 'Failed to validate Cosmos throughput access.');
+        }
+
+        if (data.status?.configured) {
+            updateCosmosThroughputStatusPanel(data.status);
+        }
+        setCosmosThroughputValidationResult(data);
+    } catch (error) {
+        setCosmosThroughputMessage(error.message || 'Failed to validate Cosmos throughput access.', 'danger');
+    } finally {
+        if (button) {
+            setButtonBusy(button, false);
+        }
+    }
+}
+
+async function manuallyScaleCosmosThroughput(direction, containerName = '', triggerButton = null) {
+    const button = triggerButton || document.getElementById(`cosmos-throughput-scale-${direction}-btn`);
+    if (button) {
+        setButtonBusy(button, true, direction === 'up' ? 'Scaling up...' : 'Scaling down...');
+    }
+    const targetText = containerName ? ` for ${containerName}` : '';
+    setCosmosThroughputMessage(direction === 'up' ? `Submitting scale-up request${targetText}...` : `Submitting scale-down request${targetText}...`, 'info');
+
+    try {
+        const response = await fetch('/api/admin/settings/cosmos-throughput/scale', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ direction, container_name: containerName })
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error || 'Cosmos throughput scale request failed.');
+        }
+
+        const scaledTarget = data.container_name ? ` for ${data.container_name}` : '';
+        setCosmosThroughputMessage(`Cosmos throughput${scaledTarget} changed from ${formatRu(data.from_ru)} to ${formatRu(data.to_ru)}.`, 'success');
+        await loadCosmosThroughputStatus();
+    } catch (error) {
+        setCosmosThroughputMessage(error.message || 'Cosmos throughput scale request failed.', 'danger');
+    } finally {
+        if (button) {
+            setButtonBusy(button, false, direction === 'up' ? 'Scale Up' : 'Scale Down');
+        }
+    }
+}
+
+async function convertCosmosThroughputToAutoscale(containerName = '', triggerButton = null) {
+    const targetText = containerName ? ` for ${containerName}` : '';
+    if (triggerButton) {
+        setButtonBusy(triggerButton, true, 'Converting...');
+    }
+    setCosmosThroughputMessage(`Converting manual Cosmos throughput${targetText} to native autoscale...`, 'info');
+
+    try {
+        const response = await fetch('/api/admin/settings/cosmos-throughput/convert-autoscale', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ container_name: containerName })
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error || 'Cosmos throughput mode conversion failed.');
+        }
+
+        const convertedTarget = data.container_name ? ` for ${data.container_name}` : '';
+        setCosmosThroughputMessage(`Cosmos throughput${convertedTarget} converted from manual ${formatRu(data.from_ru)} to autoscale max ${formatRu(data.to_ru)}.`, 'success');
+        await loadCosmosThroughputStatus();
+    } catch (error) {
+        setCosmosThroughputMessage(error.message || 'Cosmos throughput mode conversion failed.', 'danger');
+    } finally {
+        if (triggerButton) {
+            setButtonBusy(triggerButton, false);
+        }
+    }
+}
+
+function setupCosmosThroughputControls() {
+    const section = document.getElementById('cosmos-throughput-section');
+    if (!section) {
+        return;
+    }
+
+    const automationToggle = document.getElementById('cosmos_throughput_autoscale_enabled');
+    const automationSettings = document.getElementById('cosmos-throughput-automation-settings');
+    if (automationToggle && automationSettings) {
+        automationToggle.addEventListener('change', () => {
+            automationSettings.classList.toggle('d-none', !automationToggle.checked);
+            validateCosmosThroughputSettings();
+        });
+        automationSettings.classList.toggle('d-none', !automationToggle.checked);
+    }
+
+    COSMOS_THROUGHPUT_VALIDATION_FIELD_IDS.forEach(fieldId => {
+        const field = document.getElementById(fieldId);
+        if (!field) {
+            return;
+        }
+        field.addEventListener('input', () => validateCosmosThroughputSettings());
+        field.addEventListener('change', () => validateCosmosThroughputSettings());
+    });
+
+    document.getElementById('cosmos-throughput-container-filter')?.addEventListener('input', () => {
+        renderCosmosContainerMetrics(currentCosmosContainers);
+    });
+    document.getElementById('cosmos-throughput-container-policy-filter')?.addEventListener('input', () => {
+        renderCosmosContainerPolicyModal(currentCosmosContainers);
+    });
+
+    document.querySelectorAll('.cosmos-throughput-container-sort').forEach(button => {
+        button.addEventListener('click', () => {
+            const fieldName = button.dataset.sortField;
+            if (!COSMOS_CONTAINER_SORT_FIELDS.has(fieldName)) {
+                return;
+            }
+
+            if (currentCosmosContainerSort.field === fieldName) {
+                currentCosmosContainerSort.direction = currentCosmosContainerSort.direction === 'desc' ? 'asc' : 'desc';
+            } else {
+                currentCosmosContainerSort = {
+                    field: fieldName,
+                    direction: COSMOS_CONTAINER_TEXT_SORT_FIELDS.has(fieldName) ? 'asc' : 'desc'
+                };
+            }
+            renderCosmosContainerMetrics(currentCosmosContainers);
+        });
+    });
+
+    document.getElementById('cosmos-throughput-refresh-btn')?.addEventListener('click', loadCosmosThroughputStatus);
+    document.getElementById('cosmos-throughput-refresh-table-btn')?.addEventListener('click', loadCosmosThroughputStatus);
+    document.getElementById('cosmos-throughput-validate-access-btn')?.addEventListener('click', event => validateCosmosThroughputAccess(event.currentTarget));
+    document.getElementById('cosmos-throughput-run-setup-test-btn')?.addEventListener('click', event => validateCosmosThroughputAccess(event.currentTarget));
+    document.getElementById('cosmos-throughput-convert-autoscale-btn')?.addEventListener('click', event => convertCosmosThroughputToAutoscale('', event.currentTarget));
+    document.getElementById('cosmos-throughput-scale-up-btn')?.addEventListener('click', () => manuallyScaleCosmosThroughput('up'));
+    document.getElementById('cosmos-throughput-scale-down-btn')?.addEventListener('click', () => manuallyScaleCosmosThroughput('down'));
+    document.getElementById('cosmos-throughput-container-policies-btn')?.addEventListener('click', () => {
+        setCosmosContainerPolicyFilter('');
+        renderCosmosContainerPolicyModal(currentCosmosContainers);
+    });
+    document.getElementById('cosmos_throughput_enforce_container_defaults')?.addEventListener('change', () => {
+        renderCosmosContainerMetrics(currentCosmosContainers);
+        renderCosmosContainerPolicyModal(currentCosmosContainers);
+        markFormAsModified();
+    });
+    document.getElementById('cosmos_throughput_convert_manual_to_autoscale_enabled')?.addEventListener('change', () => {
+        renderCosmosContainerMetrics(currentCosmosContainers);
+        renderCosmosContainerPolicyModal(currentCosmosContainers);
+        markFormAsModified();
+    });
+    document.getElementById('cosmos-throughput-apply-global-policy-btn')?.addEventListener('click', applyGlobalCosmosContainerPolicyToCurrentContainers);
+    document.getElementById('cosmos-throughput-save-container-policies-btn')?.addEventListener('click', () => {
+        const validationResult = validateCosmosThroughputSettings({ report: true });
+        if (!validationResult.isValid) {
+            return;
+        }
+        writeCosmosContainerPolicies(collectCosmosContainerPolicies());
+        renderCosmosContainerMetrics(currentCosmosContainers);
+        setCosmosThroughputMessage('Container throughput policies are staged. Save Admin Settings to persist them.', 'info');
+    });
+    if (!currentCosmosStatusLoaded) {
+        initializeCosmosThroughputStatusView();
+    }
+}
+
+function createTextElement(tagName, className, text) {
+    const element = document.createElement(tagName);
+    if (className) {
+        element.className = className;
+    }
+    element.textContent = text || '';
+    return element;
+}
+
+function appendTextList(container, title, items) {
+    if (!Array.isArray(items) || items.length === 0) {
+        return;
+    }
+
+    container.appendChild(createTextElement('div', 'fw-semibold mt-2', title));
+    const list = document.createElement('ul');
+    list.className = 'mb-0 ps-3';
+    items.forEach(item => {
+        const listItem = document.createElement('li');
+        listItem.textContent = String(item || '');
+        list.appendChild(listItem);
+    });
+    container.appendChild(list);
+}
+
+function renderAdminTestLoading(container, message) {
+    if (!container) {
+        return;
+    }
+
+    container.replaceChildren();
+    const alert = document.createElement('div');
+    alert.className = 'alert alert-info mb-0';
+    alert.textContent = message;
+    container.appendChild(alert);
+}
+
+function renderAdminTestResult(container, resultOptions) {
+    if (!container) {
+        return;
+    }
+
+    const variantMap = {
+        success: 'success',
+        warning: 'warning',
+        danger: 'danger',
+        info: 'info'
+    };
+    const variant = variantMap[resultOptions.variant] || 'info';
+    container.replaceChildren();
+
+    const alert = document.createElement('div');
+    alert.className = `alert alert-${variant} mb-0`;
+    alert.appendChild(createTextElement('div', 'fw-semibold', resultOptions.title));
+
+    if (resultOptions.message) {
+        alert.appendChild(createTextElement('div', 'mt-1', resultOptions.message));
+    }
+    if (resultOptions.preview) {
+        alert.appendChild(createTextElement('div', 'fw-semibold mt-2', 'Response Preview'));
+        alert.appendChild(createTextElement('div', 'small text-break', resultOptions.preview));
+    }
+
+    appendTextList(alert, 'Details', resultOptions.details);
+    appendTextList(alert, 'Guidance', resultOptions.guidance);
+    container.appendChild(alert);
+}
+
+function setupDeepResearchPolicyEditors() {
+    document.querySelectorAll('[data-deep-research-policy], [data-url-access-policy]').forEach(editor => {
+        const policyName = editor.dataset.urlAccessPolicy || editor.dataset.deepResearchPolicy;
+        const policyKind = editor.dataset.policyKind || 'text';
+        const hiddenField = document.getElementById(policyName);
+        const listContainer = editor.querySelector('[data-policy-list]');
+        if (!policyName || !hiddenField || !listContainer) {
+            return;
+        }
+
+        let policyItems = parsePolicyListValue(hiddenField.value)
+            .map(item => normalizePolicyValue(item, policyKind))
+            .filter(Boolean)
+            .filter((item, index, items) => items.indexOf(item) === index);
+
+        const syncHiddenField = () => {
+            hiddenField.value = policyItems.join('\n');
+        };
+
+        const renderEmptyState = () => {
+            const emptyState = document.createElement('div');
+            emptyState.className = 'list-group-item text-muted small';
+            emptyState.textContent = policyKind === 'domain'
+                ? 'No domain rules configured.'
+                : 'No user rules configured.';
+            listContainer.appendChild(emptyState);
+        };
+
+        const renderPolicyItems = () => {
+            listContainer.replaceChildren();
+            syncHiddenField();
+
+            if (policyItems.length === 0) {
+                renderEmptyState();
+                return;
+            }
+
+            policyItems.forEach((item, index) => {
+                const row = document.createElement('div');
+                row.className = 'list-group-item d-flex align-items-center gap-2';
+
+                const input = document.createElement('input');
+                input.type = 'text';
+                input.className = 'form-control form-control-sm';
+                input.value = item;
+                input.setAttribute('aria-label', `Edit ${policyKind} policy entry`);
+
+                const applyEdit = () => {
+                    const normalizedValue = normalizePolicyValue(input.value, policyKind);
+                    if (!normalizedValue) {
+                        policyItems.splice(index, 1);
+                        renderPolicyItems();
+                        markFormAsModified();
+                        return;
+                    }
+
+                    const duplicateIndex = policyItems.findIndex((existingItem, existingIndex) => (
+                        existingIndex !== index && existingItem.toLowerCase() === normalizedValue.toLowerCase()
+                    ));
+                    if (duplicateIndex >= 0) {
+                        input.value = policyItems[index];
+                        showToast('That policy entry already exists.', 'warning');
+                        return;
+                    }
+
+                    if (policyItems[index] !== normalizedValue) {
+                        policyItems[index] = normalizedValue;
+                        renderPolicyItems();
+                        markFormAsModified();
+                    } else {
+                        input.value = normalizedValue;
+                    }
+                };
+
+                input.addEventListener('change', applyEdit);
+                input.addEventListener('keydown', event => {
+                    if (event.key === 'Enter') {
+                        event.preventDefault();
+                        applyEdit();
+                    }
+                });
+
+                const deleteButton = createIconButton('bi bi-trash', 'Delete policy entry', 'btn-outline-danger');
+                deleteButton.addEventListener('click', () => {
+                    policyItems.splice(index, 1);
+                    renderPolicyItems();
+                    markFormAsModified();
+                });
+
+                row.appendChild(input);
+                row.appendChild(deleteButton);
+                listContainer.appendChild(row);
+            });
+        };
+
+        const addPolicyItems = (rawItems, options = {}) => {
+            const { silent = false } = options;
+            const normalizedItems = rawItems
+                .map(item => normalizePolicyValue(item, policyKind))
+                .filter(Boolean);
+            const startingCount = policyItems.length;
+
+            normalizedItems.forEach(item => {
+                const alreadyExists = policyItems.some(existingItem => existingItem.toLowerCase() === item.toLowerCase());
+                if (!alreadyExists) {
+                    policyItems.push(item);
+                }
+            });
+
+            if (policyItems.length !== startingCount) {
+                renderPolicyItems();
+                markFormAsModified();
+            } else if (!silent && normalizedItems.length > 0) {
+                showToast('No new policy entries were added.', 'info');
+            }
+        };
+
+        const newInput = editor.querySelector('[data-policy-new-input]');
+        const addButton = editor.querySelector('[data-policy-add-button]');
+        if (newInput && addButton) {
+            const addFromInput = () => {
+                addPolicyItems([newInput.value]);
+                newInput.value = '';
+                newInput.focus();
+            };
+            addButton.addEventListener('click', addFromInput);
+            newInput.addEventListener('keydown', event => {
+                if (event.key === 'Enter') {
+                    event.preventDefault();
+                    addFromInput();
+                }
+            });
+        }
+
+        setupDeepResearchUserPolicySearch(editor, addPolicyItems);
+        setupDeepResearchUserPolicyBulkAdd(editor, addPolicyItems);
+        renderPolicyItems();
+    });
+}
+
+function setupDeepResearchUserPolicySearch(editor, addPolicyItems) {
+    const searchInput = editor.querySelector('[data-user-search-input]');
+    const searchButton = editor.querySelector('[data-user-search-button]');
+    const searchStatus = editor.querySelector('[data-user-search-status]');
+    const resultsContainer = editor.querySelector('[data-user-search-results]');
+    if (!searchInput || !searchButton || !resultsContainer) {
+        return;
+    }
+
+    const setStatus = (message, tone = 'muted') => {
+        if (!searchStatus) {
+            return;
+        }
+        searchStatus.textContent = message || '';
+        searchStatus.className = `small text-${tone} mt-1`;
+    };
+
+    const renderResults = users => {
+        resultsContainer.replaceChildren();
+        resultsContainer.classList.remove('d-none');
+
+        if (!Array.isArray(users) || users.length === 0) {
+            const emptyState = document.createElement('div');
+            emptyState.className = 'list-group-item text-muted small';
+            emptyState.textContent = 'No users found.';
+            resultsContainer.appendChild(emptyState);
+            return;
+        }
+
+        users.forEach(user => {
+            const row = document.createElement('div');
+            row.className = 'list-group-item d-flex align-items-center justify-content-between gap-2';
+
+            const textWrapper = document.createElement('div');
+            textWrapper.className = 'min-w-0';
+
+            const nameEl = document.createElement('div');
+            nameEl.className = 'fw-semibold text-truncate';
+            nameEl.textContent = user.displayName || '(no name)';
+
+            const emailEl = document.createElement('div');
+            emailEl.className = 'small text-muted text-truncate';
+            emailEl.textContent = user.email || user.id || '';
+
+            textWrapper.appendChild(nameEl);
+            textWrapper.appendChild(emailEl);
+
+            const addButton = document.createElement('button');
+            addButton.type = 'button';
+            addButton.className = 'btn btn-sm btn-outline-primary flex-shrink-0';
+            addButton.textContent = 'Add';
+            addButton.addEventListener('click', () => {
+                addPolicyItems([user.email || user.id || '']);
+            });
+
+            row.appendChild(textWrapper);
+            row.appendChild(addButton);
+            resultsContainer.appendChild(row);
+        });
+    };
+
+    const searchUsers = async () => {
+        const query = searchInput.value.trim();
+        if (!query) {
+            searchInput.classList.add('is-invalid');
+            setStatus('Enter a name or email to search.', 'warning');
+            return;
+        }
+
+        searchInput.classList.remove('is-invalid');
+        searchButton.disabled = true;
+        setStatus('Searching...', 'muted');
+
+        try {
+            const response = await fetch(`/api/userSearch?query=${encodeURIComponent(query)}`);
+            const payload = await response.json();
+            if (!response.ok) {
+                throw new Error(payload.error || response.statusText || 'User search failed');
+            }
+            renderResults(payload);
+            const resultCount = Array.isArray(payload) ? payload.length : 0;
+            setStatus(
+                resultCount > 0 ? `Found ${resultCount} user(s).` : 'No users found.',
+                resultCount > 0 ? 'success' : 'muted'
+            );
+        } catch (error) {
+            resultsContainer.classList.add('d-none');
+            resultsContainer.replaceChildren();
+            setStatus(`Search failed: ${error.message}`, 'danger');
+            showToast(`User search failed: ${error.message}`, 'danger');
+        } finally {
+            searchButton.disabled = false;
+        }
+    };
+
+    searchButton.addEventListener('click', searchUsers);
+    searchInput.addEventListener('keydown', event => {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            searchUsers();
+        }
+    });
+}
+
+function setupDeepResearchUserPolicyBulkAdd(editor, addPolicyItems) {
+    const bulkInput = editor.querySelector('[data-user-bulk-input]');
+    const bulkAddButton = editor.querySelector('[data-user-bulk-add-button]');
+    if (!bulkInput || !bulkAddButton) {
+        return;
+    }
+
+    bulkAddButton.addEventListener('click', () => {
+        const entries = parsePolicyListValue(bulkInput.value);
+        if (entries.length === 0) {
+            bulkInput.classList.add('is-invalid');
+            showToast('Enter at least one email or user id to add.', 'warning');
+            return;
+        }
+
+        bulkInput.classList.remove('is-invalid');
+        addPolicyItems(entries);
+        bulkInput.value = '';
+    });
+}
+
+function setupDeepResearchAllowedUsersManager() {
+    const hiddenField = document.getElementById('source_review_allowed_users');
+    const summary = document.getElementById('deep_research_allowed_users_summary');
+    const countLabel = document.getElementById('deep_research_allowed_users_count');
+    const filterInput = document.getElementById('deep_research_allowed_users_filter');
+    const usersTableBody = document.getElementById('deep_research_allowed_users_tbody');
+    const searchInput = document.getElementById('deep_research_user_search_term');
+    const searchButton = document.getElementById('deep_research_user_search_button');
+    const searchStatus = document.getElementById('deep_research_user_search_status');
+    const searchResultsTable = document.getElementById('deep_research_user_search_results_table');
+    const manualIdentifierInput = document.getElementById('deep_research_manual_user_identifier');
+    const manualAddButton = document.getElementById('deep_research_manual_user_add_button');
+    const csvInput = document.getElementById('deep_research_allowed_users_csv_input');
+    const csvStatus = document.getElementById('deep_research_allowed_users_csv_status');
+    const csvExampleButton = document.getElementById('deep_research_allowed_users_csv_example_button');
+
+    if (!hiddenField || !usersTableBody) {
+        return;
+    }
+
+    let allowedUsers = parsePolicyListValue(hiddenField.value)
+        .map(normalizeUserPolicyValue)
+        .filter(Boolean)
+        .filter((item, index, items) => items.indexOf(item) === index);
+
+    const syncHiddenField = (markModified = true) => {
+        hiddenField.value = allowedUsers.join('\n');
+        if (markModified) {
+            markFormAsModified();
+        }
+    };
+
+    const setSearchStatus = (message, tone = 'muted') => {
+        if (!searchStatus) {
+            return;
+        }
+        searchStatus.textContent = message || '';
+        searchStatus.className = `form-text text-${tone}`;
+    };
+
+    const setCsvStatus = (message, tone = 'info') => {
+        if (!csvStatus) {
+            return;
+        }
+        csvStatus.replaceChildren();
+        if (!message) {
+            csvStatus.classList.add('d-none');
+            return;
+        }
+        csvStatus.className = `alert alert-${tone} mt-3`;
+        const messageNode = document.createElement('div');
+        messageNode.textContent = message;
+        csvStatus.appendChild(messageNode);
+    };
+
+    const userTypeLabel = identifier => {
+        if (isEmailLike(identifier)) {
+            return 'Email';
+        }
+        if (isGuidLike(identifier)) {
+            return 'User ID';
+        }
+        return 'Identifier';
+    };
+
+    const addAllowedUsers = (rawItems, options = {}) => {
+        const { source = 'manual' } = options;
+        const normalizedItems = rawItems
+            .map(normalizeUserPolicyValue)
+            .filter(Boolean);
+        if (normalizedItems.length === 0) {
+            showToast('Enter at least one email or user ID to add.', 'warning');
+            return 0;
+        }
+
+        const existingItems = new Set(allowedUsers.map(item => item.toLowerCase()));
+        const startingCount = allowedUsers.length;
+        normalizedItems.forEach(item => {
+            const itemKey = item.toLowerCase();
+            if (!existingItems.has(itemKey)) {
+                allowedUsers.push(item);
+                existingItems.add(itemKey);
+            }
+        });
+
+        const addedCount = allowedUsers.length - startingCount;
+        if (addedCount > 0) {
+            renderAllowedUsers();
+            syncHiddenField();
+            showToast(`${addedCount} allowed user${addedCount === 1 ? '' : 's'} added.`, 'success');
+        } else if (source !== 'initial') {
+            showToast('No new allowed users were added.', 'info');
+        }
+        return addedCount;
+    };
+
+    const removeAllowedUser = identifier => {
+        const normalizedIdentifier = normalizeUserPolicyValue(identifier);
+        allowedUsers = allowedUsers.filter(item => item.toLowerCase() !== normalizedIdentifier.toLowerCase());
+        renderAllowedUsers();
+        syncHiddenField();
+    };
+
+    const renderAllowedUsers = () => {
+        const filterValue = normalizeUserPolicyValue(filterInput ? filterInput.value : '');
+        const filteredUsers = allowedUsers.filter(identifier => !filterValue || identifier.includes(filterValue));
+        usersTableBody.replaceChildren();
+
+        if (summary) {
+            summary.textContent = allowedUsers.length === 0
+                ? 'No specific users selected.'
+                : `${allowedUsers.length} allowed user${allowedUsers.length === 1 ? '' : 's'} selected.`;
+        }
+        if (countLabel) {
+            countLabel.textContent = allowedUsers.length === 0
+                ? 'All signed-in users are allowed.'
+                : `${allowedUsers.length} allowed user${allowedUsers.length === 1 ? '' : 's'}.`;
+        }
+
+        if (filteredUsers.length === 0) {
+            const row = document.createElement('tr');
+            const cell = document.createElement('td');
+            cell.colSpan = 3;
+            cell.className = 'text-center text-muted py-4';
+            cell.textContent = allowedUsers.length === 0 ? 'No allowed users configured.' : 'No allowed users match the filter.';
+            row.appendChild(cell);
+            usersTableBody.appendChild(row);
+            return;
+        }
+
+        filteredUsers.forEach(identifier => {
+            const row = document.createElement('tr');
+
+            const identifierCell = document.createElement('td');
+            identifierCell.textContent = identifier;
+
+            const typeCell = document.createElement('td');
+            typeCell.textContent = userTypeLabel(identifier);
+
+            const actionCell = document.createElement('td');
+            const removeButton = createIconButton('bi bi-trash', 'Remove allowed user', 'btn-outline-danger');
+            removeButton.addEventListener('click', () => removeAllowedUser(identifier));
+            actionCell.appendChild(removeButton);
+
+            row.appendChild(identifierCell);
+            row.appendChild(typeCell);
+            row.appendChild(actionCell);
+            usersTableBody.appendChild(row);
+        });
+    };
+
+    const renderSearchResults = users => {
+        const tableBody = searchResultsTable ? searchResultsTable.querySelector('tbody') : null;
+        if (!tableBody) {
+            return;
+        }
+        tableBody.replaceChildren();
+
+        if (!Array.isArray(users) || users.length === 0) {
+            const row = document.createElement('tr');
+            const cell = document.createElement('td');
+            cell.colSpan = 3;
+            cell.className = 'text-center text-muted';
+            cell.textContent = 'No results.';
+            row.appendChild(cell);
+            tableBody.appendChild(row);
+            return;
+        }
+
+        users.forEach(user => {
+            const identifier = normalizeUserPolicyValue(user.email || user.id || '');
+            const row = document.createElement('tr');
+
+            const nameCell = document.createElement('td');
+            nameCell.textContent = user.displayName || '(no name)';
+
+            const emailCell = document.createElement('td');
+            emailCell.textContent = user.email || user.id || '';
+
+            const actionCell = document.createElement('td');
+            const selectButton = document.createElement('button');
+            selectButton.type = 'button';
+            selectButton.className = 'btn btn-sm btn-primary';
+            selectButton.textContent = 'Select';
+            selectButton.disabled = !identifier;
+            selectButton.addEventListener('click', () => {
+                addAllowedUsers([identifier], { source: 'search' });
+            });
+            actionCell.appendChild(selectButton);
+
+            row.appendChild(nameCell);
+            row.appendChild(emailCell);
+            row.appendChild(actionCell);
+            tableBody.appendChild(row);
+        });
+    };
+
+    const searchUsers = async () => {
+        if (!searchInput || !searchButton) {
+            return;
+        }
+        const query = searchInput.value.trim();
+        if (!query) {
+            searchInput.classList.add('is-invalid');
+            setSearchStatus('Enter a name or email to search.', 'warning');
+            return;
+        }
+
+        searchInput.classList.remove('is-invalid');
+        searchButton.disabled = true;
+        setSearchStatus('Searching...', 'muted');
+
+        try {
+            const response = await fetch(`/api/userSearch?query=${encodeURIComponent(query)}`, {
+                credentials: 'same-origin',
+            });
+            const payload = await response.json();
+            if (!response.ok) {
+                throw new Error(payload.error || response.statusText || 'User search failed');
+            }
+            renderSearchResults(payload);
+            const resultCount = Array.isArray(payload) ? payload.length : 0;
+            setSearchStatus(
+                resultCount > 0 ? `Found ${resultCount} user(s).` : 'No users found.',
+                resultCount > 0 ? 'success' : 'muted'
+            );
+        } catch (error) {
+            renderSearchResults([]);
+            setSearchStatus(`Search failed: ${error.message}`, 'danger');
+            showToast(`User search failed: ${error.message}`, 'danger');
+        } finally {
+            searchButton.disabled = false;
+        }
+    };
+
+    const addManualUser = () => {
+        if (!manualIdentifierInput) {
+            return;
+        }
+        const addedCount = addAllowedUsers([manualIdentifierInput.value], { source: 'manual' });
+        if (addedCount > 0) {
+            manualIdentifierInput.value = '';
+            manualIdentifierInput.focus();
+        }
+    };
+
+    const downloadCsvExample = () => {
+        const csvContent = 'userId,displayName,email\n00000000-0000-0000-0000-000000000001,John Smith,john.smith@contoso.com\n00000000-0000-0000-0000-000000000002,Jane Doe,jane.doe@contoso.com\n';
+        const blob = new Blob([csvContent], { type: 'text/csv' });
+        const objectUrl = window.URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = objectUrl;
+        link.download = 'deep_research_allowed_users_example.csv';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        window.URL.revokeObjectURL(objectUrl);
+    };
+
+    const handleCsvFileSelect = event => {
+        const file = event.target.files[0];
+        if (!file) {
+            setCsvStatus('');
+            return;
+        }
+
+        const reader = new FileReader();
+        reader.onload = loadEvent => {
+            try {
+                const parsedUsers = parseDeepResearchAllowedUsersCsv(loadEvent.target.result || '');
+                const addedCount = addAllowedUsers(parsedUsers, { source: 'csv' });
+                setCsvStatus(
+                    `${parsedUsers.length} valid row${parsedUsers.length === 1 ? '' : 's'} parsed. ${addedCount} new allowed user${addedCount === 1 ? '' : 's'} added.`,
+                    'success'
+                );
+            } catch (error) {
+                setCsvStatus(error.message, 'danger');
+                showToast(error.message, 'danger');
+            } finally {
+                event.target.value = '';
+            }
+        };
+        reader.onerror = () => {
+            setCsvStatus('Unable to read the selected CSV file.', 'danger');
+        };
+        reader.readAsText(file);
+    };
+
+    if (searchButton) {
+        searchButton.addEventListener('click', searchUsers);
+    }
+    if (searchInput) {
+        searchInput.addEventListener('keydown', event => {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                searchUsers();
+            }
+        });
+    }
+    if (manualAddButton) {
+        manualAddButton.addEventListener('click', addManualUser);
+    }
+    if (manualIdentifierInput) {
+        manualIdentifierInput.addEventListener('keydown', event => {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                addManualUser();
+            }
+        });
+    }
+    if (filterInput) {
+        filterInput.addEventListener('input', renderAllowedUsers);
+    }
+    if (csvInput) {
+        csvInput.addEventListener('change', handleCsvFileSelect);
+    }
+    if (csvExampleButton) {
+        csvExampleButton.addEventListener('click', downloadCsvExample);
+    }
+
+    syncHiddenField(false);
+    renderAllowedUsers();
+    renderSearchResults([]);
+}
+
+function parseDeepResearchAllowedUsersCsv(csvText) {
+    const lines = String(csvText || '')
+        .split(/\r?\n/)
+        .filter(line => line.trim());
+    if (lines.length < 2) {
+        throw new Error('CSV must contain a header row and at least one data row.');
+    }
+
+    const headers = parseCsvLine(lines[0]).map(header => header.trim().toLowerCase());
+    const userIdIndex = headers.indexOf('userid');
+    const emailIndex = headers.indexOf('email');
+    if (emailIndex < 0 && userIdIndex < 0) {
+        throw new Error('CSV must include an email or userId column.');
+    }
+
+    const dataRows = lines.slice(1);
+    if (dataRows.length > 1000) {
+        throw new Error(`Too many rows. Maximum 1,000 users allowed (found ${dataRows.length}).`);
+    }
+
+    const parsedUsers = [];
+    const errors = [];
+    dataRows.forEach((line, index) => {
+        const rowNumber = index + 2;
+        const columns = parseCsvLine(line);
+        const email = emailIndex >= 0 ? normalizeUserPolicyValue(columns[emailIndex] || '') : '';
+        const userId = userIdIndex >= 0 ? normalizeUserPolicyValue(columns[userIdIndex] || '') : '';
+        const identifier = email || userId;
+        if (!identifier) {
+            errors.push(`Row ${rowNumber}: email or userId is required.`);
+            return;
+        }
+        if (email && !isEmailLike(email)) {
+            errors.push(`Row ${rowNumber}: invalid email format.`);
+            return;
+        }
+        if (!email && userId && !isGuidLike(userId)) {
+            errors.push(`Row ${rowNumber}: invalid userId format.`);
+            return;
+        }
+        parsedUsers.push(identifier);
+    });
+
+    if (errors.length > 0) {
+        throw new Error(`Found ${errors.length} validation error(s): ${errors.slice(0, 5).join(' ')}`);
+    }
+    if (parsedUsers.length === 0) {
+        throw new Error('No valid allowed users were found in the CSV file.');
+    }
+    return parsedUsers;
+}
+
+function parseCsvLine(line) {
+    const columns = [];
+    let currentValue = '';
+    let insideQuotes = false;
+    const value = String(line || '');
+
+    for (let index = 0; index < value.length; index++) {
+        const character = value[index];
+        const nextCharacter = value[index + 1];
+        if (character === '"' && insideQuotes && nextCharacter === '"') {
+            currentValue += '"';
+            index++;
+            continue;
+        }
+        if (character === '"') {
+            insideQuotes = !insideQuotes;
+            continue;
+        }
+        if (character === ',' && !insideQuotes) {
+            columns.push(currentValue.trim());
+            currentValue = '';
+            continue;
+        }
+        currentValue += character;
+    }
+    columns.push(currentValue.trim());
+    return columns;
+}
+
+function isEmailLike(value) {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim());
+}
+
+function isGuidLike(value) {
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || '').trim());
+}
+
+function normalizeGroupWorkflowGroupId(value) {
+    const groupId = String(value || '').trim();
+    return isGuidLike(groupId) ? groupId.toLowerCase() : '';
+}
+
+function collectGroupWorkflowAssignmentIds(value, depth = 0) {
+    if (depth > GROUP_WORKFLOW_ASSIGNMENT_PARSE_DEPTH_LIMIT) {
+        return [];
+    }
+
+    const rawValue = String(value || '').trim();
+    if (!rawValue) {
+        return [];
+    }
+
+    if (rawValue.startsWith('[') || rawValue.startsWith('"')) {
+        try {
+            const parsedValue = JSON.parse(rawValue);
+            if (Array.isArray(parsedValue)) {
+                const nestedIds = [];
+                parsedValue.forEach(item => {
+                    nestedIds.push(...collectGroupWorkflowAssignmentIds(item, depth + 1));
+                });
+                return nestedIds;
+            }
+            if (typeof parsedValue === 'string' && parsedValue !== rawValue) {
+                return collectGroupWorkflowAssignmentIds(parsedValue, depth + 1);
+            }
+        } catch (error) {
+            // Fall back to delimiter parsing for older saved form values.
+        }
+    }
+
+    return rawValue
+        .split(/[\n,;]+/)
+        .map(normalizeGroupWorkflowGroupId)
+        .filter(Boolean);
+}
+
+function parseGroupWorkflowAssignmentIds(value) {
+    return Array.from(new Set(collectGroupWorkflowAssignmentIds(value)));
+}
+
+function syncGroupWorkflowAssignmentField() {
+    if (!groupWorkflowAssignmentsInput) {
+        return;
+    }
+
+    groupWorkflowAssignmentsInput.value = JSON.stringify(Array.from(groupWorkflowAssignedGroupIds));
+}
+
+function updateGroupWorkflowAssignmentSummary() {
+    if (!groupWorkflowAssignmentSummary) {
+        return;
+    }
+
+    const assignedCount = groupWorkflowAssignedGroupIds.size;
+    groupWorkflowAssignmentSummary.textContent = assignedCount === 1
+        ? '1 group assigned.'
+        : `${assignedCount} groups assigned.`;
+}
+
+function setGroupWorkflowAssignmentError(message) {
+    if (!groupWorkflowAssignmentError) {
+        return;
+    }
+
+    groupWorkflowAssignmentError.textContent = message || '';
+    groupWorkflowAssignmentError.classList.toggle('d-none', !message);
+}
+
+function setGroupWorkflowAssignmentStatus(message) {
+    if (groupWorkflowAssignmentStatus) {
+        groupWorkflowAssignmentStatus.textContent = message || '';
+    }
+}
+
+function createGroupWorkflowAssignmentEmptyRow(message) {
+    const row = document.createElement('tr');
+    const cell = document.createElement('td');
+    cell.colSpan = 3;
+    cell.className = 'text-center text-muted py-3';
+    cell.textContent = message;
+    row.appendChild(cell);
+    return row;
+}
+
+function renderGroupWorkflowAssignmentRows(groups) {
+    if (!groupWorkflowAssignmentGroupsBody) {
+        return;
+    }
+
+    groupWorkflowAssignmentGroupsBody.replaceChildren();
+
+    if (!Array.isArray(groups) || groups.length === 0) {
+        groupWorkflowAssignmentGroupsBody.appendChild(createGroupWorkflowAssignmentEmptyRow('No groups found.'));
+        return;
+    }
+
+    const rows = groups.map(group => {
+        const groupId = normalizeGroupWorkflowGroupId(group?.id);
+        const row = document.createElement('tr');
+
+        const nameCell = document.createElement('td');
+        const name = document.createElement('div');
+        name.className = 'fw-semibold';
+        name.textContent = group?.name || 'Unnamed group';
+        const meta = document.createElement('div');
+        meta.className = 'small text-muted';
+        meta.textContent = groupId;
+        nameCell.appendChild(name);
+        nameCell.appendChild(meta);
+
+        const descriptionCell = document.createElement('td');
+        descriptionCell.textContent = group?.description || '-';
+
+        const actionCell = document.createElement('td');
+        actionCell.className = 'text-end';
+        const actionButton = document.createElement('button');
+        actionButton.type = 'button';
+        actionButton.className = groupWorkflowAssignedGroupIds.has(groupId)
+            ? 'btn btn-sm btn-outline-danger'
+            : 'btn btn-sm btn-outline-primary';
+        actionButton.textContent = groupWorkflowAssignedGroupIds.has(groupId) ? 'Remove' : 'Assign';
+        actionButton.disabled = !groupId;
+        actionButton.addEventListener('click', () => {
+            if (!groupId) {
+                return;
+            }
+            if (groupWorkflowAssignedGroupIds.has(groupId)) {
+                groupWorkflowAssignedGroupIds.delete(groupId);
+            } else {
+                groupWorkflowAssignedGroupIds.add(groupId);
+                groupWorkflowDiscoveredGroups.set(groupId, group);
+            }
+            syncGroupWorkflowAssignmentField();
+            updateGroupWorkflowAssignmentSummary();
+            renderGroupWorkflowAssignmentRows(groups);
+            markFormAsModified();
+        });
+        actionCell.appendChild(actionButton);
+
+        row.appendChild(nameCell);
+        row.appendChild(descriptionCell);
+        row.appendChild(actionCell);
+        return row;
+    });
+
+    groupWorkflowAssignmentGroupsBody.replaceChildren(...rows);
+}
+
+async function searchGroupWorkflowAssignmentGroups() {
+    if (!groupWorkflowAssignmentGroupsBody) {
+        return;
+    }
+
+    const query = groupWorkflowGroupSearchInput?.value?.trim() || '';
+    const originalButtonText = groupWorkflowGroupSearchBtn?.textContent || 'Search';
+
+    setGroupWorkflowAssignmentError('');
+    setGroupWorkflowAssignmentStatus('Searching groups...');
+    if (groupWorkflowGroupSearchBtn) {
+        groupWorkflowGroupSearchBtn.disabled = true;
+        groupWorkflowGroupSearchBtn.textContent = 'Searching...';
+    }
+
+    try {
+        const url = new URL('/api/groups/discover', window.location.origin);
+        url.searchParams.set('showAll', 'true');
+        if (query) {
+            url.searchParams.set('search', query);
+        }
+
+        const response = await fetch(url.toString(), { headers: { 'Accept': 'application/json' } });
+        const payload = await response.json();
+        if (!response.ok) {
+            throw new Error(payload?.error || 'Unable to load groups.');
+        }
+
+        const groups = Array.isArray(payload) ? payload : [];
+        groups.forEach(group => {
+            const groupId = normalizeGroupWorkflowGroupId(group?.id);
+            if (groupId) {
+                groupWorkflowDiscoveredGroups.set(groupId, group);
+            }
+        });
+        renderGroupWorkflowAssignmentRows(groups);
+        setGroupWorkflowAssignmentStatus(groups.length === 1 ? '1 group found.' : `${groups.length} groups found.`);
+    } catch (error) {
+        setGroupWorkflowAssignmentError(error.message || 'Unable to load groups.');
+        setGroupWorkflowAssignmentStatus('Search failed.');
+    } finally {
+        if (groupWorkflowGroupSearchBtn) {
+            groupWorkflowGroupSearchBtn.disabled = false;
+            groupWorkflowGroupSearchBtn.textContent = originalButtonText;
+        }
+    }
+}
+
+function setupGroupWorkflowAssignments() {
+    if (!groupWorkflowAssignmentsInput) {
+        return;
+    }
+
+    parseGroupWorkflowAssignmentIds(groupWorkflowAssignmentsInput.value).forEach(groupId => {
+        groupWorkflowAssignedGroupIds.add(groupId);
+    });
+    syncGroupWorkflowAssignmentField();
+    updateGroupWorkflowAssignmentSummary();
+
+    if (groupWorkflowAssignmentGroupsBody && groupWorkflowAssignedGroupIds.size > 0) {
+        groupWorkflowAssignmentGroupsBody.replaceChildren(createGroupWorkflowAssignmentEmptyRow('Search for groups to review current assignments.'));
+    }
+
+    groupWorkflowGroupSearchBtn?.addEventListener('click', searchGroupWorkflowAssignmentGroups);
+    groupWorkflowGroupSearchInput?.addEventListener('keydown', event => {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            void searchGroupWorkflowAssignmentGroups();
+        }
+    });
+    groupWorkflowAssignmentModal?.addEventListener('shown.bs.modal', () => {
+        if (groupWorkflowDiscoveredGroups.size === 0) {
+            void searchGroupWorkflowAssignmentGroups();
+        }
+    });
+    adminForm?.addEventListener('submit', syncGroupWorkflowAssignmentField);
+}
+
+function parseFileDownloadAssignmentIds(value) {
+    const rawValue = String(value || '').trim();
+    if (!rawValue) {
+        return [];
+    }
+
+    try {
+        const parsedValue = JSON.parse(rawValue);
+        if (Array.isArray(parsedValue)) {
+            return parsedValue.map(item => String(item || '').trim()).filter(Boolean);
+        }
+    } catch (error) {
+        // Fall back to comma/newline parsing for older saved form values.
+    }
+
+    return rawValue
+        .split(/[\n,;]+/)
+        .map(item => String(item || '').trim())
+        .filter(Boolean);
+}
+
+function createFileDownloadAssignmentManager(config) {
+    const assignedIds = new Set();
+
+    function syncField() {
+        if (config.input) {
+            config.input.value = JSON.stringify(Array.from(assignedIds));
+        }
+    }
+
+    function updateSummary() {
+        if (!config.summary) {
+            return;
+        }
+
+        const count = assignedIds.size;
+        config.summary.textContent = count === 1
+            ? `1 ${config.summarySingular} assigned.`
+            : `${count} ${config.summaryPlural} assigned.`;
+    }
+
+    function setError(message) {
+        if (!config.error) {
+            return;
+        }
+
+        config.error.textContent = message || '';
+        config.error.classList.toggle('d-none', !message);
+    }
+
+    function setStatus(message) {
+        if (config.status) {
+            config.status.textContent = message || '';
+        }
+    }
+
+    function createEmptyRow(message) {
+        const row = document.createElement('tr');
+        const cell = document.createElement('td');
+        cell.colSpan = 3;
+        cell.className = 'text-center text-muted py-3';
+        cell.textContent = message;
+        row.appendChild(cell);
+        return row;
+    }
+
+    function renderRows(items) {
+        if (!config.body) {
+            return;
+        }
+
+        if (!Array.isArray(items) || items.length === 0) {
+            config.body.replaceChildren(createEmptyRow(config.emptyMessage));
+            return;
+        }
+
+        const rows = items.map(item => {
+            const itemId = String(item?.id || '').trim();
+            const row = document.createElement('tr');
+
+            const nameCell = document.createElement('td');
+            const name = document.createElement('div');
+            name.className = 'fw-semibold';
+            name.textContent = item?.[config.titleField] || config.unnamedLabel;
+            const meta = document.createElement('div');
+            meta.className = 'small text-muted';
+            meta.textContent = itemId;
+            nameCell.appendChild(name);
+            nameCell.appendChild(meta);
+
+            const descriptionCell = document.createElement('td');
+            descriptionCell.textContent = item?.description || '-';
+
+            const actionCell = document.createElement('td');
+            actionCell.className = 'text-end';
+            const actionButton = document.createElement('button');
+            actionButton.type = 'button';
+            actionButton.className = assignedIds.has(itemId)
+                ? 'btn btn-sm btn-outline-danger'
+                : 'btn btn-sm btn-outline-primary';
+            actionButton.textContent = assignedIds.has(itemId) ? 'Remove' : 'Assign';
+            actionButton.disabled = !itemId;
+            actionButton.addEventListener('click', () => {
+                if (!itemId) {
+                    return;
+                }
+                if (assignedIds.has(itemId)) {
+                    assignedIds.delete(itemId);
+                } else {
+                    assignedIds.add(itemId);
+                }
+                syncField();
+                updateSummary();
+                renderRows(items);
+                markFormAsModified();
+            });
+            actionCell.appendChild(actionButton);
+
+            row.appendChild(nameCell);
+            row.appendChild(descriptionCell);
+            row.appendChild(actionCell);
+            return row;
+        });
+
+        config.body.replaceChildren(...rows);
+    }
+
+    async function searchItems() {
+        if (!config.body) {
+            return;
+        }
+
+        const query = config.searchInput?.value?.trim() || '';
+        const originalButtonText = config.searchButton?.textContent || 'Search';
+        setError('');
+        setStatus(`Searching ${config.summaryPlural}...`);
+
+        if (config.searchButton) {
+            config.searchButton.disabled = true;
+            config.searchButton.textContent = 'Searching...';
+        }
+
+        try {
+            const url = new URL(config.endpoint, window.location.origin);
+            if (query) {
+                url.searchParams.set('search', query);
+                url.searchParams.set('q', query);
+            }
+            if (config.showAll) {
+                url.searchParams.set('showAll', 'true');
+            }
+
+            const response = await fetch(url.toString(), { headers: { 'Accept': 'application/json' } });
+            const payload = await response.json();
+            if (!response.ok) {
+                throw new Error(payload?.error || `Unable to load ${config.summaryPlural}.`);
+            }
+
+            const items = Array.isArray(payload)
+                ? payload
+                : (Array.isArray(payload?.[config.resultsKey]) ? payload[config.resultsKey] : []);
+            renderRows(items);
+            setStatus(items.length === 1 ? `1 ${config.summarySingular} found.` : `${items.length} ${config.summaryPlural} found.`);
+        } catch (error) {
+            setError(error.message || `Unable to load ${config.summaryPlural}.`);
+            setStatus('Search failed.');
+        } finally {
+            if (config.searchButton) {
+                config.searchButton.disabled = false;
+                config.searchButton.textContent = originalButtonText;
+            }
+        }
+    }
+
+    function setup() {
+        if (!config.input) {
+            return;
+        }
+
+        parseFileDownloadAssignmentIds(config.input.value).forEach(itemId => assignedIds.add(itemId));
+        syncField();
+        updateSummary();
+
+        if (config.body && assignedIds.size > 0) {
+            config.body.replaceChildren(createEmptyRow(config.reviewMessage));
+        }
+
+        config.searchButton?.addEventListener('click', searchItems);
+        config.searchInput?.addEventListener('keydown', event => {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                void searchItems();
+            }
+        });
+        config.modal?.addEventListener('shown.bs.modal', () => {
+            if (config.body && config.body.children.length <= 1) {
+                void searchItems();
+            }
+        });
+        adminForm?.addEventListener('submit', syncField);
+    }
+
+    return { setup };
+}
+
+function setupFileDownloadAssignments() {
+    createFileDownloadAssignmentManager({
+        input: fileDownloadGroupAssignmentsInput,
+        summary: fileDownloadGroupAssignmentSummary,
+        modal: fileDownloadGroupAssignmentModal,
+        searchInput: fileDownloadGroupSearchInput,
+        searchButton: fileDownloadGroupSearchBtn,
+        status: fileDownloadGroupAssignmentStatus,
+        error: fileDownloadGroupAssignmentError,
+        body: fileDownloadGroupAssignmentBody,
+        endpoint: '/api/groups/discover',
+        resultsKey: 'groups',
+        titleField: 'name',
+        summarySingular: 'group',
+        summaryPlural: 'groups',
+        unnamedLabel: 'Unnamed group',
+        emptyMessage: 'No groups found.',
+        reviewMessage: 'Search for groups to review current assignments.',
+        showAll: true,
+    }).setup();
+
+    createFileDownloadAssignmentManager({
+        input: fileDownloadPublicAssignmentsInput,
+        summary: fileDownloadPublicAssignmentSummary,
+        modal: fileDownloadPublicAssignmentModal,
+        searchInput: fileDownloadPublicSearchInput,
+        searchButton: fileDownloadPublicSearchBtn,
+        status: fileDownloadPublicAssignmentStatus,
+        error: fileDownloadPublicAssignmentError,
+        body: fileDownloadPublicAssignmentBody,
+        endpoint: '/api/admin/file-sync/public-workspaces/search',
+        resultsKey: 'workspaces',
+        titleField: 'name',
+        summarySingular: 'public workspace',
+        summaryPlural: 'public workspaces',
+        unnamedLabel: 'Unnamed public workspace',
+        emptyMessage: 'No public workspaces found.',
+        reviewMessage: 'Search for public workspaces to review current assignments.',
+    }).setup();
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     setupAdminFormAutofillMetadata();
 
@@ -96,6 +2874,12 @@ document.addEventListener('DOMContentLoaded', () => {
     updateImageHiddenInput();
 
     setupToggles(); // This function will be extended below
+    setupGroupWorkflowAssignments();
+    setupFileDownloadAssignments();
+    setupLandingPageLogoScaleControl();
+    setupDocumentActionCapabilityControls();
+    setupDeepResearchPolicyEditors();
+    setupDeepResearchAllowedUsersManager();
     
     // Initialize tooltips
     initializeTooltips();
@@ -122,7 +2906,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         event.preventDefault();
-        openAdminSettingsTab(trigger.getAttribute('data-open-admin-tab'));
+        openAdminSettingsTab(
+            trigger.getAttribute('data-open-admin-tab'),
+            trigger.getAttribute('data-open-admin-section') || ''
+        );
     });
 
     window.addEventListener("popstate", activateTabFromHash);
@@ -136,8 +2923,13 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- NEW: Support Menu Setup ---
     setupSupportMenuSettings();
 
+    // --- Agents page promoted Popular tab setup ---
+    setupAgentsPagePromotedPopularAgents();
+
     // --- NEW: Chunk size controls ---
     setupChunkSizeControls();
+
+    setupCosmosThroughputControls();
     
     // --- Setup form change tracking ---
     setupFormChangeTracking();
@@ -152,6 +2944,13 @@ document.addEventListener('DOMContentLoaded', () => {
     if (adminForm) {
         adminForm.addEventListener('submit', function(e) {
             try {
+                const cosmosValidationResult = validateCosmosThroughputSettings({ report: true });
+                if (!cosmosValidationResult.isValid) {
+                    e.preventDefault();
+                    e.stopImmediatePropagation();
+                    return;
+                }
+
                 console.log('🚀 Form submission started - gathering tab information...');
                 
                 // Capture the current active tab before form submission
@@ -1741,6 +4540,26 @@ function setupToggles() {
         });
     }
 
+    const documentIntelligenceExtractionMode = document.getElementById('document_intelligence_pdf_image_extraction_mode');
+    const documentIntelligenceAutoSamplePagesGroup = document.getElementById('document_intelligence_auto_sample_pages_group');
+    const documentIntelligenceAutoSamplePages = document.getElementById('document_intelligence_auto_sample_pages');
+    const updateDocumentIntelligenceAutoControls = () => {
+        if (!documentIntelligenceExtractionMode || !documentIntelligenceAutoSamplePagesGroup) {
+            return;
+        }
+        documentIntelligenceAutoSamplePagesGroup.classList.toggle('d-none', documentIntelligenceExtractionMode.value !== 'auto');
+    };
+    if (documentIntelligenceExtractionMode) {
+        updateDocumentIntelligenceAutoControls();
+        documentIntelligenceExtractionMode.addEventListener('change', function () {
+            updateDocumentIntelligenceAutoControls();
+            markFormAsModified();
+        });
+    }
+    if (documentIntelligenceAutoSamplePages) {
+        documentIntelligenceAutoSamplePages.addEventListener('input', markFormAsModified);
+    }
+
     const enableContentSafetyCheckbox = document.getElementById('enable_content_safety');
     if (enableContentSafetyCheckbox) {
         enableContentSafetyCheckbox.addEventListener('change', function() {
@@ -1854,6 +4673,99 @@ function setupToggles() {
     if (enableWebSearchUserNotice && webSearchUserNoticeSettings) {
         enableWebSearchUserNotice.addEventListener('change', function() {
             toggleVisibility(webSearchUserNoticeSettings, this.checked);
+            markFormAsModified();
+        });
+    }
+
+    const enableUrlAccess = document.getElementById('enable_url_access');
+    const urlAccessSettings = document.getElementById('url_access_settings');
+    const applyUrlAccessDefaults = () => {
+        const numericDefaults = {
+            url_access_max_chat_urls_per_turn: '10',
+            url_access_max_workflow_urls_per_run: '50',
+        };
+        Object.entries(numericDefaults).forEach(([fieldId, value]) => {
+            const field = document.getElementById(fieldId);
+            if (field && !field.value) {
+                field.value = value;
+            }
+        });
+    };
+
+    if (enableUrlAccess && urlAccessSettings) {
+        toggleVisibility(urlAccessSettings, enableUrlAccess.checked);
+        enableUrlAccess.addEventListener('change', function () {
+            toggleVisibility(urlAccessSettings, this.checked);
+            if (this.checked) {
+                applyUrlAccessDefaults();
+            }
+            markFormAsModified();
+        });
+    }
+
+    const enableSourceReview = document.getElementById('enable_source_review');
+    const sourceReviewSettings = document.getElementById('source_review_settings');
+    const enableDeepSourceReview = document.getElementById('enable_deep_source_review');
+    const sourceReviewDeepSettings = document.getElementById('source_review_deep_settings');
+
+    const applyDeepResearchMaxDefaults = () => {
+        const defaultMode = document.getElementById('source_review_default_mode');
+        const numericDefaults = {
+            source_review_max_pages_per_turn: '10',
+            source_review_max_seed_pages_per_turn: '10',
+            deep_research_max_user_urls_per_turn: '100',
+            deep_research_max_search_queries_per_turn: '8',
+            source_review_timeout_seconds: '30',
+            source_review_max_redirects: '5',
+            source_review_max_bytes_per_page_mb: '5',
+            source_review_max_depth: '2',
+            source_review_js_load_more_clicks: '12',
+        };
+        const enabledDefaults = [
+            'enable_deep_source_review',
+            'deep_research_enable_query_planning',
+            'deep_research_enable_ledger_artifact',
+            'source_review_enable_llm_planning',
+            'source_review_allow_js_rendering',
+            'source_review_respect_robots_txt',
+            'source_review_audit_logging',
+        ];
+
+        if (defaultMode) {
+            defaultMode.value = 'manual';
+        }
+        Object.entries(numericDefaults).forEach(([fieldId, value]) => {
+            const field = document.getElementById(fieldId);
+            if (field) {
+                field.value = value;
+            }
+        });
+        enabledDefaults.forEach(fieldId => {
+            const field = document.getElementById(fieldId);
+            if (field) {
+                field.checked = true;
+            }
+        });
+        if (sourceReviewDeepSettings) {
+            toggleVisibility(sourceReviewDeepSettings, true);
+        }
+    };
+
+    if (enableSourceReview && sourceReviewSettings) {
+        toggleVisibility(sourceReviewSettings, enableSourceReview.checked);
+        enableSourceReview.addEventListener('change', function () {
+            toggleVisibility(sourceReviewSettings, this.checked);
+            if (this.checked) {
+                applyDeepResearchMaxDefaults();
+            }
+            markFormAsModified();
+        });
+    }
+
+    if (enableDeepSourceReview && sourceReviewDeepSettings) {
+        toggleVisibility(sourceReviewDeepSettings, enableDeepSourceReview.checked);
+        enableDeepSourceReview.addEventListener('change', function () {
+            toggleVisibility(sourceReviewDeepSettings, this.checked);
             markFormAsModified();
         });
     }
@@ -2233,9 +5145,197 @@ function setupToggles() {
             markFormAsModified();
         });
     }
+
+    const enableFileSyncToggle = document.getElementById('enable_file_sync');
+    const fileSyncSettings = document.getElementById('file_sync_settings');
+    if (enableFileSyncToggle && fileSyncSettings) {
+        const updateFileSyncSettingsVisibility = () => {
+            fileSyncSettings.classList.toggle('d-none', !enableFileSyncToggle.checked);
+        };
+        updateFileSyncSettingsVisibility();
+        enableFileSyncToggle.addEventListener('change', function() {
+            updateFileSyncSettingsVisibility();
+            markFormAsModified();
+        });
+    }
+    setupFileSyncAdminTargets();
     
     // --- Workspace Dependency Validation ---
     setupWorkspaceDependencyValidation();
+}
+
+function setupFileSyncAdminTargets() {
+    document.querySelectorAll('[data-file-sync-admin-target]').forEach(container => {
+        setupFileSyncAdminTarget(container);
+    });
+}
+
+function setupFileSyncAdminTarget(container) {
+    const scope = container.dataset.scope || '';
+    const searchEndpoint = container.dataset.searchEndpoint || '';
+    const resultsKey = container.dataset.resultsKey || 'items';
+    const valueField = container.dataset.valueField || 'id';
+    const titleField = container.dataset.titleField || 'name';
+    const subtitleField = container.dataset.subtitleField || '';
+    const queryInput = container.querySelector('[data-file-sync-admin-target-query]');
+    const searchButton = container.querySelector('[data-file-sync-admin-target-search]');
+    const resultsContainer = container.querySelector('[data-file-sync-admin-target-results]');
+    const targetInput = container.querySelector('[data-file-sync-admin-target-id]');
+    const manageButton = container.querySelector('[data-file-sync-admin-target-manage]');
+    const labelElement = container.querySelector('[data-file-sync-admin-target-label]');
+    if (!scope || !queryInput || !searchButton || !resultsContainer || !targetInput || !manageButton || !labelElement) {
+        return;
+    }
+
+    let selectedLabel = '';
+
+    const updateManageState = () => {
+        const targetId = targetInput.value.trim();
+        manageButton.disabled = !targetId;
+        if (!targetId) {
+            labelElement.textContent = 'No target selected.';
+            return;
+        }
+        labelElement.textContent = selectedLabel ? selectedLabel : `Target ID: ${targetId}`;
+    };
+
+    const renderResultsMessage = (message, type = 'muted') => {
+        resultsContainer.replaceChildren();
+        resultsContainer.appendChild(createFileSyncTextElement('div', `list-group-item text-${type}`, message));
+        resultsContainer.classList.remove('d-none');
+    };
+
+    const getResultValue = (item) => String(item?.[valueField] || item?.id || item?.email || item?.name || '').trim();
+
+    const renderResults = (items) => {
+        resultsContainer.replaceChildren();
+        if (!Array.isArray(items) || items.length === 0) {
+            renderResultsMessage('No matching targets found. You can still paste an ID manually.');
+            return;
+        }
+        items.forEach(item => {
+            const itemValue = getResultValue(item);
+            if (!itemValue) {
+                return;
+            }
+            const titleText = String(item?.[titleField] || itemValue);
+            const subtitleText = String(item?.[subtitleField] || itemValue);
+            const resultButton = document.createElement('button');
+            resultButton.type = 'button';
+            resultButton.className = 'list-group-item list-group-item-action';
+            resultButton.appendChild(createFileSyncTextElement('div', 'fw-semibold', titleText));
+            resultButton.appendChild(createFileSyncTextElement('div', 'text-muted', subtitleText));
+            resultButton.addEventListener('click', () => {
+                targetInput.value = itemValue;
+                selectedLabel = subtitleText && subtitleText !== itemValue ? `${titleText} (${subtitleText})` : titleText;
+                resultsContainer.classList.add('d-none');
+                updateManageState();
+            });
+            resultsContainer.appendChild(resultButton);
+        });
+        resultsContainer.classList.remove('d-none');
+    };
+
+    const searchTargets = async () => {
+        const query = queryInput.value.trim();
+        if (query.length < 2) {
+            renderResultsMessage('Type at least two characters to search.', 'muted');
+            return;
+        }
+        searchButton.disabled = true;
+        renderResultsMessage('Searching...', 'muted');
+        try {
+            const response = await fetch(`${searchEndpoint}?q=${encodeURIComponent(query)}`, {
+                credentials: 'same-origin',
+            });
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(payload.error || `Search failed with ${response.status}`);
+            }
+            renderResults(payload[resultsKey] || []);
+        } catch (error) {
+            renderResultsMessage(error.message, 'danger');
+        } finally {
+            searchButton.disabled = false;
+        }
+    };
+
+    searchButton.addEventListener('click', searchTargets);
+    queryInput.addEventListener('keydown', event => {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            searchTargets();
+        }
+    });
+    targetInput.addEventListener('input', () => {
+        selectedLabel = '';
+        updateManageState();
+    });
+    manageButton.addEventListener('click', () => {
+        openFileSyncAdminManager(scope, targetInput.value.trim(), selectedLabel || targetInput.value.trim());
+    });
+    updateManageState();
+}
+
+function openFileSyncAdminManager(scope, targetId, targetLabel) {
+    if (!scope || !targetId) {
+        return;
+    }
+    const modalElement = document.getElementById('file-sync-admin-manager-modal');
+    const titleElement = document.getElementById('file-sync-admin-manager-title');
+    const contextElement = document.getElementById('file-sync-admin-manager-context');
+    const container = document.getElementById('file-sync-admin-manager-container');
+    if (!modalElement || !titleElement || !contextElement || !container) {
+        return;
+    }
+
+    const scopeLabels = {
+        personal: 'User',
+        group: 'Group',
+        public: 'Public Workspace',
+    };
+    const recursiveAllowed = document.getElementById('file_sync_allow_recursive_sources')?.checked !== false;
+    const visibleSourceTypes = getSelectedFileSyncVisibleSourceTypes();
+    const root = document.createElement('div');
+    root.dataset.fileSyncRoot = 'true';
+    root.dataset.scope = scope;
+    root.dataset.apiBase = `/api/admin/file-sync/${encodeURIComponent(scope)}/${encodeURIComponent(targetId)}`;
+    root.dataset.recursiveAllowed = recursiveAllowed ? 'true' : 'false';
+    root.dataset.visibleSourceTypes = visibleSourceTypes.join(',');
+
+    titleElement.textContent = `Manage ${scopeLabels[scope] || 'Workspace'} Sync Sources`;
+    contextElement.textContent = targetLabel ? `${targetLabel} (${targetId})` : targetId;
+    container.replaceChildren(root);
+
+    if (typeof window.initializeFileSyncRoot === 'function') {
+        window.initializeFileSyncRoot(root);
+    } else {
+        root.appendChild(createFileSyncTextElement('div', 'alert alert-danger', 'File Sync source manager did not load.'));
+    }
+
+    if (window.bootstrap?.Modal) {
+        window.bootstrap.Modal.getOrCreateInstance(modalElement).show();
+    }
+}
+
+function getSelectedFileSyncVisibleSourceTypes() {
+    const checkboxes = Array.from(document.querySelectorAll('input[name="file_sync_visible_source_types"]'));
+    if (checkboxes.length === 0) {
+        return ['smb', 'azure_files'];
+    }
+    return checkboxes
+        .filter((checkbox) => checkbox.checked)
+        .map((checkbox) => checkbox.value)
+        .filter((value, index, values) => value && values.indexOf(value) === index);
+}
+
+function createFileSyncTextElement(tagName, className, text) {
+    const element = document.createElement(tagName);
+    if (className) {
+        element.className = className;
+    }
+    element.textContent = text;
+    return element;
 }
 
 /**
@@ -2448,6 +5548,147 @@ function setupWorkspaceDependencyValidation() {
 }
 
 function setupTestButtons() {
+
+    const buildWebSearchPayload = () => ({
+        test_type: 'web_search',
+        enabled: isFieldChecked('enable_web_search'),
+        consent_accepted: getFieldValue('web_search_consent_accepted') === 'true',
+        query: getFieldValue('web_search_test_query'),
+        foundry: {
+            endpoint: getFieldValue('web_search_foundry_endpoint'),
+            api_version: getFieldValue('web_search_foundry_api_version'),
+            agent_id: getFieldValue('web_search_foundry_agent_id'),
+            authentication_type: getFieldValue('web_search_foundry_auth_type') || 'managed_identity',
+            managed_identity_type: getFieldValue('web_search_foundry_managed_identity_type') || 'system_assigned',
+            managed_identity_client_id: getFieldValue('web_search_foundry_managed_identity_client_id'),
+            tenant_id: getFieldValue('web_search_foundry_tenant_id'),
+            client_id: getFieldValue('web_search_foundry_client_id'),
+            client_secret: getFieldValue('web_search_foundry_client_secret'),
+            cloud: getFieldValue('web_search_foundry_cloud'),
+            authority: getFieldValue('web_search_foundry_authority')
+        }
+    });
+
+    const buildUrlAccessPolicyPayload = () => ({
+        test_type: 'url_access_policy',
+        enabled: isFieldChecked('enable_url_access'),
+        url: getFieldValue('url_access_policy_test_url'),
+        source_review_allow_internal_hosts: isFieldChecked('source_review_allow_internal_hosts'),
+        url_access_allowed_domains: getFieldValue('url_access_allowed_domains'),
+        url_access_blocked_domains: getFieldValue('url_access_blocked_domains')
+    });
+
+    const runAdminTestRequest = async (payload) => {
+        const response = await fetch('/api/admin/settings/test_connection', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        let data = {};
+        try {
+            data = await response.json();
+        } catch (error) {
+            data = { error: error.message };
+        }
+        return { response, data };
+    };
+
+    const renderWebSearchTestData = (container, response, data) => {
+        if (response.ok && data.success !== false) {
+            const isWarning = data.status === 'warning';
+            renderAdminTestResult(container, {
+                variant: isWarning ? 'warning' : 'success',
+                title: isWarning ? 'Web Search test completed with warnings' : 'Web Search test passed',
+                message: data.message,
+                preview: data.response_preview,
+                details: data.details,
+                guidance: data.guidance
+            });
+            return;
+        }
+
+        renderAdminTestResult(container, {
+            variant: 'danger',
+            title: 'Web Search test failed',
+            message: data.message || data.error || 'Error testing Web Search.',
+            details: data.details,
+            guidance: data.guidance
+        });
+    };
+
+    const renderUrlAccessPolicyTestData = (container, response, data) => {
+        if (response.ok && data.success !== false) {
+            renderAdminTestResult(container, {
+                variant: data.allowed ? 'success' : 'warning',
+                title: data.allowed ? 'URL Access policy allowed this URL' : 'URL Access policy blocked this URL',
+                message: data.message,
+                details: data.details,
+                guidance: data.guidance
+            });
+            return;
+        }
+
+        renderAdminTestResult(container, {
+            variant: 'danger',
+            title: 'URL Access policy test failed',
+            message: data.message || data.error || 'Error testing URL Access policy.',
+            details: data.details,
+            guidance: data.guidance
+        });
+    };
+
+    const runWebSearchTest = async (button) => {
+        const resultDiv = document.getElementById('test_web_search_result');
+        renderAdminTestLoading(resultDiv, 'Running Web Search test...');
+        setButtonBusy(button, true, 'Testing...');
+
+        try {
+            const { response, data } = await runAdminTestRequest(buildWebSearchPayload());
+            renderWebSearchTestData(resultDiv, response, data);
+        } catch (error) {
+            renderAdminTestResult(resultDiv, {
+                variant: 'danger',
+                title: 'Web Search test failed',
+                message: error.message
+            });
+        } finally {
+            setButtonBusy(button, false);
+        }
+    };
+
+    const runUrlAccessPolicyTest = async (button) => {
+        const resultDiv = document.getElementById('test_url_access_policy_result');
+        renderAdminTestLoading(resultDiv, 'Checking URL Access policy...');
+        setButtonBusy(button, true, 'Checking...');
+
+        try {
+            const { response, data } = await runAdminTestRequest(buildUrlAccessPolicyPayload());
+            renderUrlAccessPolicyTestData(resultDiv, response, data);
+        } catch (error) {
+            renderAdminTestResult(resultDiv, {
+                variant: 'danger',
+                title: 'URL Access policy test failed',
+                message: error.message
+            });
+        } finally {
+            setButtonBusy(button, false);
+        }
+    };
+
+    const testWebSearchBtn = document.getElementById('test_web_search_button');
+    if (testWebSearchBtn) {
+        testWebSearchBtn.addEventListener('click', () => runWebSearchTest(testWebSearchBtn));
+    }
+
+    const rerunWebSearchBtn = document.getElementById('rerun_web_search_test_button');
+    if (rerunWebSearchBtn) {
+        rerunWebSearchBtn.addEventListener('click', () => runWebSearchTest(rerunWebSearchBtn));
+    }
+
+    const testUrlAccessPolicyBtn = document.getElementById('test_url_access_policy_button');
+    if (testUrlAccessPolicyBtn) {
+        testUrlAccessPolicyBtn.addEventListener('click', () => runUrlAccessPolicyTest(testUrlAccessPolicyBtn));
+    }
 
     const testGptBtn = document.getElementById('test_gpt_button');
     if (testGptBtn) {
@@ -2727,27 +5968,30 @@ function setupTestButtons() {
     if (testDocIntelBtn) {
         testDocIntelBtn.addEventListener('click', async () => {
             const resultDiv = document.getElementById('test_azure_doc_intelligence_result');
-            resultDiv.innerHTML = 'Testing Document Intelligence...';
+            resultDiv.className = 'mt-2';
+            resultDiv.textContent = 'Testing Document Intelligence...';
 
             const enableApim = document.getElementById('enable_document_intelligence_apim').checked;
+            const extractionMode = document.getElementById('document_intelligence_pdf_image_extraction_mode')?.value || 'read';
+            const autoSamplePages = document.getElementById('document_intelligence_auto_sample_pages')?.value || '3';
 
             const payload = {
                 test_type: 'azure_doc_intelligence',
-                enable_apim: enableApim
+                enable_apim: enableApim,
+                document_intelligence_pdf_image_extraction_mode: extractionMode,
+                document_intelligence_auto_sample_pages: autoSamplePages
             };
 
             if (enableApim) {
                 payload.apim = {
-                    endpoint: document.getElementById('azure_apim_document_intelligence_endpoint').value,
-                    subscription_key: document.getElementById('azure_apim_document_intelligence_subscription_key').value,
-                    deployment: document.getElementById('azure_apim_document_intelligence_deployment').value,
-                    api_version: document.getElementById('azure_apim_document_intelligence_api_version').value
+                    endpoint: document.getElementById('azure_apim_document_intelligence_endpoint')?.value || '',
+                    subscription_key: document.getElementById('azure_apim_document_intelligence_subscription_key')?.value || ''
                 };
             } else {
                 payload.direct = {
-                    endpoint: document.getElementById('azure_document_intelligence_endpoint').value,
-                    auth_type: document.getElementById('azure_document_intelligence_authentication_type').value,
-                    key: document.getElementById('azure_document_intelligence_key').value
+                    endpoint: document.getElementById('azure_document_intelligence_endpoint')?.value || '',
+                    auth_type: document.getElementById('azure_document_intelligence_authentication_type')?.value || 'key',
+                    key: document.getElementById('azure_document_intelligence_key')?.value || ''
                 };
             }
 
@@ -2759,12 +6003,15 @@ function setupTestButtons() {
                 });
                 const data = await resp.json();
                 if (resp.ok) {
-                    resultDiv.innerHTML = `<span class="text-success">${data.message}</span>`;
+                    resultDiv.className = 'mt-2 text-success';
+                    resultDiv.textContent = data.message;
                 } else {
-                    resultDiv.innerHTML = `<span class="text-danger">${data.error || 'Error testing Doc Intelligence'}</span>`;
+                    resultDiv.className = 'mt-2 text-danger';
+                    resultDiv.textContent = data.error || 'Error testing Doc Intelligence';
                 }
             } catch (err) {
-                resultDiv.innerHTML = `<span class="text-danger">Error: ${err.message}</span>`;
+                resultDiv.className = 'mt-2 text-danger';
+                resultDiv.textContent = `Error: ${err.message}`;
             }
         });
     }
@@ -3675,37 +6922,6 @@ if (audioServiceDiv) {
 // Metadata Extraction UI
 const extractToggle = document.getElementById('enable_extract_meta_data');
 const extractModelDiv = document.getElementById('metadata_extraction_model_settings');
-const extractSelect   = document.getElementById('metadata_extraction_model');
-
-function populateExtractionModels() {
-  // remember previously chosen value
-  const prev = extractSelect.getAttribute('data-prev') || '';
-
-  // clear out old options
-  extractSelect.innerHTML = '';
-
-  if (document.getElementById('enable_gpt_apim').checked) {
-    // use comma-separated APIM deployments
-    const text = document.getElementById('azure_apim_gpt_deployment').value || '';
-    text.split(',')
-        .map(s => s.trim())
-        .filter(s => s)
-        .forEach(d => {
-          const opt = new Option(d, d);
-          extractSelect.add(opt);
-        });
-  } else {
-    // use direct GPT selected deployments
-    (window.gptSelected || []).forEach(m => {
-      const label = `${m.deploymentName} (${m.modelName})`;
-      const opt = new Option(label, m.deploymentName);
-      extractSelect.add(opt);
-    });
-  }
-
-  // restore previous
-  extractSelect.value = prev;
-}
 
 if (extractToggle) {
     // show/hide the model dropdown
@@ -3798,17 +7014,12 @@ if (visionSelect) {
 const apimToggle = document.getElementById('enable_gpt_apim');
 if (apimToggle) {
     apimToggle.addEventListener('change', () => {
-        populateExtractionModels();
         populateVisionModels();
     });
 }
 
 // on load, stash previous & populate
 document.addEventListener('DOMContentLoaded', () => {
-    if (extractSelect) {
-        extractSelect.setAttribute('data-prev', extractSelect.value);
-        populateExtractionModels();
-    }
     if (visionSelect) {
         visionSelect.setAttribute('data-prev', visionSelect.value);
         populateVisionModels();
@@ -4842,6 +8053,8 @@ function setupWalkthroughFieldListeners() {
             {selector: '#azure_document_intelligence_endpoint', event: 'input'},
             {selector: '#azure_document_intelligence_key', event: 'input'},
             {selector: '#azure_document_intelligence_authentication_type', event: 'change'},
+            {selector: '#document_intelligence_pdf_image_extraction_mode', event: 'change'},
+            {selector: '#document_intelligence_auto_sample_pages', event: 'input'},
             {selector: '#azure_apim_document_intelligence_endpoint', event: 'input'},
             {selector: '#azure_apim_document_intelligence_subscription_key', event: 'input'},
             {selector: '#enable_document_intelligence_apim', event: 'change'}
@@ -4919,6 +8132,93 @@ function initializeTooltips() {
     if (tooltipTriggerList.length > 0) {
         const tooltipList = [...tooltipTriggerList].map(tooltipTriggerEl => new bootstrap.Tooltip(tooltipTriggerEl));
     }
+}
+
+function setupLandingPageLogoScaleControl() {
+    const slider = document.getElementById('landing_page_logo_scale_percent');
+    const valueDisplay = document.getElementById('landing-page-logo-scale-value');
+
+    if (!slider || !valueDisplay) {
+        return;
+    }
+
+    const updateValue = () => {
+        valueDisplay.textContent = `${slider.value}%`;
+    };
+
+    slider.addEventListener('input', updateValue);
+    slider.addEventListener('change', updateValue);
+    updateValue();
+}
+
+function setupDocumentActionCapabilityControls() {
+    const rangeInputs = document.querySelectorAll('.document-action-capability-range');
+    if (!rangeInputs.length) {
+        return;
+    }
+
+    rangeInputs.forEach(rangeInput => {
+        const numberInputId = rangeInput.getAttribute('data-range-sync');
+        const valueDisplayId = rangeInput.getAttribute('data-range-display');
+        const numberInput = numberInputId ? document.getElementById(numberInputId) : null;
+        const valueDisplay = valueDisplayId ? document.getElementById(valueDisplayId) : null;
+
+        if (!numberInput) {
+            return;
+        }
+
+        const minValue = Number.parseInt(rangeInput.min || numberInput.min || '0', 10);
+        const maxValue = Number.parseInt(rangeInput.max || numberInput.max || '0', 10);
+
+        const clampValue = rawValue => {
+            const parsedValue = Number.parseInt(rawValue, 10);
+            if (Number.isNaN(parsedValue)) {
+                return null;
+            }
+
+            return Math.min(maxValue, Math.max(minValue, parsedValue));
+        };
+
+        const updateValueDisplay = value => {
+            if (valueDisplay) {
+                valueDisplay.textContent = `${value}`;
+            }
+        };
+
+        const syncFromRange = () => {
+            const clampedValue = clampValue(rangeInput.value);
+            if (clampedValue === null) {
+                return;
+            }
+
+            rangeInput.value = `${clampedValue}`;
+            numberInput.value = `${clampedValue}`;
+            updateValueDisplay(clampedValue);
+        };
+
+        const syncFromNumber = forceClamp => {
+            const clampedValue = clampValue(numberInput.value);
+            if (clampedValue === null) {
+                if (forceClamp) {
+                    syncFromRange();
+                }
+                return;
+            }
+
+            if (forceClamp || numberInput.value !== '') {
+                rangeInput.value = `${clampedValue}`;
+                numberInput.value = `${clampedValue}`;
+                updateValueDisplay(clampedValue);
+            }
+        };
+
+        rangeInput.addEventListener('input', syncFromRange);
+        rangeInput.addEventListener('change', syncFromRange);
+        numberInput.addEventListener('input', () => syncFromNumber(false));
+        numberInput.addEventListener('change', () => syncFromNumber(true));
+
+        syncFromNumber(true);
+    });
 }
 
 /**
@@ -5049,7 +8349,7 @@ function setupFormChangeTracking() {
     updateSaveButtonState();
     
     // Add event listeners to all form inputs, selects, and textareas
-    const formElements = adminForm.querySelectorAll('input:not([data-ignore-settings-change="true"]), select:not([data-ignore-settings-change="true"]), textarea:not([data-ignore-settings-change="true"])');
+    const formElements = Array.from(adminForm.querySelectorAll('input, select, textarea')).filter(element => !isIgnoredSettingsChangeElement(element));
     formElements.forEach(element => {
         // For checkboxes and radios, listen for change event
         if (element.type === 'checkbox' || element.type === 'radio') {
@@ -5062,10 +8362,21 @@ function setupFormChangeTracking() {
     });
     
     // Reset form state when form is submitted
-    adminForm.addEventListener('submit', () => {
+    adminForm.addEventListener('submit', event => {
+        if (event.defaultPrevented) {
+            return;
+        }
         formModified = false;
         updateSaveButtonState();
     });
+
+    document.querySelectorAll('button[data-bs-toggle="tab"]').forEach(tabButton => {
+        tabButton.addEventListener('shown.bs.tab', updateSaveButtonState);
+    });
+}
+
+function isIgnoredSettingsChangeElement(element) {
+    return Boolean(element?.closest('[data-ignore-settings-change="true"]'));
 }
 
 /**
@@ -5084,6 +8395,13 @@ window.isAdminSettingsFormModified = () => formModified;
  */
 function updateSaveButtonState() {
     if (!saveButton) return;
+
+    const dataManagementPane = document.getElementById('data-management');
+    const isDataManagementActive = Boolean(dataManagementPane?.classList.contains('active'));
+    saveButton.classList.toggle('d-none', isDataManagementActive);
+    if (isDataManagementActive) {
+        return;
+    }
     
     if (formModified) {
         // Enable button, make it blue, and update text
@@ -5099,6 +8417,8 @@ function updateSaveButtonState() {
         saveButton.innerHTML = '<i class="bi bi-floppy"></i> Save Settings';
     }
 }
+
+window.updateAdminSettingsSaveButtonState = updateSaveButtonState;
 
 function setupLatestFeatureImageModal() {
     const modalElement = document.getElementById('latestFeatureImageModal');
@@ -5138,7 +8458,7 @@ function setupLatestFeatureImageModal() {
     });
 }
 
-function openAdminSettingsTab(targetHash) {
+function openAdminSettingsTab(targetHash, sectionId = '') {
     if (!targetHash) {
         return;
     }
@@ -5146,6 +8466,12 @@ function openAdminSettingsTab(targetHash) {
     const normalizedHash = targetHash.startsWith('#') ? targetHash : `#${targetHash}`;
     history.pushState(null, null, normalizedHash);
     activateTabFromHash();
+
+    if (sectionId) {
+        setTimeout(() => {
+            document.getElementById(sectionId)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }, 150);
+    }
 }
 
 window.openAdminSettingsTab = openAdminSettingsTab;

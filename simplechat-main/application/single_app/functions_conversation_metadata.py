@@ -7,6 +7,7 @@ from functions_authentication import get_current_user_info
 from functions_group import find_group_by_id
 from functions_public_workspaces import find_public_workspace_by_id
 from functions_documents import get_document_metadata
+from functions_collaboration import get_collaboration_conversation
 from functions_debug import debug_print
 
 def get_user_info_by_id(user_id):
@@ -59,6 +60,23 @@ def _normalize_scope_id_list(raw_ids):
             normalized_ids.append(normalized_id)
 
     return normalized_ids
+
+
+def _get_conversation_item_with_source(conversation_id):
+    """Load a conversation from the legacy or collaboration store."""
+    normalized_conversation_id = str(conversation_id or '').strip()
+    if not normalized_conversation_id:
+        raise CosmosResourceNotFoundError(message='Conversation not found')
+
+    try:
+        conversation_item = cosmos_conversations_container.read_item(
+            item=normalized_conversation_id,
+            partition_key=normalized_conversation_id
+        )
+        return conversation_item, 'legacy'
+    except CosmosResourceNotFoundError:
+        conversation_item = get_collaboration_conversation(normalized_conversation_id)
+        return conversation_item, 'collaboration'
 
 
 def _build_primary_context_from_scope_selection(
@@ -151,6 +169,103 @@ def _build_last_grounded_document_refs(document_map):
     return grounded_refs
 
 
+def _add_document_metadata_entry(document_map, document_id, scope_info, chunk_id=None,
+                                 classification='None', file_name=None):
+    """Add or merge a document-level metadata entry used by conversation tagging."""
+    normalized_document_id = str(document_id or '').strip()
+    scope_info = scope_info if isinstance(scope_info, dict) else {}
+    scope_type = str(scope_info.get('scope') or '').strip()
+    scope_id = str(scope_info.get('id') or '').strip()
+    if not normalized_document_id or not scope_type or not scope_id:
+        return False
+
+    if normalized_document_id not in document_map:
+        document_map[normalized_document_id] = {
+            'scope': {
+                'scope': scope_type,
+                'id': scope_id,
+            },
+            'chunk_ids': [],
+            'classification': classification or 'None',
+            'file_name': file_name or 'Unknown Document'
+        }
+
+    normalized_chunk_id = str(chunk_id or '').strip()
+    if normalized_chunk_id and normalized_chunk_id not in document_map[normalized_document_id]['chunk_ids']:
+        document_map[normalized_document_id]['chunk_ids'].append(normalized_chunk_id)
+
+    return True
+
+
+def _determine_selected_document_scope(doc, user_id, document_scope=None, active_group_id=None,
+                                       active_group_ids=None, active_public_workspace_id=None,
+                                       active_public_workspace_ids=None):
+    """Infer workspace scope from document-action selected document summaries."""
+    if not isinstance(doc, dict):
+        return None
+
+    public_workspace_id = str(doc.get('public_workspace_id') or '').strip()
+    if public_workspace_id:
+        return {
+            "scope": "public",
+            "id": public_workspace_id
+        }
+
+    group_id = str(doc.get('group_id') or '').strip()
+    if group_id:
+        return {
+            "scope": "group",
+            "id": group_id
+        }
+
+    normalized_scope = str(doc.get('scope') or '').strip().lower()
+    normalized_scope_id = str(doc.get('scope_id') or '').strip()
+    if normalized_scope == 'group' and normalized_scope_id:
+        return {
+            "scope": "group",
+            "id": normalized_scope_id
+        }
+    if normalized_scope == 'public' and normalized_scope_id:
+        return {
+            "scope": "public",
+            "id": normalized_scope_id
+        }
+    if normalized_scope in {'personal', 'workspace'}:
+        return {
+            "scope": "personal",
+            "id": normalized_scope_id or str(doc.get('user_id') or user_id).strip()
+        }
+
+    primary_scope = _build_primary_context_from_scope_selection(
+        user_id=user_id,
+        document_scope=document_scope,
+        active_group_id=active_group_id,
+        active_group_ids=active_group_ids,
+        active_public_workspace_id=active_public_workspace_id,
+        active_public_workspace_ids=active_public_workspace_ids,
+    )
+    if primary_scope:
+        return {
+            "scope": primary_scope.get('scope'),
+            "id": primary_scope.get('id')
+        }
+
+    return None
+
+
+def _extract_selected_document_id(doc):
+    """Resolve a stable selected-document id from document-action metadata."""
+    if not isinstance(doc, dict):
+        return None
+
+    for key in ('document_id', 'id'):
+        normalized_id = str(doc.get(key) or '').strip()
+        if normalized_id:
+            return normalized_id
+
+    return None
+
+
 def collect_conversation_metadata(user_message, conversation_id, user_id, active_group_id=None, 
                                 document_scope=None, selected_document_id=None, model_deployment=None,
                                 hybrid_search_enabled=False, 
@@ -216,6 +331,18 @@ def collect_conversation_metadata(user_message, conversation_id, user_id, active
                 "id": group_id,
                 "name": group_name or "Unknown Group"
             }
+    elif (
+        selected_agent_details
+        and selected_agent_details.get('assigned_knowledge_enabled')
+        and not selected_agent_details.get('is_global')
+    ):
+        user_info = get_user_info_by_id(user_id)
+        agent_primary_context = {
+            "type": "primary",
+            "scope": "personal",
+            "id": user_id,
+            "name": user_info.get('name', 'Personal') if user_info else 'Personal'
+        }
 
     # Process documents from search results first to determine primary context
     document_map = {}  # Map of document_id -> {scope, chunks, classification}
@@ -228,28 +355,50 @@ def collect_conversation_metadata(user_message, conversation_id, user_id, active
             classification = doc.get('document_classification', 'None')
             document_id = _extract_document_id_from_search_result(doc)
 
-            if document_id and chunk_id:
-                
-                # Initialize document entry if not exists
-                if document_id not in document_map:
-                    document_map[document_id] = {
-                        'scope': doc_scope_result,
-                        'chunk_ids': [],
-                        'classification': classification,
-                        'file_name': doc.get('file_name') or doc.get('title') or 'Unknown Document'
-                    }
-                
-                # Add chunk ID to this document
-                if chunk_id not in document_map[document_id]['chunk_ids']:
-                    document_map[document_id]['chunk_ids'].append(chunk_id)
-                
+            if _add_document_metadata_entry(
+                document_map,
+                document_id,
+                doc_scope_result,
+                chunk_id=chunk_id,
+                classification=classification,
+                file_name=doc.get('file_name') or doc.get('title') or 'Unknown Document'
+            ):
                 # Set workspace_used to the first workspace encountered (for primary context)
+                if workspace_used is None:
+                    workspace_used = doc_scope_result
+
+    if selected_documents:
+        for doc in selected_documents:
+            document_id = _extract_selected_document_id(doc)
+            doc_scope_result = _determine_selected_document_scope(
+                doc,
+                user_id,
+                document_scope=document_scope,
+                active_group_id=active_group_id,
+                active_group_ids=active_group_ids,
+                active_public_workspace_id=active_public_workspace_id,
+                active_public_workspace_ids=active_public_workspace_ids,
+            )
+            classification = doc.get('classification') or doc.get('document_classification') or 'None'
+            chunk_id = doc.get('chunk_id') or doc.get('citation_id')
+
+            if _add_document_metadata_entry(
+                document_map,
+                document_id,
+                doc_scope_result,
+                chunk_id=chunk_id,
+                classification=classification,
+                file_name=doc.get('file_name') or doc.get('title') or doc.get('document_name') or 'Unknown Document'
+            ):
                 if workspace_used is None:
                     workspace_used = doc_scope_result
     
     # Set primary context based on document usage
     primary_context = None
-    if workspace_used:
+    if agent_primary_context and selected_agent_details and selected_agent_details.get('assigned_knowledge_enabled'):
+        primary_context = agent_primary_context
+        agent_primary_context_active = True
+    elif workspace_used:
         # Documents were used - the first workspace becomes primary context
         scope_type = workspace_used['scope']
         scope_id = workspace_used['id']
@@ -390,7 +539,11 @@ def collect_conversation_metadata(user_message, conversation_id, user_id, active
     if existing_primary:
         # Documents were used - set chat_type based on primary context scope
         if existing_primary.get('scope') == 'group':
-            conversation_item['chat_type'] = 'group-single-user'  # Default to single-user for now
+            conversation_item['chat_type'] = (
+                'group'
+                if conversation_item.get('conversation_kind') == 'collaboration_source'
+                else 'group-single-user'
+            )
         elif existing_primary.get('scope') == 'public':
             conversation_item['chat_type'] = 'public'
         elif existing_primary.get('scope') == 'personal':
@@ -696,23 +849,23 @@ def update_conversation_with_metadata(conversation_id, metadata_updates):
         bool: True if successful, False otherwise
     """
     try:
-        # Read the existing conversation
-        conversation_item = cosmos_conversations_container.read_item(
-            item=conversation_id,
-            partition_key=conversation_id
-        )
+        conversation_item, conversation_source = _get_conversation_item_with_source(conversation_id)
         
         # Update with new metadata
         conversation_item.update(metadata_updates)
-        conversation_item['last_updated'] = datetime.utcnow().isoformat()
+        updated_at = datetime.utcnow().isoformat()
         
-        # Upsert back to Cosmos
-        cosmos_conversations_container.upsert_item(conversation_item)
+        if conversation_source == 'collaboration':
+            conversation_item['updated_at'] = updated_at
+            cosmos_collaboration_conversations_container.upsert_item(conversation_item)
+        else:
+            conversation_item['last_updated'] = updated_at
+            cosmos_conversations_container.upsert_item(conversation_item)
         
         return True
         
     except Exception as e:
-        print(f"Error updating conversation metadata for {conversation_id}: {e}")
+        debug_print(f"Error updating conversation metadata for {conversation_id}: {e}")
         return False
 
 
@@ -727,12 +880,9 @@ def get_conversation_metadata(conversation_id):
         dict: Conversation metadata or None if not found
     """
     try:
-        conversation_item = cosmos_conversations_container.read_item(
-            item=conversation_id,
-            partition_key=conversation_id
-        )
+        conversation_item, _ = _get_conversation_item_with_source(conversation_id)
         return conversation_item
         
     except Exception as e:
-        print(f"Error retrieving conversation metadata for {conversation_id}: {e}")
+        debug_print(f"Error retrieving conversation metadata for {conversation_id}: {e}")
         return None

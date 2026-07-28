@@ -1,4 +1,3 @@
-
 # Azure Functions artifacts
 bin
 obj
@@ -50,5 +49,15 @@ nul
 /artifacts/tests
 /artifacts/tmp/*
 /artifacts/tmp
+Demo testing/artifacts/
 scripts/agent.json
 scripts/me.json
+.github/instructions/python-venv-path.instructions.md
+.github/instructions/local.instructions.md
+
+
+deploy.zip
+application/teams_app/manifest.json
+application/teams_app/*.zip
+
+local_storage_state.json 

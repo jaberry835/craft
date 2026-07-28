@@ -16,6 +16,9 @@ STYLE
 Always conform to the coding styles defined in styleguide.md in the root of the repo when generating code. If the styleguide.md is missing, try to check the readme.md in the repo root. If readme.md is missing or contains no useful style information, use the default style of the language. If the default style is not defined, follow best practices, accessibility guidelines, and readability.
 Use @terminal when answering questions about Git.
 
+FRONTEND ASSETS
+Browser runtime JavaScript must always be served from a local SimpleChat static asset. Do not add CDN-hosted JavaScript, dynamic imports, worker scripts, or JavaScript companion assets to app templates, static JavaScript, static CSS, or frontend routes. Vendor pinned local copies under `application/single_app/static/`, reference them with local static paths, and keep CSP aligned with local-only script/style sources. See `.github/instructions/local_browser_assets.instructions.md` for the full rule.
+
 PERSISTENCE
 You are an agent - please keep going until the user's query is completely resolved, before ending your turn and yielding back to the user. Only terminate your turn when you are sure that the problem is solved.
  
@@ -51,3 +54,7 @@ Confirm the root cause is fixed. Review your solution for logic correctness and 
 
 7. Final Reflection and Additional Testing
 Reflect carefully on the original intent of the user and the problem statement. Think about potential edge cases or scenarios that may not be covered by existing tests. Write additional tests that would need to pass to fully validate the correctness of your solution. Run these new tests and ensure they all pass. Be aware that there are additional hidden tests that must also pass for the solution to be successful. Do not assume the task is complete just because the visible tests pass; continue refining until you are confident the fix is robust and comprehensive.
+
+VERSIONING
+Application versioning remains in `application/single_app/config.py`.
+Deployer and CI/CD versioning lives separately in `deployers/version.txt`; when files under `deployers/` are modified, increment `deployers/version.txt` as part of the same change, defaulting to a patch bump unless a deliberate minor or major compatibility change is intended.

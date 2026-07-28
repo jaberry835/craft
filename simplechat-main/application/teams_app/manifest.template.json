@@ -1,0 +1,40 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/teams/v1.25/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.25",
+  "version": "1.0.0",
+  "id": "TEAMS_APP_ID",
+  "name": {
+    "short": "SimpleChat",
+    "full": "SimpleChat"
+  },
+  "description": {
+    "short": "AI chat for Microsoft Teams",
+    "full": "SimpleChat as a Microsoft Teams personal tab with Teams single sign-on."
+  },
+  "developer": {
+    "name": "Your Name",
+    "websiteUrl": "https://example.com",
+    "privacyUrl": "https://example.com/privacy",
+    "termsOfUseUrl": "https://example.com/terms"
+  },
+  "icons": {
+    "color": "color.png",
+    "outline": "outline.png"
+  },
+  "accentColor": "#FFFFFF",
+  "staticTabs": [
+    {
+      "entityId": "main",
+      "name": "SimpleChat",
+      "contentUrl": "https://HOSTNAME/login?teams=true",
+      "websiteUrl": "https://HOSTNAME",
+      "scopes": ["personal"]
+    }
+  ],
+  "permissions": ["identity"],
+  "validDomains": ["HOSTNAME"],
+  "webApplicationInfo": {
+    "id": "CLIENT_ID",
+    "resource": "TEAMS_APP_RESOURCE_URI"
+  }
+}

@@ -2,8 +2,176 @@
 import { showToast } from "../chat/chat-toast.js";
 
 let currentUserRole = null;
+let currentStatsWindow = { days: 30, startDate: "", endDate: "" };
+let currentStatsData = null;
+const defaultWorkspaceHeroColor = '#0078d4';
+const workspaceHeroColorPattern = /^#[0-9a-fA-F]{6}$/;
+
+function normalizeWorkspaceHeroColor(color) {
+  const candidate = String(color || '').trim();
+  return workspaceHeroColorPattern.test(candidate) ? candidate : defaultWorkspaceHeroColor;
+}
+
+function getDateInputValueDaysAgo(daysAgo) {
+  const dateValue = new Date();
+  dateValue.setDate(dateValue.getDate() - daysAgo);
+  return dateValue.toISOString().split("T")[0];
+}
+
+function formatDateInputForDisplay(dateValue) {
+  const parts = String(dateValue || "").split("-");
+  if (parts.length !== 3) {
+    return dateValue;
+  }
+
+  return `${Number(parts[1])}/${Number(parts[2])}/${parts[0]}`;
+}
+
+function setDateInputDefaults(startInputId, endInputId) {
+  const startInput = document.getElementById(startInputId);
+  const endInput = document.getElementById(endInputId);
+
+  if (startInput && !startInput.value) {
+    startInput.value = getDateInputValueDaysAgo(29);
+  }
+
+  if (endInput && !endInput.value) {
+    endInput.value = getDateInputValueDaysAgo(0);
+  }
+}
+
+function getStatsWindowLabel(windowConfig = currentStatsWindow) {
+  if (windowConfig.startDate && windowConfig.endDate) {
+    return `${formatDateInputForDisplay(windowConfig.startDate)} - ${formatDateInputForDisplay(windowConfig.endDate)}`;
+  }
+
+  return `Last ${windowConfig.days || 30} Days`;
+}
+
+function updateStatsWindowLabels(label) {
+  $(".stats-window-label").text(label);
+}
+
+function getStatsQueryString(windowConfig = currentStatsWindow) {
+  const params = new URLSearchParams();
+  if (windowConfig.startDate && windowConfig.endDate) {
+    params.set("start_date", windowConfig.startDate);
+    params.set("end_date", windowConfig.endDate);
+  } else {
+    params.set("days", windowConfig.days || 30);
+  }
+  return params.toString();
+}
+
+function setStatsWindow(days) {
+  currentStatsWindow = { days, startDate: "", endDate: "" };
+  $("[data-stats-days]").removeClass("active");
+  $(`[data-stats-days="${days}"]`).addClass("active");
+  $("#groupStatsWindowCustom").removeClass("active");
+  updateStatsWindowLabels(getStatsWindowLabel());
+  loadGroupStats();
+}
+
+function applyStatsCustomRange() {
+  const startDate = $("#groupStatsStartDate").val();
+  const endDate = $("#groupStatsEndDate").val();
+
+  if (!startDate || !endDate) {
+    showToast("Please select both start and end dates.", "warning");
+    return;
+  }
+
+  if (new Date(startDate) > new Date(endDate)) {
+    showToast("Start date must be before end date.", "warning");
+    return;
+  }
+
+  const diffMs = Math.abs(new Date(endDate) - new Date(startDate));
+  currentStatsWindow = {
+    days: Math.ceil(diffMs / 86400000) + 1,
+    startDate,
+    endDate
+  };
+  $("[data-stats-days]").removeClass("active");
+  $("#groupStatsWindowCustom").addClass("active");
+  updateStatsWindowLabels(getStatsWindowLabel());
+  loadGroupStats();
+}
+
+function getExportStatsWindowSelection() {
+  const selectedValue = $('input[name="groupExportTimeWindow"]:checked').val() || "30";
+  if (selectedValue === "custom") {
+    const startDate = $("#groupExportStartDate").val();
+    const endDate = $("#groupExportEndDate").val();
+    if (!startDate || !endDate) {
+      throw new Error("Please select both start and end dates for the custom export range.");
+    }
+    if (new Date(startDate) > new Date(endDate)) {
+      throw new Error("Export start date must be before end date.");
+    }
+    const diffMs = Math.abs(new Date(endDate) - new Date(startDate));
+    return {
+      days: Math.ceil(diffMs / 86400000) + 1,
+      startDate,
+      endDate
+    };
+  }
+
+  return { days: Number(selectedValue) || 30, startDate: "", endDate: "" };
+}
+
+function toggleExportCustomDateRange() {
+  const isCustom = $("#groupExportCustom").prop("checked");
+  $("#groupExportCustomDateRange").toggleClass("d-none", !isCustom);
+  if (isCustom) {
+    setDateInputDefaults("groupExportStartDate", "groupExportEndDate");
+  }
+}
+
+function initializeStatsWindowControls() {
+  setDateInputDefaults("groupStatsStartDate", "groupStatsEndDate");
+  updateStatsWindowLabels(getStatsWindowLabel());
+  $("[data-stats-days]").on("click", function () {
+    setStatsWindow(Number($(this).data("stats-days")) || 30);
+  });
+  $("#groupStatsApplyCustomRange").on("click", applyStatsCustomRange);
+  $('input[name="groupExportTimeWindow"]').on("change", toggleExportCustomDateRange);
+  $("#executeGroupStatsExportBtn").on("click", exportGroupStats);
+}
+
+function escapeCsvValue(value) {
+  const stringValue = value === null || typeof value === "undefined" ? "" : String(value);
+  if (/[",\n\r]/.test(stringValue)) {
+    return `"${stringValue.replace(/"/g, '""')}"`;
+  }
+  return stringValue;
+}
+
+function appendCsvRow(rows, values) {
+  rows.push(values.map(escapeCsvValue).join(","));
+}
+
+function appendCsvSectionBreak(rows) {
+  rows.push("");
+}
+
+function downloadCsvFile(csvContent, filename) {
+  const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.classList.add("d-none");
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
 
 $(document).ready(function () {
+  initializeColorPicker();
+  initializeStatsWindowControls();
+
   loadGroupInfo(function () {
     loadMembers();
   });
@@ -81,7 +249,6 @@ $(document).ready(function () {
     $("#changeRoleModal").modal("show");
   });
 
-  // Add event delegation for approve/reject request buttons
   $(document).on("click", ".approve-request-btn", function () {
     const requestId = $(this).data("request-id");
     approveRequest(requestId);
@@ -117,11 +284,26 @@ $(document).ready(function () {
     loadActivityTimeline(limit);
   });
 
+  $(document).on("click", "#activityTimeline .activity-item", function () {
+    showRawActivity($(this).data("activity"));
+  });
+
+  $(document).on("keydown", "#activityTimeline .activity-item", function (e) {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      showRawActivity($(this).data("activity"));
+    }
+  });
+
   // Retention policy settings
   $("#saveRetentionBtn").on("click", function () {
     saveGroupRetentionSettings();
   });
+  $("#saveGroupDownloadSettingsBtn").on("click", function () {
+    saveGroupDownloadSettings();
+  });
   $('#settings-tab').on('shown.bs.tab', function () {
+    loadGroupDownloadSettings();
     loadGroupRetentionSettings();
   });
 
@@ -168,7 +350,9 @@ $(document).ready(function () {
     // Populate the list of members to be removed
     let membersList = "<ul class='list-unstyled'>";
     selectedMembers.forEach(member => {
-      membersList += `<li>• ${member.name} (${member.email})</li>`;
+      const safeName = escapeHtml(member.name || "");
+      const safeEmail = escapeHtml(member.email || "");
+      membersList += `<li>&bull; ${safeName} (${safeEmail})</li>`;
     });
     membersList += "</ul>";
     
@@ -187,10 +371,11 @@ $(document).ready(function () {
       let options = "";
       members.forEach((m) => {
         if (m.role === "Owner") return;
-
-        options += `<option value="${m.userId}">${m.displayName} (${m.email})</option>`;
+        const safeUserId = escapeHtml(m.userId || "");
+        const safeDisplayName = escapeHtml(m.displayName || "(no name)");
+        const safeEmail = escapeHtml(m.email || "");
+        options += `<option value="${safeUserId}">${safeDisplayName} (${safeEmail})</option>`;
       });
-
       $("#newOwnerSelect").html(options);
       $("#transferOwnershipModal").modal("show");
     });
@@ -249,7 +434,7 @@ $(document).ready(function () {
           method: "DELETE",
           success: function (resp) {
             alert("Group deleted successfully!");
-            window.location.href = "/my_groups";
+            window.location.href = "/profile?tab=groups";
           },
           error: function (err) {
             console.error(err);
@@ -272,6 +457,7 @@ function loadGroupInfo(doneCallback) {
   $.get(`/api/groups/${groupId}`, function (group) {
     const ownerName = group.owner?.displayName || "N/A";
     const ownerEmail = group.owner?.email || "N/A";
+    const heroColor = group.heroColor || '#0078d4';
 
     // Update hero section
     const initial = group.name ? group.name.charAt(0).toUpperCase() : 'G';
@@ -280,6 +466,8 @@ function loadGroupInfo(doneCallback) {
     $('#groupOwnerName').text(ownerName);
     $('#groupOwnerEmail').text(ownerEmail);
     $('#groupHeroDescription').text(group.description || 'No description provided');
+    setSelectedGroupHeroColor(heroColor);
+    updateGroupHeroMedia(group);
 
     // Update group status alert if not active
     updateGroupStatusAlert(group.status || 'active');
@@ -304,18 +492,22 @@ function loadGroupInfo(doneCallback) {
       $("#editGroupContainer").show();
       $("#editGroupName").val(group.name);
       $("#editGroupDescription").val(group.description);
+      $("#groupLogoFile").val('');
       $("#ownerActionsContainer").show();
       
       // Disable editing for locked/inactive groups
       if (isGroupLocked) {
         $("#editGroupName").prop('readonly', true);
         $("#editGroupDescription").prop('readonly', true);
+        $("#groupLogoFile").prop('disabled', true);
         $("#editGroupForm button[type='submit']").hide();
       } else {
         $("#editGroupName").prop('readonly', false);
         $("#editGroupDescription").prop('readonly', false);
+        $("#groupLogoFile").prop('disabled', false);
         $("#editGroupForm button[type='submit']").show();
       }
+      window.SimpleChatVoiceInput?.refreshButtons?.();
     } else {
       $("#leaveGroupContainer").show();
     }
@@ -334,11 +526,16 @@ function loadGroupInfo(doneCallback) {
       $("#activityTimelineSection").show();
       $("#stats-tab-item").show();
       $("#settings-tab-item").removeClass("d-none");
+      $("#settings").removeClass("d-none");
 
       loadPendingRequests();
       loadGroupStats();
       loadActivityTimeline(50);
+      loadGroupDownloadSettings(group);
       loadGroupRetentionSettings();
+    } else {
+      $("#settings-tab-item").addClass("d-none");
+      $("#settings").addClass("d-none");
     }
 
     if (typeof doneCallback === "function") {
@@ -358,7 +555,7 @@ function leaveGroup() {
     method: "DELETE",
     success: function (resp) {
       alert("You have left the group.");
-      window.location.href = "/my_groups";
+      window.location.href = "/profile?tab=groups";
     },
     error: function (err) {
       console.error(err);
@@ -371,25 +568,147 @@ function leaveGroup() {
   });
 }
 
-function updateGroupInfo() {
+async function updateGroupInfo() {
   const data = {
     name: $("#editGroupName").val(),
     description: $("#editGroupDescription").val(),
+    heroColor: $("#selectedColor").val() || '#0078d4',
   };
-  $.ajax({
-    url: `/api/groups/${groupId}`,
-    method: "PATCH",
-    contentType: "application/json",
-    data: JSON.stringify(data),
-    success: function () {
-      alert("Group updated successfully!");
-      loadGroupInfo();
-    },
-    error: function (err) {
-      console.error(err);
-      alert("Failed to update group info.");
-    },
+
+  try {
+    const updateResponse = await fetch(`/api/groups/${groupId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    const updatePayload = await updateResponse.json().catch(() => ({}));
+    if (!updateResponse.ok) {
+      throw new Error(updatePayload.error || 'Failed to update group info.');
+    }
+
+    const logoInput = document.getElementById('groupLogoFile');
+    const logoFile = logoInput?.files?.[0] || null;
+
+    if (logoFile) {
+      try {
+        await uploadGroupLogo(logoFile);
+        alert('Group updated successfully and logo uploaded.');
+      } catch (error) {
+        console.error(error);
+        loadGroupInfo();
+        alert(`Group details saved, but logo upload failed: ${error.message}`);
+        return;
+      }
+    } else {
+      alert('Group updated successfully!');
+    }
+
+    loadGroupInfo();
+  } catch (error) {
+    console.error(error);
+    alert(error.message || 'Failed to update group info.');
+  }
+}
+
+async function uploadGroupLogo(file) {
+  const formData = new FormData();
+  formData.append('logo_file', file);
+
+  const response = await fetch(`/api/groups/${groupId}/logo`, {
+    method: 'POST',
+    body: formData,
   });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.error || 'Failed to upload group logo.');
+  }
+
+  const logoInput = document.getElementById('groupLogoFile');
+  if (logoInput) {
+    logoInput.value = '';
+  }
+
+  return payload;
+}
+
+function updateGroupHeroMedia(group) {
+  const logoImage = document.getElementById('groupLogoImage');
+  const initialBadge = document.getElementById('groupInitial');
+  if (!logoImage || !initialBadge) {
+    return;
+  }
+
+  const hasLogo = Boolean(group?.hasLogo);
+  if (!hasLogo) {
+    logoImage.src = '';
+    logoImage.classList.add('d-none');
+    initialBadge.classList.remove('d-none');
+    return;
+  }
+
+  logoImage.onerror = function () {
+    logoImage.src = '';
+    logoImage.classList.add('d-none');
+    initialBadge.classList.remove('d-none');
+  };
+  logoImage.src = `/api/groups/${groupId}/logo?v=${encodeURIComponent(group.logoVersion || 1)}`;
+  logoImage.classList.remove('d-none');
+  initialBadge.classList.add('d-none');
+}
+
+function setSelectedGroupHeroColor(color) {
+  const normalizedColor = normalizeWorkspaceHeroColor(color);
+  const matchingPreset = $('.color-option').filter(function () {
+    return String($(this).data('color') || '').toLowerCase() === normalizedColor.toLowerCase();
+  });
+  const customColorInput = $('#customHeroColor');
+
+  $('#selectedColor').val(normalizedColor);
+  $('.color-option').removeClass('selected');
+  customColorInput.removeClass('selected').val(normalizedColor);
+  if (matchingPreset.length > 0) {
+    matchingPreset.addClass('selected');
+  } else {
+    customColorInput.addClass('selected');
+  }
+  updateGroupHeroColor(normalizedColor);
+}
+
+function updateGroupHeroColor(color) {
+  const heroElement = document.getElementById('groupHero');
+  if (!heroElement) {
+    return;
+  }
+
+  const normalizedColor = normalizeWorkspaceHeroColor(color);
+  heroElement.style.setProperty('--hero-color', normalizedColor);
+  heroElement.style.setProperty('--hero-color-dark', adjustColorBrightness(normalizedColor, -30));
+}
+
+function initializeColorPicker() {
+  $('.color-option').on('click', function () {
+    const color = $(this).data('color');
+    setSelectedGroupHeroColor(color);
+  });
+  $('#customHeroColor').on('input change', function () {
+    setSelectedGroupHeroColor(this.value);
+  });
+}
+
+function adjustColorBrightness(color, percent) {
+  const normalizedColor = normalizeWorkspaceHeroColor(color);
+  const numericColor = parseInt(String(normalizedColor).replace('#', ''), 16);
+  const amount = Math.round(2.55 * percent);
+  const red = (numericColor >> 16) + amount;
+  const green = ((numericColor >> 8) & 0x00FF) + amount;
+  const blue = (numericColor & 0x0000FF) + amount;
+
+  return `#${(
+    0x1000000 +
+    (red < 255 ? (red < 1 ? 0 : red) : 255) * 0x10000 +
+    (green < 255 ? (green < 1 ? 0 : green) : 255) * 0x100 +
+    (blue < 255 ? (blue < 1 ? 0 : blue) : 255)
+  ).toString(16).slice(1)}`;
 }
 
 function loadMembers(searchTerm, roleFilter) {
@@ -410,22 +729,26 @@ function loadMembers(searchTerm, roleFilter) {
     let rows = "";
     members.forEach((m) => {
       const isOwner = m.role === "Owner";
+      const safeUserId = escapeHtml(m.userId || "");
+      const safeDisplayName = escapeHtml(m.displayName || "(no name)");
+      const safeEmail = escapeHtml(m.email || "");
+      const safeRole = escapeHtml(m.role || "");
       const checkboxHtml = isOwner || (currentUserRole !== "Owner" && currentUserRole !== "Admin") 
         ? '<input type="checkbox" class="form-check-input" disabled>' 
         : `<input type="checkbox" class="form-check-input member-checkbox" 
-                   data-user-id="${m.userId}" 
-                   data-user-name="${m.displayName || '(no name)'}"
-                   data-user-email="${m.email || ''}"
-                   data-user-role="${m.role}">`;
+                   data-user-id="${safeUserId}" 
+                   data-user-name="${safeDisplayName}"
+                   data-user-email="${safeEmail}"
+                   data-user-role="${safeRole}">`;
       
       rows += `
       <tr>
         <td>${checkboxHtml}</td>
         <td>
-          ${m.displayName || "(no name)"}<br/>
-          <small>${m.email || ""}</small>
+          ${safeDisplayName}<br/>
+          <small>${safeEmail}</small>
         </td>
-        <td>${m.role}</td>
+        <td>${safeRole}</td>
         <td>${renderMemberActions(m)}</td>
       </tr>
     `;
@@ -529,10 +852,12 @@ function loadPendingRequests() {
   $.get(`/api/groups/${groupId}/requests`, function (pending) {
     let rows = "";
     pending.forEach((u) => {
+      const safeDisplayName = escapeHtml(u.displayName || "(no name)");
+      const safeEmail = escapeHtml(u.email || "");
       rows += `
         <tr>
-          <td>${u.displayName}</td>
-          <td>${u.email}</td>
+          <td>${safeDisplayName}</td>
+          <td>${safeEmail}</td>
           <td>
             <button class="btn btn-sm btn-success approve-request-btn" 
                     data-request-id="${u.userId}">Approve</button>
@@ -634,15 +959,18 @@ function renderUserSearchResults(users) {
     html = `<tr><td colspan="3" class="text-center text-muted">No results.</td></tr>`;
   } else {
     users.forEach(u => {
+      const safeUserId = escapeHtml(u.id || "");
+      const safeDisplayName = escapeHtml(u.displayName || "(no name)");
+      const safeEmail = escapeHtml(u.email || "");
       html += `
         <tr>
-          <td>${u.displayName || "(no name)"}</td>
-          <td>${u.email || ""}</td>
+          <td>${safeDisplayName}</td>
+          <td>${safeEmail}</td>
           <td>
             <button class="btn btn-sm btn-primary select-user-btn"
-                    data-user-id="${u.id}"
-                    data-user-name="${u.displayName}"
-                    data-user-email="${u.email}">
+                    data-user-id="${safeUserId}"
+                    data-user-name="${safeDisplayName}"
+                    data-user-email="${safeEmail}">
               Select
             </button>
           </td>
@@ -893,7 +1221,7 @@ function handleCsvFileSelect(event) {
       <p>Total members to add: <strong>${csvParsedData.length}</strong></p>
       <p>Sample data (first 3):</p>
       <ul class="mb-0">
-        ${sampleRows.map(row => `<li>${row.displayName} (${row.email})</li>`).join('')}
+        ${sampleRows.map(row => `<li>${escapeHtml(row.displayName || '')} (${escapeHtml(row.email || '')})</li>`).join('')}
       </ul>
     `);
     $("#csvValidationResults").show();
@@ -907,8 +1235,11 @@ function handleCsvFileSelect(event) {
 let documentChart, storageChart, tokenChart;
 
 function loadGroupStats() {
-  $.get(`/api/groups/${groupId}/stats`)
+  $.get(`/api/groups/${groupId}/stats?${getStatsQueryString()}`)
     .done(function(data) {
+      currentStatsData = data;
+      updateStatsWindowLabels(data.window?.label || getStatsWindowLabel());
+
       // Update stat cards
       $('#stat-documents').text(data.totalDocuments || 0);
       
@@ -923,9 +1254,9 @@ function loadGroupStats() {
       $('#stat-members').text(data.totalMembers || 0);
 
       // Create charts
-      createDocumentChart(data.documentActivity);
-      createStorageChart(data.storage);
-      createTokenChart(data.tokenUsage);
+      createDocumentChart(data.documentActivity || { labels: [], uploads: [], deletes: [] });
+      createStorageChart(data.storage || {});
+      createTokenChart(data.tokenUsage || { labels: [], data: [] });
     })
     .fail(function(xhr) {
       console.error('Failed to load group stats:', xhr);
@@ -934,6 +1265,106 @@ function loadGroupStats() {
       $('#stat-tokens').text('Error');
       $('#stat-members').text('Error');
     });
+}
+
+async function exportGroupStats() {
+  const includeSummary = $("#groupExportSummary").prop("checked");
+  const includeDocuments = $("#groupExportDocuments").prop("checked");
+  const includeTokens = $("#groupExportTokens").prop("checked");
+  const includeStorage = $("#groupExportStorage").prop("checked");
+
+  if (!includeSummary && !includeDocuments && !includeTokens && !includeStorage) {
+    showToast("Please select at least one data type to export.", "warning");
+    return;
+  }
+
+  let exportWindow;
+  try {
+    exportWindow = getExportStatsWindowSelection();
+  } catch (error) {
+    showToast(error.message, "warning");
+    return;
+  }
+
+  const exportButton = document.getElementById("executeGroupStatsExportBtn");
+  const originalHtml = exportButton ? exportButton.innerHTML : "";
+  if (exportButton) {
+    exportButton.disabled = true;
+    exportButton.innerHTML = '<i class="bi bi-hourglass-split me-1"></i>Exporting...';
+  }
+
+  try {
+    const response = await fetch(`/api/groups/${groupId}/stats?${getStatsQueryString(exportWindow)}`);
+    if (!response.ok) {
+      throw new Error("Unable to load stats for export.");
+    }
+
+    const stats = await response.json();
+    const windowLabel = stats.window?.label || getStatsWindowLabel(exportWindow);
+    const rows = [];
+
+    rows.push("Group Stats Export");
+    appendCsvRow(rows, ["Export Date", new Date().toLocaleString()]);
+    appendCsvRow(rows, ["Data Period", windowLabel]);
+    appendCsvSectionBreak(rows);
+
+    if (includeSummary) {
+      rows.push("SUMMARY METRICS");
+      appendCsvRow(rows, ["Metric", "Value"]);
+      appendCsvRow(rows, ["Total Documents", stats.totalDocuments || 0]);
+      appendCsvRow(rows, ["Storage Used (bytes)", stats.storageUsed || 0]);
+      appendCsvRow(rows, ["Total Tokens", stats.totalTokens || 0]);
+      appendCsvRow(rows, ["Total Members", stats.totalMembers || 0]);
+      appendCsvSectionBreak(rows);
+    }
+
+    if (includeDocuments) {
+      rows.push(`DOCUMENT ACTIVITY (${windowLabel})`);
+      appendCsvRow(rows, ["Date", "Uploads", "Deletes"]);
+      const labels = stats.documentActivity?.labels || [];
+      const uploads = stats.documentActivity?.uploads || [];
+      const deletes = stats.documentActivity?.deletes || [];
+      labels.forEach((label, index) => {
+        appendCsvRow(rows, [label, uploads[index] || 0, deletes[index] || 0]);
+      });
+      appendCsvSectionBreak(rows);
+    }
+
+    if (includeTokens) {
+      rows.push(`TOKEN USAGE (${windowLabel})`);
+      appendCsvRow(rows, ["Date", "Total Tokens"]);
+      const labels = stats.tokenUsage?.labels || [];
+      const tokenValues = stats.tokenUsage?.data || [];
+      labels.forEach((label, index) => {
+        appendCsvRow(rows, [label, tokenValues[index] || 0]);
+      });
+      appendCsvSectionBreak(rows);
+    }
+
+    if (includeStorage) {
+      rows.push("STORAGE USAGE");
+      appendCsvRow(rows, ["Metric", "Bytes", "Formatted"]);
+      appendCsvRow(rows, ["AI Search", stats.storage?.ai_search_size || 0, formatBytes(stats.storage?.ai_search_size || 0)]);
+      appendCsvRow(rows, ["Blob Storage", stats.storage?.storage_account_size || 0, formatBytes(stats.storage?.storage_account_size || 0)]);
+      appendCsvSectionBreak(rows);
+    }
+
+    downloadCsvFile(rows.join("\n"), `group_stats_export_${new Date().toISOString().split("T")[0]}.csv`);
+
+    const modal = bootstrap.Modal.getInstance(document.getElementById("groupStatsExportModal"));
+    if (modal) {
+      modal.hide();
+    }
+    showToast("Group stats exported successfully.", "success");
+  } catch (error) {
+    console.error("Failed to export group stats:", error);
+    showToast("Failed to export group stats.", "danger");
+  } finally {
+    if (exportButton) {
+      exportButton.disabled = false;
+      exportButton.innerHTML = originalHtml;
+    }
+  }
 }
 
 function createDocumentChart(activityData) {
@@ -1081,7 +1512,11 @@ function loadActivityTimeline(limit = 50) {
       }
       
       const html = activities.map(activity => renderActivityItem(activity)).join('');
-      $('#activityTimeline').html(html);
+      const activityTimeline = $('#activityTimeline');
+      activityTimeline.html(html);
+      activityTimeline.find('.activity-item').each(function(index) {
+        $(this).data('activity', activities[index]);
+      });
     })
     .fail(function(xhr) {
       if (xhr.status === 403) {
@@ -1133,21 +1568,23 @@ function renderActivityItem(activity) {
   } else if (activityType === 'conversation_deletion') {
     description = 'Conversation deleted';
   }
-  
-  const activityJson = JSON.stringify(activity);
+
+  const safeTitle = escapeHtml(title);
+  const safeTime = escapeHtml(time);
+  const safeDescription = escapeHtml(description);
   
   return `
-    <div class="activity-item" data-activity='${activityJson.replace(/'/g, "&apos;")}' onclick="showRawActivity(this)">
+    <div class="activity-item" role="button" tabindex="0">
       <div class="d-flex align-items-start gap-3">
         <div class="activity-icon">
           <i class="bi bi-${icon} text-${color}" style="font-size: 1.5rem;"></i>
         </div>
         <div class="flex-grow-1">
           <div class="d-flex justify-content-between align-items-start mb-1">
-            <h6 class="mb-0">${title}</h6>
-            <small class="text-muted">${time}</small>
+            <h6 class="mb-0">${safeTitle}</h6>
+            <small class="text-muted">${safeTime}</small>
           </div>
-          <p class="mb-0 text-muted small">${description}</p>
+          <p class="mb-0 text-muted small">${safeDescription}</p>
         </div>
       </div>
     </div>
@@ -1177,12 +1614,18 @@ function formatNumber(num) {
   return num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 }
 
-function showRawActivity(element) {
+function showRawActivity(activity) {
   try {
-    const activityJson = element.getAttribute('data-activity');
-    const activity = JSON.parse(activityJson);
     const modalBody = document.getElementById('rawActivityModalBody');
-    modalBody.innerHTML = `<pre><code>${JSON.stringify(activity, null, 2)}</code></pre>`;
+    if (!modalBody) {
+      return;
+    }
+
+    const pre = document.createElement('pre');
+    const code = document.createElement('code');
+    code.textContent = JSON.stringify(activity ?? {}, null, 2) || '{}';
+    pre.appendChild(code);
+    modalBody.replaceChildren(pre);
     $('#rawActivityModal').modal('show');
   } catch (error) {
     console.error('Error showing raw activity:', error);
@@ -1481,7 +1924,96 @@ async function bulkRemoveMembers() {
   loadMembers();
 }
 
-/* ===================== GROUP RETENTION POLICY ===================== */
+/* ===================== GROUP SETTINGS ===================== */
+
+function setGroupDownloadStatus(messageHtml, clearAfterMs = 0) {
+  const statusSpan = document.getElementById('group-download-settings-save-status');
+  if (!statusSpan) {
+    return;
+  }
+
+  statusSpan.innerHTML = messageHtml;
+  if (clearAfterMs) {
+    setTimeout(() => { statusSpan.innerHTML = ''; }, clearAfterMs);
+  }
+}
+
+function setGroupDownloadSettingsVisibility(isAvailable) {
+  const settingsSection = document.getElementById('group-file-download-settings-section');
+  if (!settingsSection) {
+    return;
+  }
+
+  settingsSection.classList.toggle('d-none', !isAvailable);
+  if (!isAvailable) {
+    setGroupDownloadStatus('');
+  }
+}
+
+async function loadGroupDownloadSettings(groupData = null) {
+  const disableDownloadsInput = document.getElementById('group-disable-file-downloads');
+  if (!disableDownloadsInput) {
+    return;
+  }
+
+  try {
+    let group = groupData;
+    if (!group) {
+      const response = await fetch(`/api/groups/${groupId}`);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch group: ${response.status}`);
+      }
+      group = await response.json();
+    }
+
+    const downloadsAdminEnabled = Boolean(group.file_downloads_admin_enabled);
+    setGroupDownloadSettingsVisibility(downloadsAdminEnabled);
+    if (!downloadsAdminEnabled) {
+      disableDownloadsInput.checked = false;
+      return;
+    }
+
+    disableDownloadsInput.checked = Boolean(group.disable_file_downloads);
+  } catch (error) {
+    console.error('Error loading group download settings:', error);
+    setGroupDownloadSettingsVisibility(false);
+    setGroupDownloadStatus(`<span class="text-danger"><i class="bi bi-exclamation-circle-fill"></i> ${error.message}</span>`);
+  }
+}
+
+async function saveGroupDownloadSettings() {
+  const disableDownloadsInput = document.getElementById('group-disable-file-downloads');
+  if (!disableDownloadsInput) {
+    return;
+  }
+  const settingsSection = document.getElementById('group-file-download-settings-section');
+  if (settingsSection && settingsSection.classList.contains('d-none')) {
+    return;
+  }
+
+  setGroupDownloadStatus('<span class="text-info"><i class="bi bi-hourglass-split"></i> Saving...</span>');
+
+  try {
+    const response = await fetch(`/api/groups/${groupId}/download-settings`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ disable_file_downloads: disableDownloadsInput.checked })
+    });
+    const data = await response.json();
+
+    if (response.ok && data.success) {
+      disableDownloadsInput.checked = Boolean(data.disable_file_downloads);
+      setGroupDownloadStatus('<span class="text-success"><i class="bi bi-check-circle-fill"></i> Saved successfully!</span>', 3000);
+      return;
+    }
+
+    throw new Error(data.error || 'Failed to save download settings');
+  } catch (error) {
+    console.error('Error saving group download settings:', error);
+    setGroupDownloadStatus(`<span class="text-danger"><i class="bi bi-exclamation-circle-fill"></i> Error: ${error.message}</span>`);
+    showToast(`Error saving download settings: ${error.message}`, 'danger');
+  }
+}
 
 async function loadGroupRetentionSettings() {
     const convSelect = document.getElementById('group-conversation-retention-days');

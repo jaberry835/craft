@@ -6,6 +6,12 @@ from functions_documents import *
 from functions_settings import *
 from functions_group import get_user_groups
 from functions_public_workspaces import get_user_visible_public_workspace_ids_from_settings
+from functions_file_sync import (
+    FILE_SYNC_SCOPE_PERSONAL,
+    apply_synced_document_delete_action,
+    build_synced_document_delete_guard,
+)
+from functions_notifications import create_notification, delete_notifications_by_metadata
 from utils_cache import invalidate_personal_search_cache
 from functions_debug import *
 from functions_activity_logging import log_document_upload, log_document_metadata_update_transaction
@@ -26,6 +32,234 @@ def _extract_citation_document_id(chunk, citation_id):
         return citation_id.rsplit('_', 1)[0]
 
     return citation_id
+
+
+def _normalize_citation_lookup_value(value):
+    if value is None:
+        return ''
+
+    normalized_value = str(value).strip()
+    if normalized_value.startswith('#'):
+        normalized_value = normalized_value[1:].strip()
+
+    return normalized_value
+
+
+def _append_unique_lookup_value(values, seen_values, value):
+    normalized_value = _normalize_citation_lookup_value(value)
+    if not normalized_value or normalized_value in seen_values:
+        return
+
+    seen_values.add(normalized_value)
+    values.append(normalized_value)
+
+
+def _get_citation_id_suffix(citation_id):
+    normalized_citation_id = _normalize_citation_lookup_value(citation_id)
+    if '_' not in normalized_citation_id:
+        return ''
+
+    return normalized_citation_id.rsplit('_', 1)[1]
+
+
+def _build_citation_locator_values(citation_id, page_number=None, chunk_id=None):
+    locator_values = []
+    seen_values = set()
+
+    _append_unique_lookup_value(locator_values, seen_values, chunk_id)
+    _append_unique_lookup_value(locator_values, seen_values, page_number)
+    _append_unique_lookup_value(locator_values, seen_values, _get_citation_id_suffix(citation_id))
+
+    return locator_values
+
+
+def _build_citation_key_candidates(citation_id, document_id=None, page_number=None, chunk_id=None):
+    candidates = []
+    seen_values = set()
+    normalized_document_id = _normalize_citation_lookup_value(document_id)
+    locator_values = _build_citation_locator_values(citation_id, page_number=page_number, chunk_id=chunk_id)
+
+    _append_unique_lookup_value(candidates, seen_values, citation_id)
+
+    if normalized_document_id:
+        for locator_value in locator_values:
+            if locator_value == normalized_document_id:
+                continue
+            _append_unique_lookup_value(candidates, seen_values, f'{normalized_document_id}_{locator_value}')
+
+    return candidates
+
+
+PERSONAL_DOCUMENT_SHARE_PENDING_NOTIFICATION_TYPES = ['personal_document_share_pending']
+
+
+def _get_document_display_name(document_item):
+    return str(
+        (document_item or {}).get('title')
+        or (document_item or {}).get('file_name')
+        or 'Document'
+    ).strip()
+
+
+def _clear_personal_document_share_pending_notifications(document_id, target_user_id):
+    delete_notifications_by_metadata(
+        metadata_filters={
+            'share_scope': 'personal',
+            'document_id': document_id,
+            'target_user_id': target_user_id,
+        },
+        notification_types=PERSONAL_DOCUMENT_SHARE_PENDING_NOTIFICATION_TYPES,
+    )
+
+
+def _create_personal_document_share_pending_notification(document_item, owner_user_id, target_user_id):
+    document_name = _get_document_display_name(document_item)
+    return create_notification(
+        user_id=target_user_id,
+        notification_type='personal_document_share_pending',
+        title='Shared document needs approval',
+        message=f'"{document_name}" was shared with you and needs approval before it can be searched.',
+        link_url='/workspace',
+        link_context={
+            'workspace_type': 'personal',
+            'document_id': document_item.get('id'),
+        },
+        metadata={
+            'share_scope': 'personal',
+            'document_id': document_item.get('id'),
+            'document_name': document_name,
+            'owner_user_id': owner_user_id,
+            'target_user_id': target_user_id,
+        },
+    )
+
+
+def _create_personal_document_share_decision_notification(document_item, target_user_id, decision):
+    owner_user_id = (document_item or {}).get('user_id')
+    if not owner_user_id:
+        return None
+
+    normalized_decision = 'approved' if decision == 'approved' else 'denied'
+    document_name = _get_document_display_name(document_item)
+    return create_notification(
+        user_id=owner_user_id,
+        notification_type=f'personal_document_share_{normalized_decision}',
+        title=f'Document share {normalized_decision}',
+        message=f'Your shared document "{document_name}" was {normalized_decision}.',
+        link_url='/workspace',
+        link_context={
+            'workspace_type': 'personal',
+            'document_id': document_item.get('id'),
+        },
+        metadata={
+            'share_scope': 'personal',
+            'document_id': document_item.get('id'),
+            'document_name': document_name,
+            'owner_user_id': owner_user_id,
+            'target_user_id': target_user_id,
+            'decision': normalized_decision,
+        },
+    )
+
+
+def _escape_citation_odata_literal(value):
+    return _normalize_citation_lookup_value(value).replace("'", "''")
+
+
+def _parse_citation_integer(value):
+    normalized_value = _normalize_citation_lookup_value(value)
+    if not normalized_value:
+        return None
+
+    try:
+        return int(normalized_value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_citation_metadata_filter(document_id, locator_values):
+    normalized_document_id = _normalize_citation_lookup_value(document_id)
+    if not normalized_document_id:
+        return ''
+
+    document_filter = f"document_id eq '{_escape_citation_odata_literal(normalized_document_id)}'"
+    locator_filters = []
+    seen_filters = set()
+
+    for locator_value in locator_values:
+        normalized_locator = _normalize_citation_lookup_value(locator_value)
+        if not normalized_locator:
+            continue
+
+        chunk_id_filter = f"chunk_id eq '{_escape_citation_odata_literal(normalized_locator)}'"
+        if chunk_id_filter not in seen_filters:
+            seen_filters.add(chunk_id_filter)
+            locator_filters.append(chunk_id_filter)
+
+        integer_locator = _parse_citation_integer(normalized_locator)
+        if integer_locator is None:
+            continue
+
+        for numeric_filter in (
+            f'page_number eq {integer_locator}',
+            f'chunk_sequence eq {integer_locator}',
+        ):
+            if numeric_filter in seen_filters:
+                continue
+            seen_filters.add(numeric_filter)
+            locator_filters.append(numeric_filter)
+
+    if not locator_filters:
+        return ''
+
+    return f"{document_filter} and ({' or '.join(locator_filters)})"
+
+
+def _as_citation_chunk_dict(chunk):
+    if isinstance(chunk, dict):
+        return chunk
+
+    try:
+        return dict(chunk)
+    except (TypeError, ValueError):
+        return None
+
+
+def _first_citation_search_result(search_results):
+    for result in search_results:
+        return _as_citation_chunk_dict(result)
+
+    return None
+
+
+def _find_citation_chunk_by_metadata(search_client, document_id, locator_values):
+    filter_expression = _build_citation_metadata_filter(document_id, locator_values)
+    if not filter_expression:
+        return None
+
+    search_results = search_client.search(
+        search_text='*',
+        filter=filter_expression,
+        top=1,
+    )
+    return _first_citation_search_result(search_results)
+
+
+def _resolve_citation_chunk(search_client, citation_id, document_id=None, page_number=None, chunk_id=None):
+    for candidate_key in _build_citation_key_candidates(
+        citation_id,
+        document_id=document_id,
+        page_number=page_number,
+        chunk_id=chunk_id,
+    ):
+        try:
+            chunk = search_client.get_document(key=candidate_key)
+            return _as_citation_chunk_dict(chunk)
+        except ResourceNotFoundError:
+            continue
+
+    locator_values = _build_citation_locator_values(citation_id, page_number=page_number, chunk_id=chunk_id)
+    return _find_citation_chunk_by_metadata(search_client, document_id, locator_values)
 
 
 def _try_get_document_json(user_id, document_id, group_id=None, public_workspace_id=None):
@@ -135,7 +369,7 @@ def register_route_backend_documents(app):
             return jsonify({'error': 'Missing conversation_id or id'}), 400
 
         try:
-            _ = cosmos_conversations_container.read_item(
+            conversation_item = cosmos_conversations_container.read_item(
                 item=conversation_id,
                 partition_key=conversation_id
             )
@@ -143,6 +377,9 @@ def register_route_backend_documents(app):
             return jsonify({'error': 'Conversation not found'}), 404
         except Exception as e:
             return jsonify({'error': f'Error reading conversation: {str(e)}'}), 500
+
+        if conversation_item.get('user_id') != user_id:
+            return jsonify({'error': 'Forbidden'}), 403
         
         add_file_task_to_file_processing_log(document_id=file_id, user_id=user_id, content="Conversation exists, retrieving file content")
         try:
@@ -585,11 +822,13 @@ def register_route_backend_documents(app):
             debug_print(f"Error executing legacy query: {e}")
 
         # --- 5) Return results ---
+        file_downloads_enabled = is_personal_workspace_file_download_enabled(get_settings())
         return jsonify({
             "documents": docs,
             "page": page,
             "page_size": page_size,
             "total_count": total_count,
+            "file_downloads_enabled": file_downloads_enabled,
             "needs_legacy_update_check": legacy_count > 0
         }), 200
 
@@ -605,18 +844,122 @@ def register_route_backend_documents(app):
         
         return get_document(user_id, document_id)
 
+    @app.route('/api/documents/<document_id>/versions', methods=['GET'])
+    @swagger_route(security=get_auth_security())
+    @login_required
+    @user_required
+    @enabled_required("enable_user_workspace")
+    def api_get_user_document_versions(document_id):
+        user_id = get_current_user_id()
+        if not user_id:
+            return jsonify({'error': 'User not authenticated'}), 401
+
+        versions = get_document_versions(user_id=user_id, document_id=document_id)
+        if not versions:
+            return jsonify({'error': 'Document versions not found'}), 404
+
+        return jsonify({
+            'document_id': document_id,
+            'revision_family_id': versions[0].get('revision_family_id'),
+            'versions': versions,
+        }), 200
+
+    @app.route('/api/documents/<document_id>/download', methods=['GET'])
+    @swagger_route(security=get_auth_security())
+    @login_required
+    @user_required
+    @enabled_required("enable_user_workspace")
+    def api_download_user_document(document_id):
+        user_id = get_current_user_id()
+        if not user_id:
+            return jsonify({'error': 'User not authenticated'}), 401
+        if not is_personal_workspace_file_download_enabled(get_settings()):
+            return jsonify({'error': 'File downloads are disabled for personal workspaces'}), 403
+
+        document_record = get_document_record(user_id=user_id, document_id=document_id)
+        if not document_record:
+            return jsonify({'error': 'Document not found or access denied'}), 404
+
+        try:
+            return build_document_download_response(document_record, user_id=user_id)
+        except FileNotFoundError as exc:
+            return jsonify({'error': str(exc)}), 404
+        except Exception as exc:
+            log_event(
+                '[DocumentDownload] Failed personal document download',
+                {'document_id': document_id, 'error': str(exc)},
+                debug_only=True,
+            )
+            return jsonify({'error': 'Unable to download document'}), 500
+
+    @app.route('/api/documents/download', methods=['POST'])
+    @swagger_route(security=get_auth_security())
+    @login_required
+    @user_required
+    @enabled_required("enable_user_workspace")
+    def api_download_user_documents():
+        user_id = get_current_user_id()
+        if not user_id:
+            return jsonify({'error': 'User not authenticated'}), 401
+        if not is_personal_workspace_file_download_enabled(get_settings()):
+            return jsonify({'error': 'File downloads are disabled for personal workspaces'}), 403
+
+        data = request.get_json(silent=True) or {}
+        document_ids = data.get('document_ids') or []
+        if not isinstance(document_ids, list):
+            return jsonify({'error': 'document_ids must be a list'}), 400
+
+        documents = []
+        seen_ids = set()
+        for document_id_value in document_ids:
+            normalized_document_id = str(document_id_value or '').strip()
+            if not normalized_document_id or normalized_document_id in seen_ids:
+                continue
+            seen_ids.add(normalized_document_id)
+            document_record = get_document_record(user_id=user_id, document_id=normalized_document_id)
+            if not document_record:
+                return jsonify({'error': f'Document not found or access denied: {normalized_document_id}'}), 404
+            documents.append(document_record)
+
+        if not documents:
+            return jsonify({'error': 'No documents selected'}), 400
+        if len(documents) == 1:
+            try:
+                return build_document_download_response(documents[0], user_id=user_id)
+            except FileNotFoundError as exc:
+                return jsonify({'error': str(exc)}), 404
+
+        try:
+            return build_documents_zip_download_response(
+                documents,
+                'personal_documents.zip',
+                user_id=user_id,
+            )
+        except FileNotFoundError as exc:
+            return jsonify({'error': str(exc)}), 404
+        except Exception as exc:
+            log_event(
+                '[DocumentDownload] Failed personal document ZIP download',
+                {'document_count': len(documents), 'error': str(exc)},
+                debug_only=True,
+            )
+            return jsonify({'error': 'Unable to download selected documents'}), 500
+
     @app.route('/api/documents/<document_id>', methods=['PATCH'])
     @swagger_route(security=get_auth_security())
     @login_required
     @user_required
     @enabled_required("enable_user_workspace")
     def api_patch_user_document(document_id):
+        """
+        Update metadata fields (title, abstract, keywords, etc.) for a user document.
+        """
         user_id = get_current_user_id()
         if not user_id:
             return jsonify({'error': 'User not authenticated'}), 401
 
         data = request.get_json()  # new metadata values from the client
-        
+
         # Track which fields were updated
         updated_fields = {}
 
@@ -687,7 +1030,7 @@ def register_route_backend_documents(app):
                     authors=authors_list
                 )
                 updated_fields['authors'] = authors_list
-        
+
         # Handle tags with validation and chunk propagation
         if 'tags' in data:
             from functions_documents import validate_tags, propagate_tags_to_chunks, get_or_create_tag_definition
@@ -761,8 +1104,52 @@ def register_route_backend_documents(app):
         delete_mode = request.args.get('delete_mode', 'all_versions')
         if delete_mode not in {'all_versions', 'current_only'}:
             return jsonify({'error': 'Invalid delete mode'}), 400
+        conversation_linked_delete_confirmed = request.args.get('conversation_linked_delete_confirmed') == 'true'
+        try:
+            document_record = get_document_record(user_id=user_id, document_id=document_id)
+        except Exception:
+            document_record = None
+        if not document_record:
+            return jsonify({'error': 'Document not found or access denied'}), 404
+
+        if (
+            document_record.get('created_from_chat_upload')
+            and document_record.get('conversation_id')
+            and not conversation_linked_delete_confirmed
+        ):
+            conversation_id = document_record.get('conversation_id')
+            conversation_url = document_record.get('conversation_url') or f'/chats?conversation_id={conversation_id}'
+            return jsonify({
+                'error': 'conversation_linked_document_delete_requires_confirmation',
+                'message': 'This document was uploaded through chat and is part of a conversation.',
+                'conversation': {
+                    'id': conversation_id,
+                    'title': document_record.get('conversation_title_at_upload') or 'Conversation',
+                    'url': conversation_url,
+                },
+                'document': {
+                    'id': document_id,
+                    'file_name': document_record.get('file_name'),
+                },
+            }), 409
+
+        file_sync_delete_action = request.args.get('file_sync_delete_action')
+        file_sync_guard = build_synced_document_delete_guard(
+            FILE_SYNC_SCOPE_PERSONAL,
+            document_id,
+            user_id,
+            requested_action=file_sync_delete_action,
+        )
+        if file_sync_guard:
+            return jsonify(file_sync_guard), 409
         
         try:
+            apply_synced_document_delete_action(
+                FILE_SYNC_SCOPE_PERSONAL,
+                document_id,
+                user_id,
+                file_sync_delete_action,
+            )
             delete_result = delete_document_revision(user_id, document_id, delete_mode=delete_mode)
             
             # Invalidate search cache since document was deleted
@@ -774,7 +1161,7 @@ def register_route_backend_documents(app):
             }), 200
         except Exception as e:
             return jsonify({'error': f'Error deleting document: {str(e)}'}), 500
-    
+
     @app.route('/api/documents/<document_id>/extract_metadata', methods=['POST'])
     @swagger_route(security=get_auth_security())
     @login_required
@@ -808,14 +1195,80 @@ def register_route_backend_documents(app):
             'document_id': document_id
         }), 200
 
+    @app.route('/api/documents/reprocess_extraction', methods=['POST'])
+    @swagger_route(security=get_auth_security())
+    @login_required
+    @user_required
+    @enabled_required("enable_user_workspace")
+    def api_reprocess_document_extraction():
+        user_id = get_current_user_id()
+        if not user_id:
+            return jsonify({'error': 'User not authenticated'}), 401
+
+        payload = request.get_json(silent=True) or {}
+        raw_mode = str(payload.get('extraction_mode') or payload.get('target_extraction_mode') or '').strip().lower()
+        if raw_mode not in DOCUMENT_INTELLIGENCE_MANUAL_EXTRACTION_MODES:
+            return jsonify({'error': 'Extraction mode must be Standard or Enhanced.'}), 400
+        target_mode = normalize_document_intelligence_manual_extraction_mode(raw_mode)
+
+        document_ids = payload.get('document_ids')
+        if not isinstance(document_ids, list):
+            document_id = payload.get('document_id')
+            document_ids = [document_id] if document_id else []
+        document_ids = [str(document_id).strip() for document_id in document_ids if str(document_id or '').strip()]
+        if not document_ids:
+            return jsonify({'error': 'At least one document ID is required.'}), 400
+
+        queued = []
+        errors = []
+        for document_id in document_ids:
+            try:
+                document_item = get_document_metadata(document_id=document_id, user_id=user_id)
+                if not document_item:
+                    errors.append({'document_id': document_id, 'error': 'Document not found.'})
+                    continue
+                if document_item.get('user_id') != user_id:
+                    errors.append({'document_id': document_id, 'error': 'Only the document owner can change extraction for this PDF.'})
+                    continue
+
+                is_valid, validation_message = validate_document_reprocess_source(document_item, user_id=user_id)
+                if not is_valid:
+                    errors.append({'document_id': document_id, 'error': validation_message})
+                    continue
+
+                current_app.extensions['executor'].submit_stored(
+                    f"{document_id}_di_reprocess_{target_mode}",
+                    process_document_reprocess_extraction_background,
+                    document_id=document_id,
+                    user_id=user_id,
+                    target_extraction_mode=target_mode,
+                )
+                queued.append({'document_id': document_id, 'extraction_mode': target_mode})
+            except Exception as e:
+                errors.append({'document_id': document_id, 'error': str(e)})
+
+        if queued:
+            invalidate_personal_search_cache(user_id)
+
+        status_code = 202 if queued and not errors else (207 if queued else 400)
+        target_mode_label = "Enhanced" if target_mode == "layout" else "Standard"
+        return jsonify({
+            'message': f'Queued {len(queued)} document(s) to extract again with {target_mode_label}.',
+            'queued': queued,
+            'errors': errors,
+        }), status_code
+
     @app.route("/api/get_citation", methods=["POST"])
     @swagger_route(security=get_auth_security())
     @login_required
     @user_required
     def get_citation():
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
         user_id = get_current_user_id()
         citation_id = data.get("citation_id")
+        document_id = data.get("document_id")
+        page_number = data.get("page_number")
+        chunk_id = data.get("chunk_id")
 
         if not user_id:
             return jsonify({"error": "User not authenticated"}), 401
@@ -831,38 +1284,44 @@ def register_route_backend_documents(app):
             }), 200
 
         def get_citation_for_scope(search_client, scope_name):
-            chunk = search_client.get_document(key=citation_id)
-            document_id = _extract_citation_document_id(chunk, citation_id)
-            accessible_document = _find_accessible_citation_document(user_id, document_id, scope_name)
+            chunk = _resolve_citation_chunk(
+                search_client,
+                citation_id,
+                document_id=document_id,
+                page_number=page_number,
+                chunk_id=chunk_id,
+            )
+            if not chunk:
+                return None
+
+            resolved_document_id = _extract_citation_document_id(chunk, citation_id)
+            accessible_document = _find_accessible_citation_document(user_id, resolved_document_id, scope_name)
 
             if not accessible_document:
                 return jsonify({"error": "Unauthorized access to citation"}), 403
 
             return build_citation_response(chunk)
 
-        try:
-            search_client_user = CLIENTS['search_client_user']
-            return get_citation_for_scope(search_client_user, 'personal')
+        for scope_name, client_key in (
+            ('personal', 'search_client_user'),
+            ('group', 'search_client_group'),
+            ('public', 'search_client_public'),
+        ):
+            search_client = CLIENTS.get(client_key)
+            if not search_client:
+                continue
 
-        except ResourceNotFoundError:
-            pass
+            try:
+                citation_response = get_citation_for_scope(search_client, scope_name)
+            except ResourceNotFoundError:
+                continue
+            except Exception as e:
+                return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
 
-        try:
-            search_client_group = CLIENTS['search_client_group']
-            return get_citation_for_scope(search_client_group, 'group')
+            if citation_response:
+                return citation_response
 
-        except ResourceNotFoundError:
-            pass
-        
-        try:
-            search_client_public = CLIENTS['search_client_public']
-            return get_citation_for_scope(search_client_public, 'public')
-        
-        except ResourceNotFoundError:
-            return jsonify({"error": "Citation not found in user, group, or public docs"}), 404
-
-        except Exception as e:
-            return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
+        return jsonify({"error": "Citation not found in user, group, or public docs"}), 404
         
     @app.route('/api/documents/upgrade_legacy', methods=['POST'])
     @swagger_route(security=get_auth_security())
@@ -919,12 +1378,12 @@ def register_route_backend_documents(app):
         
         data = request.get_json()
         tag_name = data.get('tag_name')
-        color = data.get('color', '#0d6efd')  # Default blue color
+        color = data.get('color')
         
         if not tag_name:
             return jsonify({'error': 'tag_name is required'}), 400
         
-        from functions_documents import normalize_tag, validate_tags
+        from functions_documents import normalize_tag, validate_tag_color, validate_tags
         from functions_settings import get_user_settings, update_user_settings
         from datetime import datetime, timezone
         
@@ -935,6 +1394,9 @@ def register_route_backend_documents(app):
                 return jsonify({'error': error_msg}), 400
             
             normalized_tag = normalized_tags[0]
+            is_valid_color, color_error, normalized_color = validate_tag_color(color, normalized_tag)
+            if not is_valid_color:
+                return jsonify({'error': color_error}), 400
             
             # Get existing tag definitions from settings
             user_settings = get_user_settings(user_id)
@@ -954,7 +1416,7 @@ def register_route_backend_documents(app):
             
             # Add new tag to existing tags (don't replace)
             personal_tags[normalized_tag] = {
-                'color': color,
+                'color': normalized_color,
                 'created_at': datetime.now(timezone.utc).isoformat()
             }
             
@@ -973,7 +1435,7 @@ def register_route_backend_documents(app):
                 'message': f'Tag "{normalized_tag}" created successfully',
                 'tag': {
                     'name': normalized_tag,
-                    'color': color
+                    'color': normalized_color
                 }
             }), 201
             
@@ -1157,7 +1619,7 @@ def register_route_backend_documents(app):
         debug_print(f"[UPDATE TAG] Request data - new_name: {new_name}, new_color: {new_color}")
         
         from functions_documents import (
-            normalize_tag, validate_tags, get_documents,
+            normalize_tag, validate_tag_color, validate_tags, get_documents,
             update_document, propagate_tags_to_chunks
         )
         from functions_settings import get_user_settings, update_user_settings
@@ -1267,6 +1729,10 @@ def register_route_backend_documents(app):
             # Handle color change only
             if new_color:
                 debug_print(f"[UPDATE TAG] Handling color change operation...")
+                is_valid_color, color_error, normalized_color = validate_tag_color(new_color, normalized_old_tag)
+                if not is_valid_color:
+                    return jsonify({'error': color_error}), 400
+
                 user_settings = get_user_settings(user_id)
                 settings_dict = user_settings.get('settings', {})
                 tag_defs = settings_dict.get('tag_definitions', {})
@@ -1276,13 +1742,13 @@ def register_route_backend_documents(app):
                 debug_print(f"[UPDATE TAG] Looking for tag: {normalized_old_tag}")
                 
                 if normalized_old_tag in personal_tags:
-                    debug_print(f"[UPDATE TAG] Found tag, updating color to: {new_color}")
-                    personal_tags[normalized_old_tag]['color'] = new_color
+                    debug_print(f"[UPDATE TAG] Found tag, updating color to: {normalized_color}")
+                    personal_tags[normalized_old_tag]['color'] = normalized_color
                 else:
-                    debug_print(f"[UPDATE TAG] Tag not found, creating new entry with color: {new_color}")
+                    debug_print(f"[UPDATE TAG] Tag not found, creating new entry with color: {normalized_color}")
                     from datetime import datetime, timezone
                     personal_tags[normalized_old_tag] = {
-                        'color': new_color,
+                        'color': normalized_color,
                         'created_at': datetime.now(timezone.utc).isoformat()
                     }
                 
@@ -1293,7 +1759,11 @@ def register_route_backend_documents(app):
                 
                 debug_print(f"[UPDATE TAG] Color change completed successfully")
                 return jsonify({
-                    'message': f'Tag color updated for "{normalized_old_tag}"'
+                    'message': f'Tag color updated for "{normalized_old_tag}"',
+                    'tag': {
+                        'name': normalized_old_tag,
+                        'color': normalized_color
+                    }
                 }), 200
             
             debug_print(f"[UPDATE TAG] No updates specified!")
@@ -1417,21 +1887,39 @@ def register_route_backend_documents(app):
             return jsonify({'error': 'user_id is required'}), 400
         
         try:
-            # Check if user owns the document
-            doc = get_document(user_id, document_id)
-            if not doc:
+            document_item = cosmos_user_documents_container.read_item(
+                item=document_id,
+                partition_key=document_id,
+            )
+            if document_item.get('user_id') != user_id:
                 return jsonify({'error': 'Document not found or access denied'}), 404
+
+            already_shared = any(
+                str(entry).startswith(f"{target_user_id},")
+                for entry in document_item.get('shared_user_ids', [])
+            )
             
             # Share the document
             success = share_document_with_user(document_id, user_id, target_user_id)
             if success:
+                if not already_shared:
+                    refreshed_document = cosmos_user_documents_container.read_item(
+                        item=document_id,
+                        partition_key=document_id,
+                    )
+                    _create_personal_document_share_pending_notification(
+                        refreshed_document,
+                        user_id,
+                        target_user_id,
+                    )
                 # Invalidate cache for both owner and target user
                 invalidate_personal_search_cache(user_id)
                 invalidate_personal_search_cache(target_user_id)
                 return jsonify({'message': 'Document shared successfully'}), 200
             else:
                 return jsonify({'error': 'Failed to share document'}), 500
-                
+        except exceptions.CosmosResourceNotFoundError:
+            return jsonify({'error': 'Document not found or access denied'}), 404
         except Exception as e:
             return jsonify({'error': f'Error sharing document: {str(e)}'}), 500
 
@@ -1453,21 +1941,25 @@ def register_route_backend_documents(app):
             return jsonify({'error': 'user_id is required'}), 400
         
         try:
-            # Check if user owns the document
-            doc = get_document(user_id, document_id)
-            if not doc:
+            document_item = cosmos_user_documents_container.read_item(
+                item=document_id,
+                partition_key=document_id,
+            )
+            if document_item.get('user_id') != user_id:
                 return jsonify({'error': 'Document not found or access denied'}), 404
             
             # Unshare the document
             success = unshare_document_from_user(document_id, user_id, target_user_id)
             if success:
+                _clear_personal_document_share_pending_notifications(document_id, target_user_id)
                 # Invalidate cache for both owner and target user
                 invalidate_personal_search_cache(user_id)
                 invalidate_personal_search_cache(target_user_id)
                 return jsonify({'message': 'Document unshared successfully'}), 200
             else:
                 return jsonify({'error': 'Failed to unshare document'}), 500
-                
+        except exceptions.CosmosResourceNotFoundError:
+            return jsonify({'error': 'Document not found or access denied'}), 404
         except Exception as e:
             return jsonify({'error': f'Error unsharing document: {str(e)}'}), 500
 
@@ -1552,42 +2044,41 @@ def register_route_backend_documents(app):
             return jsonify({'error': 'User not authenticated'}), 401
     
         try:
-            # Always get the document and extract the dict robustly
-            doc_response = get_document(user_id, document_id)
-            doc = None
-            status_code = None
-    
-            # Handle (response, status) tuple
-            if isinstance(doc_response, tuple):
-                resp, status_code = doc_response
-                if hasattr(resp, "get_json"):
-                    doc = resp.get_json()
-                else:
-                    doc = resp
-            elif hasattr(doc_response, "status_code") and hasattr(doc_response, "get_json"):
-                status_code = doc_response.status_code
-                doc = doc_response.get_json()
-            else:
-                doc = doc_response
-    
-            if status_code is not None and status_code != 200:
-                return jsonify({'error': 'Document not found or access denied'}), 404
-            if not doc or not isinstance(doc, dict):
-                return jsonify({'error': 'Document not found or access denied'}), 404
+            doc = cosmos_user_documents_container.read_item(
+                item=document_id,
+                partition_key=document_id,
+            )
     
             # Check if user is the owner - owners cannot remove themselves
             if doc.get('user_id') == user_id:
                 return jsonify({'error': 'Document owners cannot remove themselves from their own documents'}), 400
+
+            shared_entry = next(
+                (
+                    str(entry)
+                    for entry in doc.get('shared_user_ids', [])
+                    if str(entry).startswith(f"{user_id},")
+                ),
+                None,
+            )
+            if not shared_entry:
+                return jsonify({'error': 'Document not found or access denied'}), 404
+
+            was_pending = shared_entry.endswith(',not_approved')
     
             # Remove user from shared_user_ids (pass user_id as both requester and target for self-removal)
             success = unshare_document_from_user(document_id, user_id, user_id)
             if success:
+                _clear_personal_document_share_pending_notifications(document_id, user_id)
+                if was_pending:
+                    _create_personal_document_share_decision_notification(doc, user_id, 'denied')
                 # Invalidate cache for user who removed themselves
                 invalidate_personal_search_cache(user_id)
                 return jsonify({'message': 'Successfully removed from shared document'}), 200
             else:
                 return jsonify({'error': 'Failed to remove from shared document'}), 500
-    
+        except exceptions.CosmosResourceNotFoundError:
+            return jsonify({'error': 'Document not found or access denied'}), 404
         except Exception as e:
             debug_print(f"[ERROR] /api/documents/{document_id}/remove-self: {e}", flush=True)
             return jsonify({'error': f'Error removing from shared document: {str(e)}'}), 500
@@ -1647,8 +2138,12 @@ def register_route_backend_documents(app):
             
             # Invalidate cache for user who approved (their search results changed)
             if updated:
+                _clear_personal_document_share_pending_notifications(document_id, user_id)
+                _create_personal_document_share_decision_notification(document_item, user_id, 'approved')
                 invalidate_personal_search_cache(user_id)
             
             return jsonify({'message': 'Share approved' if updated else 'Already approved'}), 200
+        except exceptions.CosmosResourceNotFoundError:
+            return jsonify({'error': 'Document not found or access denied'}), 404
         except Exception as e:
             return jsonify({'error': f'Error approving shared document: {str(e)}'}), 500

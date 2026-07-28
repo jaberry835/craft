@@ -35,6 +35,36 @@ function handleWorkspaceFeatureAction() {
     clearFeatureActionParam();
 }
 
+
+function clearWorkspaceAgentNavigationParams() {
+    const url = new URL(window.location.href);
+    ['tab', 'new_agent'].forEach(key => url.searchParams.delete(key));
+    window.history.replaceState({}, document.title, `${url.pathname}${url.search}${url.hash}`);
+}
+
+
+function handleWorkspaceAgentNavigation() {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('tab') !== 'agents') {
+        return false;
+    }
+
+    const agentsTabButton = document.getElementById('agents-tab-btn');
+    if (!agentsTabButton) {
+        return false;
+    }
+
+    bootstrap.Tab.getOrCreateInstance(agentsTabButton).show();
+    if (params.get('new_agent') === '1') {
+        window.setTimeout(() => {
+            document.getElementById('create-agent-btn')?.click();
+        }, 250);
+    }
+
+    clearWorkspaceAgentNavigationParams();
+    return true;
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     console.log("Workspace initializing...");
     
@@ -65,11 +95,15 @@ document.addEventListener('DOMContentLoaded', () => {
              } else {
                   console.error("fetchUserPrompts function not found.");
              }
+        } else if (targetId === '#workflows-tab') {
+             console.log("Loading workflows tab data...");
+             if (typeof window.fetchUserWorkflows === 'function') {
+                 window.fetchUserWorkflows();
+             } else {
+                 console.error("fetchUserWorkflows function not found.");
+             }
         }
     }
-
-    // Initial load for the default active tab
-    loadActiveTabData();
 
     // Add event listeners to tab buttons to load data when a tab is shown
     const tabButtons = document.querySelectorAll('#workspaceTab button[data-bs-toggle="tab"]');
@@ -79,6 +113,11 @@ document.addEventListener('DOMContentLoaded', () => {
             loadActiveTabData(); // Load data for the newly shown tab
         });
     });
+
+    const handledAgentNavigation = handleWorkspaceAgentNavigation();
+    if (!handledAgentNavigation) {
+        loadActiveTabData();
+    }
 
     handleWorkspaceFeatureAction();
 

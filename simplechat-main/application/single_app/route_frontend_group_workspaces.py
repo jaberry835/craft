@@ -2,8 +2,10 @@
 
 from config import *
 from functions_authentication import *
-from functions_group import get_group_model_endpoints
+from functions_group import get_group_model_endpoints, require_active_group, update_active_group_for_user
+from functions_governance import filter_governed_model_endpoints, is_action_scope_access_allowed, is_governance_access_allowed
 from functions_settings import *
+from functions_file_sync import FILE_SYNC_MANAGER_ROLES, is_file_sync_enabled_for_group
 from swagger_wrapper import swagger_route, get_auth_security
 
 def register_route_frontend_group_workspaces(app):
@@ -18,7 +20,16 @@ def register_route_frontend_group_workspaces(app):
         settings = get_settings()
         user_settings = get_user_settings(user_id)
         public_settings = sanitize_settings_for_user(settings)
-        active_group_id = user_settings.get("settings", {}).get("activeGroupOid")
+        try:
+            active_group_id = require_active_group(user_id)
+        except (ValueError, LookupError, PermissionError):
+            active_group_id = None
+        try:
+            require_active_group(user_id, allowed_roles=FILE_SYNC_MANAGER_ROLES)
+            user_info = get_current_user_info() or {}
+            file_sync_enabled = is_file_sync_enabled_for_group(settings, active_group_id, user_info=user_info) if active_group_id else False
+        except (ValueError, LookupError, PermissionError):
+            file_sync_enabled = False
         enable_document_classification = settings.get('enable_document_classification', False)
         enable_file_sharing = settings.get('enable_file_sharing', False)
         enable_extract_meta_data = settings.get('enable_extract_meta_data', False)
@@ -54,24 +65,20 @@ def register_route_frontend_group_workspaces(app):
         ))
         allowed_extensions_str = "Allowed: " + ", ".join(allowed_extensions)
 
+        workspace_governance = {
+            "group_agents": is_governance_access_allowed("governance_group_agents", user_id),
+            "group_actions": is_action_scope_access_allowed("governance_group_actions", user_id, "group"),
+            "group_endpoints": is_governance_access_allowed("governance_group_endpoints", user_id),
+            "global_endpoints": is_governance_access_allowed("governance_global_endpoints", user_id),
+        }
+
+        group_endpoints = get_group_model_endpoints(active_group_id) if active_group_id else []
         group_model_endpoints = sanitize_model_endpoints_for_frontend(
-            get_group_model_endpoints(active_group_id) if active_group_id else []
+            filter_governed_model_endpoints(user_id, group_endpoints, "governance_group_endpoints")
         )
         global_model_endpoints = sanitize_model_endpoints_for_frontend(
-            settings.get("model_endpoints", [])
+            filter_governed_model_endpoints(user_id, settings.get("model_endpoints", []), "governance_global_endpoints")
         )
-
-        # Build allowed extensions string
-        allowed_extensions = [
-            "txt", "pdf", "doc", "docm", "docx", "xlsx", "xls", "xlsm","csv", "pptx", "html",
-            "jpg", "jpeg", "png", "bmp", "tiff", "tif", "heif", "md", "json",
-            "xml", "yaml", "yml", "log"
-        ]
-        if enable_video_file_support in [True, 'True', 'true']:
-            allowed_extensions += ["mp4", "mov", "avi", "wmv", "mkv", "webm"]
-        if enable_audio_file_support in [True, 'True', 'true']:
-            allowed_extensions += ["mp3", "wav", "ogg", "aac", "flac", "m4a"]
-        allowed_extensions_str = "Allowed: " + ", ".join(allowed_extensions)
 
         return render_template(
             'group_workspaces.html', 
@@ -84,7 +91,9 @@ def register_route_frontend_group_workspaces(app):
             legacy_docs_count=legacy_count,
             allowed_extensions=allowed_extensions_str,
             group_model_endpoints=group_model_endpoints,
-            global_model_endpoints=global_model_endpoints
+            global_model_endpoints=global_model_endpoints,
+                file_sync_enabled=file_sync_enabled,
+                workspace_governance=workspace_governance
         )
 
     @app.route('/set_active_group', methods=['POST'])
@@ -97,7 +106,12 @@ def register_route_frontend_group_workspaces(app):
         group_id = request.form.get("group_id")
         if not user_id or not group_id:
             return "Missing user or group id", 400
-        success = update_user_settings(user_id, {"activeGroupOid": group_id})
-        if not success:
-            return "Failed to update user settings", 500
+
+        try:
+            update_active_group_for_user(group_id, user_id=user_id)
+        except LookupError:
+            return "Group not found", 404
+        except PermissionError:
+            return "You are not a member of this group", 403
+
         return redirect(url_for('group_workspaces'))

@@ -17,6 +17,7 @@ from functions_keyvault import (
     keyvault_agent_save_helper,
 )
 from functions_agent_payload import sanitize_agent_payload
+from functions_governance import ensure_governance_access
 
 
 _NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -65,6 +66,9 @@ def get_group_agent(group_id: str, agent_id: str) -> Optional[Dict[str, Any]]:
 
 def save_group_agent(group_id: str, agent_data: Dict[str, Any], user_id: Optional[str] = None) -> Dict[str, Any]:
     """Create or update a group agent entry."""
+    if user_id:
+        ensure_governance_access('governance_group_agents', user_id)
+
     payload = sanitize_agent_payload(agent_data)
     agent_id = payload.get("id") or str(uuid.uuid4())
     payload["id"] = agent_id
@@ -102,6 +106,8 @@ def save_group_agent(group_id: str, agent_data: Dict[str, Any], user_id: Optiona
     payload.setdefault("instructions", "")
     payload.setdefault("actions_to_load", [])
     payload.setdefault("other_settings", {})
+    payload.setdefault("tags", [])
+    payload.setdefault("icon", {})
     payload.setdefault("max_completion_tokens", -1)
     payload.setdefault("enable_agent_gpt_apim", False)
     payload.setdefault("agent_type", "local")
@@ -131,7 +137,7 @@ def save_group_agent(group_id: str, agent_data: Dict[str, Any], user_id: Optiona
         payload["max_completion_tokens"] = -1
 
     # Store sensitive values in Key Vault before persistence
-    payload = keyvault_agent_save_helper(payload, payload["id"], scope="group")
+    payload = keyvault_agent_save_helper(payload, payload["id"], scope="group", existing_agent=existing_agent)
 
     try:
         stored = cosmos_group_agents_container.upsert_item(body=payload)
@@ -230,6 +236,8 @@ def _clean_agent(agent: Dict[str, Any]) -> Dict[str, Any]:
     cleaned.setdefault("model_endpoint_id", "")
     cleaned.setdefault("model_id", "")
     cleaned.setdefault("model_provider", "")
+    cleaned.setdefault("tags", [])
+    cleaned.setdefault("icon", {})
     # Remove empty reasoning_effort to prevent validation errors
     if cleaned.get("reasoning_effort") == "":
         cleaned.pop("reasoning_effort", None)

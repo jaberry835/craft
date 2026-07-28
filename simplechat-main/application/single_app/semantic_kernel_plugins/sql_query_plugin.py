@@ -12,7 +12,13 @@ from typing import Dict, Any, List, Optional, Union
 from semantic_kernel_plugins.base_plugin import BasePlugin
 from semantic_kernel.functions import kernel_function
 from functions_appinsights import log_event
+from functions_debug import debug_print
 from semantic_kernel_plugins.plugin_invocation_logger import plugin_function_logger
+from semantic_kernel_plugins.sql_odbc_utils import (
+    DEFAULT_SQL_SERVER_ODBC_DRIVER,
+    build_sql_server_odbc_connection_string,
+    connect_with_sql_server_odbc_fallback,
+)
 
 # Helper class to wrap results with metadata
 class ResultWithMetadata:
@@ -36,7 +42,11 @@ class SQLQueryPlugin(BasePlugin):
         raw_db_type = (manifest.get('database_type') or additional_fields.get('database_type', 'sqlserver')).lower()
         # Map azure_sql to sqlserver for compatibility
         self.database_type = 'sqlserver' if raw_db_type in ['azure_sql', 'azuresql'] else raw_db_type
-        self.auth_type = manifest.get('auth', {}).get('type', 'connection_string')
+        manifest_auth_type = manifest.get('auth', {}).get('type', 'connection_string')
+        additional_auth_type = additional_fields.get('auth_type') or additional_fields.get('identity_auth_type')
+        self.auth_type = additional_auth_type or manifest_auth_type
+        if self.auth_type == 'identity' and raw_db_type in ['azure_sql', 'azuresql']:
+            self.auth_type = 'managed_identity'
         self.server = manifest.get('server') or additional_fields.get('server')
         self.database = manifest.get('database') or additional_fields.get('database')
         self.username = manifest.get('username') or additional_fields.get('username')
@@ -60,13 +70,13 @@ class SQLQueryPlugin(BasePlugin):
             "has_username": bool(self.username),
             "manifest_keys": list(manifest.keys())
         })
-        print(f"[SQLQueryPlugin] Initializing - DB Type: {self.database_type}, Auth: {self.auth_type}, Server: {self.server}, Database: {self.database}, Read-Only: {self.read_only}")
+        debug_print(f"[SQLQueryPlugin] Initializing - DB Type: {self.database_type}, Auth: {self.auth_type}, Server: {self.server}, Database: {self.database}, Read-Only: {self.read_only}")
         
         # Validate required configuration
         if not self.connection_string and not (self.server and self.database):
             error_msg = "SQLQueryPlugin requires either 'connection_string' or 'server' and 'database' in the manifest."
             log_event(f"[SQLQueryPlugin] Configuration error: {error_msg}", extra={"manifest": manifest})
-            print(f"[SQLQueryPlugin] ERROR: {error_msg}")
+            debug_print(f"[SQLQueryPlugin] ERROR: {error_msg}")
             raise ValueError(error_msg)
         
         # Set up database-specific configurations
@@ -74,14 +84,14 @@ class SQLQueryPlugin(BasePlugin):
         
         # Initialize connection (lazy loading)
         self._connection = None
-        print(f"[SQLQueryPlugin] Initialization complete")
+        debug_print(f"[SQLQueryPlugin] Initialization complete")
 
     def _setup_database_config(self):
         """Setup database-specific configurations and import requirements"""
         self.supported_databases = {
             'sqlserver': {
                 'module': 'pyodbc',
-                'default_driver': 'ODBC Driver 17 for SQL Server',
+                'default_driver': DEFAULT_SQL_SERVER_ODBC_DRIVER,
                 'default_port': 1433
             },
             'postgresql': {
@@ -113,18 +123,36 @@ class SQLQueryPlugin(BasePlugin):
     def _create_connection(self):
         """Create database connection based on database type"""
         try:
+            debug_print(
+                f"[SQLQueryPlugin] Creating database connection database_type={self.database_type} "
+                f"auth_type={self.auth_type} server={self.server} database={self.database} "
+                f"driver={self.driver or self.supported_databases.get(self.database_type, {}).get('default_driver')} "
+                f"has_connection_string={bool(self.connection_string)} timeout={self.timeout}"
+            )
             if self.database_type == 'sqlserver':
                 import pyodbc
                 if self.connection_string:
-                    return pyodbc.connect(self.connection_string, timeout=self.timeout)
+                    return connect_with_sql_server_odbc_fallback(
+                        pyodbc.connect,
+                        self.connection_string,
+                        connect_kwargs={"timeout": self.timeout},
+                        log_source="SQLQueryPlugin",
+                    )
                 else:
-                    driver = self.driver or self.supported_databases['sqlserver']['default_driver']
-                    conn_str = f"DRIVER={{{driver}}};SERVER={self.server};DATABASE={self.database}"
-                    if self.username and self.password:
-                        conn_str += f";UID={self.username};PWD={self.password}"
-                    else:
-                        conn_str += ";Trusted_Connection=yes"
-                    return pyodbc.connect(conn_str, timeout=self.timeout)
+                    conn_str = build_sql_server_odbc_connection_string(
+                        server=self.server,
+                        database=self.database,
+                        driver=self.driver or self.supported_databases['sqlserver']['default_driver'],
+                        username=self.username,
+                        password=self.password,
+                        auth_type=self.auth_type,
+                    )
+                    return connect_with_sql_server_odbc_fallback(
+                        pyodbc.connect,
+                        conn_str,
+                        connect_kwargs={"timeout": self.timeout},
+                        log_source="SQLQueryPlugin",
+                    )
                     
             elif self.database_type == 'postgresql':
                 import psycopg2
@@ -162,8 +190,13 @@ class SQLQueryPlugin(BasePlugin):
                 return conn
                 
         except ImportError as e:
+            debug_print(f"[SQLQueryPlugin] Database driver import failed database_type={self.database_type} error={e}")
             raise ImportError(f"Required database driver not installed for {self.database_type}: {e}")
         except Exception as e:
+            debug_print(
+                f"[SQLQueryPlugin] Connection failed database_type={self.database_type} server={self.server} "
+                f"database={self.database} exception_type={type(e).__name__} message={e}"
+            )
             log_event(f"[SQLQueryPlugin] Connection failed: {e}", extra={"database_type": self.database_type})
             raise
 
@@ -250,6 +283,11 @@ class SQLQueryPlugin(BasePlugin):
             if not validation_result["is_valid"]:
                 raise ValueError(f"Invalid query: {validation_result['issues']}")
             
+            debug_print(
+                f"[SQLQueryPlugin] Executing query database_type={self.database_type} "
+                f"query_length={len(cleaned_query)} parameters_present={bool(parameters)} "
+                f"max_rows={max_rows or self.max_rows} timeout={self.timeout}"
+            )
             conn = self._get_connection()
             cursor = conn.cursor()
             
@@ -299,10 +337,18 @@ class SQLQueryPlugin(BasePlugin):
             }
             
             log_event(f"[SQLQueryPlugin] Executed query successfully, returned {len(results)} rows")
+            debug_print(
+                f"[SQLQueryPlugin] Query executed successfully row_count={len(results)} "
+                f"columns={len(columns)} truncated={len(results) >= effective_max_rows}"
+            )
             return ResultWithMetadata(result_data, self.metadata)
             
         except Exception as e:
             log_event(f"[SQLQueryPlugin] Error executing query: {e}")
+            debug_print(
+                f"[SQLQueryPlugin] Error executing query database_type={self.database_type} "
+                f"exception_type={type(e).__name__} message={e}"
+            )
             error_result = {
                 "error": str(e),
                 "query": query,
@@ -328,6 +374,10 @@ class SQLQueryPlugin(BasePlugin):
             if not validation_result["is_valid"]:
                 raise ValueError(f"Invalid query: {validation_result['issues']}")
             
+            debug_print(
+                f"[SQLQueryPlugin] Executing scalar query database_type={self.database_type} "
+                f"query_length={len(cleaned_query)} parameters_present={bool(parameters)} timeout={self.timeout}"
+            )
             conn = self._get_connection()
             cursor = conn.cursor()
             
@@ -360,10 +410,15 @@ class SQLQueryPlugin(BasePlugin):
             }
             
             log_event(f"[SQLQueryPlugin] Executed scalar query successfully")
+            debug_print("[SQLQueryPlugin] Scalar query executed successfully.")
             return ResultWithMetadata(result_data, self.metadata)
             
         except Exception as e:
             log_event(f"[SQLQueryPlugin] Error executing scalar query: {e}")
+            debug_print(
+                f"[SQLQueryPlugin] Error executing scalar query database_type={self.database_type} "
+                f"exception_type={type(e).__name__} message={e}"
+            )
             error_result = {
                 "error": str(e),
                 "query": query,
@@ -408,6 +463,10 @@ class SQLQueryPlugin(BasePlugin):
             if not validation_result["is_valid"]:
                 raise ValueError(f"Invalid query: {validation_result['issues']}")
             
+            debug_print(
+                f"[SQLQueryPlugin] Executing query_database database_type={self.database_type} "
+                f"query_length={len(cleaned_query)} max_rows={max_rows or self.max_rows} timeout={self.timeout}"
+            )
             conn = self._get_connection()
             cursor = conn.cursor()
             
@@ -451,10 +510,18 @@ class SQLQueryPlugin(BasePlugin):
             }
             
             log_event(f"[SQLQueryPlugin] query_database executed successfully, returned {len(results)} rows", extra={"question": question})
+            debug_print(
+                f"[SQLQueryPlugin] query_database executed successfully row_count={len(results)} "
+                f"columns={len(columns)} truncated={len(results) >= effective_max_rows}"
+            )
             return ResultWithMetadata(result_data, self.metadata)
             
         except Exception as e:
             log_event(f"[SQLQueryPlugin] Error in query_database: {e}", extra={"question": question})
+            debug_print(
+                f"[SQLQueryPlugin] Error in query_database database_type={self.database_type} "
+                f"exception_type={type(e).__name__} message={e}"
+            )
             error_result = {
                 "error": str(e),
                 "question": question,

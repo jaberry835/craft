@@ -17,6 +17,9 @@ let exportFormat = 'json';
 let exportPackaging = 'single';
 let includeSummaryIntro = false;
 let summaryModelDeployment = '';
+let summaryModelEndpointId = '';
+let summaryModelId = '';
+let summaryModelProvider = '';
 let currentStep = 1;
 let totalSteps = 3;
 let skipSelectionStep = false;
@@ -56,7 +59,7 @@ function openExportWizard(conversationIds, skipSelection) {
     exportFormat = 'json';
     exportPackaging = conversationIds.length > 1 ? 'zip' : 'single';
     includeSummaryIntro = false;
-    summaryModelDeployment = _getDefaultSummaryModel();
+    _setSummaryModelSelectionFromSelect(getEl('model-select'));
     skipSelectionStep = !!skipSelection;
 
     // Determine step configuration
@@ -114,10 +117,25 @@ function prevStep() {
 
 async function _loadConversationTitles() {
     try {
-        const response = await fetch('/api/get_conversations');
-        if (!response.ok) throw new Error('Failed to fetch conversations');
-        const data = await response.json();
-        const conversations = data.conversations || [];
+        const legacyConversationsRequest = fetch('/api/get_conversations')
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('Failed to fetch conversations');
+                }
+                return response.json();
+            });
+        const collaborationConversationsRequest = window.chatCollaboration?.fetchCollaborationConversationList
+            ? window.chatCollaboration.fetchCollaborationConversationList().catch(() => [])
+            : Promise.resolve([]);
+
+        const [legacyData, collaborationConversations] = await Promise.all([
+            legacyConversationsRequest,
+            collaborationConversationsRequest,
+        ]);
+        const conversations = [
+            ...(legacyData?.conversations || []),
+            ...(Array.isArray(collaborationConversations) ? collaborationConversations : []),
+        ];
         exportConversationTitles = {};
         conversations.forEach(c => {
             if (exportConversationIds.includes(c.id)) {
@@ -344,10 +362,10 @@ function _renderSummaryStep(container) {
     const summaryModelSelect = getEl('export-summary-model');
 
     if (summaryModelSelect && hasModelOptions) {
-        summaryModelSelect.value = defaultSummaryModel || summaryModelSelect.value;
-        summaryModelDeployment = summaryModelSelect.options[summaryModelSelect.selectedIndex]?.dataset?.deploymentName || summaryModelSelect.value;
+        _selectSummaryModelOption(summaryModelSelect, defaultSummaryModel);
+        _setSummaryModelSelectionFromSelect(summaryModelSelect);
         summaryModelSelect.addEventListener('change', () => {
-            summaryModelDeployment = summaryModelSelect.options[summaryModelSelect.selectedIndex]?.dataset?.deploymentName || summaryModelSelect.value;
+            _setSummaryModelSelectionFromSelect(summaryModelSelect);
         });
     }
 
@@ -358,8 +376,9 @@ function _renderSummaryStep(container) {
                 modelContainer.classList.toggle('d-none', !includeSummaryIntro);
             }
             if (includeSummaryIntro && summaryModelSelect && !summaryModelSelect.value) {
-                summaryModelSelect.value = _getDefaultSummaryModel();
-                summaryModelDeployment = summaryModelSelect.options[summaryModelSelect.selectedIndex]?.dataset?.deploymentName || summaryModelSelect.value;
+                _setSummaryModelSelectionFromSelect(getEl('model-select'));
+                _selectSummaryModelOption(summaryModelSelect, summaryModelDeployment || _getDefaultSummaryModel());
+                _setSummaryModelSelectionFromSelect(summaryModelSelect);
             }
         });
     }
@@ -532,7 +551,10 @@ async function _executeExport() {
                 format: exportFormat,
                 packaging: exportPackaging,
                 include_summary_intro: includeSummaryIntro,
-                summary_model_deployment: includeSummaryIntro ? summaryModelDeployment : null
+                summary_model_deployment: includeSummaryIntro ? summaryModelDeployment : null,
+                summary_model_endpoint_id: includeSummaryIntro ? summaryModelEndpointId : null,
+                summary_model_id: includeSummaryIntro ? summaryModelId : null,
+                summary_model_provider: includeSummaryIntro ? summaryModelProvider : null
             })
         });
 
@@ -603,6 +625,48 @@ function _getDefaultSummaryModel() {
     }
 
     return mainModelSelect.value || (mainModelSelect.options[0] ? mainModelSelect.options[0].value : '');
+}
+
+function _selectSummaryModelOption(selectElement, deployment) {
+    if (!selectElement) {
+        return;
+    }
+
+    const deploymentValue = String(deployment || '').trim();
+    const options = Array.from(selectElement.options || []);
+    const exactOption = options.find(option => {
+        const optionDeployment = option.dataset.deploymentName || option.value || '';
+        if (deploymentValue && optionDeployment !== deploymentValue) {
+            return false;
+        }
+        if (summaryModelEndpointId && option.dataset.endpointId !== summaryModelEndpointId) {
+            return false;
+        }
+        if (summaryModelId && option.dataset.modelId !== summaryModelId) {
+            return false;
+        }
+        if (summaryModelProvider && option.dataset.provider !== summaryModelProvider) {
+            return false;
+        }
+        return Boolean(deploymentValue || summaryModelEndpointId || summaryModelId || summaryModelProvider);
+    });
+    const deploymentOption = exactOption || options.find(option => (
+        option.dataset.deploymentName || option.value || ''
+    ) === deploymentValue);
+
+    if (deploymentOption) {
+        selectElement.selectedIndex = deploymentOption.index;
+    } else if (options.length > 0 && !selectElement.value) {
+        selectElement.selectedIndex = 0;
+    }
+}
+
+function _setSummaryModelSelectionFromSelect(selectElement) {
+    const selectedOption = selectElement?.options?.[selectElement.selectedIndex];
+    summaryModelDeployment = selectedOption?.dataset?.deploymentName || selectElement?.value || '';
+    summaryModelEndpointId = selectedOption?.dataset?.endpointId || '';
+    summaryModelId = selectedOption?.dataset?.modelId || '';
+    summaryModelProvider = selectedOption?.dataset?.provider || '';
 }
 
 // --- Expose Globally ---

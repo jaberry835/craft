@@ -91,7 +91,7 @@ async function fetchPlugins() {
         document.getElementById('plugins-list-view'),
         document.getElementById('plugins-grid-view')
       );
-    });
+    }, { mobileDefault: 'grid' });
     
     // Set up the create action button
     const createPluginBtn = document.getElementById('create-plugin-btn');
@@ -109,6 +109,10 @@ async function fetchPlugins() {
 function openPluginModal(plugin = null) {
   // Use the new multi-step modal
   if (window.pluginModalStepper) {
+    window.pluginModalStepper.setActionScope({
+      scope: 'personal',
+      apiBase: '/api/workspace-identities/personal'
+    });
     const modal = window.pluginModalStepper.showModal(plugin);
     
     // Set up save handler

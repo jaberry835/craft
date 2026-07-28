@@ -4,16 +4,92 @@ from config import *
 from functions_documents import *
 from functions_authentication import *
 from functions_settings import *
+from functions_web_search_test import run_web_search_connection_test
+from functions_url_access_policy_test import run_url_access_policy_test
 from functions_activity_logging import (
     log_admin_feedback_email_submission,
+    log_general_admin_action,
     log_admin_release_notifications_registration,
     log_user_support_feedback_email_submission,
 )
 from functions_appinsights import log_event
+from functions_cosmos_throughput import (
+    calculate_manual_to_autoscale_target,
+    calculate_manual_scale_target,
+    build_cosmos_throughput_access_validation,
+    build_runtime_update,
+    CosmosThroughputError,
+    get_cosmos_throughput_setting_keys,
+    get_cosmos_throughput_status,
+    normalize_cosmos_throughput_settings,
+    set_database_throughput,
+)
 from azure.identity import DefaultAzureCredential
 from azure.keyvault.secrets import SecretClient
 from swagger_wrapper import swagger_route, get_auth_security
+import logging
 import redis 
+import time
+import uuid
+
+
+def _resolve_test_payload_secret(payload, path, settings, field_name):
+    current = payload if isinstance(payload, dict) else {}
+    for part in path[:-1]:
+        current = current.get(part) if isinstance(current, dict) else None
+    if not isinstance(current, dict) or path[-1] not in current:
+        return
+    current[path[-1]] = resolve_admin_settings_secret_value(field_name, current.get(path[-1]), settings)
+
+
+def _resolve_admin_settings_test_secrets(payload):
+    settings = get_settings()
+    test_type = str((payload or {}).get('test_type') or '').strip()
+    if test_type == 'gpt':
+        if payload.get('enable_apim'):
+            _resolve_test_payload_secret(payload, ('apim', 'subscription_key'), settings, 'azure_apim_gpt_subscription_key')
+        else:
+            _resolve_test_payload_secret(payload, ('direct', 'key'), settings, 'azure_openai_gpt_key')
+    elif test_type == 'embedding':
+        if payload.get('enable_apim'):
+            _resolve_test_payload_secret(payload, ('apim', 'subscription_key'), settings, 'azure_apim_embedding_subscription_key')
+        else:
+            _resolve_test_payload_secret(payload, ('direct', 'key'), settings, 'azure_openai_embedding_key')
+    elif test_type == 'image':
+        if payload.get('enable_apim'):
+            _resolve_test_payload_secret(payload, ('apim', 'subscription_key'), settings, 'azure_apim_image_gen_subscription_key')
+        else:
+            _resolve_test_payload_secret(payload, ('direct', 'key'), settings, 'azure_openai_image_gen_key')
+    elif test_type == 'safety':
+        if payload.get('enable_apim'):
+            _resolve_test_payload_secret(payload, ('apim', 'subscription_key'), settings, 'azure_apim_content_safety_subscription_key')
+        else:
+            _resolve_test_payload_secret(payload, ('direct', 'key'), settings, 'content_safety_key')
+    elif test_type == 'azure_ai_search':
+        if payload.get('enable_apim'):
+            _resolve_test_payload_secret(payload, ('apim', 'subscription_key'), settings, 'azure_apim_ai_search_subscription_key')
+        else:
+            _resolve_test_payload_secret(payload, ('direct', 'key'), settings, 'azure_ai_search_key')
+    elif test_type == 'azure_doc_intelligence':
+        if payload.get('enable_apim'):
+            _resolve_test_payload_secret(payload, ('apim', 'subscription_key'), settings, 'azure_apim_document_intelligence_subscription_key')
+        else:
+            _resolve_test_payload_secret(payload, ('direct', 'key'), settings, 'azure_document_intelligence_key')
+    elif test_type == 'redis':
+        _resolve_test_payload_secret(payload, ('key',), settings, 'redis_key')
+    elif test_type == 'web_search':
+        _resolve_test_payload_secret(
+            payload,
+            ('foundry', 'client_secret'),
+            settings,
+            'web_search_agent.other_settings.azure_ai_foundry.client_secret',
+        )
+    elif test_type == 'multimodal_vision':
+        if payload.get('enable_apim'):
+            _resolve_test_payload_secret(payload, ('apim', 'subscription_key'), settings, 'azure_apim_gpt_subscription_key')
+        else:
+            _resolve_test_payload_secret(payload, ('direct', 'key'), settings, 'azure_openai_gpt_key')
+    return payload
 
 
 def auto_fix_index_fields(idx_type: str, user_id: str = 'system', admin_email: str = None) -> dict:
@@ -391,7 +467,8 @@ def register_route_backend_settings(app):
         data from admin_settings.js. Uses that data to attempt an actual connection
         to GPT, Embeddings, etc., and returns success/failure.
         """
-        data = request.get_json(force=True)
+        data = request.get_json(force=True) or {}
+        data = _resolve_admin_settings_test_secrets(data)
         test_type = data.get('test_type', '')
 
         try:
@@ -409,6 +486,9 @@ def register_route_backend_settings(app):
 
             elif test_type == 'web_search':
                 return _test_web_search_connection(data)
+
+            elif test_type == 'url_access_policy':
+                return _test_url_access_policy(data)
 
             elif test_type == 'azure_ai_search':
                 return _test_azure_ai_search_connection(data)
@@ -437,6 +517,253 @@ def register_route_backend_settings(app):
 
         except Exception as e:
             return jsonify({'error': str(e)}), 500
+
+    @app.route('/api/admin/settings/cosmos-throughput/status', methods=['GET'])
+    @swagger_route(security=get_auth_security())
+    @login_required
+    @admin_required
+    def get_cosmos_throughput_admin_status():
+        """Return Cosmos DB throughput and RU usage status for the admin Scale tab."""
+        refresh_id = str(uuid.uuid4())
+        refresh_start = time.perf_counter()
+        try:
+            user = session.get('user', {})
+            admin_email = user.get('preferred_username', user.get('email', 'unknown'))
+            log_event(
+                '[CosmosThroughput] Admin status refresh requested.',
+                extra={'refresh_id': refresh_id, 'admin_email': admin_email},
+                level=logging.INFO,
+            )
+            status = get_cosmos_throughput_status(get_settings(), include_metrics=True, refresh_id=refresh_id)
+            update_settings(build_runtime_update(status=status))
+            log_event(
+                '[CosmosThroughput] Admin status refresh completed.',
+                extra={
+                    'refresh_id': refresh_id,
+                    'capacity_scope': status.get('capacity_scope'),
+                    'configured': status.get('configured'),
+                    'elapsed_ms': int((time.perf_counter() - refresh_start) * 1000),
+                },
+                level=logging.INFO,
+            )
+            return jsonify(status), 200
+        except Exception as e:
+            log_event(
+                '[CosmosThroughput] Failed to load admin status.',
+                extra={
+                    'refresh_id': refresh_id,
+                    'error': str(e),
+                    'elapsed_ms': int((time.perf_counter() - refresh_start) * 1000),
+                },
+                level=logging.ERROR,
+                exceptionTraceback=True,
+            )
+            return jsonify({'error': 'Failed to load Cosmos throughput status.'}), 500
+
+    @app.route('/api/admin/settings/cosmos-throughput/validate-access', methods=['POST'])
+    @swagger_route(security=get_auth_security())
+    @login_required
+    @admin_required
+    def validate_cosmos_throughput_admin_access():
+        """Validate Cosmos throughput resource configuration and access without saving settings."""
+        validation_id = str(uuid.uuid4())
+        validation_start = time.perf_counter()
+        try:
+            user = session.get('user', {})
+            admin_email = user.get('preferred_username', user.get('email', 'unknown'))
+            payload = request.get_json(silent=True) or {}
+            base_settings = get_settings()
+            candidate_settings = dict(base_settings or {})
+            for key in get_cosmos_throughput_setting_keys():
+                if key in payload:
+                    candidate_settings[key] = payload.get(key)
+            candidate_settings = normalize_cosmos_throughput_settings(candidate_settings)
+
+            log_event(
+                '[CosmosThroughput] Admin access validation requested.',
+                extra={'validation_id': validation_id, 'admin_email': admin_email},
+                level=logging.INFO,
+            )
+            status = get_cosmos_throughput_status(
+                candidate_settings,
+                include_metrics=True,
+                refresh_id=validation_id,
+            )
+            validation = build_cosmos_throughput_access_validation(status)
+            log_event(
+                '[CosmosThroughput] Admin access validation completed.',
+                extra={
+                    'validation_id': validation_id,
+                    'success': validation.get('success'),
+                    'capacity_scope': status.get('capacity_scope'),
+                    'elapsed_ms': int((time.perf_counter() - validation_start) * 1000),
+                },
+                level=logging.INFO if validation.get('success') else logging.WARNING,
+            )
+            return jsonify({
+                **validation,
+                'status': status,
+            }), 200
+        except Exception as exc:
+            log_event(
+                '[CosmosThroughput] Admin access validation failed.',
+                extra={
+                    'validation_id': validation_id,
+                    'error': str(exc),
+                    'elapsed_ms': int((time.perf_counter() - validation_start) * 1000),
+                },
+                level=logging.ERROR,
+                exceptionTraceback=True,
+            )
+            return jsonify({'error': 'Failed to validate Cosmos throughput access.'}), 500
+
+    @app.route('/api/admin/settings/cosmos-throughput/scale', methods=['POST'])
+    @swagger_route(security=get_auth_security())
+    @login_required
+    @admin_required
+    def scale_cosmos_throughput_admin():
+        """Manually scale Cosmos DB database throughput from the admin Scale tab."""
+        user = session.get('user', {})
+        admin_email = user.get('preferred_username', user.get('email', 'unknown'))
+        admin_user_id = get_current_user_id() or 'unknown'
+
+        try:
+            data = request.get_json(force=True) or {}
+            direction = str(data.get('direction') or '').strip().lower()
+            container_name = str(data.get('container_name') or '').strip()
+            settings = get_settings()
+            status = get_cosmos_throughput_status(settings, include_metrics=True)
+            target_ru = calculate_manual_scale_target(settings, status, direction, container_name=container_name)
+            scale_result = set_database_throughput(
+                settings,
+                target_ru,
+                initiated_by=admin_email,
+                reason=f'manual_{direction}',
+                decision={'scope': 'container', 'container_name': container_name} if container_name else {'scope': 'database'},
+            )
+            scale_result['direction'] = direction
+            scale_result['reason'] = f'manual_{direction}'
+
+            update_settings(build_runtime_update(
+                status=status,
+                decision={'direction': direction, 'reason': f'manual_{direction}'},
+                scale_result=scale_result,
+                settings=settings,
+            ))
+            log_general_admin_action(
+                admin_user_id=admin_user_id,
+                admin_email=admin_email,
+                action='cosmos_throughput_manual_scale',
+                description=f'Manually scaled Cosmos DB throughput {direction}.',
+                additional_context={
+                    'direction': direction,
+                    'scope': scale_result.get('scope'),
+                    'container_name': scale_result.get('container_name'),
+                    'from_ru': scale_result.get('from_ru'),
+                    'to_ru': scale_result.get('to_ru'),
+                    'mode': scale_result.get('mode'),
+                },
+            )
+
+            return jsonify({
+                'success': True,
+                'direction': direction,
+                'scope': scale_result.get('scope'),
+                'container_name': scale_result.get('container_name'),
+                'from_ru': scale_result.get('from_ru'),
+                'to_ru': scale_result.get('to_ru'),
+                'mode': scale_result.get('mode'),
+            }), 200
+        except CosmosThroughputError as e:
+            return jsonify({'error': str(e)}), 400
+        except Exception as e:
+            log_event(
+                '[CosmosThroughput] Manual admin scale failed.',
+                extra={'error': str(e), 'admin_email': admin_email},
+                level=logging.ERROR,
+                exceptionTraceback=True,
+            )
+            return jsonify({'error': 'Failed to scale Cosmos throughput.'}), 500
+
+    @app.route('/api/admin/settings/cosmos-throughput/convert-autoscale', methods=['POST'])
+    @swagger_route(security=get_auth_security())
+    @login_required
+    @admin_required
+    def convert_cosmos_throughput_to_autoscale_admin():
+        """Convert manual Cosmos DB throughput to native Cosmos autoscale throughput."""
+        user = session.get('user', {})
+        admin_email = user.get('preferred_username', user.get('email', 'unknown'))
+        admin_user_id = get_current_user_id() or 'unknown'
+
+        try:
+            data = request.get_json(force=True) or {}
+            container_name = str(data.get('container_name') or '').strip()
+            settings = get_settings()
+            status = get_cosmos_throughput_status(settings, include_metrics=False)
+            target_ru = calculate_manual_to_autoscale_target(settings, status, container_name=container_name)
+            decision = {
+                'scope': 'container',
+                'container_name': container_name,
+                'direction': 'convert_to_autoscale',
+                'target_mode': 'autoscale',
+                'reason': 'manual_throughput_conversion_requested',
+            } if container_name else {
+                'scope': 'database',
+                'direction': 'convert_to_autoscale',
+                'target_mode': 'autoscale',
+                'reason': 'manual_throughput_conversion_requested',
+            }
+            scale_result = set_database_throughput(
+                settings,
+                target_ru,
+                initiated_by=admin_email,
+                reason='manual_to_autoscale_conversion',
+                decision=decision,
+            )
+            scale_result['direction'] = 'convert_to_autoscale'
+            scale_result['reason'] = 'manual_to_autoscale_conversion'
+
+            update_settings(build_runtime_update(
+                status=status,
+                decision=decision,
+                scale_result=scale_result,
+                settings=settings,
+            ))
+            log_general_admin_action(
+                admin_user_id=admin_user_id,
+                admin_email=admin_email,
+                action='cosmos_throughput_manual_to_autoscale_conversion',
+                description='Converted Cosmos DB manual throughput to native autoscale throughput.',
+                additional_context={
+                    'scope': scale_result.get('scope'),
+                    'container_name': scale_result.get('container_name'),
+                    'from_ru': scale_result.get('from_ru'),
+                    'to_ru': scale_result.get('to_ru'),
+                    'from_mode': scale_result.get('from_mode'),
+                    'to_mode': scale_result.get('to_mode'),
+                },
+            )
+
+            return jsonify({
+                'success': True,
+                'scope': scale_result.get('scope'),
+                'container_name': scale_result.get('container_name'),
+                'from_ru': scale_result.get('from_ru'),
+                'to_ru': scale_result.get('to_ru'),
+                'from_mode': scale_result.get('from_mode'),
+                'to_mode': scale_result.get('to_mode'),
+                'reason': scale_result.get('reason'),
+            }), 200
+        except CosmosThroughputError as exc:
+            return jsonify({'error': str(exc)}), exc.status_code or 400
+        except Exception as exc:
+            log_event(
+                '[CosmosThroughput] Manual-to-autoscale conversion failed.',
+                extra={'error': str(exc)},
+                level=logging.ERROR,
+                exceptionTraceback=True,
+            )
+            return jsonify({'error': 'Cosmos throughput mode conversion failed.'}), 500
 
     @app.route('/api/admin/settings/send_feedback_email', methods=['POST'])
     @swagger_route(security=get_auth_security())
@@ -1120,6 +1447,25 @@ def _test_safety_connection(payload):
     except Exception as e:
         return jsonify({'error': f'Safety connection error: {str(e)}'}), 500
 
+
+def _test_web_search_connection(payload):
+    """Attempt to run the configured Web Search Foundry agent with ephemeral settings."""
+    response_payload, status_code = run_web_search_connection_test(
+        payload,
+        global_settings=get_settings()
+    )
+    return jsonify(response_payload), status_code
+
+
+def _test_url_access_policy(payload):
+    """Evaluate a URL against the current URL Access policy form values."""
+    response_payload, status_code = run_url_access_policy_test(
+        payload,
+        global_settings=get_settings()
+    )
+    return jsonify(response_payload), status_code
+
+
 def _test_azure_ai_search_connection(payload):
     """Attempt to connect to Azure Cognitive Search (or APIM-wrapped)."""
     enable_apim = payload.get('enable_apim', False)
@@ -1168,6 +1514,14 @@ def _test_azure_ai_search_connection(payload):
 def _test_azure_doc_intelligence_connection(payload):
     """Attempt to connect to Azure Form Recognizer / Document Intelligence."""
     enable_apim = payload.get('enable_apim', False)
+    extraction_mode = normalize_document_intelligence_pdf_image_extraction_mode(
+        payload.get('document_intelligence_pdf_image_extraction_mode')
+    )
+    test_extraction_mode = "layout" if extraction_mode in ("layout", "auto") else "read"
+    model_id = "prebuilt-layout" if test_extraction_mode == "layout" else "prebuilt-read"
+    analyze_options = {}
+    if test_extraction_mode == "layout":
+        analyze_options["output_content_format"] = "markdown"
 
     if enable_apim:
         apim_data = payload.get('apim', {})
@@ -1211,8 +1565,9 @@ def _test_azure_doc_intelligence_connection(payload):
             base64_source = base64.b64encode(file_bytes).decode('utf-8')
 
         poller = document_intelligence_client.begin_analyze_document(
-            "prebuilt-read",
-            {"base64Source": base64_source}
+            model_id,
+            {"base64Source": base64_source},
+            **analyze_options
         )
     else:
         with open(test_file_path, 'rb') as f:
@@ -1221,8 +1576,9 @@ def _test_azure_doc_intelligence_connection(payload):
             base64_source = base64.b64encode(file_content).decode('utf-8')
             analyze_request = {"base64Source": base64_source}
             poller = document_intelligence_client.begin_analyze_document(
-                model_id="prebuilt-read",
-                body=analyze_request
+                model_id=model_id,
+                body=analyze_request,
+                **analyze_options
             )
 
     max_wait_time = 600
@@ -1237,7 +1593,10 @@ def _test_azure_doc_intelligence_connection(payload):
         time.sleep(10)
 
     if status == "succeeded":
-        return jsonify({'message': 'Azure document intelligence connection successful'}), 200
+        if extraction_mode == "auto":
+            return jsonify({'message': 'Azure document intelligence Auto connection successful. Auto samples PDFs with Enhanced extraction during ingestion, then finishes with Standard or Enhanced.'}), 200
+        extraction_mode_label = "Enhanced" if extraction_mode == "layout" else "Standard"
+        return jsonify({'message': f'Azure document intelligence {extraction_mode_label} connection successful'}), 200
     else:
         return jsonify({'error': f"Document Intelligence error: {status}"}), 500
 

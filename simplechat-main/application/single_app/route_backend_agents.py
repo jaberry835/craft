@@ -4,15 +4,18 @@ import re
 import uuid
 import logging
 import builtins
+from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from flask import Blueprint, jsonify, request, current_app, session
 from config import (
+    AzureOpenAI,
+    cognitive_services_scope,
     cosmos_global_agents_container,
     cosmos_group_agents_container,
     cosmos_personal_agents_container,
 )
 from semantic_kernel_loader import get_agent_orchestration_types
 from functions_settings import get_settings, update_settings, get_user_settings, update_user_settings, sanitize_model_endpoints_for_frontend
-from functions_global_agents import get_global_agents, save_global_agent, delete_global_agent
+from functions_global_agents import get_global_agents, save_global_agent, delete_global_agent, update_global_agent_enabled
 from functions_personal_agents import get_personal_agents, ensure_migration_complete, save_personal_agent, delete_personal_agent
 from functions_group import require_active_group, assert_group_role
 from functions_agent_payload import (
@@ -22,6 +25,11 @@ from functions_agent_payload import (
     has_agent_custom_connection_override,
     is_azure_ai_foundry_agent,
     sanitize_agent_payload,
+)
+from functions_assigned_knowledge import (
+    AssignedKnowledgeError,
+    apply_assigned_knowledge_to_agent_payload,
+    build_assigned_knowledge_catalog,
 )
 from functions_group_agents import (
     get_group_agents,
@@ -33,6 +41,12 @@ from functions_group_agents import (
 from functions_debug import debug_print
 from functions_authentication import *
 from functions_appinsights import log_event
+from functions_agent_catalog import (
+    apply_agent_popular_promotions,
+    apply_agent_usage_counts,
+    build_accessible_agent_catalog,
+    get_popular_agents,
+)
 from functions_group import get_group_model_endpoints, require_active_group
 from json_schema_validation import validate_agent
 from swagger_wrapper import swagger_route, get_auth_security
@@ -42,53 +56,156 @@ from functions_activity_logging import (
     log_agent_deletion,
     log_general_admin_action,
 )
+from functions_governance import ensure_governance_access, upsert_item_policy
 
 bpa = Blueprint('admin_agents', __name__)
+
+AGENT_INSTRUCTION_FIELD_LIMIT = 6000
+AGENT_INSTRUCTION_OUTPUT_TOKEN_LIMIT = 1400
+
+
+def _redact_catalog_agent_instructions(catalog):
+    redacted_catalog = []
+    for agent in catalog or []:
+        if not isinstance(agent, dict):
+            continue
+        agent_copy = dict(agent)
+        agent_copy.pop('instructions', None)
+        redacted_catalog.append(agent_copy)
+    return redacted_catalog
+
+
+def _normalize_agent_instruction_draft_input(value, max_length=AGENT_INSTRUCTION_FIELD_LIMIT):
+    """Normalize user-provided instruction draft context before sending it to the model."""
+    normalized_value = re.sub(r'\s+', ' ', str(value or '')).strip()
+    return normalized_value[:max_length]
+
+
+def _resolve_agent_instruction_model(settings):
+    """Resolve the configured GPT deployment for agent instruction drafting."""
+    if settings.get('enable_gpt_apim', False):
+        model_name = settings.get('azure_apim_gpt_deployment') or settings.get('azure_openai_gpt_deployment')
+    else:
+        gpt_model_settings = settings.get('gpt_model') if isinstance(settings.get('gpt_model'), dict) else {}
+        selected_models = gpt_model_settings.get('selected', [])
+        if not isinstance(selected_models, list):
+            selected_models = []
+        selected_model = selected_models[0] if selected_models else {}
+        model_name = (
+            settings.get('metadata_extraction_model')
+            or settings.get('azure_openai_gpt_deployment')
+            or selected_model.get('deploymentName')
+        )
+
+    if isinstance(model_name, str) and ',' in model_name:
+        model_name = model_name.split(',')[0].strip()
+    model_name = str(model_name or '').strip()
+    if not model_name:
+        raise RuntimeError('No GPT deployment is configured for instruction drafting.')
+    return model_name
+
+
+def _create_agent_instruction_client(settings):
+    """Create an Azure OpenAI client from existing app GPT/APIM settings."""
+    if settings.get('enable_gpt_apim', False):
+        return AzureOpenAI(
+            api_version=settings.get('azure_apim_gpt_api_version') or settings.get('azure_openai_gpt_api_version'),
+            azure_endpoint=settings.get('azure_apim_gpt_endpoint'),
+            api_key=settings.get('azure_apim_gpt_subscription_key'),
+        )
+
+    auth_type = str(settings.get('azure_openai_gpt_authentication_type') or 'key').strip().lower()
+    if auth_type == 'managed_identity':
+        token_provider = get_bearer_token_provider(
+            DefaultAzureCredential(),
+            cognitive_services_scope,
+        )
+        return AzureOpenAI(
+            api_version=settings.get('azure_openai_gpt_api_version'),
+            azure_endpoint=settings.get('azure_openai_gpt_endpoint'),
+            azure_ad_token_provider=token_provider,
+        )
+
+    return AzureOpenAI(
+        api_version=settings.get('azure_openai_gpt_api_version'),
+        azure_endpoint=settings.get('azure_openai_gpt_endpoint'),
+        api_key=settings.get('azure_openai_gpt_key'),
+    )
+
+
+def _build_agent_instruction_messages(display_name, description, brief, existing_instructions):
+    """Build the prompt for drafting editable SimpleChat agent instructions."""
+    display_name = _normalize_agent_instruction_draft_input(display_name, 500)
+    description = _normalize_agent_instruction_draft_input(description)
+    brief = _normalize_agent_instruction_draft_input(brief)
+    existing_instructions = _normalize_agent_instruction_draft_input(existing_instructions)
+
+    user_sections = [
+        f'Agent display name: {display_name or "Not provided"}',
+        f'Agent description: {description or "Not provided"}',
+        f'Author brief: {brief or "Not provided"}',
+    ]
+    if existing_instructions:
+        user_sections.append(f'Existing instructions to improve or preserve where useful:\n{existing_instructions}')
+
+    return [
+        {
+            'role': 'system',
+            'content': (
+                'You write production-ready SimpleChat agent instructions. '
+                'Return only the finished instructions in Markdown. '
+                'Be specific about role, goals, workflow, boundaries, tool use, and response style. '
+                'Do not include code fences, preambles, or commentary about how the instructions were created.'
+            ),
+        },
+        {
+            'role': 'user',
+            'content': (
+                '\n\n'.join(user_sections)
+                + '\n\nDraft concise but complete instructions that the user can edit before saving the agent.'
+            ),
+        },
+    ]
+
+
+def _build_agent_instruction_api_params(model_name, messages):
+    """Build chat-completion parameters compatible with GPT-5/o-series token names."""
+    model_name_lower = str(model_name or '').lower()
+    uses_completion_tokens = any(marker in model_name_lower for marker in ('o1', 'o3', 'gpt-5'))
+    api_params = {
+        'model': model_name,
+        'messages': messages,
+    }
+    if uses_completion_tokens:
+        api_params['max_completion_tokens'] = AGENT_INSTRUCTION_OUTPUT_TOKEN_LIMIT
+    else:
+        api_params['temperature'] = 0.2
+        api_params['max_tokens'] = AGENT_INSTRUCTION_OUTPUT_TOKEN_LIMIT
+    return api_params
+
+
+def _is_agent_allowed_for_user_selection(user_id, agent):
+    try:
+        if agent.get('is_global'):
+            ensure_governance_access(
+                'governance_global_agents_usage',
+                user_id,
+                item_entity_type='global_agent',
+                item_id=str(agent.get('id') or agent.get('name') or ''),
+            )
+        elif agent.get('is_group'):
+            ensure_governance_access('governance_group_agents', user_id)
+        else:
+            ensure_governance_access('governance_user_agents', user_id)
+        return True
+    except PermissionError:
+        return False
 
 
 def _build_user_selectable_agents(user_id, requested_agent=None):
     """Build the set of agents the current user is allowed to select."""
     settings = get_settings()
-    requested_agent = requested_agent or {}
-    candidates = []
-
-    for agent in get_personal_agents(user_id):
-        candidate = dict(agent)
-        candidate['is_global'] = False
-        candidate['is_group'] = False
-        candidate['group_id'] = None
-        candidate['group_name'] = None
-        candidates.append(candidate)
-
-    merge_global = settings.get('per_user_semantic_kernel', False) and settings.get('merge_global_semantic_kernel_with_workspace', False)
-    if merge_global or requested_agent.get('is_global'):
-        for agent in get_global_agents():
-            candidate = dict(agent)
-            candidate['is_global'] = True
-            candidate['is_group'] = False
-            candidate['group_id'] = None
-            candidate['group_name'] = None
-            candidates.append(candidate)
-
-    requested_group_id = str(requested_agent.get('group_id') or '').strip()
-    if requested_agent.get('is_group') and not requested_group_id:
-        try:
-            requested_group_id = require_active_group(user_id)
-        except Exception:
-            requested_group_id = ''
-
-    if requested_group_id:
-        requested_group_name = requested_agent.get('group_name')
-        for agent in get_group_agents(requested_group_id):
-            candidate = dict(agent)
-            candidate['is_global'] = False
-            candidate['is_group'] = True
-            candidate['group_id'] = requested_group_id
-            if requested_group_name and not candidate.get('group_name'):
-                candidate['group_name'] = requested_group_name
-            candidates.append(candidate)
-
-    return candidates
+    return build_accessible_agent_catalog(user_id, settings=settings)
 
 
 def _find_matching_user_selected_agent(candidates, requested_agent):
@@ -264,6 +381,22 @@ def _clear_legacy_agent_connection_override(agent):
         agent[field_name] = ''
 
     agent['enable_agent_gpt_apim'] = False
+    return agent
+
+
+def _strip_disallowed_local_custom_connection_fields(agent):
+    if not isinstance(agent, dict) or is_azure_ai_foundry_agent(agent):
+        return agent
+
+    for field_name in (
+        'azure_agent_apim_gpt_endpoint',
+        'azure_agent_apim_gpt_subscription_key',
+        'azure_agent_apim_gpt_api_revision',
+        'azure_openai_gpt_endpoint',
+        'azure_openai_gpt_key',
+        'azure_openai_gpt_api_revision',
+    ):
+        agent.pop(field_name, None)
     return agent
 
 
@@ -518,9 +651,86 @@ def _maybe_disable_multi_endpoint_migration_notice(settings, preview):
     security=get_auth_security()
 )
 @login_required
+@user_required
 def generate_agent_id():
     """Generate a new GUID for agent creation (user or admin)."""
     return jsonify({'id': str(uuid.uuid4())})
+
+
+@bpa.route('/api/agents/draft-instructions', methods=['POST'])
+@swagger_route(
+    security=get_auth_security()
+)
+@login_required
+@user_required
+def draft_agent_instructions():
+    """Draft editable agent instructions from a typed or transcribed brief."""
+    settings = get_settings()
+    request_data = request.get_json(silent=True) or {}
+    user_id = get_current_user_id()
+    agent_scope = str(request_data.get('agent_scope') or 'personal').strip().lower()
+    if agent_scope in {'admin', 'user'}:
+        agent_scope = 'global' if agent_scope == 'admin' else 'personal'
+
+    if agent_scope == 'global' and 'Admin' not in session.get('user', {}).get('roles', []):
+        return jsonify({'error': 'Admin role is required to draft global agent instructions.'}), 403
+    if agent_scope == 'group':
+        if not settings.get('allow_group_agents', False):
+            return jsonify({'error': 'Group agents are disabled.'}), 403
+        try:
+            require_active_group(
+                user_id,
+                allowed_roles=("Owner", "Admin", "DocumentManager", "User"),
+            )
+        except (LookupError, PermissionError, ValueError) as exc:
+            return jsonify({'error': str(exc)}), 403
+    elif agent_scope not in {'personal', 'global'}:
+        return jsonify({'error': 'Invalid agent scope.'}), 400
+    elif agent_scope == 'personal' and not settings.get('allow_user_agents', False):
+        return jsonify({'error': 'Personal agents are disabled.'}), 403
+
+    display_name = request_data.get('display_name')
+    description = request_data.get('description')
+    brief = request_data.get('brief')
+    existing_instructions = request_data.get('existing_instructions')
+    if not any(str(value or '').strip() for value in (display_name, description, brief, existing_instructions)):
+        return jsonify({'error': 'Provide a brief, display name, description, or existing instructions.'}), 400
+
+    try:
+        model_name = _resolve_agent_instruction_model(settings)
+        client = _create_agent_instruction_client(settings)
+        messages = _build_agent_instruction_messages(
+            display_name,
+            description,
+            brief,
+            existing_instructions,
+        )
+        response = client.chat.completions.create(
+            **_build_agent_instruction_api_params(model_name, messages)
+        )
+        instructions = ''
+        if getattr(response, 'choices', None):
+            instructions = str(response.choices[0].message.content or '').strip()
+        if not instructions:
+            return jsonify({'error': 'The model did not return instructions.'}), 502
+
+        log_event(
+            '[AgentInstructions] Agent instructions drafted.',
+            extra={
+                'user_id': str(user_id),
+                'agent_scope': agent_scope,
+                'model_name': model_name,
+            },
+            debug_only=True,
+        )
+        return jsonify({'success': True, 'instructions': instructions})
+    except Exception as exc:
+        log_event(
+            f'[AgentInstructions] Error drafting agent instructions: {exc}',
+            level=logging.ERROR,
+            exceptionTraceback=True,
+        )
+        return jsonify({'error': 'Failed to draft instructions.'}), 500
 
 # === USER AGENTS ENDPOINTS ===
 @bpa.route('/api/user/agents', methods=['GET'])
@@ -528,6 +738,7 @@ def generate_agent_id():
     security=get_auth_security()
 )
 @login_required
+@user_required
 def get_user_agents():
     settings = get_settings()
     if not settings.get('allow_user_agents', False):
@@ -545,6 +756,8 @@ def get_user_agents():
         agent['is_group'] = False
         agent.setdefault('agent_type', 'local')
 
+    agents = [agent for agent in agents if _is_agent_allowed_for_user_selection(user_id, agent)]
+
     # Check global/merge toggles
     per_user = settings.get('per_user_semantic_kernel', False)
     merge_global = settings.get('merge_global_semantic_kernel_with_workspace', False)
@@ -556,6 +769,8 @@ def get_user_agents():
             agent['is_global'] = True
             agent['is_group'] = False
             agent.setdefault('agent_type', 'local')
+
+        global_agents = [agent for agent in global_agents if _is_agent_allowed_for_user_selection(user_id, agent)]
         
         # Merge agents using ID as key to avoid name conflicts
         # This allows both personal and global agents with same name to coexist
@@ -575,11 +790,54 @@ def get_user_agents():
     else:
         return jsonify(agents)
 
+
+@bpa.route('/api/agents/assigned-knowledge/catalog', methods=['GET'])
+@swagger_route(security=get_auth_security())
+@login_required
+@user_required
+def get_assigned_knowledge_catalog_route():
+    user_id = get_current_user_id()
+    if not user_id:
+        return jsonify({'error': 'User not authenticated'}), 401
+
+    agent_scope = str(request.args.get('agent_scope') or 'personal').strip().lower()
+    if agent_scope not in {'personal', 'group', 'global'}:
+        return jsonify({'error': 'Invalid assigned knowledge agent scope.'}), 400
+
+    active_group_id = None
+    is_admin = False
+    if agent_scope == 'group':
+        try:
+            active_group_id = require_active_group(
+                user_id,
+                allowed_roles=("Owner", "Admin", "DocumentManager", "User"),
+            )
+        except ValueError as exc:
+            return jsonify({'error': str(exc)}), 400
+        except LookupError as exc:
+            return jsonify({'error': str(exc)}), 404
+        except PermissionError as exc:
+            return jsonify({'error': str(exc)}), 403
+    elif agent_scope == 'global':
+        user = session.get('user', {})
+        is_admin = 'Admin' in user.get('roles', [])
+        if not is_admin:
+            return jsonify({'error': 'Admin role required for global assigned knowledge.'}), 403
+
+    catalog = build_assigned_knowledge_catalog(
+        user_id=user_id,
+        agent_scope=agent_scope,
+        group_id=active_group_id,
+        is_admin=is_admin,
+    )
+    return jsonify(catalog), 200
+
 @bpa.route('/api/user/agents', methods=['POST'])
 @swagger_route(
     security=get_auth_security()
 )
 @login_required
+@user_required
 @enabled_required("allow_user_agents")
 def set_user_agents():
     user_id = get_current_user_id()
@@ -588,12 +846,7 @@ def set_user_agents():
     # If custom endpoints are not allowed, strip deployment settings for endpoint, key, and api-revision
     if not settings.get('allow_user_custom_endpoints', False):
         for agent in agents:
-            # APIM fields
-            for k in ['azure_agent_apim_gpt_endpoint', 'azure_agent_apim_gpt_subscription_key', 'azure_agent_apim_gpt_api_revision']:
-                agent.pop(k, None)
-            # Non-APIM fields
-            for k in ['azure_openai_gpt_endpoint', 'azure_openai_gpt_key', 'azure_openai_gpt_api_revision']:
-                agent.pop(k, None)
+            _strip_disallowed_local_custom_connection_fields(agent)
 
     # Remove any global agents before saving
     filtered_agents = []
@@ -606,6 +859,15 @@ def set_user_agents():
             return jsonify({'error': str(exc)}), 400
         cleaned_agent['is_global'] = False
         cleaned_agent['is_group'] = False
+        try:
+            cleaned_agent = apply_assigned_knowledge_to_agent_payload(
+                cleaned_agent,
+                user_id=user_id,
+                agent_scope='personal',
+                is_admin=False,
+            )
+        except AssignedKnowledgeError as exc:
+            return jsonify({'error': str(exc)}), 400
         validation_error = validate_agent(cleaned_agent)
         if validation_error:
             return jsonify({'error': f'Agent validation failed: {validation_error}'}), 400
@@ -626,6 +888,11 @@ def set_user_agents():
     current_agent_names = set(agent['name'] for agent in current_agents)
     
     # Save new/updated agents to personal_agents container
+    try:
+        ensure_governance_access('governance_user_agents', user_id)
+    except PermissionError as exc:
+        return jsonify({'error': str(exc)}), 403
+
     for agent in filtered_agents:
         save_personal_agent(user_id, agent)
     
@@ -655,8 +922,9 @@ def set_user_agents():
 @swagger_route(
     security=get_auth_security()
 )
-@enabled_required("allow_user_agents")
 @login_required
+@user_required
+@enabled_required("allow_user_agents")
 def delete_user_agent(agent_name):
     user_id = get_current_user_id()
     # Get current agents from personal_agents container
@@ -714,6 +982,12 @@ def get_group_agents_route():
         return jsonify({'error': str(exc)}), 403
 
     agents = get_group_agents(active_group)
+    for agent in agents:
+        if isinstance(agent, dict):
+            agent['is_global'] = False
+            agent['is_group'] = True
+            agent['group_id'] = active_group
+    agents = [agent for agent in agents if isinstance(agent, dict) and _is_agent_allowed_for_user_selection(user_id, agent)]
     return jsonify({'agents': agents}), 200
 
 
@@ -774,21 +1048,26 @@ def create_group_agent_route():
 
     settings = get_settings()
     if not settings.get('allow_group_custom_endpoints', False):
-        for key in [
-            'azure_agent_apim_gpt_endpoint',
-            'azure_agent_apim_gpt_subscription_key',
-            'azure_agent_apim_gpt_api_revision',
-            'azure_openai_gpt_endpoint',
-            'azure_openai_gpt_key',
-            'azure_openai_gpt_api_revision'
-        ]:
-            cleaned_payload.pop(key, None)
+        _strip_disallowed_local_custom_connection_fields(cleaned_payload)
 
     for key in ('group_id', 'last_updated', 'is_global', 'is_group'):
         cleaned_payload.pop(key, None)
 
     try:
+        cleaned_payload = apply_assigned_knowledge_to_agent_payload(
+            cleaned_payload,
+            user_id=user_id,
+            agent_scope='group',
+            group_id=active_group,
+            is_admin=False,
+        )
+    except AssignedKnowledgeError as exc:
+        return jsonify({'error': str(exc)}), 400
+
+    try:
         saved = save_group_agent(active_group, cleaned_payload, user_id=user_id)
+    except PermissionError as exc:
+        return jsonify({'error': str(exc)}), 403
     except Exception as exc:
         debug_print('Failed to save group agent: %s', exc)
         return jsonify({'error': 'Unable to save agent'}), 500
@@ -846,18 +1125,23 @@ def update_group_agent_route(agent_id):
 
     settings = get_settings()
     if not settings.get('allow_group_custom_endpoints', False):
-        for key in [
-            'azure_agent_apim_gpt_endpoint',
-            'azure_agent_apim_gpt_subscription_key',
-            'azure_agent_apim_gpt_api_revision',
-            'azure_openai_gpt_endpoint',
-            'azure_openai_gpt_key',
-            'azure_openai_gpt_api_revision'
-        ]:
-            cleaned_payload.pop(key, None)
+        _strip_disallowed_local_custom_connection_fields(cleaned_payload)
+
+    try:
+        cleaned_payload = apply_assigned_knowledge_to_agent_payload(
+            cleaned_payload,
+            user_id=user_id,
+            agent_scope='group',
+            group_id=active_group,
+            is_admin=False,
+        )
+    except AssignedKnowledgeError as exc:
+        return jsonify({'error': str(exc)}), 400
 
     try:
         saved = save_group_agent(active_group, cleaned_payload, user_id=user_id)
+    except PermissionError as exc:
+        return jsonify({'error': str(exc)}), 403
     except Exception as exc:
         debug_print('Failed to update group agent %s: %s', agent_id, exc)
         return jsonify({'error': 'Unable to update agent'}), 500
@@ -903,6 +1187,7 @@ def delete_group_agent_route(agent_id):
     security=get_auth_security()
 )
 @login_required
+@user_required
 def set_user_selected_agent():
     user_id = get_current_user_id()
     data = request.json
@@ -917,6 +1202,21 @@ def set_user_selected_agent():
     if not matched_agent:
         return jsonify({'error': 'Selected agent is not available for this user or scope.'}), 400
 
+    try:
+        if matched_agent.get('is_global'):
+            ensure_governance_access(
+                'governance_global_agents_usage',
+                user_id,
+                item_entity_type='global_agent',
+                item_id=str(matched_agent.get('id') or matched_agent.get('name') or ''),
+            )
+        elif matched_agent.get('is_group'):
+            ensure_governance_access('governance_group_agents', user_id)
+        else:
+            ensure_governance_access('governance_user_agents', user_id)
+    except PermissionError as exc:
+        return jsonify({'error': str(exc)}), 403
+
     user_settings = get_user_settings(user_id)
     settings_to_update = user_settings.get('settings', {})
     agent_name = (matched_agent.get('name') or '').strip()
@@ -929,7 +1229,10 @@ def set_user_selected_agent():
         "is_global": matched_agent.get('is_global', False),
         "is_group": matched_agent.get('is_group', False),
         "group_id": matched_agent.get('group_id'),
-        "group_name": matched_agent.get('group_name')
+        "group_name": matched_agent.get('group_name'),
+        "icon": matched_agent.get('icon') or {},
+        "tags": matched_agent.get('tags') or [],
+        "catalog_key": matched_agent.get('catalog_key')
     }
     settings_to_update['selected_agent'] = agent
     settings_to_update['enable_agents'] = True
@@ -942,6 +1245,7 @@ def set_user_selected_agent():
     security=get_auth_security()
 )
 @login_required
+@user_required
 def get_global_agent_settings_for_users():
     user_id = get_current_user_id()
     return get_global_agent_settings(include_admin_extras=False, user_id=user_id)
@@ -1004,6 +1308,62 @@ def set_selected_agent():
         log_event(f"Error setting default agent: {e}", level=logging.ERROR)
         return jsonify({'error': 'Failed to set default agent.'}), 500
 
+@bpa.route('/api/agents/catalog', methods=['GET'])
+@swagger_route(security=get_auth_security())
+@login_required
+@user_required
+@enabled_required('enable_semantic_kernel')
+def get_agents_catalog():
+    user_id = get_current_user_id()
+    include_usage = str(request.args.get('include_usage') or '').strip().lower() in ('1', 'true', 'yes')
+    try:
+        settings = get_settings()
+        catalog = build_accessible_agent_catalog(user_id, settings=settings)
+        if include_usage:
+            catalog = apply_agent_usage_counts(catalog)
+            catalog = apply_agent_popular_promotions(catalog, settings=settings)
+        if not settings.get('agents_page_show_instructions_in_details', True):
+            catalog = _redact_catalog_agent_instructions(catalog)
+        return jsonify({'agents': catalog}), 200
+    except Exception as exc:
+        log_event(
+            '[AgentsCatalog] Failed to load accessible agent catalog.',
+            extra={'user_id': user_id, 'error': str(exc)},
+            level=logging.ERROR,
+            exceptionTraceback=True,
+        )
+        return jsonify({'error': 'Failed to load agents.'}), 500
+
+@bpa.route('/api/agents/popular', methods=['GET'])
+@swagger_route(security=get_auth_security())
+@login_required
+@user_required
+@enabled_required('enable_semantic_kernel')
+def get_popular_agents_catalog():
+    user_id = get_current_user_id()
+    try:
+        limit = int(request.args.get('limit') or 3)
+    except (TypeError, ValueError):
+        limit = 3
+    usage_window = str(request.args.get('usage_window') or request.args.get('window') or '30_days').strip().lower()
+    try:
+        settings = get_settings()
+        catalog = build_accessible_agent_catalog(user_id, settings=settings)
+        catalog = apply_agent_usage_counts(catalog)
+        catalog = apply_agent_popular_promotions(catalog, settings=settings)
+        popular_agents = get_popular_agents(catalog, limit=limit, usage_window=usage_window)
+        if not settings.get('agents_page_show_instructions_in_details', True):
+            popular_agents = _redact_catalog_agent_instructions(popular_agents)
+        return jsonify({'agents': popular_agents}), 200
+    except Exception as exc:
+        log_event(
+            '[AgentsCatalog] Failed to load popular agents.',
+            extra={'user_id': user_id, 'error': str(exc)},
+            level=logging.ERROR,
+            exceptionTraceback=True,
+        )
+        return jsonify({'error': 'Failed to load popular agents.'}), 500
+
 
 @bpa.route('/api/admin/agents', methods=['GET'])
 @swagger_route(
@@ -1014,7 +1374,7 @@ def set_selected_agent():
 def list_agents():
     try:
         # Use new global agents container
-        agents = get_global_agents()
+        agents = get_global_agents(include_disabled=True)
         
         # Ensure each agent has an actions_to_load field
         for agent in agents:
@@ -1029,6 +1389,73 @@ def list_agents():
     except Exception as e:
         log_event(f"Error listing agents: {e}", level=logging.ERROR)
         return jsonify({'error': 'Failed to list agents.'}), 500
+
+
+@bpa.route('/api/admin/agents/<agent_name>/enabled', methods=['PATCH'])
+@swagger_route(
+    security=get_auth_security()
+)
+@login_required
+@admin_required
+def set_agent_enabled(agent_name):
+    try:
+        data = request.get_json(silent=True) or {}
+        if 'is_enabled' not in data or not isinstance(data.get('is_enabled'), bool):
+            return jsonify({'error': 'Field "is_enabled" must be a boolean.'}), 400
+
+        is_enabled = data.get('is_enabled')
+        agents = get_global_agents(include_disabled=True)
+        target_agent = next((agent for agent in agents if agent.get('name') == agent_name), None)
+        if not target_agent:
+            return jsonify({'error': 'Agent not found.'}), 404
+
+        result = update_global_agent_enabled(
+            target_agent.get('id'),
+            is_enabled,
+            user_id=str(get_current_user_id())
+        )
+        if not result:
+            return jsonify({'error': 'Failed to update agent enabled state.'}), 500
+
+        fallback_agent_name = None
+        settings = get_settings()
+        selected_agent = settings.get('global_selected_agent', {}) if isinstance(settings.get('global_selected_agent', {}), dict) else {}
+        if not is_enabled and selected_agent.get('name') == agent_name:
+            enabled_agents = get_global_agents()
+            if enabled_agents:
+                fallback_agent_name = enabled_agents[0].get('name')
+                settings['global_selected_agent'] = {
+                    'name': fallback_agent_name,
+                    'is_global': True,
+                    'is_group': False,
+                }
+            else:
+                settings['global_selected_agent'] = {}
+            update_settings(settings)
+
+        log_agent_update(
+            user_id=str(get_current_user_id()),
+            agent_id=target_agent.get('id', ''),
+            agent_name=agent_name,
+            agent_display_name=target_agent.get('display_name', ''),
+            scope='global'
+        )
+        log_event(
+            "Global agent enabled state updated",
+            extra={
+                'action': 'toggle-enabled',
+                'agent_name': agent_name,
+                'agent_id': target_agent.get('id', ''),
+                'is_enabled': is_enabled,
+                'fallback_agent_name': fallback_agent_name,
+                'user': str(get_current_user_id()),
+            }
+        )
+        setattr(builtins, "kernel_reload_needed", True)
+        return jsonify({'success': True, 'fallback_agent_name': fallback_agent_name})
+    except Exception as e:
+        log_event(f"Error updating agent enabled state: {e}", level=logging.ERROR, exceptionTraceback=True)
+        return jsonify({'error': 'Failed to update agent enabled state.'}), 500
 
 
 @bpa.route('/api/admin/agents/default-model-migration/preview', methods=['GET'])
@@ -1194,15 +1621,27 @@ def run_default_model_agent_migration():
 @admin_required
 def add_agent():
     try:
-        agents = get_global_agents()
+        agents = get_global_agents(include_disabled=True)
         new_agent = request.json.copy() if hasattr(request.json, 'copy') else dict(request.json)
         try:
             cleaned_agent = sanitize_agent_payload(new_agent)
         except AgentPayloadError as exc:
             log_event("Add agent failed: payload error", level=logging.WARNING, extra={"action": "add", "error": str(exc)})
             return jsonify({'error': str(exc)}), 400
+
+        governance_policy_payload = cleaned_agent.pop('governance_policy', None)
         cleaned_agent['is_global'] = True
         cleaned_agent['is_group'] = False
+        try:
+            cleaned_agent = apply_assigned_knowledge_to_agent_payload(
+                cleaned_agent,
+                user_id=str(get_current_user_id()),
+                agent_scope='global',
+                is_admin=True,
+            )
+        except AssignedKnowledgeError as exc:
+            log_event("Add agent failed: assigned knowledge error", level=logging.WARNING, extra={"action": "add", "error": str(exc)})
+            return jsonify({'error': str(exc)}), 400
         validation_error = validate_agent(cleaned_agent)
         if validation_error:
             log_event("Add agent failed: validation error", level=logging.WARNING, extra={"action": "add", "agent": cleaned_agent, "error": validation_error})
@@ -1223,6 +1662,15 @@ def add_agent():
         result = save_global_agent(cleaned_agent, user_id=str(get_current_user_id()))
         if not result:
             return jsonify({'error': 'Failed to save agent.'}), 500
+
+        if isinstance(governance_policy_payload, dict):
+            upsert_item_policy(
+                entity_type='global_agent',
+                item_id=str(cleaned_agent.get('id') or ''),
+                payload=governance_policy_payload,
+                actor_user_id=str(get_current_user_id() or ''),
+                actor_email=str((session.get('user') or {}).get('email') or ''),
+            )
 
         log_agent_creation(user_id=str(get_current_user_id()), agent_id=cleaned_agent.get('id', ''), agent_name=cleaned_agent.get('name', ''), agent_display_name=cleaned_agent.get('display_name', ''), scope='global')
         log_event("Agent added", extra={"action": "add", "agent": {k: v for k, v in cleaned_agent.items() if k != 'id'}, "user": str(get_current_user_id())})
@@ -1300,15 +1748,27 @@ def update_agent_setting(setting_name):
 @admin_required
 def edit_agent(agent_name):
     try:
-        agents = get_global_agents()
+        agents = get_global_agents(include_disabled=True)
         updated_agent = request.json.copy() if hasattr(request.json, 'copy') else dict(request.json)
         try:
             cleaned_agent = sanitize_agent_payload(updated_agent)
         except AgentPayloadError as exc:
             log_event("Edit agent failed: payload error", level=logging.WARNING, extra={"action": "edit", "agent_name": agent_name, "error": str(exc)})
             return jsonify({'error': str(exc)}), 400
+
+        governance_policy_payload = cleaned_agent.pop('governance_policy', None)
         cleaned_agent['is_global'] = True
         cleaned_agent['is_group'] = False
+        try:
+            cleaned_agent = apply_assigned_knowledge_to_agent_payload(
+                cleaned_agent,
+                user_id=str(get_current_user_id()),
+                agent_scope='global',
+                is_admin=True,
+            )
+        except AssignedKnowledgeError as exc:
+            log_event("Edit agent failed: assigned knowledge error", level=logging.WARNING, extra={"action": "edit", "agent_name": agent_name, "error": str(exc)})
+            return jsonify({'error': str(exc)}), 400
         validation_error = validate_agent(cleaned_agent)
         if validation_error:
             log_event("Edit agent failed: validation error", level=logging.WARNING, extra={"action": "edit", "agent": cleaned_agent, "error": validation_error})
@@ -1336,6 +1796,15 @@ def edit_agent(agent_name):
         if not result:
             return jsonify({'error': 'Failed to save agent.'}), 500
 
+        if isinstance(governance_policy_payload, dict):
+            upsert_item_policy(
+                entity_type='global_agent',
+                item_id=str(cleaned_agent.get('id') or ''),
+                payload=governance_policy_payload,
+                actor_user_id=str(get_current_user_id() or ''),
+                actor_email=str((session.get('user') or {}).get('email') or ''),
+            )
+
         log_agent_update(user_id=str(get_current_user_id()), agent_id=cleaned_agent.get('id', ''), agent_name=agent_name, agent_display_name=cleaned_agent.get('display_name', ''), scope='global')
         log_event(
             f"Agent {agent_name} edited",
@@ -1360,7 +1829,7 @@ def edit_agent(agent_name):
 @admin_required
 def delete_agent(agent_name):
     try:
-        agents = get_global_agents()
+        agents = get_global_agents(include_disabled=True)
         
         # Find the agent to delete
         agent_to_delete = None
@@ -1457,20 +1926,28 @@ def build_combined_model_endpoints(settings, user_id=None, group_id=None):
 
     if group_id:
         if allow_group_custom_endpoints:
-            group_endpoints = get_group_model_endpoints(group_id)
-            for endpoint in group_endpoints:
-                enriched = dict(endpoint)
-                enriched["scope"] = "group"
-                enriched["group_id"] = group_id
-                endpoints.append(enriched)
+            try:
+                ensure_governance_access("governance_group_endpoints", user_id)
+                group_endpoints = get_group_model_endpoints(group_id)
+                for endpoint in group_endpoints:
+                    enriched = dict(endpoint)
+                    enriched["scope"] = "group"
+                    enriched["group_id"] = group_id
+                    endpoints.append(enriched)
+            except PermissionError:
+                pass
     elif user_id:
         if allow_user_custom_endpoints:
-            user_settings = get_user_settings(user_id)
-            personal = user_settings.get("settings", {}).get("personal_model_endpoints", [])
-            for endpoint in personal:
-                enriched = dict(endpoint)
-                enriched["scope"] = "user"
-                endpoints.append(enriched)
+            try:
+                ensure_governance_access("governance_user_endpoints", user_id)
+                user_settings = get_user_settings(user_id)
+                personal = user_settings.get("settings", {}).get("personal_model_endpoints", [])
+                for endpoint in personal:
+                    enriched = dict(endpoint)
+                    enriched["scope"] = "user"
+                    endpoints.append(enriched)
+            except PermissionError:
+                pass
 
     return sanitize_model_endpoints_for_frontend(endpoints)
 
@@ -1510,6 +1987,8 @@ def get_global_agent_settings(include_admin_extras=False, user_id=None, group_id
         "gpt_model": settings.get("gpt_model", {}),
         "allow_user_agents": settings.get("allow_user_agents", False),
         "allow_user_custom_endpoints": settings.get("allow_user_custom_endpoints", False),
+        "allow_user_workflows": settings.get("allow_user_workflows", False),
+        "require_member_of_workflow_user": settings.get("require_member_of_workflow_user", False),
         "allow_group_agents": settings.get("allow_group_agents", False),
         "allow_group_custom_endpoints": settings.get("allow_group_custom_endpoints", False),
         "allow_ai_foundry_agents": settings.get("allow_ai_foundry_agents", False),

@@ -17,6 +17,12 @@ from functions_keyvault import (
     keyvault_plugin_get_helper,
     keyvault_plugin_save_helper,
 )
+from functions_workspace_identities import (
+    WORKSPACE_IDENTITY_SCOPE_GROUP,
+    hydrate_action_identity_reference,
+    validate_action_identity_reference,
+)
+from functions_governance import ensure_action_type_access, filter_actions_by_action_type_access
 
 
 _NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -46,6 +52,16 @@ def get_group_actions(
             "Error fetching group actions for %s: %s", group_id, exc
         )
         return []
+
+
+def get_governed_group_actions(
+    group_id: str,
+    user_id: str,
+    return_type: SecretReturnType = SecretReturnType.TRIGGER,
+) -> List[Dict[str, Any]]:
+    """Return group actions that the user can access by action type governance."""
+    actions = get_group_actions(group_id, return_type=return_type)
+    return filter_actions_by_action_type_access(user_id, actions, 'governance_group_actions', 'group')
 
 
 def get_group_action(
@@ -127,7 +143,16 @@ def save_group_action(group_id: str, action_data: Dict[str, Any], user_id: Optio
     elif "type" not in payload["auth"]:
         payload["auth"]["type"] = "identity"
 
+    if user_id:
+        ensure_action_type_access('governance_group_actions', user_id, payload.get('type'), 'group')
+
     payload.pop("user_id", None)
+
+    validate_action_identity_reference(
+        payload,
+        WORKSPACE_IDENTITY_SCOPE_GROUP,
+        group_id,
+    )
 
     payload = keyvault_plugin_save_helper(
         payload,
@@ -228,6 +253,12 @@ def _clean_action(
         cleaned,
         scope_value=group_id,
         scope="group",
+        return_type=return_type,
+    )
+    cleaned = hydrate_action_identity_reference(
+        cleaned,
+        WORKSPACE_IDENTITY_SCOPE_GROUP,
+        group_id,
         return_type=return_type,
     )
     cleaned.setdefault("is_global", False)

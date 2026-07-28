@@ -5,7 +5,8 @@ import { showToast } from "./chat-toast.js";
  * Per-message export module.
  *
  * Provides functions to export a single chat message as Markdown (.md)
- * or Word (.docx) from the three-dots dropdown on each message bubble.
+ * Word (.docx), or PowerPoint (.pptx) from the three-dots dropdown on each
+ * message bubble.
  */
 
 /**
@@ -39,6 +40,27 @@ function getMessageMeta(messageDiv, role) {
     return { sender };
 }
 
+function getMessageContentOverride(messageDiv, role) {
+    if (role !== 'assistant') {
+        return '';
+    }
+
+    return String(getMessageMarkdown(messageDiv, role) || '');
+}
+
+function buildMessageExportRequestBody(messageDiv, messageId, conversationId, role, extraFields = {}) {
+    const requestBody = {
+        message_id: messageId,
+        conversation_id: conversationId,
+        ...extraFields,
+    };
+    const messageContentOverride = getMessageContentOverride(messageDiv, role);
+    if (messageContentOverride) {
+        requestBody.message_content_override = messageContentOverride;
+    }
+    return requestBody;
+}
+
 /**
  * Trigger a browser file download from a Blob.
  */
@@ -51,6 +73,83 @@ function downloadBlob(blob, filename) {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+}
+
+function dataUriToBlob(dataUri, fallbackContentType = 'application/octet-stream') {
+    const candidate = String(dataUri || '').trim();
+    const commaIndex = candidate.indexOf(',');
+    if (commaIndex === -1 || !candidate.startsWith('data:')) {
+        return null;
+    }
+
+    const metadata = candidate.slice(5, commaIndex);
+    const encodedPayload = candidate.slice(commaIndex + 1);
+    const contentType = metadata.split(';')[0] || fallbackContentType;
+    const isBase64 = metadata.toLowerCase().includes(';base64');
+    let binaryString = '';
+    try {
+        binaryString = isBase64 ? atob(encodedPayload) : decodeURIComponent(encodedPayload);
+    } catch (err) {
+        console.warn('Unable to decode email draft attachment data URI:', err);
+        return null;
+    }
+
+    const bytes = new Uint8Array(binaryString.length);
+    for (let index = 0; index < binaryString.length; index += 1) {
+        bytes[index] = binaryString.charCodeAt(index);
+    }
+    return new Blob([bytes], { type: contentType || fallbackContentType });
+}
+
+function safeDownloadFilename(filename, fallbackFilename) {
+    const candidate = String(filename || '').trim() || fallbackFilename;
+    return candidate.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_');
+}
+
+function downloadEmailDraftAttachments(attachments) {
+    if (!Array.isArray(attachments) || attachments.length === 0) {
+        return 0;
+    }
+
+    let downloadedCount = 0;
+    attachments.forEach((attachment, index) => {
+        const dataUri = String(attachment?.data_uri || '').trim();
+        if (!dataUri.startsWith('data:image/png;base64,')) {
+            return;
+        }
+
+        const blob = dataUriToBlob(dataUri, attachment?.content_type || 'image/png');
+        if (!blob) {
+            return;
+        }
+
+        const filename = safeDownloadFilename(
+            attachment?.filename,
+            `message_chart_${index + 1}.png`
+        );
+        downloadBlob(blob, filename);
+        downloadedCount += 1;
+    });
+
+    return downloadedCount;
+}
+
+function getPreferredMarkdownArtifactExportSource(messageDiv) {
+    if (!(messageDiv instanceof HTMLElement)) {
+        return null;
+    }
+
+    const artifactButton = messageDiv.querySelector('.generated-artifact-export-ppt-btn[data-artifact-message-id]');
+    const artifactMessageId = String(artifactButton?.dataset.artifactMessageId || '').trim();
+    const conversationId = String(artifactButton?.dataset.conversationId || window.currentConversationId || '').trim();
+    if (!artifactMessageId || !conversationId) {
+        return null;
+    }
+
+    return {
+        artifactMessageId,
+        conversationId,
+    };
 }
 
 /**
@@ -103,10 +202,7 @@ export async function exportMessageAsWord(messageDiv, messageId, role) {
         const response = await fetch('/api/message/export-word', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                message_id: messageId,
-                conversation_id: conversationId
-            })
+            body: JSON.stringify(buildMessageExportRequestBody(messageDiv, messageId, conversationId, role))
         });
 
         if (!response.ok) {
@@ -123,6 +219,58 @@ export async function exportMessageAsWord(messageDiv, messageId, role) {
     } catch (err) {
         console.error('Error exporting message to Word:', err);
         showToast('Failed to export message to Word.', 'danger');
+    }
+}
+
+/**
+ * Export a single message as a PowerPoint (.pptx) presentation by calling
+ * the backend endpoint that uses python-pptx to generate slides.
+ */
+export async function exportMessageAsPowerPoint(messageDiv, messageId, role, options = {}) {
+    const preferredArtifactSource = options.artifactMessageId
+        ? {
+            artifactMessageId: String(options.artifactMessageId || '').trim(),
+            conversationId: String(options.conversationId || window.currentConversationId || '').trim(),
+        }
+        : getPreferredMarkdownArtifactExportSource(messageDiv);
+    const conversationId = preferredArtifactSource?.conversationId || window.currentConversationId;
+    if (!conversationId || !messageId) {
+        showToast('Cannot export - no active conversation or message.', 'warning');
+        return;
+    }
+
+    try {
+        const requestBody = buildMessageExportRequestBody(messageDiv, messageId, conversationId, role);
+        if (preferredArtifactSource?.artifactMessageId) {
+            requestBody.artifact_message_id = preferredArtifactSource.artifactMessageId;
+            delete requestBody.message_content_override;
+        }
+
+        const response = await fetch('/api/message/export-powerpoint', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(requestBody)
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => null);
+            const errorMsg = errorData?.error || `Export failed (${response.status})`;
+            showToast(errorMsg, 'danger');
+            return;
+        }
+
+        const blob = await response.blob();
+        const filename = `message_export_${filenameTimestamp()}.pptx`;
+        downloadBlob(blob, filename);
+        showToast(
+            preferredArtifactSource?.artifactMessageId
+                ? 'Markdown artifact exported as PowerPoint.'
+                : 'Message exported as PowerPoint.',
+            'success'
+        );
+    } catch (err) {
+        console.error('Error exporting message to PowerPoint:', err);
+        showToast('Failed to export message to PowerPoint.', 'danger');
     }
 }
 
@@ -172,10 +320,7 @@ export async function openInEmail(messageDiv, messageId, role) {
         const response = await fetch('/api/message/export-email-draft', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                message_id: messageId,
-                conversation_id: conversationId
-            })
+            body: JSON.stringify(buildMessageExportRequestBody(messageDiv, messageId, conversationId, role))
         });
 
         const data = await response.json().catch(() => null);
@@ -187,7 +332,14 @@ export async function openInEmail(messageDiv, messageId, role) {
 
         const subject = data?.subject || 'Shared chat message';
         const body = data?.body || content;
+        const downloadedAttachmentCount = downloadEmailDraftAttachments(data?.attachments);
         const mailtoUrl = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+        if (downloadedAttachmentCount > 0) {
+            showToast(
+                `${downloadedAttachmentCount} visual PNG ${downloadedAttachmentCount === 1 ? 'file' : 'files'} downloaded for the email draft.`,
+                'success'
+            );
+        }
         window.location.href = mailtoUrl;
     } catch (err) {
         console.error('Error exporting message to email:', err);

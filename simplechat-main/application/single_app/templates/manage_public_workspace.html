@@ -49,6 +49,18 @@
     backdrop-filter: blur(10px);
   }
 
+  .profile-hero-logo {
+    width: 120px;
+    height: 120px;
+    border-radius: 50%;
+    object-fit: contain;
+    padding: 0.75rem;
+    background: rgba(255,255,255,0.18);
+    border: 5px solid rgba(255,255,255,0.3);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.2);
+    backdrop-filter: blur(10px);
+  }
+
   .stat-card {
     background: var(--bs-body-bg);
     border-radius: 12px;
@@ -150,7 +162,41 @@
     transform: scale(1.1);
   }
 
+  .custom-color-option {
+    width: 40px;
+    height: 40px;
+    border-radius: 8px;
+    cursor: pointer;
+    border: 3px solid transparent;
+    padding: 0;
+    background: transparent;
+    transition: border-color 0.2s, transform 0.2s;
+  }
+
+  .custom-color-option:hover {
+    transform: scale(1.1);
+  }
+
+  .custom-color-option::-webkit-color-swatch-wrapper {
+    padding: 0;
+  }
+
+  .custom-color-option::-webkit-color-swatch {
+    border: 0;
+    border-radius: 5px;
+  }
+
+  .custom-color-option::-moz-color-swatch {
+    border: 0;
+    border-radius: 5px;
+  }
+
   .color-option.selected {
+    border-color: white;
+    box-shadow: 0 0 0 2px var(--bs-primary);
+  }
+
+  .custom-color-option.selected {
     border-color: white;
     box-shadow: 0 0 0 2px var(--bs-primary);
   }
@@ -168,6 +214,7 @@
   <div class="profile-hero" id="workspaceHero">
     <div class="row align-items-center">
       <div class="col-auto">
+        <img class="profile-hero-logo d-none" id="workspaceLogoImage" alt="Workspace logo">
         <div class="profile-hero-placeholder" id="workspaceInitial">
           W
         </div>
@@ -184,6 +231,8 @@
       </div>
     </div>
   </div>
+
+  {% include "_semantic_search_health_warning.html" %}
 
   <!-- Workspace Status Alert -->
   <div class="alert d-none mb-3" id="workspace-status-alert">
@@ -210,14 +259,26 @@
         <i class="bi bi-graph-up me-2"></i>Stats
       </button>
     </li>
-    {% if app_settings.enable_retention_policy_public %}
-    <li class="nav-item d-none" role="presentation" id="settings-tab-item">
-      <button class="nav-link" id="settings-tab" data-bs-toggle="tab" data-bs-target="#settings"
-        type="button" role="tab" aria-controls="settings" aria-selected="false">
-        <i class="bi bi-hourglass-split me-2"></i>Settings
+    {% if file_sync_enabled %}
+    <li class="nav-item" role="presentation">
+      <button class="nav-link" id="identities-tab" data-bs-toggle="tab" data-bs-target="#identities"
+        type="button" role="tab" aria-controls="identities" aria-selected="false">
+        <i class="bi bi-person-badge me-2"></i>Identities
+      </button>
+    </li>
+    <li class="nav-item" role="presentation">
+      <button class="nav-link" id="sync-tab" data-bs-toggle="tab" data-bs-target="#sync"
+        type="button" role="tab" aria-controls="sync" aria-selected="false">
+        <i class="bi bi-arrow-repeat me-2"></i>Sync
       </button>
     </li>
     {% endif %}
+    <li class="nav-item d-none" role="presentation" id="settings-tab-item">
+      <button class="nav-link" id="settings-tab" data-bs-toggle="tab" data-bs-target="#settings"
+        type="button" role="tab" aria-controls="settings" aria-selected="false">
+        <i class="bi bi-sliders me-2"></i>Settings
+      </button>
+    </li>
   </ul>
 
   <!-- Tab Content -->
@@ -255,8 +316,14 @@
                     <div class="color-option" data-color="#7719aa" style="background: linear-gradient(135deg, #7719aa 0%, #531277 100%);"></div>
                     <div class="color-option" data-color="#ca5010" style="background: linear-gradient(135deg, #ca5010 0%, #8e3a0d 100%);"></div>
                     <div class="color-option" data-color="#0099bc" style="background: linear-gradient(135deg, #0099bc 0%, #006d85 100%);"></div>
+                    <input type="color" class="custom-color-option" id="customHeroColor" value="#0078d4" aria-label="Custom hero color" title="Custom hero color">
                   </div>
                   <input type="hidden" id="selectedColor" value="#0078d4">
+                </div>
+                <div class="mb-3">
+                  <label for="workspaceLogoFile" class="form-label">Workspace Logo</label>
+                  <input type="file" class="form-control" id="workspaceLogoFile" accept=".png,.jpg,.jpeg,image/png,image/jpeg">
+                  <div class="form-text">PNG or JPEG. The uploaded logo is stored as PNG and used in the hero card.</div>
                 </div>
                 <button type="submit" class="btn btn-primary btn-sm">
                   <i class="bi bi-save me-1"></i>Save Changes
@@ -371,6 +438,46 @@
 
     <!-- Stats Tab -->
     <div class="tab-pane fade" id="stats" role="tabpanel">
+      <div class="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center gap-3 mb-3">
+        <div>
+          <h5 class="mb-1"><i class="bi bi-graph-up me-2"></i>Public Workspace Stats</h5>
+          <div class="small text-muted">Showing <span class="stats-window-label">Last 30 Days</span></div>
+        </div>
+        <div class="d-flex align-items-center gap-2 flex-wrap">
+          <div class="btn-group" role="group" aria-label="Public workspace stats time window">
+            <button type="button" class="btn btn-outline-secondary btn-sm" id="publicStatsWindow7" data-stats-days="7">7 Days</button>
+            <button type="button" class="btn btn-outline-secondary btn-sm active" id="publicStatsWindow30" data-stats-days="30">30 Days</button>
+            <button type="button" class="btn btn-outline-secondary btn-sm" id="publicStatsWindow90" data-stats-days="90">90 Days</button>
+            <button type="button" class="btn btn-outline-secondary btn-sm" id="publicStatsWindowCustom" data-bs-toggle="collapse" data-bs-target="#publicStatsCustomDateRange" aria-expanded="false" aria-controls="publicStatsCustomDateRange">
+              <i class="bi bi-calendar3 me-1"></i>Custom
+            </button>
+          </div>
+          <button type="button" class="btn btn-outline-primary btn-sm" id="publicStatsExportBtn" data-bs-toggle="modal" data-bs-target="#publicStatsExportModal">
+            <i class="bi bi-download me-1"></i>Export
+          </button>
+        </div>
+      </div>
+
+      <div class="collapse mb-3" id="publicStatsCustomDateRange">
+        <div class="card card-body py-2">
+          <div class="row align-items-end g-2">
+            <div class="col-md-4">
+              <label for="publicStatsStartDate" class="form-label small">Start Date</label>
+              <input type="date" class="form-control form-control-sm" id="publicStatsStartDate" />
+            </div>
+            <div class="col-md-4">
+              <label for="publicStatsEndDate" class="form-label small">End Date</label>
+              <input type="date" class="form-control form-control-sm" id="publicStatsEndDate" />
+            </div>
+            <div class="col-md-4">
+              <button type="button" class="btn btn-primary btn-sm" id="publicStatsApplyCustomRange">
+                <i class="bi bi-check2 me-1"></i>Apply
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- Quick Stats -->
       <div class="row g-3 mb-4">
         <div class="col-md-3">
@@ -415,7 +522,7 @@
       <div class="row g-3 mb-4">
         <div class="col-lg-6">
           <div class="chart-card">
-            <h5 class="mb-3"><i class="bi bi-file-earmark-bar-graph me-2"></i>Document Activity (Last 30 Days)</h5>
+            <h5 class="mb-3"><i class="bi bi-file-earmark-bar-graph me-2"></i>Document Activity (<span class="stats-window-label">Last 30 Days</span>)</h5>
             <div class="chart-container">
               <canvas id="documentChart"></canvas>
             </div>
@@ -434,7 +541,7 @@
       <div class="row g-3 mb-4">
         <div class="col-12">
           <div class="chart-card">
-            <h5 class="mb-3"><i class="bi bi-cpu me-2"></i>Token Usage (Last 30 Days)</h5>
+            <h5 class="mb-3"><i class="bi bi-cpu me-2"></i>Token Usage (<span class="stats-window-label">Last 30 Days</span>)</h5>
             <div class="chart-container">
               <canvas id="tokenChart"></canvas>
             </div>
@@ -463,9 +570,26 @@
       </div>
     </div>
 
-    {% if app_settings.enable_retention_policy_public %}
     <!-- Settings Tab -->
-    <div class="tab-pane fade" id="settings" role="tabpanel">
+    <div class="tab-pane fade d-none" id="settings" role="tabpanel">
+      <div class="section-card d-none" id="public-file-download-settings-section">
+        <h5 class="mb-3"><i class="bi bi-download me-2"></i>File Download Settings</h5>
+        <p class="text-muted">Disable original file downloads for this public workspace even when admins enable downloads globally or assign this workspace.</p>
+
+        <div class="form-check form-switch mb-3">
+          <input class="form-check-input" type="checkbox" role="switch" id="public-disable-file-downloads">
+          <label class="form-check-label" for="public-disable-file-downloads">Disable file downloads for this public workspace</label>
+        </div>
+
+        <div>
+          <button type="button" class="btn btn-primary" id="savePublicDownloadSettingsBtn">
+            <i class="bi bi-save me-1"></i>Save Download Settings
+          </button>
+          <span id="public-download-settings-save-status" class="ms-3"></span>
+        </div>
+      </div>
+
+      {% if app_settings.enable_retention_policy_public %}
       <div class="section-card">
         <h5 class="mb-3"><i class="bi bi-hourglass-split me-2"></i>Retention Policy Settings</h5>
         <p class="text-muted">Configure how long to keep conversations and documents in this public workspace. Items older than the specified period will be automatically deleted.</p>
@@ -526,6 +650,36 @@
           <i class="bi bi-exclamation-triangle me-2"></i>
           <strong>Important:</strong> Deleted conversations will be archived if archiving is enabled. All deletions are logged in activity history.
         </div>
+      </div>
+      {% endif %}
+    </div>
+
+    {% if file_sync_enabled %}
+    <!-- Identities Tab -->
+    <div class="tab-pane fade" id="identities" role="tabpanel" aria-labelledby="identities-tab">
+      <div class="section-card">
+        <div
+          id="public-workspace-identities-root"
+          data-workspace-identity-root="true"
+          data-identity-api-base="/api/workspace-identities/public/{{ workspace_id }}"
+          data-default-capability="file_sync"
+          data-capability-options="file_sync"
+          data-auth-type-options="username_password,anonymous,client_secret,connection_string,managed_identity"
+        ></div>
+      </div>
+    </div>
+
+    <!-- Sync Tab -->
+    <div class="tab-pane fade" id="sync" role="tabpanel">
+      <div class="section-card">
+        <div
+          id="file-sync-root"
+          data-scope="public"
+          data-api-base="/api/file-sync/public/{{ workspace_id }}"
+          data-tags-api="/api/public_workspace_documents/tags?workspace_ids={{ workspace_id|urlencode }}"
+          data-recursive-allowed="{{ 'true' if settings.file_sync_allow_recursive_sources else 'false' }}"
+          data-visible-source-types="{{ settings.file_sync_visible_source_types|default(['smb', 'azure_files'])|join(',') }}"
+        ></div>
       </div>
     </div>
     {% endif %}
@@ -935,6 +1089,84 @@
   </div>
 </div>
 
+<!-- Public Workspace Stats Export Modal -->
+<div class="modal fade" id="publicStatsExportModal" tabindex="-1" aria-labelledby="publicStatsExportModalLabel" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="publicStatsExportModalLabel">
+          <i class="bi bi-download me-2"></i>Export Public Workspace Stats
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3">
+          <label class="form-label fw-semibold">Select Data to Export</label>
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="publicExportSummary" checked />
+            <label class="form-check-label" for="publicExportSummary">Summary Metrics</label>
+          </div>
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="publicExportDocuments" checked />
+            <label class="form-check-label" for="publicExportDocuments">Document Activity</label>
+          </div>
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="publicExportTokens" checked />
+            <label class="form-check-label" for="publicExportTokens">Token Usage</label>
+          </div>
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="publicExportStorage" checked />
+            <label class="form-check-label" for="publicExportStorage">Storage Usage</label>
+          </div>
+        </div>
+
+        <div class="mb-3">
+          <label class="form-label fw-semibold">Select Time Window</label>
+          <div class="form-check">
+            <input class="form-check-input" type="radio" name="publicExportTimeWindow" value="7" id="publicExport7days" />
+            <label class="form-check-label" for="publicExport7days">Last 7 Days</label>
+          </div>
+          <div class="form-check">
+            <input class="form-check-input" type="radio" name="publicExportTimeWindow" value="30" id="publicExport30days" checked />
+            <label class="form-check-label" for="publicExport30days">Last 30 Days</label>
+          </div>
+          <div class="form-check">
+            <input class="form-check-input" type="radio" name="publicExportTimeWindow" value="90" id="publicExport90days" />
+            <label class="form-check-label" for="publicExport90days">Last 90 Days</label>
+          </div>
+          <div class="form-check">
+            <input class="form-check-input" type="radio" name="publicExportTimeWindow" value="custom" id="publicExportCustom" />
+            <label class="form-check-label" for="publicExportCustom">Custom Range</label>
+          </div>
+
+          <div class="mt-3 d-none" id="publicExportCustomDateRange">
+            <div class="row g-2">
+              <div class="col-6">
+                <label for="publicExportStartDate" class="form-label small">Start Date</label>
+                <input type="date" class="form-control form-control-sm" id="publicExportStartDate" />
+              </div>
+              <div class="col-6">
+                <label for="publicExportEndDate" class="form-label small">End Date</label>
+                <input type="date" class="form-control form-control-sm" id="publicExportEndDate" />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="alert alert-info mb-0">
+          <i class="bi bi-info-circle me-2"></i>Selected stats will be exported as CSV.
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" id="executePublicStatsExportBtn">
+          <i class="bi bi-download me-1"></i>Export CSV
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Raw Activity Modal -->
 <div class="modal fade" id="rawActivityModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-xl">
@@ -970,5 +1202,9 @@
   </script>
   <script src="{{ url_for('static', filename='js/validation-utils.js') }}"></script>
   <script src="{{ url_for('static', filename='js/public/public_workspace_utility.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/public/manage_public_workspace.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/public/manage_public_workspace.js') }}?v={{ config['VERSION'] }}"></script>
+  {% if file_sync_enabled %}
+  <script type="module" src="{{ url_for('static', filename='js/workspace/workspace-identities.js') }}?v={{ config['VERSION'] }}"></script>
+  <script type="module" src="{{ url_for('static', filename='js/workspace/workspace-file-sync.js') }}?v={{ config['VERSION'] }}"></script>
+  {% endif %}
 {% endblock %}

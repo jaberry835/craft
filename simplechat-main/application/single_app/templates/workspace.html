@@ -2,9 +2,8 @@
 {% extends "base.html" %}
 {% block title %} Personal Workspace - {{ app_settings.app_title }} {% endblock %}
 {% block head %}
-  <!-- <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/simplemde/dist/simplemde.min.css" />
-   LOCAL VERSION BELOW -->
    <link rel="stylesheet" href="/static/css/simplemde.min.css" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/workspace-responsive.css') }}" />
 
   <style>
     /* Keep fixed layout for document and prompt tables only. */
@@ -33,9 +32,20 @@
       min-height: 18px;
       display: none; /* Hide checkboxes by default */
     }
+
+    .document-select-all-checkbox {
+      cursor: pointer;
+      min-width: 18px;
+      min-height: 18px;
+      display: none;
+    }
     
     /* Show checkboxes when in selection mode */
     .selection-mode .document-checkbox {
+      display: block;
+    }
+
+    .selection-mode .document-select-all-checkbox {
       display: block;
     }
     
@@ -87,7 +97,8 @@
     }
     #prompts-table th:nth-child(2), /* Actions */
     #prompts-table td:nth-child(2) {
-        width: 150px; /* Adjust as needed for buttons */
+      width: 170px;
+      white-space: nowrap;
     }
 
     /* --- Agents Table Styles --- */
@@ -112,6 +123,122 @@
       width: 25%;
       min-width: 160px;
       white-space: nowrap;
+    }
+
+    /* --- Workflows Table Styles --- */
+    #workflows-table {
+      table-layout: fixed;
+      width: 100%;
+    }
+
+    #workflows-table th,
+    #workflows-table td {
+      vertical-align: top;
+    }
+
+    #workflows-table th:nth-child(1),
+    #workflows-table td:nth-child(1) {
+      width: 22%;
+    }
+    #workflows-table th:nth-child(2),
+    #workflows-table td:nth-child(2) {
+      width: 21%;
+    }
+    #workflows-table th:nth-child(3),
+    #workflows-table td:nth-child(3) {
+      width: 13%;
+    }
+    #workflows-table th:nth-child(4),
+    #workflows-table td:nth-child(4) {
+      width: 20%;
+    }
+    #workflows-table th:nth-child(5),
+    #workflows-table td:nth-child(5) {
+      width: 24%;
+      white-space: normal;
+    }
+
+    #workflows-table td:nth-child(1),
+    #workflows-table td:nth-child(2),
+    #workflows-table td:nth-child(3),
+    #workflows-table td:nth-child(4) {
+      overflow-wrap: anywhere;
+    }
+
+    .workflow-action-buttons {
+      row-gap: 0.35rem;
+    }
+
+    .workflow-meta {
+      color: #6c757d;
+      font-size: 0.85rem;
+    }
+
+    .workflow-item-card {
+      cursor: pointer;
+    }
+
+    .workflow-item-card .card-title {
+      word-break: break-word;
+    }
+
+    .workflow-grid-meta {
+      display: grid;
+      gap: 0.45rem;
+      font-size: 0.82rem;
+      color: var(--bs-secondary-color);
+    }
+
+    .workflow-grid-meta-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 0.75rem;
+    }
+
+    .workflow-grid-meta-row span:last-child {
+      text-align: right;
+      color: var(--bs-body-color);
+      font-weight: 500;
+    }
+
+    .workflow-grid-preview {
+      min-height: 2.75rem;
+    }
+
+    .workflow-grid-actions {
+      align-items: center;
+      border-top: 1px solid var(--bs-border-color-translucent);
+      display: flex;
+      gap: 0.5rem;
+      justify-content: space-between;
+      padding-top: 0.85rem;
+    }
+
+    .workflow-grid-actions .workflow-card-primary-actions {
+      min-width: 0;
+    }
+
+    .workflow-grid-actions .workflow-card-menu {
+      flex: 0 0 auto;
+    }
+
+    .workflow-grid-actions,
+    .workflow-grid-actions .btn,
+    .workflow-grid-actions .dropdown-menu {
+      cursor: auto;
+    }
+
+    @media (max-width: 991.98px) {
+      #workflows-table {
+        table-layout: auto;
+      }
+    }
+
+    .workflow-response-preview {
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
     }
 
     /* Style for the classification badge */
@@ -437,8 +564,15 @@
 {% endblock %}
 
 {% block content %}
-  <div class="container">
-    <h2>Personal Workspace</h2>
+  <div class="container workspace-page">
+    <div class="workspace-page-header">
+      <div>
+        <h2 class="workspace-page-title">Personal Workspace</h2>
+        <p class="workspace-page-subtitle">Manage documents, prompts, agents, actions, and model endpoints from one place.</p>
+      </div>
+    </div>
+
+    {% include "_semantic_search_health_warning.html" %}
 
     <!-- Migration Banner (Hidden by default) -->
     <div id="migration-banner" class="alert alert-info alert-dismissible fade show" role="alert" style="display: none;">
@@ -463,6 +597,37 @@
       </div>
     </div>
 
+    {% set workspace_identities_enabled = file_sync_enabled or settings.enable_semantic_kernel %}
+    <div class="workspace-section-switcher mb-3{% if nav_layout == 'left' %} workspace-section-switcher--persistent{% endif %}" data-workspace-switcher data-tab-list="#workspaceTab">
+      <div class="w-100">
+        <label class="form-label" for="workspace-section-select">Section</label>
+        <select class="form-select" id="workspace-section-select" data-workspace-section-select aria-label="Select workspace section">
+          <option value="documents-tab-btn">Your Documents</option>
+          {% if file_sync_enabled %}
+            <option value="sync-tab-btn">Sync</option>
+          {% endif %}
+          {% if workspace_identities_enabled %}
+            <option value="identities-tab-btn">Identities</option>
+          {% endif %}
+          <option value="prompts-tab-btn">Your Prompts</option>
+          {% if settings.per_user_semantic_kernel and settings.enable_semantic_kernel %}
+            {% if settings.allow_user_agents %}
+              <option value="agents-tab-btn">Your Agents</option>
+              {% if settings.allow_user_plugins %}
+                <option value="plugins-tab-btn">Your Actions</option>
+              {% endif %}
+            {% endif %}
+          {% endif %}
+          {% if settings.allow_user_workflows %}
+            <option value="workflows-tab-btn">Personal Workflows</option>
+          {% endif %}
+          {% if settings.allow_user_custom_endpoints and settings.enable_multi_model_endpoints %}
+            <option value="endpoints-tab-btn">Your Endpoints</option>
+          {% endif %}
+        </select>
+      </div>
+    </div>
+
     <!-- Nav Tabs - Hide when left nav is enabled -->
     <ul class="nav nav-tabs{% if nav_layout == 'left' %} d-none{% endif %}" id="workspaceTab" role="tablist">
       <li class="nav-item" role="presentation">
@@ -476,9 +641,41 @@
           aria-controls="documents-tab"
           aria-selected="true"
         >
-          Your Documents
+          Documents
         </button>
       </li>
+      {% if file_sync_enabled %}
+      <li class="nav-item" role="presentation">
+        <button
+          class="nav-link"
+          id="sync-tab-btn"
+          data-bs-toggle="tab"
+          data-bs-target="#sync-tab"
+          type="button"
+          role="tab"
+          aria-controls="sync-tab"
+          aria-selected="false"
+        >
+          Sync
+        </button>
+      </li>
+      {% endif %}
+      {% if workspace_identities_enabled %}
+      <li class="nav-item" role="presentation">
+        <button
+          class="nav-link"
+          id="identities-tab-btn"
+          data-bs-toggle="tab"
+          data-bs-target="#identities-tab"
+          type="button"
+          role="tab"
+          aria-controls="identities-tab"
+          aria-selected="false"
+        >
+          Identities
+        </button>
+      </li>
+      {% endif %}
       <li class="nav-item" role="presentation">
         <button
           class="nav-link"
@@ -490,7 +687,7 @@
           aria-controls="prompts-tab"
           aria-selected="false"
         >
-          Your Prompts
+          Prompts
         </button>
       </li>
       {% if settings.per_user_semantic_kernel and settings.enable_semantic_kernel %}
@@ -506,7 +703,7 @@
               aria-controls="agents-tab"
               aria-selected="false"
             >
-              Your Agents
+              Agents
             </button>
           </li>
       
@@ -522,11 +719,27 @@
                 aria-controls="plugins-tab"
                 aria-selected="false"
               >
-                Your Actions
+                Actions
               </button>
             </li>
           {% endif %}
         {% endif %}
+      {% endif %}
+      {% if settings.allow_user_workflows %}
+        <li class="nav-item" role="presentation">
+          <button
+            class="nav-link"
+            id="workflows-tab-btn"
+            data-bs-toggle="tab"
+            data-bs-target="#workflows-tab"
+            type="button"
+            role="tab"
+            aria-controls="workflows-tab"
+            aria-selected="false"
+          >
+            Personal Workflows
+          </button>
+        </li>
       {% endif %}
       {% if settings.allow_user_custom_endpoints and settings.enable_multi_model_endpoints %}
         <li class="nav-item" role="presentation">
@@ -540,7 +753,7 @@
             aria-controls="endpoints-tab"
             aria-selected="false"
           >
-            Your Endpoints
+            Endpoints
           </button>
         </li>
       {% endif %}
@@ -658,13 +871,24 @@
               <label class="btn btn-outline-secondary" for="docs-view-list">
                 <i class="bi bi-list-ul"></i> List
               </label>
+              <input type="radio" class="btn-check" name="docs-view-mode" id="docs-view-cards" autocomplete="off">
+              <label class="btn btn-outline-secondary" for="docs-view-cards">
+                <i class="bi bi-grid"></i> Cards
+              </label>
               
               <input type="radio" class="btn-check" name="docs-view-mode" id="docs-view-grid" autocomplete="off">
               <label class="btn btn-outline-secondary" for="docs-view-grid">
-                <i class="bi bi-grid-3x3-gap"></i> Grid
+                <i class="bi bi-folder2-open"></i> Folders
+              </label>
+              <input type="radio" class="btn-check" name="docs-view-mode" id="docs-view-folders-cards" autocomplete="off">
+              <label class="btn btn-outline-secondary" for="docs-view-folders-cards">
+                <i class="bi bi-folder-symlink"></i> Folders + Cards
               </label>
             </div>
             <div class="d-flex align-items-center gap-2">
+              <button type="button" class="btn btn-sm btn-outline-secondary" id="workspace-toggle-selection-btn">
+                <i class="bi bi-check2-square me-1"></i>Multi-select
+              </button>
               <button type="button" class="btn btn-sm btn-outline-primary" id="workspace-manage-tags-btn">
                 <i class="bi bi-tags me-1"></i>Manage Tags
               </button>
@@ -684,9 +908,21 @@
                 <button type="button" class="btn btn-sm btn-primary" id="manage-tags-btn">
                   <i class="bi bi-tags me-1"></i>Tag Assignment
                 </button>
-                <button type="button" class="btn btn-sm btn-primary ms-2" id="chat-selected-btn" onclick="window.chatWithSelected()">
+                <button type="button" class="btn btn-sm btn-primary ms-2" id="chat-selected-btn">
                   <i class="bi bi-chat-dots-fill me-1"></i>Chat with Selected
                 </button>
+                <button type="button" class="btn btn-sm btn-outline-primary ms-2 d-none" id="download-selected-btn">
+                  <i class="bi bi-download me-1"></i>Download Selected
+                </button>
+                <div class="btn-group ms-2" id="reprocess-selected-dropdown">
+                  <button type="button" class="btn btn-sm btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false">
+                    <i class="bi bi-arrow-repeat me-1"></i>Change Extraction
+                  </button>
+                  <ul class="dropdown-menu dropdown-menu-end">
+                    <li><button type="button" class="dropdown-item" title="Extract selected PDFs again with Standard extraction. Standard is faster for plain text PDFs and images." onclick="window.reprocessSelectedDocumentExtraction('read')">Extract Again as Standard</button></li>
+                    <li><button type="button" class="dropdown-item" title="Extract selected PDFs again with Enhanced extraction. Enhanced preserves tables, page structure, forms, and checkbox states." onclick="window.reprocessSelectedDocumentExtraction('layout')">Extract Again as Enhanced</button></li>
+                  </ul>
+                </div>
                 <button type="button" class="btn btn-sm btn-danger ms-2" id="delete-selected-btn">
                   <i class="bi bi-trash me-1"></i>Delete Selected
                 </button>
@@ -703,7 +939,12 @@
               <thead>
                 <tr>
                   <th>
-                    <!-- Expand/Collapse Column -->
+                    <input
+                      type="checkbox"
+                      id="docs-select-all-checkbox"
+                      class="form-check-input document-select-all-checkbox"
+                      aria-label="Select all visible documents"
+                    />
                   </th>
                   <th class="sortable-header" data-sort-field="file_name" style="cursor: pointer; user-select: none;">
                     File Name <i class="bi bi-arrow-down-up text-muted small sort-icon"></i>
@@ -726,8 +967,15 @@
             </table>
           </div>
 
-          <!-- Documents Grid View (Tag Folders) -->
-          <div id="documents-grid-view" style="display: none;">
+          <div id="documents-card-view" class="row g-3 d-none">
+            <div class="col-12 text-center text-muted py-5">
+              <div class="spinner-border spinner-border-sm me-2" role="status"><span class="visually-hidden">Loading...</span></div>
+              Loading documents...
+            </div>
+          </div>
+
+          <!-- Documents Folders View -->
+          <div id="documents-grid-view" class="d-none">
             <div id="tag-folders-container" class="row g-2">
               <!-- Populated by JavaScript -->
               <div class="col-12 text-center text-muted py-5">
@@ -738,13 +986,15 @@
           </div>
 
           <!-- List View Controls (pagination & page size) -->
-          <div id="list-controls-bar" class="align-items-center gap-3 mb-3 mt-3" style="display: flex;">
+          <div id="list-controls-bar" class="d-flex align-items-center gap-3 mb-3 mt-3">
             <div>
               <label for="docs-page-size-select" class="visually-hidden">Items per page:</label>
               <select id="docs-page-size-select" class="form-select form-select-sm d-inline-block" style="width:auto;">
                 <option value="10" selected>10</option>
                 <option value="20">20</option>
                 <option value="50">50</option>
+                <option value="100">100</option>
+                <option value="250">250</option>
               </select>
               <span class="ms-1 small text-muted">items per page</span>
             </div>
@@ -754,7 +1004,7 @@
           </div>
 
           <!-- Grid View Controls (sort, page size, pagination) -->
-          <div id="grid-controls-bar" class="align-items-center gap-3 mb-3 mt-3" style="display: none;">
+          <div id="grid-controls-bar" class="align-items-center gap-3 mb-3 mt-3 d-none">
             <div class="d-flex align-items-center gap-2">
               <small class="text-muted">Sort:</small>
               <button class="btn btn-sm btn-outline-secondary grid-sort-btn" data-sort="name">
@@ -770,6 +1020,8 @@
                 <option value="10" selected>10</option>
                 <option value="20">20</option>
                 <option value="50">50</option>
+                <option value="100">100</option>
+                <option value="250">250</option>
               </select>
               <span class="ms-1 small text-muted">items per page</span>
             </div>
@@ -782,6 +1034,48 @@
       </div>
       <!-- End DOCUMENTS TAB -->
 
+      {% if file_sync_enabled %}
+      <!-- ============= SYNC TAB ============= -->
+      <div
+        class="tab-pane fade"
+        id="sync-tab"
+        role="tabpanel"
+        aria-labelledby="sync-tab-btn"
+      >
+        <div class="card p-3 my-3">
+          <div
+            id="file-sync-root"
+            data-scope="personal"
+            data-api-base="/api/file-sync/personal"
+            data-tags-api="/api/documents/tags"
+            data-recursive-allowed="{{ 'true' if settings.file_sync_allow_recursive_sources else 'false' }}"
+            data-visible-source-types="{{ settings.file_sync_visible_source_types|default(['smb', 'azure_files'])|join(',') }}"
+          ></div>
+        </div>
+      </div>
+      {% endif %}
+
+      {% if workspace_identities_enabled %}
+      <!-- ============= IDENTITIES TAB ============= -->
+      <div
+        class="tab-pane fade"
+        id="identities-tab"
+        role="tabpanel"
+        aria-labelledby="identities-tab-btn"
+      >
+        <div class="card p-3 my-3">
+          <div
+            id="workspace-identities-root"
+            data-workspace-identity-root="true"
+            data-identity-api-base="/api/workspace-identities/personal"
+            data-default-capability="{% if file_sync_enabled %}file_sync{% else %}action{% endif %}"
+            data-capability-options="{% if file_sync_enabled %}file_sync{% endif %}{% if settings.enable_semantic_kernel %}{% if file_sync_enabled %},{% endif %}action{% endif %}"
+            data-auth-type-options="username_password,anonymous,api_key,bearer_token,client_secret,connection_string,managed_identity"
+          ></div>
+        </div>
+      </div>
+      {% endif %}
+
             <!-- ============= PROMPTS TAB ============= -->
       <div
         class="tab-pane fade"
@@ -790,10 +1084,16 @@
         aria-labelledby="prompts-tab-btn"
       >
         <div class="card p-3 my-3">
-          <div class="mb-3">
-            <button id="create-prompt-btn" class="btn btn-success btn-sm">
+          <div class="d-flex justify-content-between align-items-center gap-2 mb-3">
+            <button id="create-prompt-btn" class="btn btn-success btn-sm" type="button">
               New Prompt
             </button>
+            <div class="btn-group btn-group-sm" role="group" aria-label="Prompts view mode">
+              <input type="radio" class="btn-check" name="prompts-view-mode" id="prompts-view-list" autocomplete="off" checked>
+              <label class="btn btn-outline-secondary" for="prompts-view-list" title="List view" aria-label="List view"><i class="bi bi-list-ul"></i></label>
+              <input type="radio" class="btn-check" name="prompts-view-mode" id="prompts-view-grid" autocomplete="off">
+              <label class="btn btn-outline-secondary" for="prompts-view-grid" title="Card view" aria-label="Card view"><i class="bi bi-grid-3x3-gap"></i></label>
+            </div>
           </div>
 
           <!-- Prompts Filters -->
@@ -814,22 +1114,31 @@
           </div>
 
           <!-- Prompts List -->
-          <table class="table table-striped" id="prompts-table">
-            <thead>
-              <tr>
-                <th>Prompt Name</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-               <tr class="table-loading-row">
-                <td colspan="2">
+          <div id="prompts-list-view">
+            <table class="table table-striped" id="prompts-table">
+              <thead>
+                <tr>
+                  <th>Prompt Name</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr class="table-loading-row">
+                  <td colspan="2">
                     <div class="spinner-border spinner-border-sm me-2" role="status"><span class="visually-hidden">Loading...</span></div>
                     Loading prompts...
-                </td>
-              </tr>
-            </tbody>
-          </table>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div id="prompts-card-view" class="row g-3 d-none">
+            <div class="col-12 text-center text-muted py-5">
+              <div class="spinner-border spinner-border-sm me-2" role="status"><span class="visually-hidden">Loading...</span></div>
+              Loading prompts...
+            </div>
+          </div>
 
           <!-- Prompts Pagination & Page Size -->
            <div class="d-flex align-items-center gap-3 mb-3 mt-3">
@@ -859,6 +1168,7 @@
         aria-labelledby="agents-tab-btn"
       >
         {% if settings.allow_user_agents %}
+          {% if workspace_governance.user_agents %}
           <div class="tab-pane-inner">
             <div class="card p-3 my-3">
               <div class="d-flex justify-content-between align-items-center mb-2">
@@ -898,6 +1208,11 @@
             </div>
             <div id="workspace-agents-error"></div>
           </div>
+          {% else %}
+          <div class="alert alert-warning text-center my-4">
+            Personal agents are disabled by governance for your account. Please contact your admin.
+          </div>
+          {% endif %}
         {% else %}
           <div class="alert alert-warning text-center my-4">
             Custom User Agents are currently disabled. Please ask your admin to enable agents for your workspace.
@@ -916,6 +1231,7 @@
         aria-labelledby="plugins-tab-btn"
       >
         {% if settings.allow_user_plugins %}
+          {% if workspace_governance.user_actions %}
           <div id="workspace-plugins-root"></div>
           <!-- Actions Table Template (hidden) -->
           <template id="plugins-table-template">
@@ -945,6 +1261,11 @@
               <div id="plugins-grid-view" class="row g-3 d-none"></div>
             </div>
           </template>
+          {% else %}
+          <div class="alert alert-warning text-center my-4">
+            Personal actions are disabled by governance for your account. Please contact your admin.
+          </div>
+          {% endif %}
         {% else %}
           <div class="alert alert-warning text-center my-4">
             Custom User Actions are currently disabled. Please ask your admin to enable actions for your workspace.
@@ -952,6 +1273,67 @@
         {% endif %}
       </div>
       <!-- End ACTIONS TAB -->
+
+      {% endif %}
+
+      {% if settings.allow_user_workflows %}
+      <!-- ============= WORKFLOWS TAB ============= -->
+      <div
+        class="tab-pane fade"
+        id="workflows-tab"
+        role="tabpanel"
+        aria-labelledby="workflows-tab-btn"
+      >
+        <div class="tab-pane-inner">
+          <div class="card p-3 my-3">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+              <button class="btn btn-success btn-sm" id="create-workflow-btn" type="button">New Personal Workflow</button>
+              <div class="btn-group btn-group-sm" role="group" aria-label="Personal workflows view mode">
+                <input type="radio" class="btn-check" name="workflows-view-mode" id="workflows-view-list" autocomplete="off" checked>
+                <label class="btn btn-outline-secondary" for="workflows-view-list"><i class="bi bi-list-ul"></i></label>
+                <input type="radio" class="btn-check" name="workflows-view-mode" id="workflows-view-grid" autocomplete="off">
+                <label class="btn btn-outline-secondary" for="workflows-view-grid"><i class="bi bi-grid-3x3-gap"></i></label>
+              </div>
+            </div>
+            <p class="text-muted small mb-3">Create personal workflows that run a selected agent or model manually or on an interval schedule.</p>
+            <div class="row g-2 mb-3 align-items-center">
+              <div class="col-lg-7">
+                <input type="search" class="form-control" id="workflows-search" placeholder="Search workflows by name, runner, or task prompt..." />
+              </div>
+              <div class="col-lg-5 text-lg-end">
+                <div class="text-muted small" id="workflows-summary"></div>
+              </div>
+            </div>
+            <div id="workflows-list-view">
+              <div class="table-responsive">
+                <table class="table table-striped item-list-table" id="workflows-table">
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Runner</th>
+                      <th>Trigger</th>
+                      <th>Last Run</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody id="workflows-table-body">
+                    <tr class="table-loading-row">
+                      <td colspan="5">
+                        <div class="spinner-border spinner-border-sm me-2" role="status"><span class="visually-hidden">Loading...</span></div>
+                        Loading personal workflows...
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div id="workflows-grid-view" class="row g-3 d-none"></div>
+          </div>
+          <div id="workspace-workflows-error"></div>
+        </div>
+      </div>
+      <!-- End WORKFLOWS TAB -->
+      {% endif %}
 
       {% if settings.allow_user_custom_endpoints and settings.enable_multi_model_endpoints %}
       <!-- ============= ENDPOINTS TAB ============= -->
@@ -961,6 +1343,7 @@
         role="tabpanel"
         aria-labelledby="endpoints-tab-btn"
       >
+        {% if workspace_governance.user_endpoints %}
         <div class="tab-pane-inner">
           <!-- Workspace Model Endpoints -->
           <div class="card p-3 my-3" id="workspace-multi-endpoint-configuration">
@@ -973,9 +1356,14 @@
             <div id="model-endpoints-wrapper" class="{% if not settings.enable_multi_model_endpoints %}d-none{% endif %}">
               <div class="d-flex justify-content-between align-items-center mb-2">
                 <h6 class="mb-0">Your Endpoints</h6>
-                <button type="button" class="btn btn-sm btn-outline-primary" id="add-model-endpoint-btn">
-                  <i class="bi bi-plus-circle me-1"></i>Add Endpoint
-                </button>
+                <div class="d-flex flex-wrap gap-2">
+                  <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#modelEndpointIdentityGuideModal" data-testid="model-endpoint-identity-guide-open">
+                    <i class="bi bi-question-circle me-1"></i>Setup Guide
+                  </button>
+                  <button type="button" class="btn btn-sm btn-outline-primary" id="add-model-endpoint-btn">
+                    <i class="bi bi-plus-circle me-1"></i>Add Endpoint
+                  </button>
+                </div>
               </div>
               <div class="table-responsive">
                 <table class="table table-sm table-bordered">
@@ -997,16 +1385,22 @@
             <input type="hidden" id="model_endpoints_json" />
           </div>
         </div>
+        {% else %}
+        <div class="alert alert-warning text-center my-4">
+          Personal endpoints are disabled by governance for your account. Please contact your admin.
+        </div>
+        {% endif %}
       </div>
       <!-- End ENDPOINTS TAB -->
-      {% endif %}
       {% endif %}
     </div>
     <!-- End Tab Content -->
   </div>
   <!--</div>-->
 
+  {% if settings.allow_user_custom_endpoints and settings.enable_multi_model_endpoints and workspace_governance.user_endpoints %}
   {% include '_multiendpoint_modal.html' %}
+  {% endif %}
   <!-- Shared Item View Modal (read-only details for agents/actions) -->
   <div class="modal fade" id="item-view-modal" tabindex="-1" aria-labelledby="item-view-modal-label" aria-hidden="true">
     <div class="modal-dialog modal-lg modal-dialog-scrollable">
@@ -1024,6 +1418,459 @@
       </div>
     </div>
   </div>
+
+  {% if settings.allow_user_workflows %}
+  <div class="modal fade" id="workflowModal" tabindex="-1" aria-labelledby="workflowModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+      <form class="modal-content" id="workflow-form" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true">
+        <div class="modal-header">
+          <h5 class="modal-title" id="workflowModalLabel">Create Personal Workflow</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <input type="hidden" id="workflow-id" />
+          <div class="row g-3 mb-3">
+            <div class="col-md-7">
+              <label for="workflow-name" class="form-label">Workflow Name</label>
+              <input type="text" class="form-control" id="workflow-name" maxlength="120" required />
+            </div>
+            <div class="col-md-5">
+              <label for="workflow-runner-type" class="form-label">Runner</label>
+              <select class="form-select" id="workflow-runner-type">
+                <option value="model">Direct Model</option>
+                <option value="agent">Agent</option>
+              </select>
+            </div>
+          </div>
+          <div class="mb-3">
+            <label for="workflow-description" class="form-label">Description</label>
+            <input type="text" class="form-control" id="workflow-description" maxlength="240" placeholder="Optional summary for the workflow list." />
+          </div>
+          <div class="mb-3">
+            <label for="workflow-task-brief" class="form-label">Task Brief</label>
+            <textarea class="form-control" id="workflow-task-brief" rows="3" placeholder="Briefly describe what this workflow should accomplish."></textarea>
+            <div class="d-flex align-items-center gap-2 mt-2">
+              <button type="button" class="btn btn-outline-primary btn-sm" id="workflow-draft-instructions-btn">
+                <i class="bi bi-magic me-1" aria-hidden="true"></i>Draft Workflow Instructions
+              </button>
+              <span class="text-muted small" id="workflow-draft-instructions-status" aria-live="polite"></span>
+            </div>
+          </div>
+          <div class="mb-3">
+            <label for="workflow-task-prompt" class="form-label">Workflow Instructions</label>
+            <textarea class="form-control" id="workflow-task-prompt" rows="7" placeholder="Describe exactly what this workflow should do each time it runs." required></textarea>
+            <div class="form-text">Each run appends this prompt to the workflow conversation as a new user message.</div>
+          </div>
+          {% if settings.enable_url_access %}
+          <div class="form-check form-switch mb-3" id="workflow-url-access-group">
+            <input class="form-check-input" type="checkbox" id="workflow-url-access-enabled" />
+            <label class="form-check-label ms-2" for="workflow-url-access-enabled">Allow URL Access for this workflow</label>
+            <div class="form-text">Workflow runs can review up to {{ settings.url_access_max_workflow_urls_per_run|default(50, true) }} HTTP(S) URLs from the task prompt using the shared admin domain policy.</div>
+          </div>
+          {% endif %}
+
+          <div class="card p-3 mb-3">
+            <div class="row g-3 mb-2">
+              <div class="col-md-6">
+                <label for="workflow-document-action-type" class="form-label">Action Type</label>
+                <select class="form-select" id="workflow-document-action-type" title="Search selected or recent documents and use matching excerpts as workflow context.">
+                  <option value="search" data-action-description="Search selected or recent documents and use matching excerpts as workflow context." title="Search selected or recent documents and use matching excerpts as workflow context.">Search</option>
+                  {% if settings.document_action_capabilities.analyze.enabled %}
+                  <option value="analyze" data-action-description="Perform an in-depth analysis across all selected documents based on your request." title="Perform an in-depth analysis across all selected documents based on your request.">Analyze</option>
+                  {% endif %}
+                  {% if settings.document_action_capabilities.comparison.enabled %}
+                  <option value="comparison" data-action-description="Compare one source document against the selected target documents to explain differences, relationships, or downstream impact." title="Compare one source document against the selected target documents to explain differences, relationships, or downstream impact.">Compare</option>
+                  {% endif %}
+                </select>
+              </div>
+              <div class="col-md-6">
+                <label for="workflow-analysis-retries" class="form-label">Retries Per Window</label>
+                <input type="number" class="form-control" id="workflow-analysis-retries" min="0" max="5" value="1" />
+              </div>
+            </div>
+            <div class="form-text mt-2" id="workflow-document-action-help">Search selected or recent documents and use matching excerpts as workflow context.</div>
+
+            <div id="workflow-document-targets-fields" class="mt-3 d-none">
+              <input type="hidden" id="workflow-analysis-doc-scope" value="personal" />
+              <input type="hidden" id="workflow-analysis-group-ids" />
+              <input type="hidden" id="workflow-analysis-public-workspace-ids" />
+
+              <div id="workflow-analysis-target-fields" class="mb-3 d-none">
+                <div class="row g-3 mb-3">
+                  <div class="col-md-7">
+                    <label for="workflow-analysis-target-mode" class="form-label">Document Target</label>
+                    <select class="form-select" id="workflow-analysis-target-mode">
+                      <option value="selected">Selected documents</option>
+                      <option value="recent">Recent documents</option>
+                    </select>
+                  </div>
+                  <div class="col-md-5 d-none" id="workflow-analysis-recent-window-group">
+                    <label for="workflow-analysis-recent-minutes" class="form-label">Recent Window</label>
+                    <div class="input-group">
+                      <input type="number" class="form-control" id="workflow-analysis-recent-minutes" min="1" max="1440" value="10" />
+                      <span class="input-group-text">minutes</span>
+                    </div>
+                  </div>
+                </div>
+                <input type="hidden" id="workflow-analysis-document-ids" />
+                <div class="form-check form-switch mt-3 d-none" id="workflow-analysis-per-document-group">
+                  <input class="form-check-input" type="checkbox" id="workflow-analysis-per-document" />
+                  <label class="form-check-label ms-2" for="workflow-analysis-per-document">Run each document separately</label>
+                </div>
+              </div>
+
+              <div id="workflow-document-picker-card" class="border rounded-3 p-3 mb-3">
+                <div class="d-flex flex-wrap gap-2 justify-content-between align-items-center mb-3">
+                  <div class="form-text mb-0" id="workflow-selected-documents-summary">No workspace documents selected in the picker.</div>
+                  <button type="button" class="btn btn-sm btn-outline-secondary" id="workflow-use-selected-documents-btn">Refresh selected documents</button>
+                </div>
+                <div id="workflow-document-picker-loading" class="text-muted small mb-2 d-none">
+                  <span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Loading documents...
+                </div>
+                <div id="workflow-document-picker-error" class="alert alert-warning py-2 d-none" role="alert"></div>
+                <select class="d-none" id="document-action-select" aria-label="Workflow document action">
+                  <option value="search">Search</option>
+                  {% if settings.document_action_capabilities.analyze.enabled %}
+                  <option value="analyze">Analyze</option>
+                  {% endif %}
+                  {% if settings.document_action_capabilities.comparison.enabled %}
+                  <option value="comparison">Compare</option>
+                  {% endif %}
+                </select>
+                <div id="search-documents-container" class="workflow-document-picker">
+                  <div class="chat-search-panel-grid">
+                    <div class="flex-shrink-0 chat-search-panel-field chat-search-panel-field-narrow" data-chat-document-picker-field="scope">
+                      <label class="form-label mb-1 small text-muted">Scope</label>
+                      <div class="dropdown" id="scope-dropdown">
+                        <button class="form-select form-select-sm d-flex justify-content-between align-items-center" type="button" id="scope-dropdown-button" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">
+                          <span class="selected-scope-text text-truncate">All</span>
+                        </button>
+                        <div class="dropdown-menu p-2" id="scope-dropdown-menu">
+                          <div class="chat-dropdown-search mb-2">
+                            <input type="text" class="form-control form-control-sm" placeholder="Search workspaces..." id="scope-search-input" />
+                          </div>
+                          <div class="dropdown-items-container" id="scope-dropdown-items"></div>
+                        </div>
+                      </div>
+                      <select class="d-none" id="doc-scope-select" multiple></select>
+                    </div>
+                    <div class="flex-shrink-0 chat-search-panel-field chat-search-panel-field-narrow" data-chat-document-picker-field="tags">
+                      <label class="form-label mb-1 small text-muted">Tags</label>
+                      <div class="dropdown" id="tags-dropdown">
+                        <button class="form-select form-select-sm d-flex justify-content-between align-items-center" type="button" id="tags-dropdown-button" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-disabled="true" disabled aria-expanded="false">
+                          <span class="chat-search-dropdown-button-content">
+                            <span class="spinner-border spinner-border-sm text-secondary chat-search-dropdown-loading-spinner" id="tags-dropdown-loading-spinner" role="status" aria-hidden="true"></span>
+                            <span class="selected-tags-text text-truncate">Loading tags...</span>
+                          </span>
+                        </button>
+                        <div class="dropdown-menu p-2" id="tags-dropdown-menu">
+                          <div class="chat-dropdown-search mb-2">
+                            <input type="text" class="form-control form-control-sm" placeholder="Search tags..." id="tags-search-input" />
+                          </div>
+                          <div class="dropdown-items-container" id="tags-dropdown-items"></div>
+                        </div>
+                      </div>
+                      <select class="d-none" id="chat-tags-filter" multiple></select>
+                    </div>
+                    <div class="flex-grow-1 chat-search-panel-field chat-search-panel-field-wide" data-chat-document-picker-field="document">
+                      <label for="document-select" class="form-label mb-1 small text-muted">Document</label>
+                      <div class="dropdown" id="document-dropdown">
+                        <button class="form-select form-select-sm d-flex justify-content-between align-items-center" type="button" id="document-dropdown-button" data-bs-toggle="dropdown" data-bs-offset="0,5" aria-expanded="false">
+                          <span class="selected-document-text">All Documents</span>
+                        </button>
+                        <div class="dropdown-menu p-2" id="document-dropdown-menu">
+                          <div class="document-search-container mb-2">
+                            <input type="text" class="form-control form-control-sm" placeholder="Search documents..." id="document-search-input" />
+                          </div>
+                          <div class="dropdown-items-container" id="document-dropdown-items"></div>
+                        </div>
+                        <select class="d-none" id="document-select" multiple></select>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div id="workflow-comparison-target-fields" class="d-none">
+                <div class="border rounded-3 px-2 py-2 bg-body-tertiary d-flex flex-wrap align-items-center gap-2">
+                  <div class="small text-uppercase text-muted fw-semibold me-1">Compare</div>
+                  <div class="d-flex align-items-center gap-1 flex-wrap">
+                    <span class="small text-muted">Source</span>
+                    <div id="workflow-comparison-inline-source-tags" class="d-flex flex-wrap gap-1"></div>
+                  </div>
+                  <div class="d-flex align-items-center gap-1 flex-wrap flex-grow-1">
+                    <span class="small text-muted">Targets</span>
+                    <div id="workflow-comparison-inline-target-tags" class="d-flex flex-wrap gap-1"></div>
+                  </div>
+                  <button type="button" class="btn btn-outline-secondary btn-sm ms-auto" id="workflow-comparison-edit-btn">
+                    <i class="bi bi-pencil-square me-1"></i><span id="workflow-comparison-edit-btn-label">Set Up Compare</span>
+                  </button>
+                </div>
+                <select class="d-none" id="workflow-comparison-target-document-ids" multiple aria-hidden="true"></select>
+                <select class="d-none" id="workflow-comparison-left-document-id" aria-hidden="true"></select>
+              </div>
+
+              <div class="row g-3">
+                <div class="col-md-4">
+                  <label for="workflow-analysis-window-unit" class="form-label">Window Unit</label>
+                  <select class="form-select" id="workflow-analysis-window-unit">
+                    <option value="pages">Pages</option>
+                    <option value="chunks">Chunks</option>
+                  </select>
+                </div>
+                <div class="col-md-4">
+                  <label for="workflow-analysis-window-size" class="form-label">Window Size</label>
+                  <input type="number" class="form-control" id="workflow-analysis-window-size" min="1" max="100" placeholder="Optional fixed size" />
+                </div>
+                <div class="col-md-4">
+                  <label for="workflow-analysis-window-percent" class="form-label">Window Percent</label>
+                  <input type="number" class="form-control" id="workflow-analysis-window-percent" min="1" max="100" placeholder="Optional percent" />
+                </div>
+              </div>
+              <div class="form-text mt-2">Set either a fixed window size or a percentage. Leave both blank to use the ordered retrieval defaults.</div>
+            </div>
+          </div>
+
+          <div class="card p-3 mb-3" id="workflow-file-sync-card">
+            <div class="d-flex flex-wrap gap-2 justify-content-between align-items-start mb-3">
+              <div>
+                <label class="form-label mb-0" for="workflow-file-sync-enabled">File Sync Before Run</label>
+                <div class="form-text mt-1" id="workflow-file-sync-help">Trigger selected sync sources before this workflow runs.</div>
+              </div>
+              <div class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" id="workflow-file-sync-enabled" />
+                <label class="form-check-label ms-2" for="workflow-file-sync-enabled">Enabled</label>
+              </div>
+            </div>
+            <div class="row g-3">
+              <div class="col-md-6">
+                <label for="workflow-file-sync-sources" class="form-label">Sync Sources</label>
+                <select class="form-select" id="workflow-file-sync-sources" multiple size="5"></select>
+              </div>
+              <div class="col-md-6">
+                <div class="mb-3">
+                  <label for="workflow-file-sync-wait-mode" class="form-label">Wait</label>
+                  <select class="form-select" id="workflow-file-sync-wait-mode">
+                    <option value="complete">Until sync completes</option>
+                    <option value="queued">Queue only</option>
+                  </select>
+                </div>
+                <div class="mb-3">
+                  <label for="workflow-file-sync-continue-mode" class="form-label">Continue</label>
+                  <select class="form-select" id="workflow-file-sync-continue-mode">
+                    <option value="always">Always continue</option>
+                    <option value="changed">Only when files changed</option>
+                  </select>
+                </div>
+                <div class="form-check form-switch">
+                  <input class="form-check-input" type="checkbox" id="workflow-file-sync-use-changed-documents" checked />
+                  <label class="form-check-label ms-2" for="workflow-file-sync-use-changed-documents">Use changed files as Analyze targets</label>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div id="workflow-agent-fields" class="card p-3 mb-3 d-none">
+            <div class="mb-0">
+              <label for="workflow-agent-select" class="form-label">Selected Agent</label>
+              <select class="form-select" id="workflow-agent-select"></select>
+              <div class="form-text" id="workflow-agent-help">Choose a personal agent or a merged global agent.</div>
+            </div>
+          </div>
+
+          <div id="workflow-model-fields" class="card p-3 mb-3">
+            <div class="row g-3">
+              <div class="col-md-4">
+                <label for="workflow-model-source" class="form-label">Model Source</label>
+                <select class="form-select" id="workflow-model-source">
+                  <option value="default">Default App Model</option>
+                  <option value="custom">Specific Endpoint + Model</option>
+                </select>
+              </div>
+              <div class="col-md-4 d-none" id="workflow-model-endpoint-group">
+                <label for="workflow-model-endpoint-select" class="form-label">Endpoint</label>
+                <select class="form-select" id="workflow-model-endpoint-select"></select>
+              </div>
+              <div class="col-md-4 d-none" id="workflow-model-group">
+                <label for="workflow-model-select" class="form-label">Model</label>
+                <select class="form-select" id="workflow-model-select"></select>
+              </div>
+            </div>
+            <div class="form-text mt-2" id="workflow-model-help">The default app model follows your admin-configured default selection or legacy GPT settings.</div>
+          </div>
+
+          <div class="card p-3 mb-3">
+            <div class="row g-3 align-items-end">
+              <div class="col-md-5">
+                <label for="workflow-alert-priority" class="form-label">Pop-up Alert Priority</label>
+                <select class="form-select" id="workflow-alert-priority">
+                  <option value="none">No notification</option>
+                  <option value="low">Low priority</option>
+                  <option value="medium">Medium priority</option>
+                  <option value="high">High priority</option>
+                </select>
+              </div>
+              <div class="col-md-7">
+                <div class="form-text mt-0">When enabled, workflow runs create a pop-up alert modal with direct links to the workflow conversation and any conversation the agent created during the run.</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card p-3">
+            <div class="row g-3 align-items-end">
+              <div class="col-md-4">
+                <label for="workflow-trigger-type" class="form-label">Trigger</label>
+                <select class="form-select" id="workflow-trigger-type">
+                  <option value="manual">Manual</option>
+                  <option value="interval">Interval Schedule</option>
+                  <option value="file_sync">Monitor File Sync Changes</option>
+                </select>
+              </div>
+              <div class="col-md-4 d-none" id="workflow-schedule-value-group">
+                <label for="workflow-schedule-value" class="form-label">Every</label>
+                <input type="number" class="form-control" id="workflow-schedule-value" min="1" max="59" value="10" />
+              </div>
+              <div class="col-md-4 d-none" id="workflow-schedule-unit-group">
+                <label for="workflow-schedule-unit" class="form-label">Unit</label>
+                <select class="form-select" id="workflow-schedule-unit">
+                  <option value="seconds">Seconds</option>
+                  <option value="minutes">Minutes</option>
+                  <option value="hours">Hours</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-check form-switch mt-3 d-none" id="workflow-enabled-group">
+              <input class="form-check-input" type="checkbox" id="workflow-enabled" checked />
+              <label class="form-check-label ms-2" for="workflow-enabled">Enable scheduled runs</label>
+            </div>
+            <div class="form-text mt-2" id="workflow-trigger-help">Manual workflows run only when you trigger them from the workspace.</div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="workflow-save-btn">Save Personal Workflow</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal fade" id="workflow-comparison-modal" tabindex="-1" aria-labelledby="workflowComparisonModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <div>
+            <h5 class="modal-title" id="workflowComparisonModalLabel">Edit Compare</h5>
+            <div class="small text-muted">Choose one Source and at least one Target from the selected workflow documents.</div>
+          </div>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div id="workflow-comparison-board" class="d-flex flex-column gap-3">
+            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
+              <div id="workflow-comparison-selection-summary" class="small text-muted">Select documents in the workflow picker, then choose one Source and at least one Target.</div>
+              <button type="button" class="btn btn-outline-secondary btn-sm" id="workflow-comparison-refresh-btn">
+                <i class="bi bi-arrow-clockwise me-1"></i>Refresh from picker
+              </button>
+            </div>
+            <div class="row g-3">
+              <div class="col-xl-4">
+                <div class="border rounded-3 p-3 h-100 bg-body-tertiary">
+                  <div class="small fw-semibold text-body mb-1">Available Items</div>
+                  <div class="small text-muted mb-2">Use the action buttons to place each item into Source or Targets.</div>
+                  <div id="workflow-comparison-available-list" class="d-flex flex-column gap-2" role="list" aria-label="Available workflow comparison items" style="max-height: min(56vh, 34rem); overflow-y: auto;"></div>
+                </div>
+              </div>
+              <div class="col-xl-4">
+                <div class="border rounded-3 p-3 h-100">
+                  <div class="d-flex align-items-center justify-content-between mb-2">
+                    <div class="small fw-semibold text-body">Source</div>
+                    <span class="badge text-bg-primary">Baseline</span>
+                  </div>
+                  <div id="workflow-comparison-source-dropzone" class="d-flex flex-column gap-2 rounded-3 border p-2 bg-body-tertiary" aria-label="Workflow comparison source" style="min-height: 18rem; max-height: min(56vh, 34rem); overflow-y: auto; border-style: dashed !important;"></div>
+                </div>
+              </div>
+              <div class="col-xl-4">
+                <div class="border rounded-3 p-3 h-100">
+                  <div class="d-flex align-items-center justify-content-between mb-2">
+                    <div class="small fw-semibold text-body">Targets</div>
+                    <span class="badge text-bg-secondary">1 to many</span>
+                  </div>
+                  <div id="workflow-comparison-selection-list" class="d-flex flex-column gap-2 rounded-3 border p-2 bg-body-tertiary" role="list" aria-label="Workflow comparison targets" style="min-height: 18rem; max-height: min(56vh, 34rem); overflow-y: auto; border-style: dashed !important;"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Done</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal fade" id="workflowHistoryModal" tabindex="-1" aria-labelledby="workflowHistoryModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="workflowHistoryModalLabel">Personal Workflow Run History</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+            <div class="small text-muted">
+              Conversation: <span id="workflow-history-conversation-id">Not created yet.</span>
+            </div>
+            <a id="workflow-history-open-conversation-link" class="btn btn-sm btn-outline-primary d-none" href="#">
+              Open personal workflow conversation
+            </a>
+          </div>
+          <div class="table-responsive">
+            <table class="table table-sm table-striped" id="workflow-history-table">
+              <thead>
+                <tr>
+                  <th>Status</th>
+                  <th>Started</th>
+                  <th>Trigger</th>
+                  <th>Details</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="workflow-history-body">
+                <tr class="table-loading-row">
+                  <td colspan="5">
+                    <div class="spinner-border spinner-border-sm me-2" role="status"><span class="visually-hidden">Loading...</span></div>
+                    Loading run history...
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal fade" id="workflowDeleteModal" tabindex="-1" aria-labelledby="workflowDeleteModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="workflowDeleteModalLabel">Delete Personal Workflow</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <p class="mb-0">Delete <strong id="workflow-delete-name">this personal workflow</strong>? Its dedicated conversation remains in your conversations list, but this workflow definition and its run history will be removed.</p>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-danger" id="workflow-delete-confirm-btn">Delete Personal Workflow</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
 
   <!-- Modal for Creating/Editing Prompts (Keep As Is) -->
   <div
@@ -1113,6 +1960,15 @@
           <div class="modal-body">
             <!-- Hidden doc-id field -->
             <input type="hidden" id="doc-id" name="doc_id" value="" />
+
+            <div id="doc-sync-status" class="alert alert-secondary py-2 mb-3" aria-live="polite">
+              <div class="d-flex align-items-center gap-2 flex-wrap">
+                <strong>Synced:</strong>
+                <span class="badge bg-secondary">No</span>
+              </div>
+            </div>
+
+            <div id="doc-conversation-link-status" class="alert alert-info py-2 mb-3 d-none" aria-live="polite"></div>
 
             <!-- Document Classification -->
             {% if enable_document_classification in [True, 'True', 'true'] %}
@@ -1380,15 +2236,23 @@
   </div>
 </div>
 
+{% set load_user_agent_modal = settings.per_user_semantic_kernel and settings.enable_semantic_kernel and settings.allow_user_agents and workspace_governance.user_agents %}
+{% set load_user_action_modal = settings.per_user_semantic_kernel and settings.enable_semantic_kernel and settings.allow_user_plugins and workspace_governance.user_actions %}
+{% if load_user_agent_modal or load_user_action_modal %}
 <div>
   <!-- Modal for Creating/Editing Agent -->
 
+  {% if load_user_agent_modal %}
   {% include "_agent_modal.html" %}
+  {% endif %}
 
   <!-- Modal for Creating/Editing Plugin -->
 
+  {% if load_user_action_modal %}
   {% include "_plugin_modal.html" %}
+  {% endif %}
 </div>
+{% endif %}
 
 <!-- Share Document Modal -->
 <div class="modal fade" id="shareDocumentModal" tabindex="-1" aria-hidden="true" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true">
@@ -1552,7 +2416,11 @@
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
       <div class="modal-body" id="approveSharedModalBody">
-        <!-- Populated by JS -->
+        <p class="mb-2">
+          This file was shared with you by <strong id="approveSharedModalOwnerName">the owner</strong>
+          <span class="text-muted d-none" id="approveSharedModalOwnerEmailWrapper">(<span id="approveSharedModalOwnerEmail"></span>)</span>.
+        </p>
+        <p class="mb-0">Do you want to approve access to this shared document?</p>
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-sm btn-danger action-btn-wide me-1" id="approveSharedModalDenyBtn">Deny</button>
@@ -1567,27 +2435,30 @@
 
 {% block scripts %}
   {{ super() }}
-  {% if settings.per_user_semantic_kernel and settings.enable_semantic_kernel %}
+  {% if settings.per_user_semantic_kernel and settings.enable_semantic_kernel and settings.allow_user_agents and workspace_governance.user_agents %}
     <script type="module" src="/static/js/agents_common.js"></script>
     <script type="module" src="/static/js/workspace/workspace_agents.js"></script>
+  {% endif %}
+  {% if settings.per_user_semantic_kernel and settings.enable_semantic_kernel and settings.allow_user_plugins and workspace_governance.user_actions %}
     <script type="module" src="/static/js/workspace/workspace_plugins.js"></script>
+  {% endif %}
+  {% if settings.allow_user_workflows %}
+    <script type="module" src="{{ url_for('static', filename='js/workspace/workspace_workflows.js') }}"></script>
   {% endif %}
   <script>
     window.enableMultiModelEndpoints = {{ 'true' if settings.enable_multi_model_endpoints else 'false' }};
     window.modelEndpointScope = 'user';
-      window.workspaceModelEndpoints = {{ personal_model_endpoints|default([], true)|tojson|safe }};
-      window.globalModelEndpoints = {{ global_model_endpoints|default([], true)|tojson|safe }};
+      window.workspaceModelEndpoints = {{ personal_model_endpoints|default([], true)|tojson }};
+      window.globalModelEndpoints = {{ global_model_endpoints|default([], true)|tojson }};
   </script>
-  {% if settings.per_user_semantic_kernel and settings.enable_semantic_kernel and settings.allow_user_custom_endpoints and settings.enable_multi_model_endpoints %}
+  {% if settings.per_user_semantic_kernel and settings.enable_semantic_kernel and settings.allow_user_custom_endpoints and settings.enable_multi_model_endpoints and workspace_governance.user_endpoints %}
   <script type="module" src="{{ url_for('static', filename='js/workspace/workspace_model_endpoints.js') }}"></script>
   {% endif %}
-  <!-- <script src="https://cdn.jsdelivr.net/npm/simplemde/dist/simplemde.min.js"></script>
-   LOCAL VERSION BELOW -->
    <script src="/static/js/simplemde/simplemde.min.js"></script>
 
   <script>
     // Pass settings/flags needed by JS
-    window.classification_categories = {{ settings.document_classification_categories|default([], true)|tojson(indent=None)|safe }};
+    window.classification_categories = {{ settings.document_classification_categories|default([], true)|tojson(indent=None) }};
     if (!Array.isArray(window.classification_categories)) {
         window.classification_categories = [];
     }
@@ -1596,6 +2467,13 @@
     window.enable_video_file_support = "{{ enable_video_file_support | tojson }}";
     window.enable_audio_file_support = "{{ enable_audio_file_support | tojson }}";
     window.enable_file_sharing = "{{ enable_file_sharing | tojson }}";
+    window.documentActionCapabilities = {{ settings.document_action_capabilities|default({}, true)|tojson|safe }};
+    window.userGroups = {{ user_groups|default([], true)|tojson|safe }};
+    window.userVisiblePublicWorkspaces = {{ user_visible_public_workspaces|default([], true)|tojson|safe }};
+    window.urlAccessSettings = {
+      enable_url_access: {{ settings.enable_url_access|default(false, true)|tojson }},
+      url_access_max_workflow_urls_per_run: {{ settings.url_access_max_workflow_urls_per_run|default(50, true)|tojson }}
+    };
     window.max_file_size_mb = {{ settings.max_file_size_mb | default(16) }};
     
     // Pass current user ID for ownership checks
@@ -1655,7 +2533,8 @@
         document.getElementById("shareDocumentModal"),
         document.getElementById("modelEndpointModal"),
         document.getElementById("agentModal"),
-        document.getElementById("plugin-modal")
+        document.getElementById("plugin-modal"),
+        document.getElementById("workflowModal")
       ].forEach(applyWorkspaceAutofillMetadata);
     }
 
@@ -1748,14 +2627,21 @@
     });
   </script>
 
-  <script type="module" src="{{ url_for('static', filename='js/workspace/workspace-utils.js') }}"></script>
-  <script type="module" src="{{ url_for('static', filename='js/workspace/workspace-documents.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/workspace/workspace-documents-sharing.js') }}"></script>
-  <script type="module" src="{{ url_for('static', filename='js/workspace/workspace-prompts.js') }}"></script>
-  <script type="module" src="{{ url_for('static', filename='js/plugin_modal_stepper.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/workspace_sidebar_nav.js') }}"></script>
-  <script type="module" src="{{ url_for('static', filename='js/workspace/workspace-migration.js') }}"></script>
-  <script type="module" src="{{ url_for('static', filename='js/workspace/workspace-init.js') }}"></script>
-  <script type="module" src="{{ url_for('static', filename='js/workspace/workspace-tutorial.js') }}"></script>
+  <script type="module" src="{{ url_for('static', filename='js/workspace/workspace-utils.js') }}?v={{ config['VERSION'] }}"></script>
+  <script type="module" src="{{ url_for('static', filename='js/workspace/workspace-documents.js') }}?v={{ config['VERSION'] }}"></script>
+  <script src="{{ url_for('static', filename='js/workspace/workspace-documents-sharing.js') }}?v={{ config['VERSION'] }}"></script>
+  <script type="module" src="{{ url_for('static', filename='js/workspace/workspace-prompts.js') }}?v={{ config['VERSION'] }}"></script>
+  {% if file_sync_enabled %}
+  <script type="module" src="{{ url_for('static', filename='js/workspace/workspace-identities.js') }}?v={{ config['VERSION'] }}"></script>
+  <script type="module" src="{{ url_for('static', filename='js/workspace/workspace-file-sync.js') }}?v={{ config['VERSION'] }}"></script>
+  {% endif %}
+  {% if settings.per_user_semantic_kernel and settings.enable_semantic_kernel and settings.allow_user_plugins and workspace_governance.user_actions %}
+  <script type="module" src="{{ url_for('static', filename='js/plugin_modal_stepper.js') }}?v={{ config['VERSION'] }}"></script>
+  {% endif %}
+  <script src="{{ url_for('static', filename='js/workspace_sidebar_nav.js') }}?v={{ config['VERSION'] }}"></script>
+  <script src="{{ url_for('static', filename='js/workspace_section_switcher.js') }}?v={{ config['VERSION'] }}"></script>
+  <script type="module" src="{{ url_for('static', filename='js/workspace/workspace-migration.js') }}?v={{ config['VERSION'] }}"></script>
+  <script type="module" src="{{ url_for('static', filename='js/workspace/workspace-init.js') }}?v={{ config['VERSION'] }}"></script>
+  <script type="module" src="{{ url_for('static', filename='js/workspace/workspace-tutorial.js') }}?v={{ config['VERSION'] }}"></script>
 
 {% endblock %}

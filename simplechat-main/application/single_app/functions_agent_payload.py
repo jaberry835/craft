@@ -4,7 +4,9 @@
 from copy import deepcopy
 from typing import Any, Dict, List
 
-_SUPPORTED_AGENT_TYPES = {"local", "aifoundry", "new_foundry"}
+from functions_icon_utils import normalize_icon_payload
+
+_SUPPORTED_AGENT_TYPES = {"local", "aifoundry", "new_foundry", "foundry_workflow"}
 _APIM_FIELDS = [
     "azure_agent_apim_gpt_endpoint",
     "azure_agent_apim_gpt_subscription_key",
@@ -84,6 +86,8 @@ _MAX_FIELD_LENGTHS = {
     "model_id": 128,
     "model_provider": 32,
 }
+_MAX_AGENT_TAGS = 20
+_MAX_AGENT_TAG_LENGTH = 40
 _FOUNDRY_FIELD_LENGTHS = {
     "agent_id": 128,
     "endpoint": 2048,
@@ -109,6 +113,25 @@ _NEW_FOUNDRY_FIELD_LENGTHS = {
     "managed_identity_client_id": 64,
     "notes": 2000,
 }
+_FOUNDRY_WORKFLOW_FIELD_LENGTHS = {
+    "workflow_name": 200,
+    "workflow_agent_id": 256,
+    "application_id": 256,
+    "application_version": 64,
+    "endpoint": 2048,
+    "project_name": 256,
+    "responses_api_version": 64,
+    "api_version": 64,
+    "responses_path": 256,
+    "openai_responses_path": 256,
+    "authority": 2048,
+    "tenant_id": 64,
+    "client_id": 64,
+    "client_secret": 1024,
+    "managed_identity_client_id": 64,
+    "foundry_scope": 256,
+    "notes": 2000,
+}
 
 
 class AgentPayloadError(ValueError):
@@ -119,7 +142,7 @@ def is_azure_ai_foundry_agent(agent: Dict[str, Any]) -> bool:
     """Return True when the agent type is Azure AI Foundry."""
     agent_type = (agent or {}).get("agent_type", "local")
     if isinstance(agent_type, str):
-        return agent_type.strip().lower() in {"aifoundry", "new_foundry"}
+        return agent_type.strip().lower() in {"aifoundry", "new_foundry", "foundry_workflow"}
     return False
 
 
@@ -128,6 +151,14 @@ def is_new_foundry_agent(agent: Dict[str, Any]) -> bool:
     agent_type = (agent or {}).get("agent_type", "local")
     if isinstance(agent_type, str):
         return agent_type.strip().lower() == "new_foundry"
+    return False
+
+
+def is_foundry_workflow_agent(agent: Dict[str, Any]) -> bool:
+    """Return True when the agent type is a Foundry workflow."""
+    agent_type = (agent or {}).get("agent_type", "local")
+    if isinstance(agent_type, str):
+        return agent_type.strip().lower() == "foundry_workflow"
     return False
 
 
@@ -194,6 +225,38 @@ def _coerce_actions(actions: Any) -> List[str]:
     return cleaned
 
 
+def _coerce_tags(tags: Any) -> List[str]:
+    if tags in (None, ""):
+        return []
+
+    if isinstance(tags, str):
+        raw_tags = tags.replace(",", "\n").splitlines()
+    elif isinstance(tags, list):
+        raw_tags = tags
+    else:
+        raise AgentPayloadError("tags must be an array of strings.")
+
+    cleaned: List[str] = []
+    seen = set()
+    for item in raw_tags:
+        if not isinstance(item, str):
+            raise AgentPayloadError("tags entries must be strings.")
+        tag = item.strip()
+        if not tag:
+            continue
+        if len(tag) > _MAX_AGENT_TAG_LENGTH:
+            raise AgentPayloadError(f"tags entries must be {_MAX_AGENT_TAG_LENGTH} characters or fewer.")
+        tag_key = tag.lower()
+        if tag_key in seen:
+            continue
+        seen.add(tag_key)
+        cleaned.append(tag)
+        if len(cleaned) > _MAX_AGENT_TAGS:
+            raise AgentPayloadError(f"tags supports at most {_MAX_AGENT_TAGS} entries.")
+
+    return cleaned
+
+
 def _coerce_other_settings(settings: Any) -> Dict[str, Any]:
     if settings in (None, ""):
         return {}
@@ -241,6 +304,28 @@ def _validate_new_foundry_field_lengths(new_foundry_settings: Dict[str, Any]) ->
             raise AgentPayloadError(f"new_foundry.{field} exceeds maximum length of {max_len}.")
 
 
+def _validate_foundry_workflow_field_lengths(workflow_settings: Dict[str, Any]) -> None:
+    for field, max_len in _FOUNDRY_WORKFLOW_FIELD_LENGTHS.items():
+        value = workflow_settings.get(field, "")
+        if isinstance(value, str) and len(value) > max_len:
+            raise AgentPayloadError(f"foundry_workflow.{field} exceeds maximum length of {max_len}.")
+
+
+def _normalize_foundry_entra_auth_settings(foundry_settings: Dict[str, Any]) -> None:
+    auth_type = str(
+        foundry_settings.get("authentication_type")
+        or foundry_settings.get("auth_type")
+        or "delegated_user"
+    ).strip().lower()
+    if auth_type in {"managed_identity", "service_principal"}:
+        foundry_settings["authentication_type"] = auth_type
+    else:
+        foundry_settings["authentication_type"] = "delegated_user"
+    foundry_settings.pop("auth_type", None)
+    foundry_settings.pop("api_key", None)
+    foundry_settings.pop("key", None)
+
+
 def _strip_empty_values(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {
         key: value
@@ -274,6 +359,11 @@ def sanitize_agent_payload(agent: Dict[str, Any]) -> Dict[str, Any]:
 
     sanitized["other_settings"] = _coerce_other_settings(sanitized.get("other_settings"))
     sanitized["actions_to_load"] = _coerce_actions(sanitized.get("actions_to_load"))
+    sanitized["tags"] = _coerce_tags(sanitized.get("tags"))
+    try:
+        sanitized["icon"] = normalize_icon_payload(sanitized.get("icon"), field_name="icon")
+    except ValueError as exc:
+        raise AgentPayloadError(str(exc)) from exc
     sanitized["max_completion_tokens"] = _coerce_completion_tokens(
         sanitized.get("max_completion_tokens")
     )
@@ -301,9 +391,11 @@ def sanitize_agent_payload(agent: Dict[str, Any]) -> Dict[str, Any]:
                 "Azure AI Foundry agents require other_settings.azure_ai_foundry.agent_id."
             )
         foundry_settings["agent_id"] = agent_id
+        _normalize_foundry_entra_auth_settings(foundry_settings)
         _validate_foundry_field_lengths(foundry_settings)
         sanitized["other_settings"]["azure_ai_foundry"] = foundry_settings
         sanitized["other_settings"].pop("new_foundry", None)
+        sanitized["other_settings"].pop("foundry_workflow", None)
     elif agent_type == "new_foundry":
         sanitized["enable_agent_gpt_apim"] = False
         for field in _APIM_FIELDS:
@@ -376,10 +468,109 @@ def sanitize_agent_payload(agent: Dict[str, Any]) -> Dict[str, Any]:
             sanitized["azure_openai_gpt_deployment"] = project_name
 
         sanitized["azure_openai_gpt_api_version"] = response_version
+        _normalize_foundry_entra_auth_settings(new_foundry_settings)
 
         _validate_new_foundry_field_lengths(new_foundry_settings)
         sanitized["other_settings"]["new_foundry"] = _strip_empty_values(new_foundry_settings)
         sanitized["other_settings"].pop("azure_ai_foundry", None)
+        sanitized["other_settings"].pop("foundry_workflow", None)
+    elif agent_type == "foundry_workflow":
+        sanitized["enable_agent_gpt_apim"] = False
+        for field in _APIM_FIELDS:
+            sanitized.pop(field, None)
+        sanitized["actions_to_load"] = []
+
+        workflow_settings = sanitized["other_settings"].get("foundry_workflow")
+        if not isinstance(workflow_settings, dict):
+            raise AgentPayloadError(
+                "Foundry workflow agents require other_settings.foundry_workflow."
+            )
+
+        workflow_name = str(
+            workflow_settings.get("workflow_name")
+            or sanitized.get("name")
+            or ""
+        ).strip()
+        if not workflow_name:
+            raise AgentPayloadError(
+                "Foundry workflow agents require other_settings.foundry_workflow.workflow_name."
+            )
+        workflow_settings["workflow_name"] = workflow_name
+
+        agent_reference = workflow_settings.get("agent_reference")
+        if agent_reference is not None and not isinstance(agent_reference, dict):
+            raise AgentPayloadError("foundry_workflow.agent_reference must be an object when provided.")
+        if isinstance(agent_reference, dict):
+            normalized_reference = {
+                str(key): value
+                for key, value in agent_reference.items()
+                if value not in (None, "")
+            }
+            normalized_reference["type"] = str(normalized_reference.get("type") or "agent_reference").strip() or "agent_reference"
+            normalized_reference.setdefault("name", workflow_name)
+            workflow_settings["agent_reference"] = normalized_reference
+
+        response_version = str(
+            workflow_settings.get("responses_api_version")
+            or workflow_settings.get("api_version")
+            or sanitized.get("azure_openai_gpt_api_version")
+            or ""
+        ).strip()
+        if not response_version:
+            raise AgentPayloadError(
+                "Foundry workflow agents require other_settings.foundry_workflow.responses_api_version or azure_openai_gpt_api_version."
+            )
+        workflow_settings["responses_api_version"] = response_version
+        sanitized["azure_openai_gpt_api_version"] = response_version
+
+        endpoint = str(
+            workflow_settings.get("endpoint")
+            or sanitized.get("azure_openai_gpt_endpoint")
+            or ""
+        ).strip()
+        if not endpoint:
+            raise AgentPayloadError(
+                "Foundry workflow agents require a Foundry project endpoint. Enter it in Project Details or select a saved Foundry connection."
+            )
+        workflow_settings["endpoint"] = endpoint
+        sanitized["azure_openai_gpt_endpoint"] = endpoint
+
+        project_name = str(
+            workflow_settings.get("project_name")
+            or sanitized.get("azure_openai_gpt_deployment")
+            or ""
+        ).strip()
+        if "/api/projects/" not in endpoint and not project_name:
+            raise AgentPayloadError(
+                "Foundry workflow agents require project_name when endpoint does not include /api/projects/."
+            )
+        if project_name:
+            workflow_settings["project_name"] = project_name
+            sanitized["azure_openai_gpt_deployment"] = project_name
+        elif not sanitized.get("azure_openai_gpt_deployment"):
+            sanitized["azure_openai_gpt_deployment"] = workflow_name
+
+        if "include_document_context" not in workflow_settings:
+            workflow_settings["include_document_context"] = True
+        else:
+            workflow_settings["include_document_context"] = bool(
+                workflow_settings.get("include_document_context")
+            )
+
+        max_context_chars = workflow_settings.get("max_context_chars")
+        if max_context_chars not in (None, ""):
+            try:
+                workflow_settings["max_context_chars"] = max(1, int(max_context_chars))
+            except (TypeError, ValueError) as exc:
+                raise AgentPayloadError(
+                    "foundry_workflow.max_context_chars must be a positive integer."
+                ) from exc
+
+        _normalize_foundry_entra_auth_settings(workflow_settings)
+        _validate_foundry_workflow_field_lengths(workflow_settings)
+        sanitized["other_settings"]["foundry_workflow"] = _strip_empty_values(workflow_settings)
+        sanitized["other_settings"].pop("azure_ai_foundry", None)
+        sanitized["other_settings"].pop("new_foundry", None)
     else:
         # Remove stale foundry metadata when toggling back to local agents.
         azure_foundry = sanitized["other_settings"].get("azure_ai_foundry")
@@ -392,5 +583,10 @@ def sanitize_agent_payload(agent: Dict[str, Any]) -> Dict[str, Any]:
             raise AgentPayloadError("new_foundry must be an object when provided.")
         if new_foundry:
             sanitized["other_settings"].pop("new_foundry", None)
+        foundry_workflow = sanitized["other_settings"].get("foundry_workflow")
+        if foundry_workflow is not None and not isinstance(foundry_workflow, dict):
+            raise AgentPayloadError("foundry_workflow must be an object when provided.")
+        if foundry_workflow:
+            sanitized["other_settings"].pop("foundry_workflow", None)
 
     return sanitized

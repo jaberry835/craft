@@ -1,14 +1,16 @@
 # functions_group.py
 
 from config import *
-from functions_authentication import *
-from functions_settings import *
+import functions_authentication
+import functions_settings
 from typing import Iterable
+
+from functions_workspace_branding import DEFAULT_WORKSPACE_HERO_COLOR
 
 
 def create_group(name, description):
     """Creates a new group. The creator is the Owner by default."""
-    user_info = get_current_user_info()
+    user_info = functions_authentication.get_current_user_info()
     if not user_info:
         raise Exception("No user in session")
 
@@ -19,6 +21,9 @@ def create_group(name, description):
         "id": new_group_id,
         "name": name,
         "description": description,
+        "heroColor": DEFAULT_WORKSPACE_HERO_COLOR,
+        "logoBase64": "",
+        "logoVersion": 1,
         "owner":
             {
                 "id": user_info["userId"],
@@ -35,6 +40,7 @@ def create_group(name, description):
             }
         ],
         "pendingUsers": [],
+        "disable_file_downloads": False,
         "createdDate": now_str,
         "modifiedDate": now_str
     }
@@ -70,6 +76,31 @@ def search_groups(search_query, user_id):
     ))
     return results
 
+
+def search_all_groups(search_query, limit=10):
+    """
+    Return groups matching a search term for admin management workflows.
+    """
+    normalized_query = str(search_query or '').strip().lower()
+    if not normalized_query:
+        return []
+
+    query = """
+        SELECT *
+        FROM c
+        WHERE CONTAINS(LOWER(c.name), @search)
+           OR (IS_DEFINED(c.description) AND CONTAINS(LOWER(c.description), @search))
+    """
+    params = [
+        {"name": "@search", "value": normalized_query}
+    ]
+    results = list(cosmos_groups_container.query_items(
+        query=query,
+        parameters=params,
+        enable_cross_partition_query=True
+    ))
+    return results[:max(1, min(int(limit or 10), 25))]
+
 def get_user_groups(user_id):
     """
     Fetch all groups for which this user is a member.
@@ -103,12 +134,20 @@ def find_group_by_id(group_id):
     except exceptions.CosmosResourceNotFoundError:
         return None
 
-def update_active_group_for_user(group_id):
-    user_id = get_current_user_id()
+def update_active_group_for_user(group_id, user_id=None):
+    if not user_id:
+        user_id = functions_authentication.get_current_user_id()
+
+    assert_group_role(
+        user_id,
+        group_id,
+        allowed_roles=("Owner", "Admin", "DocumentManager", "User"),
+    )
+
     new_settings = {
         "activeGroupOid": group_id
     }
-    update_user_settings(user_id, new_settings)
+    functions_settings.update_user_settings(user_id, new_settings)
 
 def get_user_role_in_group(group_doc, user_id):
     """Determine the user's role in the given group doc."""
@@ -129,12 +168,17 @@ def get_user_role_in_group(group_doc, user_id):
     return None
 
 
-def require_active_group(user_id: str) -> str:
-    """Return the active group id for a user or raise ValueError if missing."""
-    settings = get_user_settings(user_id)
+def require_active_group(
+    user_id: str,
+    allowed_roles: Iterable[str] = ("Owner", "Admin", "DocumentManager", "User"),
+) -> str:
+    """Return the active group id for a user after validating current membership."""
+    settings = functions_settings.get_user_settings(user_id)
     active_group_id = settings.get("settings", {}).get("activeGroupOid")
     if not active_group_id:
         raise ValueError("No active group selected")
+
+    assert_group_role(user_id, active_group_id, allowed_roles=allowed_roles)
     return active_group_id
 
 

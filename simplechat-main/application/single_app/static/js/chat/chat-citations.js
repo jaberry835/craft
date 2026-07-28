@@ -2,7 +2,7 @@
 
 import { showToast } from "./chat-toast.js";
 import { showLoadingIndicator, hideLoadingIndicator } from "./chat-loading-indicator.js";
-import { toBoolean } from "./chat-utils.js";
+import { addTargetBlankToExternalLinks, sanitizeHttpUrl, toBoolean } from "./chat-utils.js";
 import { fetchFileContent } from "./chat-input-actions.js";
 // --- NEW IMPORT ---
 import { getDocumentMetadata } from './chat-documents.js';
@@ -14,12 +14,19 @@ const AGENT_CITATION_PREVIEW_ROWS = 3;
 const AGENT_CITATION_EXPANDED_ROWS = 25;
 let activeAgentCitationState = null;
 
-function escapeAttribute(value) {
-  return String(value)
-    .replace(/&/g, '&amp;')
-    .replace(/"/g, '&quot;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+function serializeSafeElement(element) {
+  const container = document.createElement('div');
+  container.appendChild(element);
+  return container.innerHTML;
+}
+
+function buildSafeExternalLinkHtml(url, label) {
+  const link = document.createElement('a');
+  link.href = url;
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  link.textContent = label;
+  return serializeSafeElement(link);
 }
 
 export function parseDocIdAndPage(citationId) {
@@ -38,11 +45,14 @@ export function parseCitations(message) {
   const citationRegex = /\(Source:\s*([^,]+),\s*(Page(?:s)?|Sheet(?:s)?|Location):\s*([^)]+)\)\s*((?:\[#.*?\]\s*)+)/gi;
 
   let result = message.replace(citationRegex, (whole, filename, locationLabel, locations, bracketSection) => {
-    let filenameHtml;
-    if (/^https?:\/\/.+/i.test(filename.trim())) {
-      filenameHtml = `<a href="${filename.trim()}" target="_blank" rel="noopener noreferrer">${filename.trim()}</a>`;
-    } else {
-      filenameHtml = filename.trim();
+    const trimmedFilename = filename.trim();
+    const safeFilenameText = escapeHtml(trimmedFilename);
+    let filenameHtml = safeFilenameText;
+    if (/^https?:\/\/.+/i.test(trimmedFilename)) {
+      const safeFilenameUrl = sanitizeHttpUrl(trimmedFilename);
+      if (safeFilenameUrl) {
+        filenameHtml = buildSafeExternalLinkHtml(safeFilenameUrl, trimmedFilename);
+      }
     }
 
     const bracketMatches = bracketSection.match(/\[#.*?\]/g) || [];
@@ -110,11 +120,11 @@ export function parseCitations(message) {
         const ref = pageToRefMap[singleNum];
         return buildAnchorIfExists(token, ref);
       }
-      return token;
+      return escapeHtml(token);
     });
 
     const linkedPagesText = linkedTokens.join(', ');
-    return `(Source: ${filenameHtml}, ${locationLabel}: ${linkedPagesText})`;
+    return `(Source: ${filenameHtml}, ${escapeHtml(locationLabel)}: ${linkedPagesText})`;
   });
 
   // Cleanup pass: strip any remaining [#guid...] bracket groups that the main regex didn't match.
@@ -129,22 +139,48 @@ export function parseCitations(message) {
 
 export function buildAnchorIfExists(pageStr, citationId, sheetName = null) {
   // ... (keep existing implementation)
+  const safePageText = escapeHtml(pageStr);
    if (!citationId) {
-    return pageStr;
+    return safePageText;
   }
   // Ensure citationId doesn't have a leading # if passed accidentally
-  const cleanCitationId = citationId.startsWith('#') ? citationId.slice(1) : citationId;
-  const sheetNameAttribute = sheetName ? ` data-sheet-name="${escapeAttribute(sheetName)}"` : '';
-  return `<a href="#" class="citation-link" data-citation-id="${cleanCitationId}"${sheetNameAttribute} target="_blank" rel="noopener noreferrer">${pageStr}</a>`;
+  const normalizedCitationId = String(citationId || '');
+  const cleanCitationId = normalizedCitationId.startsWith('#') ? normalizedCitationId.slice(1) : normalizedCitationId;
+  const link = document.createElement('a');
+  link.href = '#';
+  link.className = 'citation-link';
+  link.dataset.citationId = cleanCitationId;
+  if (sheetName) {
+    link.dataset.sheetName = String(sheetName);
+  }
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  link.textContent = String(pageStr ?? '');
+  return serializeSafeElement(link);
 }
 
 // --- MODIFIED: fetchCitedText handles errors more gracefully ---
-export function fetchCitedText(citationId) {
+export function fetchCitedText(citationId, citationContext = {}) {
   showLoadingIndicator();
+  const requestPayload = { citation_id: citationId };
+  const documentId = String(citationContext.documentId || '').trim();
+  const pageNumber = String(citationContext.pageNumber || '').trim();
+  const chunkId = String(citationContext.chunkId || '').trim();
+
+  if (documentId) {
+    requestPayload.document_id = documentId;
+  }
+  if (pageNumber) {
+    requestPayload.page_number = pageNumber;
+  }
+  if (chunkId) {
+    requestPayload.chunk_id = chunkId;
+  }
+
   fetch("/api/get_citation", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ citation_id: citationId }),
+    body: JSON.stringify(requestPayload),
   })
     .then((response) => {
         if (!response.ok) {
@@ -181,7 +217,44 @@ export function fetchCitedText(citationId) {
     });
 }
 
-export function showCitedTextPopup(citedText, fileName, pageNumber) {
+function renderMarkdownIntoCitationElement(contentElement, markdownText) {
+  if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') {
+    contentElement.textContent = String(markdownText || '');
+    return;
+  }
+
+  const sanitizedHtml = DOMPurify.sanitize(marked.parse(String(markdownText || '')));
+  const linkedHtml = addTargetBlankToExternalLinks(sanitizedHtml);
+  contentElement.innerHTML = DOMPurify.sanitize(linkedHtml);
+}
+
+function isMarkdownCitationFile(fileName) {
+  const normalizedFileName = String(fileName || '').trim().toLowerCase();
+  return normalizedFileName.endsWith('.md') || normalizedFileName.endsWith('.markdown');
+}
+
+function ensureCitedTextContentElement(modalContainer, renderMarkdown = false) {
+  const currentContentElement = modalContainer.querySelector("#cited-text-content");
+  const desiredTagName = renderMarkdown ? "DIV" : "PRE";
+
+  if (currentContentElement && currentContentElement.tagName === desiredTagName) {
+    return currentContentElement;
+  }
+
+  const modalBody = modalContainer.querySelector(".modal-body");
+  const replacementElement = document.createElement(renderMarkdown ? "div" : "pre");
+  replacementElement.id = "cited-text-content";
+
+  if (currentContentElement) {
+    currentContentElement.replaceWith(replacementElement);
+  } else if (modalBody) {
+    modalBody.replaceChildren(replacementElement);
+  }
+
+  return replacementElement;
+}
+
+export function showCitedTextPopup(citedText, fileName, pageNumber, options = {}) {
   // ... (keep existing implementation)
   let modalContainer = document.getElementById("citation-modal");
   if (!modalContainer) {
@@ -195,7 +268,7 @@ export function showCitedTextPopup(citedText, fileName, pageNumber) {
       <div class="modal-dialog modal-dialog-scrollable modal-xl modal-fullscreen-sm-down">
         <div class="modal-content">
           <div class="modal-header">
-            <h5 class="modal-title">Source: ${fileName}, Page: ${pageNumber}</h5>
+            <h5 class="modal-title"></h5>
             <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
           </div>
           <div class="modal-body">
@@ -205,16 +278,26 @@ export function showCitedTextPopup(citedText, fileName, pageNumber) {
       </div>
     `;
     document.body.appendChild(modalContainer);
-  } else {
-    const modalTitle = modalContainer.querySelector(".modal-title");
-    if (modalTitle) {
-      modalTitle.textContent = `Source: ${fileName}, Page: ${pageNumber}`;
-    }
   }
 
-  const citedTextContent = document.getElementById("cited-text-content");
+  const renderMarkdown = Boolean(options.renderMarkdown) || isMarkdownCitationFile(fileName);
+  const modalTitle = modalContainer.querySelector(".modal-title");
+  if (modalTitle) {
+    modalTitle.textContent = options.title || `Source: ${fileName}, Page: ${pageNumber}`;
+  }
+
+  const citedTextContent = ensureCitedTextContentElement(modalContainer, renderMarkdown);
   if (citedTextContent) {
-    citedTextContent.textContent = citedText;
+    citedTextContent.className = renderMarkdown
+      ? "generated-analysis-preview-block generated-analysis-markdown-preview citation-markdown-content p-3"
+      : "";
+    citedTextContent.removeAttribute("style");
+
+    if (renderMarkdown) {
+      renderMarkdownIntoCitationElement(citedTextContent, citedText);
+    } else {
+      citedTextContent.textContent = citedText;
+    }
   }
 
   const modal = new bootstrap.Modal(modalContainer);
@@ -255,7 +338,7 @@ export function showImagePopup(imageSrc) {
   modal.show();
 }
 
-export function showMetadataModal(metadataType, metadataContent, fileName) {
+export function showMetadataModal(metadataType, metadataContent, fileName, sourceCitation = null) {
   // Create or reuse the metadata modal
   let modalContainer = document.getElementById("metadata-modal");
   if (!modalContainer) {
@@ -283,6 +366,11 @@ export function showMetadataModal(metadataType, metadataContent, fileName) {
               <strong>Content:</strong>
               <div id="metadata-content" class="mt-2 p-3 bg-light rounded" style="white-space: pre-wrap; max-height: 60vh; overflow-y: auto;"></div>
             </div>
+            <div class="mt-3 d-flex justify-content-end">
+              <button type="button" class="btn btn-outline-primary d-none" id="metadata-open-source-btn">
+                <i class="bi bi-box-arrow-up-right me-1"></i>Open source document
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -295,18 +383,48 @@ export function showMetadataModal(metadataType, metadataContent, fileName) {
   const fileNameEl = modalContainer.querySelector("#metadata-file-name");
   const metadataTypeEl = modalContainer.querySelector("#metadata-type");
   const metadataContentEl = modalContainer.querySelector("#metadata-content");
+  const openSourceBtn = modalContainer.querySelector("#metadata-open-source-btn");
 
   if (modalTitle) {
     modalTitle.textContent = `Document Metadata - ${metadataType.charAt(0).toUpperCase() + metadataType.slice(1)}`;
   }
   if (fileNameEl) {
-    fileNameEl.textContent = fileName;
+    fileNameEl.textContent = fileName || 'Document';
   }
   if (metadataTypeEl) {
     metadataTypeEl.textContent = metadataType.charAt(0).toUpperCase() + metadataType.slice(1);
   }
   if (metadataContentEl) {
     metadataContentEl.textContent = metadataContent;
+  }
+
+  if (openSourceBtn) {
+    const sourceDocumentId = String(sourceCitation?.documentId || '').trim();
+    const sourceCitationId = String(sourceCitation?.citationId || '').trim();
+    const sourcePageNumber = sourceCitation?.pageNumber;
+    const enhancedTarget = sourceCitation?.enhancedTarget;
+    const sourceSheetName = sourceCitation?.sheetName || null;
+
+    if (sourceDocumentId && sourceCitationId) {
+      openSourceBtn.classList.remove('d-none');
+      openSourceBtn.onclick = () => {
+        const modalInstance = bootstrap.Modal.getInstance(modalContainer);
+        if (modalInstance) {
+          modalInstance.hide();
+        }
+
+        const enhancedCitationTarget = enhancedTarget !== undefined && enhancedTarget !== null && enhancedTarget !== ''
+          ? enhancedTarget
+          : sourcePageNumber !== undefined && sourcePageNumber !== null && sourcePageNumber !== ''
+          ? sourcePageNumber
+          : 1;
+
+        void showEnhancedCitationModal(sourceDocumentId, enhancedCitationTarget, sourceCitationId, sourceSheetName);
+      };
+    } else {
+      openSourceBtn.classList.add('d-none');
+      openSourceBtn.onclick = null;
+    }
   }
 
   const modal = new bootstrap.Modal(modalContainer);
@@ -473,16 +591,20 @@ function renderAgentCitationResult(toolResultEl, toolResultSummaryEl, toolResult
   });
 }
 
-async function fetchAgentCitationArtifact(conversationId, artifactId) {
+export async function fetchAgentCitationArtifact(conversationId, artifactId) {
   if (!conversationId || !artifactId) {
     return null;
   }
 
   const response = await fetch(
-    `/api/conversation/${encodeURIComponent(conversationId)}/agent-citation/${encodeURIComponent(artifactId)}`,
+    `/api/conversation/${encodeURIComponent(conversationId)}/agent-citation/${encodeURIComponent(artifactId)}?ts=${Date.now()}`,
     {
       method: "GET",
-      headers: { "Content-Type": "application/json" },
+      cache: "no-store",
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-cache",
+      },
     }
   );
 
@@ -676,6 +798,7 @@ export function showPdfModal(docId, pageNumber, citationId) {
     pdfModal.id = "pdf-modal";
     pdfModal.classList.add("modal", "fade");
     pdfModal.tabIndex = -1;
+    // xss-check: ignore - static modal shell; runtime values are assigned through DOM properties below.
     pdfModal.innerHTML = `
       <div class="modal-dialog modal-dialog-scrollable modal-xl modal-fullscreen-sm-down">
         <div class="modal-content">
@@ -766,20 +889,39 @@ if (chatboxEl) {
           // Show metadata content directly in a modal
           const metadataType = target.getAttribute("data-metadata-type");
           const metadataContent = target.getAttribute("data-metadata-content");
-          const fileName = citationId.split('_')[0]; // Extract filename from citation ID
-          
-          showMetadataModal(metadataType, metadataContent, fileName);
+          const fileName = target.getAttribute("data-file-name") || 'Document';
+          const documentId = target.getAttribute("data-document-id");
+          const enhancedTarget = target.getAttribute("data-enhanced-target");
+          const sheetName = target.getAttribute("data-sheet-name");
+          const { pageNumber } = parseDocIdAndPage(citationId);
+
+          showMetadataModal(metadataType, metadataContent, fileName, {
+            documentId,
+            citationId,
+            pageNumber,
+            enhancedTarget,
+            sheetName,
+          });
           return;
       }
 
-      const { docId, pageNumber } = parseDocIdAndPage(citationId);
+      const { docId, pageNumber: parsedPageNumber } = parseDocIdAndPage(citationId);
+      const enhancedTarget = target.getAttribute("data-enhanced-target");
       const sheetName = target.getAttribute("data-sheet-name");
+      const documentId = target.getAttribute("data-document-id") || docId || '';
+      const citationPageNumber = target.getAttribute("data-page-number") || parsedPageNumber || enhancedTarget || '';
+      const citationChunkId = target.getAttribute("data-chunk-id") || '';
+      const citationContext = {
+        documentId,
+        pageNumber: citationPageNumber,
+        chunkId: citationChunkId,
+      };
 
-      // Safety check: Ensure docId and pageNumber were parsed correctly
-      if (!docId || !pageNumber) {
-          console.warn(`Could not parse docId/pageNumber from citationId: ${citationId}. Falling back to text citation.`);
+        // Safety check: Ensure document and page context are available.
+      if (!documentId || !citationPageNumber) {
+          console.warn(`Could not resolve document/page context from citationId: ${citationId}. Falling back to text citation.`);
           // showToast("Could not identify document source, showing text.", "info");
-          fetchCitedText(citationId); // Fallback to text if parsing fails
+          fetchCitedText(citationId, citationContext); // Fallback to text if parsing fails
           return;
       }
 
@@ -788,21 +930,21 @@ if (chatboxEl) {
       let attemptEnhanced = false; // Default to not attempting enhanced
 
       if (useEnhancedGlobally) {
-          // console.log(`Checking metadata for docId: ${docId}`);
-          const docMetadata = getDocumentMetadata(docId); // Fetch metadata
+          // console.log(`Checking metadata for docId: ${documentId}`);
+          const docMetadata = getDocumentMetadata(documentId); // Fetch metadata
 
           // Decide based on metadata:
           // Attempt enhanced if:
           // 1. Metadata found AND enhanced_citations is NOT explicitly false
           // 2. Metadata not found (assume enhanced might be possible, rely on error fallback)
           if (!docMetadata) {
-              // console.log(`Metadata not found for ${docId}, attempting enhanced citation (will fallback on error).`);
+              // console.log(`Metadata not found for ${documentId}, attempting enhanced citation (will fallback on error).`);
               attemptEnhanced = true;
           } else if (docMetadata.enhanced_citations === false) {
-              // console.log(`Metadata found for ${docId}, enhanced_citations is false. Using text citation.`);
+              // console.log(`Metadata found for ${documentId}, enhanced_citations is false. Using text citation.`);
               attemptEnhanced = false; // Explicitly disabled for this doc
           } else {
-              // console.log(`Metadata found for ${docId}, enhanced_citations is true or undefined. Attempting enhanced citation.`);
+              // console.log(`Metadata found for ${documentId}, enhanced_citations is true or undefined. Attempting enhanced citation.`);
               attemptEnhanced = true; // Includes cases where metadata exists but enhanced_citations is true, null, or undefined
           }
       } else {
@@ -812,13 +954,13 @@ if (chatboxEl) {
 
       // --- Execute based on the decision ---
       if (attemptEnhanced) {
-          // console.log(`Attempting Enhanced Citation for ${docId}, page/timestamp ${pageNumber}, citationId ${citationId}`);
+          // console.log(`Attempting Enhanced Citation for ${documentId}, page/timestamp ${citationPageNumber}, citationId ${citationId}`);
           // Use new enhanced citation system that supports multiple file types
-          showEnhancedCitationModal(docId, pageNumber, citationId, sheetName);
+          showEnhancedCitationModal(documentId, enhancedTarget || citationPageNumber, citationId, sheetName);
       } else {
           // console.log(`Fetching Text Citation for ${citationId}`);
           // Use text citation if globally disabled OR explicitly disabled for this doc OR if parsing failed earlier
-          fetchCitedText(citationId);
+          fetchCitedText(citationId, citationContext);
       }
       // --- End Logic ---
 

@@ -1,3 +1,4 @@
+# functions_activity_logging.py
 """
 Activity logging functions for tracking chat and user interactions.
 This module provides functions to log various types of user activity
@@ -5,12 +6,217 @@ for analytics and monitoring purposes.
 """
 
 import logging
+import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 from functions_appinsights import log_event
 from functions_debug import debug_print
 from config import cosmos_activity_logs_container
+
+
+def coerce_activity_log_user_id(user_id: Any) -> str:
+    """Extract a stable string user id from a scalar or session-style identity payload."""
+    if user_id is None:
+        return ''
+
+    if isinstance(user_id, str):
+        return user_id.strip()
+
+    if isinstance(user_id, dict):
+        for key in ('oid', 'sub', 'id', 'user_id'):
+            candidate = user_id.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        return ''
+
+    return str(user_id).strip()
+
+
+USER_LOGIN_ACTIVITY_SESSION_KEY = 'last_user_login_activity_epoch'
+USER_LOGIN_ACTIVITY_MIN_INTERVAL_SECONDS = 15 * 60
+
+
+def _parse_session_epoch(session_state: Optional[dict], session_key: str) -> Optional[int]:
+    """Safely parse an epoch value stored in session state."""
+    if session_state is None:
+        return None
+
+    raw_epoch = session_state.get(session_key)
+    if raw_epoch is None:
+        return None
+
+    try:
+        return int(float(raw_epoch))
+    except (TypeError, ValueError):
+        return None
+
+
+def record_user_login_session_activity(
+    session_state: Optional[dict],
+    now_epoch: Optional[int] = None
+) -> Optional[int]:
+    """Persist the last time login activity was recorded for the current session."""
+    if session_state is None:
+        return None
+
+    resolved_epoch = int(now_epoch if now_epoch is not None else time.time())
+    session_state[USER_LOGIN_ACTIVITY_SESSION_KEY] = resolved_epoch
+
+    if hasattr(session_state, 'modified'):
+        session_state.modified = True
+
+    return resolved_epoch
+
+
+def maybe_log_authenticated_request_login(
+    user_id: str,
+    session_state: Optional[dict],
+    request_path: str,
+    request_method: str = 'GET',
+    now_epoch: Optional[int] = None,
+    login_method: str = 'authenticated_request',
+    min_interval_seconds: int = USER_LOGIN_ACTIVITY_MIN_INTERVAL_SECONDS
+) -> bool:
+    """
+    Log a throttled login-style activity for authenticated browser requests.
+
+    This captures passive SSO/session-based access that never re-enters the
+    explicit OAuth callback, while preventing per-request log spam.
+    """
+    if not user_id or session_state is None:
+        return False
+
+    normalized_method = (request_method or '').upper()
+    if normalized_method != 'GET':
+        return False
+
+    resolved_epoch = int(now_epoch if now_epoch is not None else time.time())
+    last_logged_epoch = _parse_session_epoch(session_state, USER_LOGIN_ACTIVITY_SESSION_KEY)
+    if last_logged_epoch is not None and (resolved_epoch - last_logged_epoch) < min_interval_seconds:
+        return False
+
+    log_user_login(
+        user_id,
+        login_method,
+        activity_details={
+            'auth_signal': 'authenticated_request',
+            'request_path': request_path,
+            'request_method': normalized_method,
+            'is_interactive_login': False
+        }
+    )
+    record_user_login_session_activity(session_state, resolved_epoch)
+    return True
+
+
+def _parse_activity_timestamp_sort_value(timestamp_value: Any) -> Optional[float]:
+    """Convert an activity timestamp string into a comparable UTC epoch value."""
+    if not timestamp_value:
+        return None
+
+    try:
+        parsed_timestamp = datetime.fromisoformat(str(timestamp_value).replace('Z', '+00:00'))
+        if parsed_timestamp.tzinfo is None:
+            parsed_timestamp = parsed_timestamp.replace(tzinfo=timezone.utc)
+        return parsed_timestamp.timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _select_latest_activity_timestamp(activity_records: list) -> Optional[str]:
+    """Return the newest timestamp or created_at value from activity records."""
+    fallback_timestamp = None
+    latest_timestamp = None
+    latest_sort_value = None
+
+    for record in activity_records:
+        if not isinstance(record, dict):
+            continue
+
+        for timestamp_value in (record.get('timestamp'), record.get('created_at')):
+            if not timestamp_value:
+                continue
+
+            timestamp_text = str(timestamp_value)
+            if fallback_timestamp is None:
+                fallback_timestamp = timestamp_text
+
+            sort_value = _parse_activity_timestamp_sort_value(timestamp_text)
+            if sort_value is None:
+                continue
+
+            if latest_sort_value is None or sort_value > latest_sort_value:
+                latest_sort_value = sort_value
+                latest_timestamp = timestamp_text
+
+    return latest_timestamp or fallback_timestamp
+
+
+def get_user_login_activity_summary(user_id: Any) -> Dict[str, Any]:
+    """Return live login activity metrics from activity_logs for one user."""
+    normalized_user_id = coerce_activity_log_user_id(user_id)
+    summary = {
+        'total_logins': 0,
+        'last_login': None,
+        'total_logins_lookup_succeeded': False,
+        'last_login_lookup_succeeded': False,
+    }
+
+    if not normalized_user_id:
+        return summary
+
+    login_params = [{'name': '@user_id', 'value': normalized_user_id}]
+
+    try:
+        total_logins_query = """
+            SELECT VALUE COUNT(1) FROM c
+            WHERE c.user_id = @user_id AND c.activity_type = 'user_login'
+        """
+        total_logins = list(cosmos_activity_logs_container.query_items(
+            query=total_logins_query,
+            parameters=login_params,
+            partition_key=normalized_user_id
+        ))
+        summary['total_logins'] = int(total_logins[0] or 0) if total_logins else 0
+        summary['total_logins_lookup_succeeded'] = True
+    except Exception as ex:
+        debug_print(f"[ActivityLogging] Could not query login count for user {normalized_user_id}: {ex}")
+        log_event(
+            message=f"[ActivityLogging] Error querying user login count: {ex}",
+            extra={'user_id': normalized_user_id, 'error': str(ex)},
+            level=logging.ERROR,
+            debug_only=True
+        )
+
+    try:
+        latest_login_records = []
+        for order_by_field in ('timestamp', 'created_at'):
+            latest_login_query = f"""
+                SELECT TOP 1 c.timestamp, c.created_at FROM c
+                WHERE c.user_id = @user_id
+                AND c.activity_type = 'user_login'
+                AND IS_DEFINED(c.{order_by_field})
+                ORDER BY c.{order_by_field} DESC
+            """
+            latest_login_records.extend(list(cosmos_activity_logs_container.query_items(
+                query=latest_login_query,
+                parameters=login_params,
+                partition_key=normalized_user_id
+            )))
+
+        summary['last_login'] = _select_latest_activity_timestamp(latest_login_records)
+        summary['last_login_lookup_succeeded'] = True
+    except Exception as ex:
+        debug_print(f"[ActivityLogging] Could not query latest login for user {normalized_user_id}: {ex}")
+        log_event(
+            message=f"[ActivityLogging] Error querying latest user login: {ex}",
+            extra={'user_id': normalized_user_id, 'error': str(ex)},
+            level=logging.ERROR,
+            debug_only=True
+        )
+
+    return summary
 
 
 def _get_email_domain(email: str) -> str:
@@ -37,11 +243,14 @@ def log_chat_activity(
     has_document_search: bool = False,
     has_image_generation: bool = False,
     document_scope: Optional[str] = None,
-    chat_context: Optional[str] = None
+    chat_context: Optional[str] = None,
+    workspace_type: Optional[str] = None,
+    group_id: Optional[str] = None,
+    public_workspace_id: Optional[str] = None,
+    additional_context: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
-    Log chat activity for monitoring. 
-    Chat data is already stored in conversations/messages containers.
+    Log chat activity to activity_logs and App Insights.
     
     Args:
         user_id (str): The ID of the user performing the action
@@ -52,9 +261,55 @@ def log_chat_activity(
         has_image_generation (bool, optional): Whether image generation was used
         document_scope (str, optional): Scope of document search if used
         chat_context (str, optional): Context or type of chat session
+        workspace_type (str, optional): Workspace category for the message
+        group_id (str, optional): Group id for group-scoped conversations
+        public_workspace_id (str, optional): Public workspace id when applicable
+        additional_context (dict, optional): Additional message context for analytics
     """
-    
-    try:        
+
+    try:
+        normalized_document_scope = str(document_scope or '').strip() or None
+        normalized_chat_context = str(chat_context or '').strip() or None
+        normalized_workspace_type = str(workspace_type or '').strip() or None
+        normalized_group_id = str(group_id or '').strip() or None
+        normalized_public_workspace_id = str(public_workspace_id or '').strip() or None
+        normalized_additional_context = dict(additional_context or {}) if isinstance(additional_context, dict) else None
+
+        if not normalized_workspace_type and normalized_document_scope in {'personal', 'group', 'public'}:
+            normalized_workspace_type = normalized_document_scope
+
+        activity_record = {
+            'id': str(uuid.uuid4()),
+            'activity_type': 'chat_activity',
+            'user_id': user_id,
+            'timestamp': datetime.utcnow().isoformat(),
+            'conversation_id': conversation_id,
+            'message_type': message_type,
+            'message_length': max(0, int(message_length or 0)),
+            'has_document_search': bool(has_document_search),
+            'has_image_generation': bool(has_image_generation),
+            'document_scope': normalized_document_scope,
+            'chat_context': normalized_chat_context,
+        }
+
+        if normalized_workspace_type:
+            activity_record['workspace_type'] = normalized_workspace_type
+        if normalized_group_id:
+            activity_record['group_id'] = normalized_group_id
+        if normalized_public_workspace_id:
+            activity_record['public_workspace_id'] = normalized_public_workspace_id
+        if normalized_additional_context:
+            activity_record['additional_context'] = normalized_additional_context
+
+        activity_log_persisted = False
+        activity_log_error = None
+        try:
+            cosmos_activity_logs_container.create_item(body=activity_record)
+            activity_log_persisted = True
+        except Exception as persistence_error:
+            activity_log_error = str(persistence_error)
+            debug_print(f"Error persisting chat activity for user {user_id}: {activity_log_error}")
+
         # Log to Application Insights for monitoring
         log_event(
             message=f"Chat activity: {message_type} for user {user_id}",
@@ -62,16 +317,26 @@ def log_chat_activity(
                 'user_id': user_id,
                 'conversation_id': conversation_id,
                 'message_type': message_type,
-                'message_length': message_length,
+                'message_length': activity_record['message_length'],
                 'has_document_search': has_document_search,
                 'has_image_generation': has_image_generation,
-                'document_scope': document_scope,
-                'chat_context': chat_context,
-                'activity_type': 'chat_activity'
+                'document_scope': normalized_document_scope,
+                'chat_context': normalized_chat_context,
+                'workspace_type': normalized_workspace_type,
+                'group_id': normalized_group_id,
+                'public_workspace_id': normalized_public_workspace_id,
+                'activity_type': 'chat_activity',
+                'activity_record_id': activity_record['id'],
+                'activity_log_persisted': activity_log_persisted,
+                'activity_log_error': activity_log_error,
+                'additional_context': normalized_additional_context,
             },
-            level=logging.INFO
+            level=logging.INFO if activity_log_persisted else logging.WARNING
         )
-        debug_print(f"Logged chat activity: {message_type} for user {user_id}")
+        debug_print(
+            f"Logged chat activity: {message_type} for user {user_id} "
+            f"(persisted={activity_log_persisted})"
+        )
         
     except Exception as e:
         # Log error but don't break the chat flow
@@ -1113,7 +1378,8 @@ def log_conversation_archival(
 
 def log_user_login(
     user_id: str,
-    login_method: str = 'azure_ad'
+    login_method: str = 'azure_ad',
+    activity_details: Optional[Dict[str, Any]] = None
 ) -> None:
     """
     Log user login activity to the activity_logs container.
@@ -1125,7 +1391,16 @@ def log_user_login(
     
     try:
         # Create login activity record
-        import uuid
+        login_details = {
+            'login_method': login_method,
+            'success': True
+        }
+        if activity_details:
+            login_details.update({
+                key: value for key, value in activity_details.items()
+                if value is not None
+            })
+
         login_activity = {
             'id': str(uuid.uuid4()),
             'user_id': user_id,
@@ -1133,11 +1408,12 @@ def log_user_login(
             'login_method': login_method,
             'timestamp': datetime.utcnow().isoformat(),
             'created_at': datetime.utcnow().isoformat(),
-            'details': {
-                'login_method': login_method,
-                'success': True
-            }
+            'details': login_details
         }
+
+        for key, value in login_details.items():
+            if key not in {'login_method', 'success'}:
+                login_activity[key] = value
         
         # Save to activity_logs container
         cosmos_activity_logs_container.create_item(body=login_activity)
@@ -1148,7 +1424,7 @@ def log_user_login(
             extra=login_activity,
             level=logging.INFO
         )
-        debug_print(f"✅ User login activity logged for user {user_id}")
+        debug_print(f"✅ User login activity logged for user {user_id} via {login_method}")
         
     except Exception as e:
         # Log error but don't break the login flow
@@ -1636,14 +1912,15 @@ def log_general_admin_action(
     """
 
     try:
+        normalized_admin_user_id = coerce_activity_log_user_id(admin_user_id)
         activity_record = {
             'id': str(uuid.uuid4()),
-            'user_id': admin_user_id,
+            'user_id': normalized_admin_user_id,
             'activity_type': 'admin_action',
             'timestamp': datetime.utcnow().isoformat(),
             'created_at': datetime.utcnow().isoformat(),
             'admin': {
-                'user_id': admin_user_id,
+                'user_id': normalized_admin_user_id,
                 'email': admin_email
             },
             'action': action,
@@ -1670,7 +1947,7 @@ def log_general_admin_action(
         log_event(
             message=f"Error logging admin action: {str(e)}",
             extra={
-                'admin_user_id': admin_user_id,
+                'admin_user_id': normalized_admin_user_id,
                 'admin_email': admin_email,
                 'action': action,
                 'error': str(e)
@@ -1678,6 +1955,127 @@ def log_general_admin_action(
             level=logging.ERROR
         )
         debug_print(f"⚠️  Warning: Failed to log admin action: {str(e)}")
+
+
+def log_file_sync_activity(
+    user_id: str,
+    action: str,
+    scope_type: str,
+    source_id: str,
+    source_name: Optional[str] = None,
+    group_id: Optional[str] = None,
+    public_workspace_id: Optional[str] = None,
+    additional_context: Optional[dict] = None
+) -> None:
+    """Log a File Sync activity event to the activity_logs container."""
+    normalized_user_id = coerce_activity_log_user_id(user_id)
+    now = datetime.utcnow().isoformat()
+    try:
+        activity_record = {
+            'id': str(uuid.uuid4()),
+            'user_id': normalized_user_id,
+            'activity_type': 'file_sync',
+            'timestamp': now,
+            'created_at': now,
+            'action': action,
+            'description': f"File Sync {action.replace('_', ' ')}",
+            'workspace_type': scope_type,
+            'workspace_context': {
+                'scope_type': scope_type,
+                'source_id': source_id,
+                'source_name': source_name,
+                'group_id': group_id,
+                'public_workspace_id': public_workspace_id
+            }
+        }
+
+        if additional_context:
+            activity_record['additional_context'] = additional_context
+
+        cosmos_activity_logs_container.create_item(body=activity_record)
+        log_event(
+            message=f"File Sync activity logged: {action}",
+            extra=activity_record,
+            level=logging.INFO
+        )
+        debug_print(f"File Sync activity logged: {action}")
+    except Exception as e:
+        log_event(
+            message=f"Error logging File Sync activity: {str(e)}",
+            extra={
+                'user_id': normalized_user_id,
+                'action': action,
+                'scope_type': scope_type,
+                'source_id': source_id,
+                'error': str(e)
+            },
+            level=logging.ERROR
+        )
+        debug_print(f"Warning: Failed to log File Sync activity: {str(e)}")
+
+
+def log_governance_change(
+    admin_user_id: str,
+    admin_email: str,
+    action: str,
+    scope: str,
+    target_id: str,
+    before_state: Optional[Dict[str, Any]] = None,
+    after_state: Optional[Dict[str, Any]] = None,
+    change_details: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Log governance mutations with detailed before/after payloads."""
+    normalized_admin_user_id = coerce_activity_log_user_id(admin_user_id)
+    timestamp = datetime.utcnow().isoformat()
+    activity_record = {
+        'id': str(uuid.uuid4()),
+        'user_id': normalized_admin_user_id,
+        'activity_type': 'governance',
+        'type': 'governance',
+        'timestamp': timestamp,
+        'created_at': timestamp,
+        'admin': {
+            'user_id': normalized_admin_user_id,
+            'email': admin_email,
+        },
+        'action': action,
+        'workspace_type': 'admin',
+        'workspace_context': {
+            'action': action,
+            'scope': scope,
+            'target_id': target_id,
+        },
+        'governance_change': {
+            'scope': scope,
+            'target_id': target_id,
+            'before': before_state or {},
+            'after': after_state or {},
+            'details': change_details or {},
+        },
+    }
+
+    try:
+        cosmos_activity_logs_container.create_item(body=activity_record)
+        log_event(
+            message=f"Governance change logged: {action} on {scope}/{target_id}",
+            extra=activity_record,
+            level=logging.INFO,
+        )
+        debug_print(f"✅ Governance change logged: {action} on {scope}/{target_id}")
+    except Exception as e:
+        log_event(
+            message=f"Error logging governance change: {str(e)}",
+            extra={
+                'admin_user_id': normalized_admin_user_id,
+                'admin_email': admin_email,
+                'action': action,
+                'scope': scope,
+                'target_id': target_id,
+                'error': str(e),
+            },
+            level=logging.ERROR,
+        )
+        debug_print(f"⚠️  Warning: Failed to log governance change: {str(e)}")
 
 
 # === AGENT & ACTION ACTIVITY LOGGING ===
@@ -1843,6 +2241,66 @@ def log_agent_deletion(
         debug_print(f"⚠️  Warning: Failed to log agent deletion: {str(e)}")
 
 
+def log_agent_run(
+    user_id: str,
+    agent_id: Optional[str],
+    agent_name: str,
+    agent_display_name: Optional[str] = None,
+    scope: str = 'personal',
+    group_id: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+    message_id: Optional[str] = None,
+    model: Optional[str] = None,
+    agent_catalog_key: Optional[str] = None
+) -> None:
+    """Log an agent runtime invocation for analytics and popularity ranking."""
+    try:
+        workspace_context = {}
+        if scope == 'group' and group_id:
+            workspace_context['group_id'] = group_id
+
+        activity_record = {
+            'id': str(uuid.uuid4()),
+            'user_id': user_id,
+            'activity_type': 'agent_run',
+            'timestamp': datetime.utcnow().isoformat(),
+            'created_at': datetime.utcnow().isoformat(),
+            'entity_type': 'agent',
+            'operation': 'run',
+            'agent_catalog_key': agent_catalog_key,
+            'agent': {
+                'id': agent_id,
+                'name': agent_name,
+                'display_name': agent_display_name or agent_name,
+            },
+            'workspace_type': scope,
+            'workspace_context': workspace_context,
+            'conversation_id': conversation_id,
+            'message_id': message_id,
+            'model_deployment_name': model,
+        }
+        cosmos_activity_logs_container.create_item(body=activity_record)
+        log_event(
+            message=f"[AgentRun] Agent used: {agent_name} ({scope}) by user {user_id}",
+            extra=activity_record,
+            level=logging.INFO,
+        )
+        debug_print(f"Agent run logged: {agent_name} ({scope})")
+    except Exception as e:
+        log_event(
+            message=f"[AgentRun] Error logging agent run: {str(e)}",
+            extra={
+                'user_id': user_id,
+                'agent_id': agent_id,
+                'agent_name': agent_name,
+                'scope': scope,
+                'error': str(e),
+            },
+            level=logging.ERROR,
+        )
+        debug_print(f"Warning: Failed to log agent run: {str(e)}")
+
+
 def log_action_creation(
     user_id: str,
     action_id: str,
@@ -2006,6 +2464,204 @@ def log_action_deletion(
             level=logging.ERROR
         )
         debug_print(f"⚠️  Warning: Failed to log action deletion: {str(e)}")
+
+
+def log_workflow_creation(
+    user_id: str,
+    workflow_id: str,
+    workflow_name: str,
+    runner_type: Optional[str] = None,
+    trigger_type: Optional[str] = None,
+    workspace_type: str = 'personal',
+    group_id: Optional[str] = None,
+    public_workspace_id: Optional[str] = None,
+) -> None:
+    """Log a workflow creation activity."""
+    try:
+        workspace_context = {}
+        if group_id:
+            workspace_context['group_id'] = group_id
+        if public_workspace_id:
+            workspace_context['public_workspace_id'] = public_workspace_id
+        activity_record = {
+            'id': str(uuid.uuid4()),
+            'user_id': user_id,
+            'activity_type': 'workflow_creation',
+            'timestamp': datetime.utcnow().isoformat(),
+            'created_at': datetime.utcnow().isoformat(),
+            'entity_type': 'workflow',
+            'operation': 'create',
+            'entity': {
+                'id': workflow_id,
+                'name': workflow_name,
+                'runner_type': runner_type,
+                'trigger_type': trigger_type,
+            },
+            'workspace_type': workspace_type or 'personal',
+            'workspace_context': workspace_context,
+        }
+        cosmos_activity_logs_container.create_item(body=activity_record)
+        log_event(
+            message=f"[WorkflowActivity] Workflow created: {workflow_name} by user {user_id}",
+            extra=activity_record,
+            level=logging.INFO,
+        )
+    except Exception as e:
+        log_event(
+            message=f"[WorkflowActivity] Error logging workflow creation: {str(e)}",
+            extra={'user_id': user_id, 'workflow_id': workflow_id, 'error': str(e)},
+            level=logging.ERROR,
+        )
+
+
+def log_workflow_update(
+    user_id: str,
+    workflow_id: str,
+    workflow_name: str,
+    runner_type: Optional[str] = None,
+    trigger_type: Optional[str] = None,
+    workspace_type: str = 'personal',
+    group_id: Optional[str] = None,
+    public_workspace_id: Optional[str] = None,
+) -> None:
+    """Log a workflow update activity."""
+    try:
+        workspace_context = {}
+        if group_id:
+            workspace_context['group_id'] = group_id
+        if public_workspace_id:
+            workspace_context['public_workspace_id'] = public_workspace_id
+        activity_record = {
+            'id': str(uuid.uuid4()),
+            'user_id': user_id,
+            'activity_type': 'workflow_update',
+            'timestamp': datetime.utcnow().isoformat(),
+            'created_at': datetime.utcnow().isoformat(),
+            'entity_type': 'workflow',
+            'operation': 'update',
+            'entity': {
+                'id': workflow_id,
+                'name': workflow_name,
+                'runner_type': runner_type,
+                'trigger_type': trigger_type,
+            },
+            'workspace_type': workspace_type or 'personal',
+            'workspace_context': workspace_context,
+        }
+        cosmos_activity_logs_container.create_item(body=activity_record)
+        log_event(
+            message=f"[WorkflowActivity] Workflow updated: {workflow_name} by user {user_id}",
+            extra=activity_record,
+            level=logging.INFO,
+        )
+    except Exception as e:
+        log_event(
+            message=f"[WorkflowActivity] Error logging workflow update: {str(e)}",
+            extra={'user_id': user_id, 'workflow_id': workflow_id, 'error': str(e)},
+            level=logging.ERROR,
+        )
+
+
+def log_workflow_deletion(
+    user_id: str,
+    workflow_id: str,
+    workflow_name: str,
+    workspace_type: str = 'personal',
+    group_id: Optional[str] = None,
+    public_workspace_id: Optional[str] = None,
+) -> None:
+    """Log a workflow deletion activity."""
+    try:
+        workspace_context = {}
+        if group_id:
+            workspace_context['group_id'] = group_id
+        if public_workspace_id:
+            workspace_context['public_workspace_id'] = public_workspace_id
+        activity_record = {
+            'id': str(uuid.uuid4()),
+            'user_id': user_id,
+            'activity_type': 'workflow_deletion',
+            'timestamp': datetime.utcnow().isoformat(),
+            'created_at': datetime.utcnow().isoformat(),
+            'entity_type': 'workflow',
+            'operation': 'delete',
+            'entity': {
+                'id': workflow_id,
+                'name': workflow_name,
+            },
+            'workspace_type': workspace_type or 'personal',
+            'workspace_context': workspace_context,
+        }
+        cosmos_activity_logs_container.create_item(body=activity_record)
+        log_event(
+            message=f"[WorkflowActivity] Workflow deleted: {workflow_name} by user {user_id}",
+            extra=activity_record,
+            level=logging.INFO,
+        )
+    except Exception as e:
+        log_event(
+            message=f"[WorkflowActivity] Error logging workflow deletion: {str(e)}",
+            extra={'user_id': user_id, 'workflow_id': workflow_id, 'error': str(e)},
+            level=logging.ERROR,
+        )
+
+
+def log_workflow_run(
+    user_id: str,
+    workflow_id: str,
+    workflow_name: str,
+    status: str,
+    trigger_source: str,
+    run_id: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+    runner_type: Optional[str] = None,
+    error: Optional[str] = None,
+    workspace_type: str = 'personal',
+    group_id: Optional[str] = None,
+    public_workspace_id: Optional[str] = None,
+) -> None:
+    """Log a workflow run activity."""
+    try:
+        workspace_context = {}
+        if group_id:
+            workspace_context['group_id'] = group_id
+        if public_workspace_id:
+            workspace_context['public_workspace_id'] = public_workspace_id
+        activity_record = {
+            'id': str(uuid.uuid4()),
+            'user_id': user_id,
+            'activity_type': 'workflow_run',
+            'timestamp': datetime.utcnow().isoformat(),
+            'created_at': datetime.utcnow().isoformat(),
+            'entity_type': 'workflow',
+            'operation': 'run',
+            'entity': {
+                'id': workflow_id,
+                'name': workflow_name,
+                'runner_type': runner_type,
+            },
+            'workspace_type': workspace_type or 'personal',
+            'workspace_context': workspace_context,
+            'run': {
+                'id': run_id,
+                'status': status,
+                'trigger_source': trigger_source,
+                'conversation_id': conversation_id,
+                'error': error,
+            },
+        }
+        cosmos_activity_logs_container.create_item(body=activity_record)
+        log_event(
+            message=f"[WorkflowActivity] Workflow run {status}: {workflow_name} by user {user_id}",
+            extra=activity_record,
+            level=logging.INFO if status == 'completed' else logging.WARNING,
+        )
+    except Exception as e:
+        log_event(
+            message=f"[WorkflowActivity] Error logging workflow run: {str(e)}",
+            extra={'user_id': user_id, 'workflow_id': workflow_id, 'error': str(e)},
+            level=logging.ERROR,
+        )
 
 
 def _log_agent_template_activity(
