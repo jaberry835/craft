@@ -150,6 +150,14 @@ Before the first planning step, context providers prepare the run.
 
 `GroundingContextProvider` refreshes the workspace index and loads grounding snippets through `GroundingService`.
 
+### Workspace skills provider
+
+`WorkspaceSkillsContextProvider` loads reusable workspace instructions from `SKILL.md`, `skills/<name>/SKILL.md`, `.junior/skills/<name>/SKILL.md`, and `.junior/skills/<name>.md`. Skill content is inserted as system context for the current run. Skills do not grant capabilities by themselves; the agent can only use tools exposed by its runtime configuration.
+
+### MCP runtime context
+
+Each run resolves the MCP servers attached to the active agent, performs live tool discovery, and supplies the discovered names, descriptions, and input schemas to the planner. Discovery results are also persisted with the MCP server configuration so the UI and runtime retain the tool inventory across restarts. A later live discovery refreshes that inventory. If refresh temporarily fails, the loop can retain the persisted schemas and reports the connection warning in its tool events.
+
 ### Package documents provider
 
 `PackageDocumentsContextProvider` loads the workspace package markdown files into the run context.
@@ -199,12 +207,15 @@ Current workspace-facing tools include:
 - `search_files`
 - `grep_search`
 - `read_file`
+- `read_files`
 - `search_workspace`
 - `write_file`
 - `edit_file`
 - `replace_lines`
 
 These tools let the agent inspect the workspace tree, find documents, search exact text, read files with line ranges, and make either exact-string or line-range edits.
+
+For MCP operations that accept workspace files, `call_mcp_tool` also accepts generic `workspaceFileBindings`. A binding selects workspace files with include/exclude globs and injects path/content objects at a JSON Pointer in the MCP arguments. This keeps bulk file content out of model planning context without coupling Junior to a specific MCP server or publishing tool.
 
 ### Package tools
 

@@ -299,6 +299,16 @@ export interface McpCustomHeader {
   valueEnv?: string;
 }
 
+export interface McpServerToolDefinition {
+  name: string;
+  description: string;
+  inputSchema: {
+    type: 'object';
+    properties: Record<string, unknown>;
+    required?: string[];
+  };
+}
+
 export interface McpServerDefinition {
   id: string;
   name: string;
@@ -310,6 +320,9 @@ export interface McpServerDefinition {
   apiKeyEnv?: string;
   audience?: string;
   customHeaders?: McpCustomHeader[];
+  discoveredTools?: McpServerToolDefinition[];
+  toolsDiscoveredAt?: string;
+  toolDiscoveryWarnings?: string[];
 }
 
 export interface McpServerStatus {
@@ -327,6 +340,9 @@ export interface McpServerStatus {
   apiKeyEnv?: string;
   audience?: string;
   customHeaders?: Array<{ name: string; configured: boolean; valueEnv?: string }>;
+  discoveredTools: McpServerToolDefinition[];
+  toolsDiscoveredAt?: string;
+  toolDiscoveryWarnings: string[];
 }
 
 export interface McpServerSaveRequest {
@@ -342,6 +358,23 @@ export interface McpServerSaveRequest {
   apiKeyEnv?: string;
   audience?: string;
   customHeaders?: McpCustomHeader[];
+}
+
+export interface DiscoveredMcpTool {
+  serverId: string;
+  serverName: string;
+  toolName: string;
+  description: string;
+  inputSchema: {
+    type: 'object';
+    properties: Record<string, unknown>;
+    required?: string[];
+  };
+}
+
+export interface McpToolDiscoveryResult {
+  tools: DiscoveredMcpTool[];
+  warnings: string[];
 }
 
 export interface AzureOpenAiConnectionDefinition {

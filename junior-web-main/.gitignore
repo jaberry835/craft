@@ -32,3 +32,4 @@ SecureChatExtension/
 .deploy/
 deploy/
 
+data/workspaces

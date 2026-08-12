@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 import test from 'node:test';
 import { cleanupHarness, createHarness, createToolCall, FakeAzureOpenAiChatClient, startHarnessServer, stopHarnessServer } from './testHarness.js';
 
@@ -18,6 +19,114 @@ function bearerHeaders(token: string) {
     Authorization: `Bearer ${token}`
   };
 }
+
+test('saved workspace MCP servers expose their available tools', async (t) => {
+  const mcpServer = createServer((request, response) => {
+    let body = '';
+    request.setEncoding('utf8');
+    request.on('data', (chunk) => { body += chunk; });
+    request.on('end', () => {
+      const rpc = JSON.parse(body) as { id: number; method: string };
+      response.setHeader('Content-Type', 'application/json');
+      response.end(JSON.stringify({
+        jsonrpc: '2.0',
+        id: rpc.id,
+        result: rpc.method === 'tools/list'
+          ? {
+              tools: [{
+                name: 'search_documents',
+                description: 'Search indexed workspace documents.',
+                inputSchema: {
+                  type: 'object',
+                  properties: { query: { type: 'string' } },
+                  required: ['query']
+                }
+              }]
+            }
+          : { protocolVersion: '2024-11-05', capabilities: {} }
+      }));
+    });
+  });
+  await new Promise<void>((resolve) => mcpServer.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve, reject) => mcpServer.close((error) => error ? reject(error) : resolve())));
+  const address = mcpServer.address();
+  assert.ok(address && typeof address !== 'string');
+
+  const harness = await createHarness(new FakeAzureOpenAiChatClient());
+  const { server, baseUrl } = await startHarnessServer(harness);
+  t.after(async () => {
+    await stopHarnessServer(server);
+    await cleanupHarness(harness);
+  });
+
+  const adminSaveResponse = await fetch(`${baseUrl}/api/mcp-servers`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: 'Admin Document MCP',
+      transport: 'http',
+      endpoint: `http://127.0.0.1:${address.port}`,
+      authMode: 'bearer-token',
+      bearerToken: 'admin-only-token'
+    })
+  });
+  assert.equal(adminSaveResponse.status, 200);
+
+  const catalogResponse = await fetch(`${baseUrl}/api/workspaces/current/shared/mcp-catalog`);
+  assert.equal(catalogResponse.status, 200);
+  const workspaceCatalog = await catalogResponse.json() as Array<{ id: string; name: string; endpoint?: string; bearerToken?: string }>;
+  assert.equal(workspaceCatalog.some((entry) => entry.id === 'azure-docs-mcp'), true);
+  const adminCatalogEntry = workspaceCatalog.find((entry) => entry.name === 'Admin Document MCP');
+  assert.equal(adminCatalogEntry?.endpoint, `http://127.0.0.1:${address.port}`);
+  assert.equal(adminCatalogEntry?.bearerToken, undefined);
+
+  const saveResponse = await fetch(`${baseUrl}/api/workspaces/current/settings/mcp-servers`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: 'Document Search MCP',
+      transport: 'http',
+      endpoint: `http://127.0.0.1:${address.port}`,
+      authMode: 'bearer-token',
+      bearerToken: 'workspace-only-token'
+    })
+  });
+  assert.equal(saveResponse.status, 200);
+  const saved = await saveResponse.json() as { id: string };
+
+  const listResponse = await fetch(`${baseUrl}/api/workspaces/current/settings/mcp-servers`);
+  assert.equal(listResponse.status, 200);
+  const persistedServers = await listResponse.json() as Array<{ id: string; endpoint?: string; authMode: string; hasBearerToken: boolean }>;
+  const persistedServer = persistedServers.find((server) => server.id === saved.id);
+  assert.equal(persistedServer?.endpoint, `http://127.0.0.1:${address.port}`);
+  assert.equal(persistedServer?.authMode, 'bearer-token');
+  assert.equal(persistedServer?.hasBearerToken, true);
+
+  const discoveryResponse = await fetch(`${baseUrl}/api/workspaces/current/settings/mcp-servers/${encodeURIComponent(saved.id)}/discover-tools`, {
+    method: 'POST'
+  });
+  assert.equal(discoveryResponse.status, 200);
+  const discovery = await discoveryResponse.json() as {
+    tools: Array<{ toolName: string; description: string; inputSchema: { required?: string[] } }>;
+    warnings: string[];
+  };
+  assert.deepEqual(discovery.warnings, []);
+  assert.equal(discovery.tools[0]?.toolName, 'search_documents');
+  assert.equal(discovery.tools[0]?.description, 'Search indexed workspace documents.');
+  assert.deepEqual(discovery.tools[0]?.inputSchema.required, ['query']);
+
+  const persistedDiscoveryResponse = await fetch(`${baseUrl}/api/workspaces/current/settings/mcp-servers`);
+  assert.equal(persistedDiscoveryResponse.status, 200);
+  const serversWithTools = await persistedDiscoveryResponse.json() as Array<{
+    id: string;
+    discoveredTools: Array<{ name: string; inputSchema: { required?: string[] } }>;
+    toolsDiscoveredAt?: string;
+  }>;
+  const serverWithTools = serversWithTools.find((server) => server.id === saved.id);
+  assert.equal(serverWithTools?.discoveredTools[0]?.name, 'search_documents');
+  assert.deepEqual(serverWithTools?.discoveredTools[0]?.inputSchema.required, ['query']);
+  assert.ok(serverWithTools?.toolsDiscoveredAt);
+});
 
 test('workspace file routes can create and read a file', async (t) => {
   const harness = await createHarness(new FakeAzureOpenAiChatClient());

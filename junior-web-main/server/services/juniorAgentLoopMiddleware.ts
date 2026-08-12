@@ -48,7 +48,7 @@ export class LoopStepTrackingMiddleware implements ToolMiddleware<LoopContext> {
   readonly name = 'loop-step-tracking';
 
   async run(toolName: string, args: Record<string, unknown>, context: LoopContext, next: () => Promise<LoopToolResult>): Promise<LoopToolResult> {
-    context.iteration += 1;
+    context.toolCallCount += 1;
     context.state.set('lastToolName', toolName);
     context.state.set('lastToolArgs', args);
     const startingEventCount = context.toolEvents.length;

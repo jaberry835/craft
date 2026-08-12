@@ -5,6 +5,7 @@ import path from 'node:path';
 import { HttpError } from './httpErrors.js';
 import type { AgentConfigStore } from './services/agentConfigStore.js';
 import { AdminConnectivityService } from './services/adminConnectivityService.js';
+import { McpHttpRuntime } from './services/mcpHttpRuntime.js';
 import { materializeWorkspaceTemplate } from './services/workspaceTemplateMaterializer.js';
 import type { ClassificationBarSettingsSaveRequest, PendingChange, RequestIdentity, WorkspaceCreateRequest, WorkspaceTemplateImportRequest, WorkspaceUpdateRequest } from './types.js';
 import { LocalWorkspaceManager } from './services/localWorkspaceManager.js';
@@ -229,6 +230,22 @@ export function createWorkbenchApp(dependencies: WorkbenchAppDependencies, optio
     app.post(`${basePath}/settings/mcp-servers`, async (request, response, next) => {
       try {
         response.json(await resolveWorkspace(request).configStore.saveMcpServer(request.body));
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.post(`${basePath}/settings/mcp-servers/:id/discover-tools`, async (request, response, next) => {
+      try {
+        const configStore = resolveWorkspace(request).configStore;
+        const server = configStore.getResolvedMcpServer(request.params.id);
+        const discovery = await new McpHttpRuntime([server]).discoverTools();
+        await configStore.saveMcpServerTools(request.params.id, discovery.tools.map((tool) => ({
+          name: tool.toolName,
+          description: tool.description,
+          inputSchema: tool.inputSchema
+        })), discovery.warnings);
+        response.json(discovery);
       } catch (error) {
         next(error);
       }
@@ -685,6 +702,21 @@ export function createWorkbenchApp(dependencies: WorkbenchAppDependencies, optio
   app.post('/api/mcp-servers', async (request, response, next) => {
     try {
       response.json(await dependencies.agentConfigStore.saveMcpServer(request.body));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/api/mcp-servers/:id/discover-tools', async (request, response, next) => {
+    try {
+      const server = dependencies.agentConfigStore.getResolvedMcpServer(request.params.id);
+      const discovery = await new McpHttpRuntime([server]).discoverTools();
+      await dependencies.agentConfigStore.saveMcpServerTools(request.params.id, discovery.tools.map((tool) => ({
+        name: tool.toolName,
+        description: tool.description,
+        inputSchema: tool.inputSchema
+      })), discovery.warnings);
+      response.json(discovery);
     } catch (error) {
       next(error);
     }

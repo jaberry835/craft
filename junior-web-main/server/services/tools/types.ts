@@ -26,7 +26,8 @@ export interface LoopToolContext {
   assistantContent?: string;
   stop: boolean;
   appliedChangeCount: number;
-  iteration: number;
+  plannerRound: number;
+  toolCallCount: number;
   loopMessages: LoopChatMessage[];
   availableTools: LoopToolDefinition[];
   state: Map<string, unknown>;

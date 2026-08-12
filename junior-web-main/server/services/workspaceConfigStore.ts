@@ -15,6 +15,7 @@ import type {
   McpServerDefinition,
   McpServerSaveRequest,
   McpServerStatus,
+  McpServerToolDefinition,
   ResolvedMcpServerDefinition,
   WorkspaceHistorySettings,
   WorkspaceHistorySettingsSaveRequest,
@@ -390,7 +391,8 @@ export class WorkspaceConfigStore implements RuntimeAgentConfigStore {
       bearerToken,
       apiKey,
       audience: server.audience,
-      customHeaders: Object.keys(customHeaders).length > 0 ? customHeaders : undefined
+      customHeaders: Object.keys(customHeaders).length > 0 ? customHeaders : undefined,
+      discoveredTools: server.discoveredTools
     };
   }
 
@@ -447,6 +449,26 @@ export class WorkspaceConfigStore implements RuntimeAgentConfigStore {
       await this.secretStore.deleteMcpSecret(id);
     }
 
+    await this.saveConfig();
+    return this.toMcpStatus(next);
+  }
+
+  async saveMcpServerTools(serverId: string, tools: McpServerToolDefinition[], warnings: string[]): Promise<McpServerStatus> {
+    const server = this.config.mcpServers.find((candidate) => candidate.id === serverId);
+    if (!server) {
+      throw new Error(`Workspace MCP server not found: ${serverId}`);
+    }
+
+    const next: McpServerDefinition = {
+      ...server,
+      discoveredTools: tools,
+      toolsDiscoveredAt: new Date().toISOString(),
+      toolDiscoveryWarnings: warnings
+    };
+    this.config = {
+      ...this.config,
+      mcpServers: this.config.mcpServers.map((candidate) => candidate.id === serverId ? next : candidate)
+    };
     await this.saveConfig();
     return this.toMcpStatus(next);
   }
@@ -652,7 +674,10 @@ export class WorkspaceConfigStore implements RuntimeAgentConfigStore {
       hasApiKey: Boolean(apiKey),
       apiKeyEnv: server.apiKeyEnv,
       audience: server.audience,
-      customHeaders
+      customHeaders,
+      discoveredTools: server.discoveredTools ?? [],
+      toolsDiscoveredAt: server.toolsDiscoveredAt,
+      toolDiscoveryWarnings: server.toolDiscoveryWarnings ?? []
     };
   }
 

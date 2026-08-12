@@ -12,7 +12,7 @@ import { AgentToolExecutor, AgentToolRegistry, MiddlewarePipeline, type AgentCon
 import { AzureOpenAiChatClient } from './azureOpenAiChatClient.js';
 import { ChangeManager } from './changeManager.js';
 import { GroundingService } from './groundingService.js';
-import { GroundingContextProvider, PackageDocumentsContextProvider } from './juniorAgentLoopContextProviders.js';
+import { GroundingContextProvider, PackageDocumentsContextProvider, WorkspaceSkillsContextProvider } from './juniorAgentLoopContextProviders.js';
 import { JuniorChatRuntime } from './juniorChatRuntime.js';
 import { RecoveryChatMiddleware } from './juniorChatMiddleware.js';
 import { AutoApplyChangesMiddleware, LoopStepTrackingMiddleware } from './juniorAgentLoopMiddleware.js';
@@ -28,6 +28,7 @@ export type LoopStep =
   | 'create_directory'
   | 'list_directory'
   | 'read_file'
+  | 'read_files'
   | 'replace_lines'
   | 'search_files'
   | 'grep_search'
@@ -46,6 +47,9 @@ export interface JuniorAgentLoopProgressHandlers {
 }
 
 export class JuniorAgentLoop {
+  private static readonly maxPlannerRounds = 8;
+  private static readonly maxToolCalls = 40;
+  private static readonly maxToolCallsPerRound = 20;
   private static readonly directAnswerSystemMessage = 'When replying directly to the user, write plain text for an in-app chat surface. Avoid markdown headings, tables, fenced code blocks, and long bullet lists unless the user explicitly asks for them. Keep the answer brief and focused on the main result.';
   private static readonly workspaceCapabilitySystemMessage = 'You are operating inside Junior Workbench with direct workspace write capability. You can create directories and files, and edit existing files by using workspace tools. When the user asks to create a folder, call create_directory first, then write files under it if requested. Prefer taking concrete file actions instead of only describing what to do when the request is clear.';
   private static readonly noReasoningMessage = 'No reasoning was emitted for this turn.';
@@ -71,6 +75,7 @@ export class JuniorAgentLoop {
     this.agentMiddleware = [new AutoApplyChangesMiddleware(this.changeManager, this.workspaceIndexer)];
     this.contextProviders = [
       new GroundingContextProvider(this.workspaceIndexer, this.groundingService),
+      new WorkspaceSkillsContextProvider(this.storage),
       new PackageDocumentsContextProvider(this.storage)
     ];
     this.registry.registerAll(createWorkspaceTools({
@@ -78,7 +83,7 @@ export class JuniorAgentLoop {
       storage: this.storage,
       workspaceIndexer: this.workspaceIndexer
     }));
-    this.registry.register(createMcpTool());
+    this.registry.register(createMcpTool(this.storage));
     this.registry.registerAll(createPackageTools({
       changeManager: this.changeManager,
       chatRuntime: this.chatRuntime
@@ -86,7 +91,7 @@ export class JuniorAgentLoop {
   }
 
   private toolDefinitionsForAgent(activeAgent: AgentDefinition, hasMcpTools: boolean) {
-    const internalTools = new Set<LoopStep>(['inspect-workspace', 'create_directory', 'write_file']);
+    const internalTools = new Set<LoopStep>(['inspect-workspace', 'create_directory', 'read_files', 'write_file']);
     if (hasMcpTools) {
       internalTools.add('call_mcp_tool');
     }
@@ -108,8 +113,13 @@ export class JuniorAgentLoop {
     const activeAgent = await this.agentConfigStore.getAgent(agentId);
     const connection = await this.agentConfigStore.getConnection(activeAgent.modelConnectionId);
     const modelConnection = await this.agentConfigStore.getConnectionStatus(activeAgent.modelConnectionId);
-    const mcpRuntime = await this.createMcpRuntime(activeAgent);
-    const mcpDiscovery = mcpRuntime ? await mcpRuntime.discoverTools() : { tools: [] as DiscoveredMcpTool[], warnings: [] as string[] };
+    const mcpSetup = await this.createMcpRuntime(activeAgent);
+    const mcpRuntime = mcpSetup.runtime;
+    const runtimeDiscovery = mcpRuntime ? await mcpRuntime.discoverTools() : { tools: [] as DiscoveredMcpTool[], warnings: [] as string[] };
+    const mcpDiscovery = {
+      tools: runtimeDiscovery.tools,
+      warnings: [...mcpSetup.warnings, ...runtimeDiscovery.warnings]
+    };
     const availableTools = this.toolDefinitionsForAgent(activeAgent, mcpDiscovery.tools.length > 0);
     const mcpSystemMessage = this.createMcpSystemMessage(mcpDiscovery.tools, mcpDiscovery.warnings);
     const normalizedChatHistory = this.normalizeChatHistory(chatHistory, content);
@@ -128,7 +138,8 @@ export class JuniorAgentLoop {
       staged: [],
       stop: false,
       appliedChangeCount: 0,
-      iteration: 0,
+      plannerRound: 0,
+      toolCallCount: 0,
       loopMessages: this.contextManager.trimIfNeeded([
         { role: 'system', content: JuniorAgentLoop.directAnswerSystemMessage },
         { role: 'system', content: JuniorAgentLoop.workspaceCapabilitySystemMessage },
@@ -146,6 +157,15 @@ export class JuniorAgentLoop {
     context.state.set('progressHandlers', progressHandlers);
     context.state.set('mcpRuntime', mcpRuntime);
     context.state.set('mcpDiscoveredTools', mcpDiscovery.tools);
+    if ((activeAgent.mcpServerIds?.length ?? 0) > 0) {
+      context.toolEvents.push({
+        id: randomUUID(),
+        type: 'read',
+        label: 'Resolved attached MCP servers',
+        detail: `${mcpDiscovery.tools.length} tool${mcpDiscovery.tools.length === 1 ? '' : 's'} available from ${activeAgent.mcpServerIds?.length ?? 0} attachment${activeAgent.mcpServerIds?.length === 1 ? '' : 's'}${mcpDiscovery.warnings.length > 0 ? `; ${mcpDiscovery.warnings.join('; ')}` : ''}`,
+        createdAt: new Date().toISOString()
+      });
+    }
 
     if (!modelConnection.configured) {
       const assistant = this.createMessage(
@@ -171,7 +191,8 @@ export class JuniorAgentLoop {
     }
 
     const response: AgentResponse = await MiddlewarePipeline.runAgent(this.agentMiddleware, context, async () => {
-      while (context.iteration < 8) {
+      while (context.plannerRound < JuniorAgentLoop.maxPlannerRounds && context.toolCallCount < JuniorAgentLoop.maxToolCalls) {
+        context.plannerRound += 1;
         context.loopMessages = this.contextManager.trimIfNeeded(context.loopMessages);
         const decision = await this.planner.nextStep(context, context.availableTools, connection);
 
@@ -183,13 +204,25 @@ export class JuniorAgentLoop {
 
         const plannerDecisions = context.state.get('plannerDecisions');
         const history = Array.isArray(plannerDecisions) ? plannerDecisions as Array<{ iteration: number; nextStep: LoopStep | null; assistantMessage?: string }> : [];
-        history.push({ iteration: context.iteration + 1, nextStep: decision.nextStep, assistantMessage: decision.assistantMessage });
+        history.push({ iteration: context.plannerRound, nextStep: decision.nextStep, assistantMessage: decision.assistantMessage });
         context.state.set('plannerDecisions', history);
 
-        const toolCalls = decision.toolCalls ?? [];
+        const remainingToolBudget = JuniorAgentLoop.maxToolCalls - context.toolCallCount;
+        const requestedToolCalls = decision.toolCalls ?? [];
+        const toolCalls = requestedToolCalls.slice(0, Math.min(JuniorAgentLoop.maxToolCallsPerRound, remainingToolBudget));
 
         if (toolCalls.length === 0) {
           break;
+        }
+
+        if (toolCalls.length < requestedToolCalls.length) {
+          context.toolEvents.push({
+            id: randomUUID(),
+            type: 'read',
+            label: 'Limited tool batch',
+            detail: `Executed ${toolCalls.length} of ${requestedToolCalls.length} requested calls to stay within the ${JuniorAgentLoop.maxToolCalls}-call run budget.`,
+            createdAt: new Date().toISOString()
+          });
         }
 
         context.loopMessages.push({
@@ -240,14 +273,26 @@ export class JuniorAgentLoop {
     return response;
   }
 
-  private async createMcpRuntime(activeAgent: AgentDefinition): Promise<McpHttpRuntime | undefined> {
+  private async createMcpRuntime(activeAgent: AgentDefinition): Promise<{ runtime?: McpHttpRuntime; warnings: string[] }> {
     const serverIds = activeAgent.mcpServerIds ?? [];
     if (serverIds.length === 0) {
-      return undefined;
+      return { warnings: [] };
     }
 
-    const servers = serverIds.map((serverId) => this.agentConfigStore.getResolvedMcpServer(serverId));
-    return new McpHttpRuntime(servers);
+    const servers = [];
+    const warnings: string[] = [];
+    for (const serverId of serverIds) {
+      try {
+        servers.push(this.agentConfigStore.getResolvedMcpServer(serverId));
+      } catch (error) {
+        warnings.push(`${serverId}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    return {
+      runtime: servers.length > 0 ? new McpHttpRuntime(servers) : undefined,
+      warnings
+    };
   }
 
   private createMcpSystemMessage(tools: DiscoveredMcpTool[], warnings: string[]): string | undefined {

@@ -271,6 +271,16 @@ export interface McpCustomHeader {
   valueEnv?: string;
 }
 
+export interface McpServerToolDefinition {
+  name: string;
+  description: string;
+  inputSchema: {
+    type: 'object';
+    properties: Record<string, unknown>;
+    required?: string[];
+  };
+}
+
 export interface McpServerDefinition {
   id: string;
   name: string;
@@ -282,6 +292,9 @@ export interface McpServerDefinition {
   apiKeyEnv?: string;
   audience?: string;
   customHeaders?: McpCustomHeader[];
+  discoveredTools?: McpServerToolDefinition[];
+  toolsDiscoveredAt?: string;
+  toolDiscoveryWarnings?: string[];
 }
 
 export interface ResolvedMcpServerDefinition {
@@ -294,6 +307,7 @@ export interface ResolvedMcpServerDefinition {
   apiKey?: string;
   audience?: string;
   customHeaders?: Record<string, string>;
+  discoveredTools?: McpServerToolDefinition[];
 }
 
 export interface McpServerStatus {
@@ -311,6 +325,9 @@ export interface McpServerStatus {
   apiKeyEnv?: string;
   audience?: string;
   customHeaders?: Array<{ name: string; configured: boolean; valueEnv?: string }>;
+  discoveredTools: McpServerToolDefinition[];
+  toolsDiscoveredAt?: string;
+  toolDiscoveryWarnings: string[];
 }
 
 export interface McpServerSaveRequest {

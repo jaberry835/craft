@@ -35,7 +35,7 @@ import {
 } from 'lucide-react';
 import { ApiUnavailableError, AuthRequiredError, RequestError, workbenchApi } from './api/workbenchApi';
 import { PremiumJuniorWorkbenchIcon } from './components/PremiumWorkbenchIcons';
-import type { AdminConnectivityReport, AgentAiSettings, AgentConnectionSaveRequest, AgentConnectionType, AgentDefinition, AgentGroundingSource, AgentModelConnectionStatus, AgentResponse, AgentTemplateDefinition, AuthConfig, AuthDiagnostics, AzureAiSearchGroundingSource, AzureAuthMode, AzureCloud, AzureOpenAiEndpointKind, ChatMessage, ChatMessageDisplayPart, ChatSessionSummary, ClassificationBarSettings, ConnectivityCheck, ConnectivitySection, McpCatalogEntry, McpCustomHeader, McpServerAuthMode, McpServerStatus, ReasoningEffort, RequestIdentitySummary, WorkspaceFile, WorkspaceHistorySettings, WorkspaceIndex, WorkspaceSummary, WorkspaceTemplateDefinition, WorkspaceTemplateFile, WorkspaceTreeNode } from './types/workbench';
+import type { AdminConnectivityReport, AgentAiSettings, AgentConnectionSaveRequest, AgentConnectionType, AgentDefinition, AgentGroundingSource, AgentModelConnectionStatus, AgentResponse, AgentTemplateDefinition, AuthConfig, AuthDiagnostics, AzureAiSearchGroundingSource, AzureAuthMode, AzureCloud, AzureOpenAiEndpointKind, ChatMessage, ChatMessageDisplayPart, ChatSessionSummary, ClassificationBarSettings, ConnectivityCheck, ConnectivitySection, DiscoveredMcpTool, McpCatalogEntry, McpCustomHeader, McpServerAuthMode, McpServerStatus, ReasoningEffort, RequestIdentitySummary, WorkspaceFile, WorkspaceHistorySettings, WorkspaceIndex, WorkspaceSummary, WorkspaceTemplateDefinition, WorkspaceTemplateFile, WorkspaceTreeNode } from './types/workbench';
 import './App.css';
 
 const defaultCustomAgentPrompt = `You are a domain-expert assistant.
@@ -264,7 +264,7 @@ function catalogSectionDescription(section: CatalogSection): string {
     return 'Inspect known MCP servers and jump into the workspace editor for personal instances.';
   }
 
-  return 'This section is reserved for the future skills/tools catalog and will stay browse-first in the first slice.';
+  return 'Workspace skills are reusable instruction files loaded automatically by the active agent loop.';
 }
 
 interface WorkspaceHomeSurfaceProps {
@@ -612,8 +612,8 @@ function WorkspaceCatalogSurface({
             </div>
           ) : (
             <div className="surface-empty-state catalog-placeholder">
-              <strong>Skills and tools are next</strong>
-              <span>This first slice stops at browse surfaces. The execution and runtime model for skills/tools comes later.</span>
+              <strong>Workspace skills are active</strong>
+              <span>Add SKILL.md files under skills/&lt;name&gt;/ or .junior/skills/&lt;name&gt;/ in a workspace. The active agent loop loads them automatically.</span>
               <button type="button" onClick={onOpenHomeSurface}>
                 <House size={16} />
                 Return Home
@@ -705,8 +705,8 @@ function WorkspaceCatalogSurface({
             ) : null
           ) : (
             <div className="surface-empty-state catalog-placeholder detail-placeholder">
-              <strong>Skills and tools catalog</strong>
-              <span>The first implementation only introduces the navigation shell. The actual schema and runtime integration come in a later slice.</span>
+              <strong>Workspace skill conventions</strong>
+              <span>Create skills/&lt;name&gt;/SKILL.md, .junior/skills/&lt;name&gt;/SKILL.md, or .junior/skills/&lt;name&gt;.md. Relevant instructions are supplied to each agent run without granting additional tools.</span>
               <button type="button" onClick={onOpenWorkspaceSettings}>
                 <Settings size={16} />
                 Open Workspace Settings
@@ -1138,7 +1138,8 @@ function App() {
   const [connectorSemanticDraft, setConnectorSemanticDraft] = useState('default');
   const [connectorTopDraft, setConnectorTopDraft] = useState(5);
   const [connectorQueryTypeDraft, setConnectorQueryTypeDraft] = useState<'simple' | 'full' | 'semantic'>('semantic');
-  const [selectedMcpServerId, setSelectedMcpServerId] = useState<string>('new');
+  const [selectedAdminMcpServerId, setSelectedAdminMcpServerId] = useState<string>('new');
+  const [selectedWorkspaceMcpServerId, setSelectedWorkspaceMcpServerId] = useState<string>('new');
   const [selectedMcpCatalogId, setSelectedMcpCatalogId] = useState<string>('');
   const [mcpServerNameDraft, setMcpServerNameDraft] = useState('Remote MCP Server');
   const [mcpServerEndpointDraft, setMcpServerEndpointDraft] = useState('');
@@ -1147,6 +1148,9 @@ function App() {
   const [mcpServerApiKeyDraft, setMcpServerApiKeyDraft] = useState('');
   const [mcpServerAudienceDraft, setMcpServerAudienceDraft] = useState('');
   const [mcpServerHeadersDraft, setMcpServerHeadersDraft] = useState('');
+  const [mcpServerTools, setMcpServerTools] = useState<DiscoveredMcpTool[] | null>(null);
+  const [mcpServerToolWarnings, setMcpServerToolWarnings] = useState<string[]>([]);
+  const [mcpToolsLoading, setMcpToolsLoading] = useState(false);
   const [customAgentMode, setCustomAgentMode] = useState<'edit' | 'create'>('edit');
   const [selectedAgentTemplateId, setSelectedAgentTemplateId] = useState<string>('');
   const [customAgentNameDraft, setCustomAgentNameDraft] = useState('');
@@ -1291,6 +1295,8 @@ function App() {
   const currentPreviewFileType: PreviewFileType | null = isMarkdownFile ? 'markdown' : isSvgFile ? 'svg' : null;
   const previewModeLabel = isMarkdownFile ? 'Markdown' : 'SVG';
   const isWorkspaceSettings = activeScreen === 'workspace-settings';
+  const selectedMcpServerId = isWorkspaceSettings ? selectedWorkspaceMcpServerId : selectedAdminMcpServerId;
+  const setSelectedMcpServerId = isWorkspaceSettings ? setSelectedWorkspaceMcpServerId : setSelectedAdminMcpServerId;
   const editableConnections = useMemo(
     () => (isWorkspaceSettings ? workspaceSettingsConnections : connections),
     [connections, isWorkspaceSettings, workspaceSettingsConnections]
@@ -1389,19 +1395,21 @@ function App() {
   }, [activeWorkspaceId]);
 
   const refreshWorkspaceSettingsConfig = useCallback(async () => {
-    const [nextAgents, nextConnections, nextMcpServers, nextHistorySettings] = await Promise.all([
+    const [nextAgents, nextConnections, nextMcpServers, nextHistorySettings, nextMcpCatalog] = await Promise.all([
       workbenchApi.getWorkspaceSettingsAgents(activeWorkspaceId),
       workbenchApi.getWorkspaceAgentConnections(activeWorkspaceId),
       workbenchApi.getWorkspaceMcpServers(activeWorkspaceId),
-      workbenchApi.getWorkspaceHistorySettings(activeWorkspaceId)
+      workbenchApi.getWorkspaceHistorySettings(activeWorkspaceId),
+      workbenchApi.getWorkspaceSharedMcpCatalog(activeWorkspaceId)
     ]);
     setWorkspaceSettingsAgents(nextAgents);
     setWorkspaceSettingsConnections(nextConnections);
     setWorkspaceSettingsMcpServers(nextMcpServers);
     setWorkspaceHistorySettings(nextHistorySettings);
+    setWorkspaceSharedMcpCatalog(nextMcpCatalog);
     setSelectedAgentId((current) => nextAgents.some((agent) => agent.id === current) ? current : nextAgents[0]?.id);
     setSelectedConnectorId((current) => nextConnections.some((connection) => connection.id === current) ? current : 'new');
-    setSelectedMcpServerId((current) => nextMcpServers.some((server) => server.id === current) ? current : 'new');
+    setSelectedWorkspaceMcpServerId((current) => nextMcpServers.some((server) => server.id === current) ? current : 'new');
   }, [activeWorkspaceId]);
 
   const refreshAdminConnectivity = useCallback(async () => {
@@ -1723,6 +1731,8 @@ function App() {
       setMcpServerApiKeyDraft('');
       setMcpServerAudienceDraft('');
       setMcpServerHeadersDraft('');
+      setMcpServerTools(null);
+      setMcpServerToolWarnings([]);
       return;
     }
 
@@ -1733,6 +1743,14 @@ function App() {
     setMcpServerApiKeyDraft('');
     setMcpServerAudienceDraft(selectedMcpServer.audience ?? '');
     setMcpServerHeadersDraft(linesFromHeaders(selectedMcpServer.customHeaders));
+    setMcpServerTools(selectedMcpServer.discoveredTools.map((tool) => ({
+      serverId: selectedMcpServer.id,
+      serverName: selectedMcpServer.name,
+      toolName: tool.name,
+      description: tool.description,
+      inputSchema: tool.inputSchema
+    })));
+    setMcpServerToolWarnings(selectedMcpServer.toolDiscoveryWarnings);
   }, [selectedMcpServer]);
 
   useEffect(() => {
@@ -2364,10 +2382,50 @@ function App() {
     setMcpServerApiKeyDraft('');
     setMcpServerAudienceDraft('');
     setMcpServerHeadersDraft('');
+    setMcpServerTools(null);
+    setMcpServerToolWarnings([]);
   }
 
   function selectMcpServerForEditing(id: string) {
     setSelectedMcpServerId(id);
+    setMcpServerTools(null);
+    setMcpServerToolWarnings([]);
+  }
+
+  function beginCreateMcpServerFromCatalog(entryId: string) {
+    beginCreateMcpServer();
+    applyMcpCatalogEntry(entryId);
+    setStatus('Loaded the Admin catalog server. Review workspace credentials, then save it to this workspace.');
+  }
+
+  async function discoverMcpServerTools(serverId: string, serverName: string, afterSave = false) {
+    setMcpToolsLoading(true);
+    setMcpServerToolWarnings([]);
+    try {
+      const discovery = isWorkspaceSettings
+        ? await workbenchApi.discoverWorkspaceMcpServerTools(serverId, activeWorkspaceId)
+        : await workbenchApi.discoverMcpServerTools(serverId);
+      const refreshedServers = isWorkspaceSettings
+        ? await workbenchApi.getWorkspaceMcpServers(activeWorkspaceId)
+        : await workbenchApi.getMcpServers();
+      if (isWorkspaceSettings) {
+        setWorkspaceSettingsMcpServers(refreshedServers);
+      } else {
+        setMcpServers(refreshedServers);
+      }
+      setMcpServerTools(discovery.tools);
+      setMcpServerToolWarnings(discovery.warnings);
+      setStatus(discovery.warnings.length > 0
+        ? `${afterSave ? `Saved ${serverName}, but` : serverName} tool discovery reported ${discovery.warnings.length} warning${discovery.warnings.length === 1 ? '' : 's'}.`
+        : `${afterSave ? `Saved ${serverName} and discovered` : `Discovered`} ${discovery.tools.length} tool${discovery.tools.length === 1 ? '' : 's'}.`);
+    } catch (error) {
+      setMcpServerTools([]);
+      const message = error instanceof Error ? error.message : 'Failed to discover MCP tools.';
+      setMcpServerToolWarnings([message]);
+      setStatus(`${afterSave ? `Saved ${serverName}, but` : serverName} tool discovery failed: ${message}`);
+    } finally {
+      setMcpToolsLoading(false);
+    }
   }
 
   async function saveMcpServer() {
@@ -2407,12 +2465,56 @@ function App() {
       setSelectedMcpServerId(saved.id);
       setMcpServerBearerTokenDraft('');
       setMcpServerApiKeyDraft('');
-      setStatus(`Saved MCP server ${saved.name}`);
+      await discoverMcpServerTools(saved.id, saved.name, true);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Failed to save MCP server');
     } finally {
       setBusy(false);
     }
+  }
+
+  function renderMcpSaveAndTools() {
+    return (
+      <>
+        <div className="config-save-row">
+          <button type="button" className="primary config-save" onClick={saveMcpServer} disabled={busy || mcpToolsLoading || !mcpServerNameDraft.trim() || !mcpServerEndpointDraft.trim()}>Save MCP Server</button>
+          {selectedMcpServer && (
+            <button type="button" onClick={() => void discoverMcpServerTools(selectedMcpServer.id, selectedMcpServer.name)} disabled={busy || mcpToolsLoading || !selectedMcpServer.configured}>
+              <RefreshCw size={16} className={mcpToolsLoading ? 'spin' : undefined} />
+              {mcpToolsLoading ? 'Discovering tools…' : 'Refresh tools'}
+            </button>
+          )}
+        </div>
+        {(mcpServerTools !== null || mcpToolsLoading || mcpServerToolWarnings.length > 0) && (
+          <section className="mcp-tool-discovery" aria-live="polite">
+            <div className="mcp-tool-discovery-header">
+              <strong>Available tools</strong>
+              <span>{mcpToolsLoading
+                ? 'Discovering…'
+                : `${mcpServerTools?.length ?? 0} found${selectedMcpServer?.toolsDiscoveredAt ? ` · saved ${new Date(selectedMcpServer.toolsDiscoveredAt).toLocaleString()}` : ''}`}</span>
+            </div>
+            {mcpServerToolWarnings.map((warning) => <p className="connector-hint" key={warning}>{warning}</p>)}
+            {!mcpToolsLoading && mcpServerTools?.length === 0 && mcpServerToolWarnings.length === 0 && (
+              <p className="mcp-tool-empty">The server connected successfully but did not advertise any tools.</p>
+            )}
+            {mcpServerTools && mcpServerTools.length > 0 && (
+              <div className="mcp-tool-list">
+                {mcpServerTools.map((tool) => {
+                  const parameterNames = Object.keys(tool.inputSchema.properties);
+                  return (
+                    <div className="mcp-tool-card" key={`${tool.serverId}:${tool.toolName}`}>
+                      <strong>{tool.toolName}</strong>
+                      <p>{tool.description || 'No description provided.'}</p>
+                      <span>{parameterNames.length > 0 ? `Inputs: ${parameterNames.join(', ')}` : 'No inputs'}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+        )}
+      </>
+    );
   }
 
   function beginCreateAgent() {
@@ -2539,7 +2641,8 @@ function App() {
 
   function applyMcpCatalogEntry(entryId: string) {
     setSelectedMcpCatalogId(entryId);
-    const entry = mcpCatalog.find((candidate) => candidate.id === entryId);
+    const availableCatalog = isWorkspaceSettings ? workspaceSharedMcpCatalog : mcpCatalog;
+    const entry = availableCatalog.find((candidate) => candidate.id === entryId);
 
     if (!entry) {
       return;
@@ -2548,6 +2651,8 @@ function App() {
     setMcpServerNameDraft(entry.name);
     setMcpServerEndpointDraft(entry.endpoint ?? '');
     setMcpServerAuthDraft(entry.authMode);
+    setMcpServerBearerTokenDraft('');
+    setMcpServerApiKeyDraft('');
     setMcpServerAudienceDraft(entry.audience ?? '');
     setMcpServerHeadersDraft(linesFromHeaders(entry.customHeaders));
   }
@@ -2829,6 +2934,9 @@ function App() {
     setWorkspaceTemplateDraft(activeWorkspace?.templateId ?? '');
     setConfigView('workspace');
     setActiveScreen('workspace-settings');
+    void refreshWorkspaceSettingsConfig().catch((error) => {
+      setStatus(error instanceof Error ? error.message : 'Failed to refresh workspace settings');
+    });
   }
 
   async function saveWorkspaceSettings() {
@@ -3295,6 +3403,25 @@ function App() {
                       </button>
                     ))}
                   </div>
+                  <div className="config-list-header catalog-list-header">
+                    <div>
+                      <strong>Admin catalog</strong>
+                      <span>{workspaceSharedMcpCatalog.length} available to add</span>
+                    </div>
+                  </div>
+                  <div className="config-item-list">
+                    {workspaceSharedMcpCatalog.length > 0 ? workspaceSharedMcpCatalog.map((entry) => (
+                      <button key={entry.id} type="button" className="config-item-row" onClick={() => beginCreateMcpServerFromCatalog(entry.id)}>
+                        <strong>{entry.name}</strong>
+                        <span>{entry.description || entry.endpoint || 'Admin-provided MCP server'}</span>
+                      </button>
+                    )) : (
+                      <div className="surface-empty-state compact">
+                        <strong>No Admin catalog servers</strong>
+                        <span>Add an MCP server in Admin, then reopen workspace settings.</span>
+                      </div>
+                    )}
+                  </div>
                 </>
               ) : (
                 <>
@@ -3587,7 +3714,7 @@ function App() {
                 <div className="config-form-grid">
                   {selectedMcpServerId === 'new' && workspaceSharedMcpCatalog.length > 0 && (
                     <label className="wide-field">
-                      <span>Known server</span>
+                      <span>Admin catalog server</span>
                       <select value={selectedMcpCatalogId} onChange={(event) => applyMcpCatalogEntry(event.target.value)}>
                         <option value="">Start from a blank MCP server</option>
                         {workspaceSharedMcpCatalog.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}
@@ -3641,7 +3768,7 @@ function App() {
                     </label>
                   )}
                 </div>
-                <button type="button" className="primary config-save" onClick={saveMcpServer} disabled={busy || !mcpServerNameDraft.trim() || !mcpServerEndpointDraft.trim()}>Save MCP Server</button>
+                {renderMcpSaveAndTools()}
               </div>
             ) : (
               <div className="config-panel">
@@ -3728,10 +3855,25 @@ function App() {
                     <input value={searchSemanticConfigDraft} onChange={(event) => setSearchSemanticConfigDraft(event.target.value)} placeholder="default" />
                   </label>
                   <label className="wide-field">
-                    <span>MCP servers</span>
-                    <select multiple value={customAgentMcpServerIdsDraft} onChange={(event) => setCustomAgentMcpServerIdsDraft(Array.from(event.target.selectedOptions).map((option) => option.value))}>
-                      {editableMcpServers.map((server) => <option key={server.id} value={server.id}>{server.name}</option>)}
-                    </select>
+                    <span>Attached MCP servers</span>
+                    <div className="config-checklist">
+                      {editableMcpServers.length === 0 ? (
+                        <span className="muted">No workspace MCP servers configured yet.</span>
+                      ) : editableMcpServers.map((server) => (
+                        <label key={server.id} className="checklist-row">
+                          <input
+                            type="checkbox"
+                            checked={customAgentMcpServerIdsDraft.includes(server.id)}
+                            disabled={!server.configured}
+                            onChange={(event) => setCustomAgentMcpServerIdsDraft((current) => event.target.checked
+                              ? [...current, server.id]
+                              : current.filter((candidate) => candidate !== server.id))}
+                          />
+                          <span>{server.name} — {server.configured ? 'ready' : `missing ${server.missing.join(', ')}`}</span>
+                        </label>
+                      ))}
+                    </div>
+                    <p className="connector-hint">Only attached MCP servers are discovered by this agent. Workspace skill files are loaded automatically from skills/&lt;name&gt;/SKILL.md.</p>
                   </label>
                 </div>
                 <button type="button" className="primary config-save" onClick={saveCustomAgent} disabled={busy || !customAgentNameDraft.trim() || !customAgentModelDraft}>{customAgentMode === 'create' ? 'Create Workspace Agent' : 'Save Workspace Agent'}</button>
@@ -4271,12 +4413,6 @@ function App() {
                       <option value="custom-headers">Custom headers</option>
                     </select>
                   </label>
-                  {mcpServerAuthDraft === 'entra' && (
-                    <label>
-                      <span>Audience / scope</span>
-                      <input value={mcpServerAudienceDraft} onChange={(event) => setMcpServerAudienceDraft(event.target.value)} placeholder="api://resource/.default" />
-                    </label>
-                  )}
                   {mcpServerAuthDraft === 'bearer-token' && (
                     <label className="wide-field">
                       <span>Bearer token</span>
@@ -4289,6 +4425,12 @@ function App() {
                       <input type="password" value={mcpServerApiKeyDraft} onChange={(event) => setMcpServerApiKeyDraft(event.target.value)} placeholder={selectedMcpServer?.hasApiKey ? 'Stored key exists; enter a new value to replace it' : 'Paste API key'} />
                     </label>
                   )}
+                  {mcpServerAuthDraft === 'entra' && (
+                    <label className="wide-field">
+                      <span>Audience / scope</span>
+                      <input value={mcpServerAudienceDraft} onChange={(event) => setMcpServerAudienceDraft(event.target.value)} placeholder="api://resource/.default" />
+                    </label>
+                  )}
                   {mcpServerAuthDraft === 'custom-headers' && (
                     <label className="wide-field">
                       <span>Custom headers</span>
@@ -4296,7 +4438,7 @@ function App() {
                     </label>
                   )}
                 </div>
-                <button type="button" className="primary config-save" onClick={saveMcpServer} disabled={busy || !mcpServerNameDraft.trim() || !mcpServerEndpointDraft.trim()}>Save MCP Server</button>
+                {renderMcpSaveAndTools()}
               </div>
             ) : (
               <div className="config-panel">

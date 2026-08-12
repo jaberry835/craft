@@ -233,6 +233,64 @@ export function createWorkspaceTools(dependencies: WorkspaceToolDependencies): L
     },
     {
       definition: {
+        name: 'read_files',
+        description: 'Read multiple workspace text files in one call. Prefer this over many read_file calls when a task needs several complete files.',
+        isReadOnly: true,
+        requiresConfirmation: false,
+        confirmationCategory: 'workspace-read',
+        category: 'workspace',
+        parameters: {
+          type: 'object',
+          properties: {
+            paths: { type: 'array', items: { type: 'string' } },
+            maxBytesPerFile: { type: 'number' }
+          },
+          required: ['paths']
+        }
+      },
+      execute: async (context, args) => {
+        const paths = Array.isArray(args.paths)
+          ? Array.from(new Set(args.paths.map((value) => String(value).trim()).filter(Boolean)))
+          : [];
+        if (paths.length === 0) {
+          return { success: false, result: 'paths must contain at least one workspace-relative file path.' };
+        }
+        if (paths.length > 25) {
+          return { success: false, result: 'read_files accepts at most 25 paths per call.' };
+        }
+
+        const maxBytesPerFile = Math.max(1, Math.min(1_048_576, Number(args.maxBytesPerFile ?? 262_144)));
+        const files: Array<{ path: string; content: string; contentType: string; truncated: boolean }> = [];
+        const missing: Array<{ path: string; error: string }> = [];
+        for (const path of paths) {
+          try {
+            const file = await dependencies.storage.readTextFile(path);
+            const contentBuffer = Buffer.from(file.content, 'utf8');
+            const truncated = contentBuffer.byteLength > maxBytesPerFile;
+            files.push({
+              path,
+              content: truncated ? contentBuffer.subarray(0, maxBytesPerFile).toString('utf8') : file.content,
+              contentType: contentTypeForPath(path),
+              truncated
+            });
+          } catch (error) {
+            missing.push({ path, error: error instanceof Error ? error.message : String(error) });
+          }
+        }
+
+        context.toolEvents.push(createToolEvent(
+          'read',
+          'Read workspace files',
+          `${files.length} file${files.length === 1 ? '' : 's'} loaded${missing.length > 0 ? `; ${missing.length} unavailable` : ''}.`
+        ));
+        return {
+          success: files.length > 0,
+          result: JSON.stringify({ files, missing })
+        };
+      }
+    },
+    {
+      definition: {
         name: 'replace_lines',
         description: 'Replace an inclusive line range in a workspace file with new content. Use this when an exact-string edit is too brittle.',
         isReadOnly: false,
@@ -432,4 +490,28 @@ function createToolEvent(type: ToolEvent['type'], label: string, detail?: string
     filePath,
     createdAt: new Date().toISOString()
   };
+}
+
+function contentTypeForPath(filePath: string): string {
+  const extension = filePath.toLowerCase().split('.').pop();
+  switch (extension) {
+    case 'md':
+    case 'markdown':
+      return 'text/markdown';
+    case 'json':
+      return 'application/json';
+    case 'yaml':
+    case 'yml':
+      return 'application/yaml';
+    case 'html':
+      return 'text/html';
+    case 'css':
+      return 'text/css';
+    case 'js':
+      return 'text/javascript';
+    case 'ts':
+      return 'text/typescript';
+    default:
+      return 'text/plain';
+  }
 }

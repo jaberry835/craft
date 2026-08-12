@@ -3,7 +3,7 @@ import { DefaultAzureCredential } from '@azure/identity';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { updatePersistenceMode } from './persistenceModeTracker.js';
-import type { AgentAiSettings, AgentConnection, AgentConnectionSaveRequest, AgentConnectionStatus, AgentCreateRequest, AgentDefinition, AgentModelConnection, AgentModelConnectionStatus, AgentTemplateDefinition, AgentUpdateRequest, AzureAiSearchConnectionDefinition, ClassificationBarSettings, ClassificationBarSettingsSaveRequest, McpCatalogEntry, McpCustomHeader, McpServerDefinition, McpServerSaveRequest, McpServerStatus, ResolvedMcpServerDefinition, WorkspaceSummary, WorkspaceTemplateDefinition, WorkspaceTemplateSaveRequest } from '../types.js';
+import type { AgentAiSettings, AgentConnection, AgentConnectionSaveRequest, AgentConnectionStatus, AgentCreateRequest, AgentDefinition, AgentModelConnection, AgentModelConnectionStatus, AgentTemplateDefinition, AgentUpdateRequest, AzureAiSearchConnectionDefinition, ClassificationBarSettings, ClassificationBarSettingsSaveRequest, McpCatalogEntry, McpCustomHeader, McpServerDefinition, McpServerSaveRequest, McpServerStatus, McpServerToolDefinition, ResolvedMcpServerDefinition, WorkspaceSummary, WorkspaceTemplateDefinition, WorkspaceTemplateSaveRequest } from '../types.js';
 
 export type RuntimeAgentConfigStore = Pick<AgentConfigStore, 'getConnection' | 'getSearchConnection' | 'resolveApiKey' | 'getConnectionStatus' | 'getResolvedMcpServer'> & {
   getAgent(agentId?: string): AgentDefinition | Promise<AgentDefinition>;
@@ -212,18 +212,23 @@ export class AgentConfigStore {
       .map((connection) => this.toStatus(connection));
   }
 
-  listSharedMcpCatalogForWorkspace(workspace?: WorkspaceSummary): McpCatalogEntry[] {
-    const workspaceTemplate = workspace?.templateId
-      ? this.workspaceTemplates.find((candidate) => candidate.id === workspace.templateId)
-      : undefined;
+  listSharedMcpCatalogForWorkspace(_workspace?: WorkspaceSummary): McpCatalogEntry[] {
+    const catalogEntries = [...this.mcpCatalog];
+    const catalogIds = new Set(catalogEntries.map((entry) => entry.id));
+    const adminServers = this.mcpServers
+      .filter((server) => !catalogIds.has(server.id))
+      .map((server): McpCatalogEntry => ({
+        id: server.id,
+        name: server.name,
+        description: 'Configured by an administrator. Workspace credentials are stored separately.',
+        transport: server.transport,
+        endpoint: server.endpoint ?? (server.endpointEnv ? process.env[server.endpointEnv] : undefined),
+        authMode: server.authMode,
+        audience: server.audience,
+        customHeaders: server.customHeaders
+      }));
 
-    if (!workspaceTemplate?.mcpCatalogIds?.length) {
-      return [];
-    }
-
-    return workspaceTemplate.mcpCatalogIds
-      .map((catalogId) => this.mcpCatalog.find((candidate) => candidate.id === catalogId))
-      .filter((entry): entry is McpCatalogEntry => Boolean(entry));
+    return [...catalogEntries, ...adminServers];
   }
 
   getAgent(agentId?: string): AgentDefinition {
@@ -376,7 +381,8 @@ export class AgentConfigStore {
       bearerToken,
       apiKey,
       audience: server.audience,
-      customHeaders: Object.keys(customHeaders).length > 0 ? customHeaders : undefined
+      customHeaders: Object.keys(customHeaders).length > 0 ? customHeaders : undefined,
+      discoveredTools: server.discoveredTools
     };
   }
 
@@ -460,6 +466,23 @@ export class AgentConfigStore {
       await this.saveMcpSecrets();
     }
 
+    await this.saveMcpServers();
+    return this.toMcpStatus(next);
+  }
+
+  async saveMcpServerTools(serverId: string, tools: McpServerToolDefinition[], warnings: string[]): Promise<McpServerStatus> {
+    const server = this.mcpServers.find((candidate) => candidate.id === serverId);
+    if (!server) {
+      throw new Error(`MCP server not found: ${serverId}`);
+    }
+
+    const next: McpServerDefinition = {
+      ...server,
+      discoveredTools: tools,
+      toolsDiscoveredAt: new Date().toISOString(),
+      toolDiscoveryWarnings: warnings
+    };
+    this.mcpServers = this.mcpServers.map((candidate) => candidate.id === serverId ? next : candidate);
     await this.saveMcpServers();
     return this.toMcpStatus(next);
   }
@@ -664,7 +687,10 @@ export class AgentConfigStore {
       hasApiKey: Boolean(apiKey),
       apiKeyEnv: server.apiKeyEnv,
       audience: server.audience,
-      customHeaders
+      customHeaders,
+      discoveredTools: server.discoveredTools ?? [],
+      toolsDiscoveredAt: server.toolsDiscoveredAt,
+      toolDiscoveryWarnings: server.toolDiscoveryWarnings ?? []
     };
   }
 

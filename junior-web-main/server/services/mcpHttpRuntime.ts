@@ -32,6 +32,13 @@ export interface DiscoveredMcpTool {
   };
 }
 
+export interface McpToolCallResult {
+  isError: boolean;
+  text?: string;
+  structuredContent?: unknown;
+  content: Array<Record<string, unknown>>;
+}
+
 interface McpConnectionState {
   server: ResolvedMcpServerDefinition;
   sessionId?: string;
@@ -71,14 +78,24 @@ export class McpHttpRuntime {
           });
         }
       } catch (error) {
-        warnings.push(`${server.name}: ${error instanceof Error ? error.message : String(error)}`);
+        const cachedTools = server.discoveredTools ?? [];
+        for (const tool of cachedTools) {
+          tools.push({
+            serverId: server.id,
+            serverName: server.name,
+            toolName: tool.name,
+            description: tool.description,
+            inputSchema: tool.inputSchema
+          });
+        }
+        warnings.push(`${server.name}: ${error instanceof Error ? error.message : String(error)}${cachedTools.length > 0 ? `; using ${cachedTools.length} persisted tool definition${cachedTools.length === 1 ? '' : 's'}` : ''}`);
       }
     }
 
     return { tools, warnings };
   }
 
-  async callTool(serverId: string, toolName: string, args: Record<string, unknown>): Promise<string> {
+  async callTool(serverId: string, toolName: string, args: Record<string, unknown>): Promise<McpToolCallResult> {
     const connection = this.connections.get(serverId);
     if (!connection) {
       throw new Error(`MCP server is not connected: ${serverId}`);
@@ -87,15 +104,25 @@ export class McpHttpRuntime {
     const result = await this.sendRequest(connection, 'tools/call', {
       name: toolName,
       arguments: args
-    }, 30000) as { content?: Array<{ type?: string; text?: string }> };
+    }, 30000) as {
+      content?: Array<Record<string, unknown>>;
+      structuredContent?: unknown;
+      isError?: boolean;
+    };
 
-    const text = result.content
-      ?.filter((item) => item.type === 'text')
-      .map((item) => item.text ?? '')
+    const content = Array.isArray(result.content) ? result.content : [];
+    const text = content
+      .filter((item) => item.type === 'text' && typeof item.text === 'string')
+      .map((item) => String(item.text))
       .join('\n')
       .trim();
 
-    return text || 'No response';
+    return {
+      isError: Boolean(result.isError),
+      ...(text ? { text } : {}),
+      ...(Object.hasOwn(result, 'structuredContent') ? { structuredContent: result.structuredContent } : {}),
+      content
+    };
   }
 
   private connectionFor(server: ResolvedMcpServerDefinition): McpConnectionState {

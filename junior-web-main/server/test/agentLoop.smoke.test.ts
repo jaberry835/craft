@@ -17,6 +17,7 @@ import type {
 import { AgentConfigStore } from '../services/agentConfigStore.js';
 import { AzureOpenAiChatClient } from '../services/azureOpenAiChatClient.js';
 import { LocalWorkspaceStorage } from '../services/localWorkspaceStorage.js';
+import { McpHttpRuntime } from '../services/mcpHttpRuntime.js';
 import { createWorkspaceTools } from '../services/tools/workspaceTools.js';
 import type { LoopToolContext } from '../services/tools/types.js';
 import type { ChatCompletionResult, ChatMessageInput, ChatToolDefinition } from '../services/azureOpenAiChatClient.js';
@@ -72,7 +73,8 @@ function createToolContext(agent: AgentDefinition, connection: AgentConnection, 
     staged: [] as PendingChange[],
     stop: false,
     appliedChangeCount: 0,
-    iteration: 0,
+    plannerRound: 0,
+    toolCallCount: 0,
     loopMessages: [] as ChatMessage[],
     availableTools: [],
     state: new Map<string, unknown>()
@@ -640,6 +642,31 @@ test('write_file stages a create change for a new workspace file', async (t) => 
   await expectMissingWorkspaceFile(harness.storage, 'uploads/smoke-created.md');
 });
 
+test('read_files returns multiple complete workspace files in one call', async (t) => {
+  const harness = await createHarness(new FakeAzureOpenAiChatClient());
+  t.after(async () => cleanupHarness(harness));
+  await harness.storage.writeTextFile('package/one.md', '# One');
+  await harness.storage.writeTextFile('package/two.txt', 'Two');
+  const tools = createWorkspaceTools({
+    changeManager: harness.changeManager,
+    storage: harness.storage,
+    workspaceIndexer: harness.workspaceIndexer
+  });
+  const readFilesTool = tools.find((tool) => tool.definition.name === 'read_files');
+  assert.ok(readFilesTool);
+  const agent = harness.agentConfigStore.getAgent();
+  const connection = harness.agentConfigStore.getConnection(agent.modelConnectionId);
+  const context = createToolContext(agent, connection, harness.workspaceIndexer.getIndex());
+
+  const result = await readFilesTool.execute(context, { paths: ['package/one.md', 'package/two.txt'] });
+
+  assert.equal(result.success, true);
+  const payload = JSON.parse(result.result) as { files: Array<{ path: string; content: string; contentType: string }> };
+  assert.deepEqual(payload.files.map((file) => file.path), ['package/one.md', 'package/two.txt']);
+  assert.equal(payload.files[0]?.content, '# One');
+  assert.equal(payload.files[0]?.contentType, 'text/markdown');
+});
+
 test('agent auto-applies create_directory by writing a folder placeholder file', async (t) => {
   const harness = await createHarness(new FakeAzureOpenAiChatClient({
     plannerResponses: [
@@ -748,14 +775,15 @@ test('agent can execute an attached HTTP MCP tool', async (t) => {
   }));
   t.after(async () => cleanupHarness(harness));
 
-  await harness.agentConfigStore.saveMcpServer({
+  const workspaceConfigStore = harness.workspaceManager.getDefault().configStore;
+  await workspaceConfigStore.saveMcpServer({
     id: 'docs-mcp',
     name: 'Docs MCP',
     transport: 'http',
     endpoint: `http://127.0.0.1:${address.port}/mcp`,
     authMode: 'none'
   });
-  const agent = await harness.agentConfigStore.createAgent({
+  const agent = await workspaceConfigStore.createAgent({
     name: 'MCP Researcher',
     description: 'Uses MCP tools',
     instructions: 'Use attached MCP tools when they are relevant.',
@@ -768,4 +796,171 @@ test('agent can execute an attached HTTP MCP tool', async (t) => {
   assert.equal(response.pendingChanges.length, 0);
   assert.equal(response.toolEvents.some((event) => event.label.includes('Called MCP tool lookup_docs')), true);
   assert.equal(response.message.content, 'The MCP lookup finished.');
+});
+
+test('large tool batches do not consume the planner-round budget', async (t) => {
+  const harness = await createHarness(new FakeAzureOpenAiChatClient({
+    plannerResponses: [
+      {
+        content: 'I will inspect the workspace thoroughly.',
+        toolCalls: Array.from({ length: 12 }, () => createToolCall('inspect-workspace', {}))
+      },
+      {
+        content: 'The follow-up planner round completed after the tool batch.',
+        toolCalls: []
+      }
+    ]
+  }));
+  t.after(async () => cleanupHarness(harness));
+
+  const response = await harness.agent.sendMessage('Inspect the workspace, then summarize it.');
+
+  assert.equal(response.message.content, 'The follow-up planner round completed after the tool batch.');
+  assert.equal(response.toolEvents.filter((event) => event.label === 'Inspected workspace state').length, 12);
+});
+
+test('generic MCP workspace bindings transfer matching files without model-side reads', async (t) => {
+  let publishedArguments: Record<string, unknown> | undefined;
+  const mcpServer = http.createServer(async (request, response) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) {
+      chunks.push(Buffer.from(chunk));
+    }
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { id: number; method: string; params?: Record<string, unknown> };
+    response.setHeader('Content-Type', 'application/json');
+    if (body.method === 'initialize') {
+      response.end(JSON.stringify({ jsonrpc: '2.0', id: body.id, result: { protocolVersion: '2024-11-05', capabilities: {} } }));
+      return;
+    }
+    if (body.method === 'tools/list') {
+      response.end(JSON.stringify({
+        jsonrpc: '2.0',
+        id: body.id,
+        result: {
+          tools: [{
+            name: 'publish_site',
+            description: 'Publish a set of site files.',
+            inputSchema: {
+              type: 'object',
+              properties: { siteId: { type: 'string' }, files: { type: 'array' } },
+              required: ['siteId', 'files']
+            }
+          }]
+        }
+      }));
+      return;
+    }
+    if (body.method === 'tools/call') {
+      publishedArguments = (body.params?.arguments ?? {}) as Record<string, unknown>;
+      response.end(JSON.stringify({
+        jsonrpc: '2.0',
+        id: body.id,
+        result: { structuredContent: { url: 'https://publish.test/site', version: 3 }, content: [], isError: false }
+      }));
+      return;
+    }
+    response.statusCode = 400;
+    response.end();
+  });
+  await new Promise<void>((resolve) => mcpServer.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve, reject) => mcpServer.close((error) => error ? reject(error) : resolve())));
+  const address = mcpServer.address();
+  assert.ok(address && typeof address !== 'string');
+
+  const harness = await createHarness(new FakeAzureOpenAiChatClient({
+    plannerResponses: [
+      {
+        content: 'I will publish the package files.',
+        toolCalls: [createToolCall('call_mcp_tool', {
+          serverId: 'site-publisher',
+          toolName: 'publish_site',
+          arguments: { siteId: 'test-site' },
+          workspaceFileBindings: [{ argumentPath: '/files', include: ['package/**'], exclude: ['**/draft*'] }]
+        })]
+      },
+      { content: 'Published the package.', toolCalls: [] }
+    ]
+  }));
+  t.after(async () => cleanupHarness(harness));
+  await harness.storage.writeTextFile('package/a.md', '# A');
+  await harness.storage.writeTextFile('package/b.txt', 'B');
+  await harness.storage.writeTextFile('notes/private.txt', 'not published');
+  const workspaceConfigStore = harness.workspaceManager.getDefault().configStore;
+  await workspaceConfigStore.saveMcpServer({
+    id: 'site-publisher',
+    name: 'Site Publisher',
+    transport: 'http',
+    endpoint: `http://127.0.0.1:${address.port}/mcp`,
+    authMode: 'none'
+  });
+  const agent = await workspaceConfigStore.createAgent({
+    name: 'Publisher',
+    description: 'Publishes package files',
+    instructions: 'Use the attached MCP publishing tool.',
+    modelConnectionId: 'default-azure-openai',
+    mcpServerIds: ['site-publisher']
+  });
+
+  const response = await harness.agent.sendMessage('Publish the package.', agent.id);
+
+  assert.equal(response.message.content, 'Published the package.');
+  assert.equal(response.toolEvents.some((event) => event.label === 'Bound workspace files to MCP call'), true);
+  const files = publishedArguments?.files as Array<{ path: string; content: string; contentType: string }>;
+  assert.deepEqual(files.map((file) => file.path), ['package/a.md', 'package/b.txt']);
+  assert.equal(files[0]?.content, '# A');
+  assert.equal(files[0]?.contentType, 'text/markdown');
+});
+
+test('MCP runtime preserves structured results and tool error state', async (t) => {
+  const mcpServer = http.createServer(async (request, response) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) {
+      chunks.push(Buffer.from(chunk));
+    }
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { id: number; method: string };
+    response.setHeader('Content-Type', 'application/json');
+    const result = body.method === 'initialize'
+      ? { protocolVersion: '2024-11-05', capabilities: {} }
+      : body.method === 'tools/list'
+        ? { tools: [{ name: 'publish', inputSchema: { type: 'object', properties: {} } }] }
+        : { content: [{ type: 'text', text: 'Validation failed' }], structuredContent: { code: 'invalid_site' }, isError: true };
+    response.end(JSON.stringify({ jsonrpc: '2.0', id: body.id, result }));
+  });
+  await new Promise<void>((resolve) => mcpServer.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve, reject) => mcpServer.close((error) => error ? reject(error) : resolve())));
+  const address = mcpServer.address();
+  assert.ok(address && typeof address !== 'string');
+  const runtime = new McpHttpRuntime([{
+    id: 'publisher',
+    name: 'Publisher',
+    transport: 'http',
+    endpoint: `http://127.0.0.1:${address.port}/mcp`,
+    authMode: 'none'
+  }]);
+  await runtime.discoverTools();
+
+  const result = await runtime.callTool('publisher', 'publish', {});
+
+  assert.equal(result.isError, true);
+  assert.equal(result.text, 'Validation failed');
+  assert.deepEqual(result.structuredContent, { code: 'invalid_site' });
+});
+
+test('agent loop loads reusable skills from the active workspace', async (t) => {
+  const harness = await createHarness(new FakeAzureOpenAiChatClient({
+    plannerResponses: [{ content: 'I applied the workspace skill.', toolCalls: [] }]
+  }));
+  t.after(async () => cleanupHarness(harness));
+
+  await harness.storage.writeTextFile('skills/research/SKILL.md', [
+    '# Research skill',
+    '',
+    'When researching, record the source and distinguish facts from assumptions.'
+  ].join('\n'));
+
+  const response = await harness.agent.sendMessage('Summarize the research approach.');
+
+  const skillEvent = response.toolEvents.find((event) => event.label === 'Loaded workspace skills');
+  assert.ok(skillEvent);
+  assert.match(skillEvent.detail ?? '', /skills\/research\/SKILL\.md/);
 });

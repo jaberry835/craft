@@ -1,5 +1,5 @@
 import { InteractionRequiredAuthError, PublicClientApplication } from '@azure/msal-browser';
-import type { AdminConnectivityReport, AdminConnectivityTestResult, AgentConnectionSaveRequest, AgentDefinition, AgentCreateRequest, AgentModelConnectionStatus, AgentResponse, AgentRunOptions, AgentTemplateDefinition, AgentUpdateRequest, AuthConfig, AuthDiagnostics, ChatMessage, ChatSessionSummary, ClassificationBarSettings, ClassificationBarSettingsSaveRequest, McpCatalogEntry, McpServerSaveRequest, McpServerStatus, PendingChange, RequestIdentitySummary, WorkspaceCreateRequest, WorkspaceFile, WorkspaceHistorySettings, WorkspaceHistorySettingsSaveRequest, WorkspaceIndex, WorkspaceSearchResult, WorkspaceSummary, WorkspaceTemplateDefinition, WorkspaceTemplateImportRequest, WorkspaceTemplateImportResult, WorkspaceTemplateSaveRequest, WorkspaceTreeNode, WorkspaceUpdateRequest } from '../types/workbench';
+import type { AdminConnectivityReport, AdminConnectivityTestResult, AgentConnectionSaveRequest, AgentDefinition, AgentCreateRequest, AgentModelConnectionStatus, AgentResponse, AgentRunOptions, AgentTemplateDefinition, AgentUpdateRequest, AuthConfig, AuthDiagnostics, ChatMessage, ChatSessionSummary, ClassificationBarSettings, ClassificationBarSettingsSaveRequest, McpCatalogEntry, McpServerSaveRequest, McpServerStatus, McpToolDiscoveryResult, PendingChange, RequestIdentitySummary, WorkspaceCreateRequest, WorkspaceFile, WorkspaceHistorySettings, WorkspaceHistorySettingsSaveRequest, WorkspaceIndex, WorkspaceSearchResult, WorkspaceSummary, WorkspaceTemplateDefinition, WorkspaceTemplateImportRequest, WorkspaceTemplateImportResult, WorkspaceTemplateSaveRequest, WorkspaceTreeNode, WorkspaceUpdateRequest } from '../types/workbench';
 
 export type AgentMessageStreamEvent =
   | { type: 'assistant_text'; text: string }
@@ -448,6 +448,12 @@ export const workbenchApi = {
   saveWorkspaceMcpServer: (server: McpServerSaveRequest, workspaceId?: string) => requestJson<McpServerStatus>(`${workspaceBasePath(workspaceId)}/settings/mcp-servers`, {
     method: 'POST',
     body: JSON.stringify(server)
+  }),
+  discoverMcpServerTools: (id: string) => requestJson<McpToolDiscoveryResult>(`/api/mcp-servers/${encodeURIComponent(id)}/discover-tools`, {
+    method: 'POST'
+  }),
+  discoverWorkspaceMcpServerTools: (id: string, workspaceId?: string) => requestJson<McpToolDiscoveryResult>(`${workspaceBasePath(workspaceId)}/settings/mcp-servers/${encodeURIComponent(id)}/discover-tools`, {
+    method: 'POST'
   }),
   deleteMcpServer: (id: string) => requestJson<McpServerStatus>(`/api/mcp-servers/${encodeURIComponent(id)}`, {
     method: 'DELETE'

@@ -863,6 +863,72 @@
   width: fit-content;
 }
 
+.config-save-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.config-save-row button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.catalog-list-header {
+  margin-top: 14px;
+}
+
+.mcp-tool-discovery {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.mcp-tool-discovery-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--text-body);
+}
+
+.mcp-tool-discovery-header span,
+.mcp-tool-empty,
+.mcp-tool-card span {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.mcp-tool-empty,
+.mcp-tool-card p {
+  margin: 0;
+}
+
+.mcp-tool-list {
+  display: grid;
+  gap: 8px;
+}
+
+.mcp-tool-card {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-subtle);
+}
+
+.mcp-tool-card p {
+  color: var(--text-body);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
 .workspace-template-editor {
   padding-bottom: 4px;
 }
