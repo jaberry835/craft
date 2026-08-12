@@ -44,3 +44,4 @@ Curated Demo Code
 | 2026-07-28 13:49 UTC | junior-web | main | +5, ~14 |
 | 2026-07-28 13:51 UTC | simplechat | main | +1194, ~343, -8 |
 | 2026-08-12 01:07 UTC | junior-web | main | ~20 |
+| 2026-08-12 01:07 UTC | curic-demo | main | +45 |
