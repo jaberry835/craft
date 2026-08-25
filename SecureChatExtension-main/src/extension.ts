@@ -70,6 +70,7 @@ export function activate(context: vscode.ExtensionContext) {
     semanticIndexer.setStoragePath(indexStorageDir);
 
     const builtinTools = new BuiltinTools(workspaceIndexer, symbolIndexer, semanticIndexer);
+    context.subscriptions.push({ dispose: () => builtinTools.dispose() });
     const retrievalRanker = new RetrievalRanker(workspaceIndexer, symbolIndexer, semanticIndexer);
     mcpClient = new McpClient();
     const sessionStorageDir = vscode.Uri.joinPath(context.storageUri ?? context.globalStorageUri, 'sessions').fsPath;

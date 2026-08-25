@@ -515,6 +515,16 @@
             "minimum": 1,
             "maximum": 8,
             "description": "Maximum number of likely files to pull into the agent's preflight investigation summary."
+          },
+          "junior.browser.executablePath": {
+            "type": "string",
+            "default": "",
+            "description": "Optional absolute path to a Chromium browser executable used by Junior browser tools. Leave empty to discover Microsoft Edge or Google Chrome automatically."
+          },
+          "junior.browser.openPreview": {
+            "type": "boolean",
+            "default": true,
+            "description": "Open browser_open URLs in VS Code's built-in browser preview tab in addition to Junior's isolated automation browser."
           }
         }
       },
@@ -880,9 +890,11 @@
     "esbuild": "^0.27.4",
     "eslint": "^8.0.0",
     "typescript": "^5.3.0",
-    "vitest": "^4.1.2"
+    "vitest": "^4.1.2",
+    "@types/ws": "^8.18.1"
   },
   "dependencies": {
-    "@github/copilot-sdk": "^0.2.2"
+    "@github/copilot-sdk": "^0.2.2",
+    "ws": "^8.18.3"
   }
 }

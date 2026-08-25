@@ -12,7 +12,7 @@ import { SemanticIndexer } from './semanticIndexer';
 import { countLineChanges } from './diffUtils';
 import { DEFAULT_PERMISSION_LEVEL, shouldConfirmLocalCategory } from './permissions';
 import { ToolContext, ToolCallbacks, BackgroundProcessEntry } from './tools/types';
-import { createFileTools, createSearchTools, createTerminalTools, createCodeActionTools, createPlanTools, createAskUserTools } from './tools';
+import { createFileTools, createSearchTools, createTerminalTools, createCodeActionTools, createPlanTools, createAskUserTools, createBrowserTools } from './tools';
 
 export class BuiltinTools {
     private handlers: Map<string, ToolHandler> = new Map();
@@ -34,6 +34,7 @@ export class BuiltinTools {
     private static readonly MAX_BACKGROUND_PROCESSES = 10;
     /** Mutable callbacks object shared with extracted tool modules. */
     private toolCallbacks: ToolCallbacks = {};
+    private disposeBrowserTools?: () => Promise<void>;
 
     constructor(
         private workspaceIndexer: WorkspaceIndexer,
@@ -333,6 +334,7 @@ export class BuiltinTools {
 
     dispose() {
         this.originalContentProvider?.dispose();
+        void this.disposeBrowserTools?.();
     }
 
     /** Discard tracking without saving or reverting */
@@ -566,6 +568,8 @@ export class BuiltinTools {
 
     private registerAll() {
         const ctx = this.createToolContext();
+        const browserTools = createBrowserTools(ctx);
+        this.disposeBrowserTools = browserTools.dispose;
         for (const entry of [
             ...createFileTools(ctx),
             ...createSearchTools(ctx),
@@ -573,6 +577,7 @@ export class BuiltinTools {
             ...createCodeActionTools(ctx),
             ...createPlanTools(ctx),
             ...createAskUserTools(ctx),
+            ...browserTools.entries,
         ]) {
             this.register(entry.definition, entry.handler);
         }

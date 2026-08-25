@@ -17,6 +17,11 @@ export const workspace = {
 
 export const Uri = {
     file: (path: string) => ({ scheme: 'file', path, fsPath: path, toString: () => `file://${path}` }),
+    parse: (value: string) => ({ scheme: value.split(':')[0], path: value, fsPath: value, toString: () => value }),
+};
+
+export const commands = {
+    executeCommand: vi.fn(() => Promise.resolve(undefined)),
 };
 
 export const languages = {

@@ -609,49 +609,75 @@ export class AgentLoop {
                 let reasoningStreamOpen = false;
 
                 try {
-                    const stream = this.chatClient.getResponseStream(outboundMessages, {
-                        tools,
-                        signal: this.abortController!.signal,
-                        reasoningMode: this.recoveryMiddleware.activeReasoningMode,
-                        ...(threadServerState ? { previousResponseId: lastResponseId } : {}),
-                    });
+                    let retriedWithoutServerState = false;
+                    while (true) {
+                    try {
+                        const usePreviousResponseId = threadServerState && !retriedWithoutServerState;
+                        const stream = this.chatClient.getResponseStream(
+                            usePreviousResponseId ? outboundMessages : requestMessages,
+                            {
+                                tools,
+                                signal: this.abortController!.signal,
+                                reasoningMode: this.recoveryMiddleware.activeReasoningMode,
+                                ...(usePreviousResponseId ? { previousResponseId: lastResponseId } : {}),
+                            }
+                        );
 
-                    for await (const chunk of stream) {
-                        if (!this.running) { break; }
+                        for await (const chunk of stream) {
+                            if (!this.running) { break; }
 
-                        if (chunk.type === 'retry') {
+                            if (chunk.type === 'retry') {
+                                streamBuffer.reset();
+                                toolCalls = [];
+                                if (reasoningStreamOpen) {
+                                    this.callbacks.sendToWebview({ type: 'reasoningEnd' });
+                                    reasoningStreamOpen = false;
+                                }
+                                continue;
+                            }
+
+                            if (chunk.type === 'text') {
+                                if (reasoningStreamOpen) {
+                                    this.callbacks.sendToWebview({ type: 'reasoningEnd' });
+                                    reasoningStreamOpen = false;
+                                }
+                                streamBuffer.onTextChunk(chunk.text);
+                            } else if (chunk.type === 'reasoning' || chunk.type === 'reasoningSummary') {
+                                if (!reasoningStreamOpen) {
+                                    this.callbacks.sendToWebview({ type: 'reasoningStart' });
+                                    reasoningStreamOpen = true;
+                                }
+                                this.callbacks.sendToWebview({ type: 'reasoningAppend', text: chunk.text });
+                            } else if (chunk.type === 'responseId') {
+                                lastResponseId = chunk.id;
+                            } else if (chunk.type === 'toolCallStarted') {
+                                streamBuffer.onToolCallDetected();
+                            } else if (chunk.type === 'toolCalls') {
+                                toolCalls = chunk.calls;
+                            } else if (chunk.type === 'usage') {
+                                if (this.tokenTracker) {
+                                    this.tokenTracker.record('chat', chunk.usage);
+                                }
+                            }
+                        }
+                        break;
+                    } catch (streamErr: any) {
+                        if (threadServerState && !retriedWithoutServerState && AgentLoop.isPreviousResponseNotFoundError(streamErr)) {
+                            if (reasoningStreamOpen) {
+                                this.callbacks.sendToWebview({ type: 'reasoningEnd' });
+                                reasoningStreamOpen = false;
+                            }
                             streamBuffer.reset();
                             toolCalls = [];
-                            if (reasoningStreamOpen) {
-                                this.callbacks.sendToWebview({ type: 'reasoningEnd' });
-                                reasoningStreamOpen = false;
-                            }
+                            this.log?.('Server-side state reset because previous_response_id was not found upstream; retrying with full transcript.');
+                            this.callbacks.sendToWebview({ type: 'setStatus', status: 'Refreshing conversation state...' });
+                            lastResponseId = undefined;
+                            serverStateCommittedCount = 0;
+                            retriedWithoutServerState = true;
                             continue;
                         }
-
-                        if (chunk.type === 'text') {
-                            if (reasoningStreamOpen) {
-                                this.callbacks.sendToWebview({ type: 'reasoningEnd' });
-                                reasoningStreamOpen = false;
-                            }
-                            streamBuffer.onTextChunk(chunk.text);
-                        } else if (chunk.type === 'reasoning' || chunk.type === 'reasoningSummary') {
-                            if (!reasoningStreamOpen) {
-                                this.callbacks.sendToWebview({ type: 'reasoningStart' });
-                                reasoningStreamOpen = true;
-                            }
-                            this.callbacks.sendToWebview({ type: 'reasoningAppend', text: chunk.text });
-                        } else if (chunk.type === 'responseId') {
-                            lastResponseId = chunk.id;
-                        } else if (chunk.type === 'toolCallStarted') {
-                            streamBuffer.onToolCallDetected();
-                        } else if (chunk.type === 'toolCalls') {
-                            toolCalls = chunk.calls;
-                        } else if (chunk.type === 'usage') {
-                            if (this.tokenTracker) {
-                                this.tokenTracker.record('chat', chunk.usage);
-                            }
-                        }
+                        throw streamErr;
+                    }
                     }
                     if (reasoningStreamOpen) {
                         this.callbacks.sendToWebview({ type: 'reasoningEnd' });
@@ -1257,6 +1283,13 @@ export class AgentLoop {
             case 'delete_file': return { icon: 'edit', label: `Deleting ${this.shortPath(args.path)}`, doneLabel: `Deleted ${this.shortPath(args.path)}`, failLabel: `Failed to delete ${this.shortPath(args.path)}`, filePath: typeof args.path === 'string' ? args.path : undefined, actionType: 'edit', progressGroup: 'edit', progressText: 'Updating the implementation for this phase.' };
             case 'apply_code_action': return { icon: 'edit', label: `Applying code action at ${this.shortPath(args.path)}`, doneLabel: `Applied code action at ${this.shortPath(args.path)}`, failLabel: `Failed code action at ${this.shortPath(args.path)}`, filePath: typeof args.path === 'string' ? args.path : undefined, actionType: 'edit', progressGroup: 'edit', progressText: 'Updating the implementation for this phase.' };
             case 'run_terminal_command': return { icon: 'run', label: `Running: ${this.truncateStr(String(args.command || ''), 60)}`, doneLabel: `Ran: ${this.truncateStr(String(args.command || ''), 60)}`, failLabel: `Command failed: ${this.truncateStr(String(args.command || ''), 60)}`, actionType: 'run', progressGroup: 'run', progressText: 'Running commands to validate the current changes.' };
+            case 'browser_open': return { icon: 'run', label: `Opening ${this.truncateStr(String(args.url || ''), 60)}`, doneLabel: `Opened ${this.truncateStr(String(args.url || ''), 60)}`, failLabel: 'Browser navigation failed', actionType: 'run', progressGroup: 'run', progressText: 'Opening the app in a browser to verify its behavior.' };
+            case 'browser_snapshot': return { icon: 'read', label: 'Inspecting browser page', doneLabel: 'Inspected browser page', failLabel: 'Browser inspection failed', actionType: 'review', progressGroup: 'inspect', progressText: 'Inspecting the rendered page and available interactions.' };
+            case 'browser_click': return { icon: 'run', label: `Clicking browser element ${args.ref || ''}`, doneLabel: `Clicked browser element ${args.ref || ''}`, failLabel: 'Browser click failed', actionType: 'run', progressGroup: 'run', progressText: 'Interacting with the rendered app to validate its behavior.' };
+            case 'browser_type': return { icon: 'run', label: `Typing in browser element ${args.ref || ''}`, doneLabel: `Typed in browser element ${args.ref || ''}`, failLabel: 'Browser input failed', actionType: 'run', progressGroup: 'run', progressText: 'Interacting with the rendered app to validate its behavior.' };
+            case 'browser_screenshot': return { icon: 'check', label: 'Capturing browser screenshot', doneLabel: 'Captured browser screenshot', failLabel: 'Browser screenshot failed', actionType: 'check', progressGroup: 'check', progressText: 'Capturing visual evidence of the rendered app.' };
+            case 'browser_console': return { icon: 'check', label: 'Checking browser console', doneLabel: 'Checked browser console', failLabel: 'Browser console check failed', actionType: 'check', progressGroup: 'check', progressText: 'Checking the browser for runtime errors.' };
+            case 'browser_close': return { icon: 'run', label: 'Closing browser', doneLabel: 'Closed browser', failLabel: 'Failed to close browser', actionType: 'run', progressGroup: 'run' };
             case 'runSubagent': { const agent = this.extractSubagentName(args); const label = this.extractSubagentLabel(args, agent); const desc = typeof args.description === 'string' ? this.stripSubagentLabelFromDescription(args.description, agent) : ''; return { icon: 'loading', label: `Spawning ${label}`, doneLabel: `${label} completed`, failLabel: `${label} failed`, detail: desc || undefined, actionType: 'other', progressGroup: 'other', progressText: 'Dispatching Squad teammates to work in parallel.' }; }
             case 'set_plan': return { icon: 'loading', label: 'Setting plan', doneLabel: 'Set plan', actionType: 'todo', progressGroup: 'todo' };
             case 'update_plan_step': return { icon: 'loading', label: 'Updating plan step', doneLabel: 'Updated plan step', actionType: 'todo', progressGroup: 'todo' };
@@ -1282,6 +1315,12 @@ export class AgentLoop {
             case 'grep_search': case 'search_files': case 'semantic_search': case 'find_symbol': case 'go_to_definition': case 'find_references': return 'Searching...';
             case 'edit_file': case 'write_file': case 'replace_lines': case 'delete_file': case 'apply_code_action': return 'Editing...';
             case 'run_terminal_command': return 'Running command...';
+            case 'browser_open': return 'Opening browser...';
+            case 'browser_snapshot': return 'Inspecting page...';
+            case 'browser_click': case 'browser_type': return 'Interacting with page...';
+            case 'browser_screenshot': return 'Capturing screenshot...';
+            case 'browser_console': return 'Checking browser console...';
+            case 'browser_close': return 'Closing browser...';
             case 'get_diagnostics': return 'Checking...';
             default: return name.startsWith('mcp_') ? 'Running tool...' : 'Working...';
         }
@@ -1293,5 +1332,15 @@ export class AgentLoop {
         const firstLine = trimmed.split(/\r?\n/, 1)[0].trim();
         if (!firstLine) { return fallback; }
         return firstLine.length > 160 ? `${firstLine.slice(0, 157)}...` : firstLine;
+    }
+
+    static isPreviousResponseNotFoundError(err: unknown): boolean {
+        if (typeof err !== 'object' || err === null) { return false; }
+        const record = err as Record<string, unknown>;
+        const status = record.statusCode ?? record.status;
+        if (status !== 400) { return false; }
+        const message = String(record.message ?? '').toLowerCase();
+        return message.includes('previous_response_id')
+            && (message.includes('previous_response_not_found') || message.includes('previous response'));
     }
 }

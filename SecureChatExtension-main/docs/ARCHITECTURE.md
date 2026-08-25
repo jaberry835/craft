@@ -60,6 +60,7 @@ src/
 │   ├── terminalTools.ts      run + check terminal output, background processes
 │   ├── codeActionTools.ts    diagnostics, code actions, rename
 │   ├── planTools.ts          set_plan / update_plan_step
+│   ├── browserTools.ts       VS Code preview + isolated Edge/Chrome automation over CDP
 │   └── index.ts              Barrel re-export of factories
 ├── mcpClient.ts              MCP server integration (stdio + HTTP)
 │
@@ -199,7 +200,7 @@ Context providers run before/after the agent loop and inject system messages. Th
 
 ## Tool System
 
-Tools are the agent's interface to the workspace. `builtinTools.ts` owns the registry, permission gates, and touched-file tracking; the actual tool handlers live in category modules under `src/tools/` (`fileTools.ts`, `searchTools.ts`, `terminalTools.ts`, `codeActionTools.ts`, `planTools.ts`) and are wired in via factory functions. There are ~20 builtin tools:
+Tools are the agent's interface to the workspace. `builtinTools.ts` owns the registry, permission gates, and touched-file tracking; the actual tool handlers live in category modules under `src/tools/` and are wired in via factory functions.
 
 | Category | Tools |
 |----------|-------|
@@ -209,6 +210,7 @@ Tools are the agent's interface to the workspace. `builtinTools.ts` owns the reg
 | **Search** | `grep_search`, `semantic_search` |
 | **Diagnostics** | `get_diagnostics`, `apply_code_action`, `rename_symbol` |
 | **Terminal** | `run_terminal_command`, `check_terminal_output` |
+| **Browser** | `browser_open`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_screenshot`, `browser_console`, `browser_close` |
 | **Planning** | `set_plan`, `update_plan_step` |
 | **Editor** | `get_open_editors` |
 
@@ -221,6 +223,8 @@ All file tools validate paths through `validatePath()`:
 - Traversal attacks (`../../etc/passwd`) are blocked by the normalized-prefix check
 
 Write tools (`write_file`, `edit_file`, `replace_lines`) snapshot the original file content before modification, enabling the undo/diff system.
+
+Browser tools show opened URLs in VS Code's built-in browser preview tab by default, then connect to an installed Microsoft Edge or Google Chrome through the Chrome DevTools Protocol for automation. The automation browser uses an isolated temporary profile that is removed when the browser closes or the extension deactivates. Opening a URL uses the terminal approval gate, only `http` and `https` URLs are accepted, and screenshots are restricted to workspace paths and tracked by the normal diff/undo system. Set `junior.browser.openPreview` to `false` to keep browser tools headless-only, or set `junior.browser.executablePath` when automatic browser discovery is not appropriate.
 
 ### MCP Integration
 

@@ -5,6 +5,7 @@
 - **Delegated A2A Agent experimental ferature** 
 - **Reasoning SElector UI changes** 
 - **Q and A UI feature** 
+- **Browser tools: Junior can now open web pages, inspect interactive elements, click controls, enter text, capture screenshots, and close its automated Chromium session. Navigated pages can also open in VS Code's browser preview for manual testing, with settings to disable the preview or specify a custom browser executable.**
 - **Fix: server-side state (`useServerSideState`) now sends only incremental conversation items once a `previous_response_id` is held, instead of resending the full transcript — prevents oversized requests and the "please check your inputs and try again" stream error on long chats.**
 - **Fix: server-side state now resets its `previous_response_id` marker when local context compaction rewrites the transcript, avoiding mismatches between provider-side state and Junior's compacted local history.**
 - **Connect Cloud Agent: the Microsoft sign-in (Entra) auth mode now accepts multiple advanced sign-in scopes (one per line), including the `microsoft-sovereign-cloud` provider directives `VSCODE_CLIENT_ID:` / `VSCODE_TENANT:` alongside resource scopes like `api://<app-id>/MCPaccess`. All listed scopes are passed to `vscode.authentication.getSession`.**
