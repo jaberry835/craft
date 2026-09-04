@@ -53,6 +53,20 @@ You should see the chat panel, the model picker shows at least one entry, and yo
 | **Junior: Open Documentation** | Browse bundled setup guides |
 | **Junior: Show Welcome Screen** | Re-open the splash screen |
 
+## Optional Browser Settings
+
+Junior can read pages with an automated browser. For web research without a URL, set an intranet search page if public search is not available:
+
+```jsonc
+{
+   "junior.browser.searchUrlTemplates": ["https://search.contoso.local/?q={query}"],
+   "junior.browser.openPreview": true,
+   "junior.browser.useClientCertificate": false
+}
+```
+
+Leave `searchUrlTemplates` empty to use Junior's public default. Set `openPreview` to `false` for headless-only browsing. Keep `useClientCertificate` off unless every browser/search navigation should immediately use visible Edge/Chrome for client-certificate selection; Junior can still prompt automatically when Chromium reports that a site requires a certificate.
+
 ## Troubleshooting
 
 | Symptom | Try this |
@@ -63,6 +77,7 @@ You should see the chat panel, the model picker shows at least one entry, and yo
 | 401 Unauthorized | Key is wrong or expired. For bearer mode, sign out and sign back in. |
 | 404 on requests | Your `providerBaseUrl` or APIM path suffix is wrong. Compare to the sample. |
 | Model dropdown empty | No deployments configured. Open the sample file and copy its `deployments` array. |
+| Web research uses the wrong search site | Set `junior.browser.searchUrlTemplates` to your intranet search URL template. |
 
 ## Where to Get Help
 

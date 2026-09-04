@@ -57,7 +57,15 @@
         }
     ],
     "junior.azureOpenAI.activeDeployment": "gpt-4o",
-    "junior.inlineCompletions.deployment": "gpt-4o"
+    "junior.inlineCompletions.deployment": "gpt-4o",
+
+    // ── Optional: browser and web research tools ─────────────────────────
+    // Leave searchUrlTemplates empty to use Junior's public default, or point
+    // it at your intranet search page. {query} is URL-encoded automatically.
+    "junior.browser.searchUrlTemplates": [],
+    // "junior.browser.searchUrlTemplates": ["https://search.contoso.local/?q={query}"],
+    "junior.browser.openPreview": true,
+    "junior.browser.useClientCertificate": false
 
     // -------------------------------------------------------------------------
     // Optional: opt into the new /openai/v1/responses wire API.

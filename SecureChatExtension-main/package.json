@@ -525,6 +525,19 @@
             "type": "boolean",
             "default": true,
             "description": "Open browser_open URLs in VS Code's built-in browser preview tab in addition to Junior's isolated automation browser."
+          },
+          "junior.browser.useClientCertificate": {
+            "type": "boolean",
+            "default": false,
+            "description": "Always open Junior's automation browser visibly so sites can request a client certificate from the Windows user certificate store. The user chooses the certificate in Edge/Chrome's native dialog; Junior does not read or export private keys."
+          },
+          "junior.browser.searchUrlTemplates": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": [],
+            "description": "Search page URL templates used by web_search. Use {query} where the URL-encoded query should be inserted. Leave empty to use Junior's public default, or configure intranet search pages such as https://search.contoso.local/?q={query}. Junior tries templates in order until one returns usable results."
           }
         }
       },

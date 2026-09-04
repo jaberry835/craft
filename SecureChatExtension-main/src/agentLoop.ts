@@ -349,7 +349,7 @@ export class AgentLoop {
             await MiddlewarePipeline.runAgent(
                 [this.memoryMiddleware, this.autofixMiddleware],
                 agentContext,
-                () => this.runKernel(agentContext, tools)
+                () => this.runKernel(agentContext, tools, displayText || userMessage)
             );
 
         } catch (e: unknown) {
@@ -394,7 +394,7 @@ export class AgentLoop {
      * Returns when the model produces a final text response (no tool calls).
      * Wrapped by AgentMiddleware pipeline (memory, autofix) in run().
      */
-    private async runKernel(agentContext: AgentContext, tools: ToolDefinition[]): Promise<AgentResponse> {
+    private async runKernel(agentContext: AgentContext, tools: ToolDefinition[], userRequest: string): Promise<AgentResponse> {
         let iteration = 0;
 
         // Working block state
@@ -534,6 +534,36 @@ export class AgentLoop {
         let serverStateCommittedCount = 0;
 
         try {
+            // Website-reading requests should not depend on the model first promising
+            // to browse and then remembering to emit a tool call. Fetch the page up
+            // front and provide the snapshot as a normal assistant/tool-call pair.
+            const websiteRequest = this.getWebsiteReadRequest(userRequest);
+            if (this.currentMode === 'agent' && websiteRequest && tools.some(tool => tool.function.name === 'browser_open')) {
+                const args: Record<string, unknown> = {
+                    url: websiteRequest.url,
+                    ...(websiteRequest.clientCertificate ? { clientCertificate: true } : {}),
+                };
+                const desc = this.describeToolForProgress('browser_open', args);
+                this.callbacks.sendToWebview({ type: 'setStatus', status: 'Opening browser...' });
+                const actionEntry = addWorkingAction(desc, 'running', 'browser_open');
+                const result = await this.executeToolForMode('browser_open', args, this.nextUiId('browser-prefetch'), agentContext.state, makeToolProgress(actionEntry));
+                updateWorkingAction(actionEntry, desc, result.success ? 'done' : 'error', result.result);
+                this.recordMemoryFromToolResult('browser_open', args, result.result, result.success);
+
+                this.messages.push({
+                    role: 'developer',
+                    content: result.success
+                        ? 'The requested web page has already been opened with browser_open. Answer the user from the page snapshot in the next message; follow relevant links with browser_click only if more context is required.'
+                        : 'The browser_open attempt failed or was declined. Explain that outcome accurately instead of claiming the page was inspected.',
+                });
+                if (result.success) {
+                    this.messages.push({
+                        role: 'user',
+                        content: `Web page snapshot for ${websiteRequest.url}:\n\n${wrapUntrusted('browser_open', result.result)}`,
+                    });
+                }
+            }
+
             // ── Core iteration loop ──
             while (iteration < this.maxIterations && this.running) {
                 iteration++;
@@ -875,6 +905,17 @@ export class AgentLoop {
             if (displayText) { userMsg.displayText = displayText; }
             this.messages.push(userMsg);
         }
+    }
+
+    private getWebsiteReadRequest(text: string): { url: string; clientCertificate: boolean } | null {
+        const url = text.match(/https?:\/\/[^\s<>()\[\]{}"']+/i)?.[0]?.replace(/[.,;:!?]+$/, '');
+        if (!url) { return null; }
+        const asksToRead = /\b(read|inspect|browse|open|visit|summari[sz]e|summary|topics?|discuss(?:ion)?|what(?:'s| is| does)|tell me about|how about this|website|web\s?page|site|forum|thread)\b/i.test(text);
+        if (!asksToRead) { return null; }
+        return {
+            url,
+            clientCertificate: /\b(client|user|personal)\s+cert(?:ificate)?\b|\bmutual\s*tls\b|\bmtls\b/i.test(text),
+        };
     }
 
     private getAllToolDefinitions(mode: ChatMode = this.currentMode): ToolDefinition[] {
@@ -1283,7 +1324,8 @@ export class AgentLoop {
             case 'delete_file': return { icon: 'edit', label: `Deleting ${this.shortPath(args.path)}`, doneLabel: `Deleted ${this.shortPath(args.path)}`, failLabel: `Failed to delete ${this.shortPath(args.path)}`, filePath: typeof args.path === 'string' ? args.path : undefined, actionType: 'edit', progressGroup: 'edit', progressText: 'Updating the implementation for this phase.' };
             case 'apply_code_action': return { icon: 'edit', label: `Applying code action at ${this.shortPath(args.path)}`, doneLabel: `Applied code action at ${this.shortPath(args.path)}`, failLabel: `Failed code action at ${this.shortPath(args.path)}`, filePath: typeof args.path === 'string' ? args.path : undefined, actionType: 'edit', progressGroup: 'edit', progressText: 'Updating the implementation for this phase.' };
             case 'run_terminal_command': return { icon: 'run', label: `Running: ${this.truncateStr(String(args.command || ''), 60)}`, doneLabel: `Ran: ${this.truncateStr(String(args.command || ''), 60)}`, failLabel: `Command failed: ${this.truncateStr(String(args.command || ''), 60)}`, actionType: 'run', progressGroup: 'run', progressText: 'Running commands to validate the current changes.' };
-            case 'browser_open': return { icon: 'run', label: `Opening ${this.truncateStr(String(args.url || ''), 60)}`, doneLabel: `Opened ${this.truncateStr(String(args.url || ''), 60)}`, failLabel: 'Browser navigation failed', actionType: 'run', progressGroup: 'run', progressText: 'Opening the app in a browser to verify its behavior.' };
+            case 'web_search': return { icon: 'search', label: `Searching web: ${this.truncateStr(String(args.query || ''), 60)}`, doneLabel: `Searched web: ${this.truncateStr(String(args.query || ''), 60)}`, failLabel: 'Web search failed', actionType: 'search', progressGroup: 'inspect', progressText: 'Searching the web for relevant sources.' };
+            case 'browser_open': return { icon: 'run', label: `Opening ${this.truncateStr(String(args.url || ''), 60)}`, doneLabel: `Opened ${this.truncateStr(String(args.url || ''), 60)}`, failLabel: 'Browser navigation failed', actionType: 'run', progressGroup: 'run', progressText: 'Opening and reading the web page.' };
             case 'browser_snapshot': return { icon: 'read', label: 'Inspecting browser page', doneLabel: 'Inspected browser page', failLabel: 'Browser inspection failed', actionType: 'review', progressGroup: 'inspect', progressText: 'Inspecting the rendered page and available interactions.' };
             case 'browser_click': return { icon: 'run', label: `Clicking browser element ${args.ref || ''}`, doneLabel: `Clicked browser element ${args.ref || ''}`, failLabel: 'Browser click failed', actionType: 'run', progressGroup: 'run', progressText: 'Interacting with the rendered app to validate its behavior.' };
             case 'browser_type': return { icon: 'run', label: `Typing in browser element ${args.ref || ''}`, doneLabel: `Typed in browser element ${args.ref || ''}`, failLabel: 'Browser input failed', actionType: 'run', progressGroup: 'run', progressText: 'Interacting with the rendered app to validate its behavior.' };

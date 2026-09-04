@@ -235,6 +235,30 @@ Normal workflow:
 3. Approve file writes or terminal commands when Junior asks.
 4. Switch models for a different speed/quality balance.
 
+## Browser And Web Research
+
+Junior can open HTTP(S) pages with an automated Edge/Chrome browser, read visible page text, inspect links and controls, and follow links when a task needs website context. For research requests without a URL, Junior first uses `web_search`, then opens relevant results with `browser_open`.
+
+Settings:
+
+```jsonc
+{
+  // Leave empty to use Junior's public default, or configure intranet search.
+  "junior.browser.searchUrlTemplates": [
+    "https://search.contoso.local/?q={query}"
+  ],
+
+  // Also show direct browser_open URLs in VS Code's browser preview tab.
+  "junior.browser.openPreview": true,
+
+  // Force visible Edge/Chrome navigation so certificate-protected sites can
+  // show the native Windows client-certificate picker on every navigation.
+  "junior.browser.useClientCertificate": false
+}
+```
+
+`{query}` is replaced with the URL-encoded search text. If `searchUrlTemplates` is empty, Junior uses its bundled public default. If a site reports that a client certificate is required, Junior asks before reopening visibly so the user can choose a certificate from the Windows user certificate store. Junior does not read or export the certificate or private key.
+
 ## Custom Project Instructions
 
 Add a `.junior/instructions.md` file (or `.github/copilot-instructions.md`) to any repo to give Junior project-specific guidance. Junior reads it at the start of every conversation and appends it to its system prompt.

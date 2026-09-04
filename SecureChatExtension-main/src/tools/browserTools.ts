@@ -102,17 +102,55 @@ interface BrowserSnapshot {
     elements: Array<{ ref: string; tag: string; role: string; name: string }>;
 }
 
+interface BrowserSearchResults {
+    query: string;
+    url: string;
+    results: Array<{ title: string; url: string; snippet: string }>;
+}
+
+const DEFAULT_SEARCH_URL_TEMPLATES = ['https://html.duckduckgo.com/html/?q={query}'];
+
+export function buildSearchUrl(template: string, query: string): string {
+    const encoded = encodeURIComponent(query);
+    const raw = template.includes('{query}')
+        ? template.replace(/\{query\}/g, encoded)
+        : `${template}${template.includes('?') ? '&' : '?'}q=${encoded}`;
+    let parsed: URL;
+    try { parsed = new URL(raw); } catch { throw new Error(`Invalid search URL template: ${template}`); }
+    if (!['http:', 'https:'].includes(parsed.protocol)) { throw new Error('Search URL templates must use http:// or https://.'); }
+    return parsed.href;
+}
+
+function getSearchUrlTemplates(override?: string): string[] {
+    if (override?.trim()) { return [override.trim()]; }
+    const configured = getSetting<string[]>('browser.searchUrlTemplates', []);
+    const values = Array.isArray(configured) ? configured.map(value => String(value || '').trim()).filter(Boolean) : [];
+    return values.length ? values : DEFAULT_SEARCH_URL_TEMPLATES;
+}
+
+class ClientCertificateRequiredError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'ClientCertificateRequiredError';
+    }
+}
+
 class BrowserSession {
     private process?: cp.ChildProcess;
     private browserConnection?: CdpConnection;
     private connection?: CdpConnection;
     private userDataDir?: string;
 
-    async open(url: string): Promise<BrowserSnapshot> {
+    async open(url: string, showWindow = false): Promise<BrowserSnapshot> {
         this.validateUrl(url);
-        if (!this.connection) { await this.launch(); }
-        const loaded = this.connection!.waitForEvent('Page.loadEventFired').catch(() => undefined);
-        await this.connection!.send('Page.navigate', { url });
+        if (!this.connection) { await this.launch(showWindow); }
+        const loaded = this.connection!.waitForEvent('Page.loadEventFired', showWindow ? 120_000 : 15_000).catch(() => undefined);
+        const navigation = await this.connection!.send('Page.navigate', { url });
+        const errorText = typeof navigation.errorText === 'string' ? navigation.errorText : '';
+        if (/ERR_(?:SSL_CLIENT_AUTH_CERT_NEEDED|BAD_SSL_CLIENT_AUTH_CERT)/i.test(errorText)) {
+            throw new ClientCertificateRequiredError(errorText);
+        }
+        if (errorText) { throw new Error(`Browser navigation failed: ${errorText}`); }
         await loaded;
         return this.snapshot();
     }
@@ -130,6 +168,77 @@ class BrowserSession {
         const result = await this.requireConnection().send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
         const value = (result.result as Record<string, unknown> | undefined)?.value as BrowserSnapshot | undefined;
         if (!value) { throw new Error('The browser did not return a page snapshot.'); }
+        return value;
+    }
+
+    async search(query: string, maxResults: number, searchUrlTemplate?: string, showWindow = false): Promise<BrowserSearchResults> {
+        const trimmed = query.trim();
+        if (!trimmed) { throw new Error('Search query is required.'); }
+        const limit = Math.max(1, Math.min(10, Math.floor(maxResults) || 6));
+        const errors: string[] = [];
+        for (const template of getSearchUrlTemplates(searchUrlTemplate)) {
+            try {
+                const searchUrl = buildSearchUrl(template, trimmed);
+                await this.open(searchUrl, showWindow);
+                const results = await this.searchResults(trimmed, limit);
+                if (results.results.length > 0) { return results; }
+                errors.push(`${searchUrl}: no usable results found`);
+            } catch (error) {
+                if (error instanceof ClientCertificateRequiredError) { throw error; }
+                errors.push(error instanceof Error ? error.message : String(error));
+            }
+        }
+        throw new Error(`No configured search page returned usable results. ${errors.join(' | ')}`);
+    }
+
+    async searchResults(query: string, maxResults: number): Promise<BrowserSearchResults> {
+        const expression = `(() => {
+            const maxResults = ${JSON.stringify(maxResults)};
+            const clean = value => String(value || '').replace(/\\s+/g, ' ').trim();
+            const normalizeHref = href => {
+                try {
+                    const url = new URL(href, location.href);
+                    const uddg = url.searchParams.get('uddg');
+                    if (uddg) return decodeURIComponent(uddg);
+                    if (!/^https?:$/.test(url.protocol)) return '';
+                    if (/duckduckgo\\.com$/i.test(url.hostname) && url.pathname.startsWith('/l/')) return '';
+                    return url.href;
+                } catch { return ''; }
+            };
+            const seen = new Set();
+            const results = [];
+            const containers = Array.from(document.querySelectorAll('.result, .web-result, .links_main, li.b_algo, article'));
+            for (const container of containers) {
+                const anchor = container.querySelector('a.result__a, h2 a, a[href]');
+                const url = normalizeHref(anchor?.getAttribute('href') || anchor?.href || '');
+                const title = clean(anchor?.innerText || anchor?.textContent || '');
+                if (!url || !title || seen.has(url)) continue;
+                seen.add(url);
+                const snippetEl = container.querySelector('.result__snippet, .result__body, .b_caption p, p');
+                let snippet = clean(snippetEl?.innerText || snippetEl?.textContent || container.innerText || '');
+                if (snippet.startsWith(title)) { snippet = clean(snippet.slice(title.length)); }
+                results.push({ title: title.slice(0, 240), url, snippet: snippet.slice(0, 500) });
+                if (results.length >= maxResults) break;
+            }
+            if (results.length === 0) {
+                for (const anchor of Array.from(document.querySelectorAll('a[href]'))) {
+                    const url = normalizeHref(anchor.getAttribute('href') || anchor.href || '');
+                    const title = clean(anchor.innerText || anchor.textContent || anchor.getAttribute('aria-label') || '');
+                    if (!url || !title || seen.has(url)) continue;
+                    try {
+                        const host = new URL(url).hostname;
+                        if (/duckduckgo\\.com$/i.test(host)) continue;
+                    } catch { continue; }
+                    seen.add(url);
+                    results.push({ title: title.slice(0, 240), url, snippet: '' });
+                    if (results.length >= maxResults) break;
+                }
+            }
+            return { query: ${JSON.stringify(query)}, url: location.href, results };
+        })()`;
+        const result = await this.requireConnection().send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+        const value = (result.result as Record<string, unknown> | undefined)?.value as BrowserSearchResults | undefined;
+        if (!value) { throw new Error('The browser did not return search results.'); }
         return value;
     }
 
@@ -182,11 +291,20 @@ class BrowserSession {
         this.userDataDir = undefined;
     }
 
-    private async launch(): Promise<void> {
+    private async launch(showWindow: boolean): Promise<void> {
         const executable = this.findExecutable();
         const debugPort = await this.reservePort();
         this.userDataDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'junior-browser-'));
-        this.process = cp.spawn(executable, ['--headless=new', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${this.userDataDir}`, '--no-first-run', '--disable-default-apps', '--disable-background-networking', 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
+        const args = [
+            ...(showWindow ? [] : ['--headless=new']),
+            `--remote-debugging-port=${debugPort}`,
+            `--user-data-dir=${this.userDataDir}`,
+            '--no-first-run',
+            '--disable-default-apps',
+            '--disable-background-networking',
+            'about:blank',
+        ];
+        this.process = cp.spawn(executable, args, { stdio: ['ignore', 'ignore', 'pipe'] });
         const debuggerUrl = await new Promise<string>((resolve, reject) => {
             let settled = false;
             const fail = (error: Error) => {
@@ -288,9 +406,30 @@ function formatSnapshot(snapshot: BrowserSnapshot): string {
     return `Title: ${snapshot.title}\nURL: ${snapshot.url}\n\nPage text:\n${snapshot.text || '(empty)'}\n\nInteractive elements:\n${elements}`;
 }
 
+function formatSearchResults(search: BrowserSearchResults): string {
+    const rows = search.results.length
+        ? search.results.map((item, index) => `${index + 1}. ${item.title}\n   URL: ${item.url}${item.snippet ? `\n   Snippet: ${item.snippet}` : ''}`).join('\n')
+        : '(no usable search results found)';
+    return `Search query: ${search.query}\nSearch page URL: ${search.url}\n\nResults:\n${rows}`;
+}
+
 export function createBrowserTools(ctx: ToolContext): { entries: ToolEntry[]; dispose: () => Promise<void> } {
     const session = new BrowserSession();
     const result = (operation: () => Promise<string>) => operation().then(value => ({ success: true, result: value })).catch(error => ({ success: false, result: error instanceof Error ? error.message : String(error) }));
+    const confirmClientCertificate = async (url: string): Promise<boolean> => {
+        if (process.platform !== 'win32') { return false; }
+        const answers = await ctx.askUser([{
+            header: 'Client certificate',
+            question: 'This site requires a client certificate. Open a visible browser window and choose a certificate?',
+            detail: `Junior will let Edge/Chrome use your Windows user certificate store for ${url}. Choose the certificate in the browser's native dialog; Junior never reads or exports its private key.`,
+            options: [
+                { label: 'Continue', description: 'Open the browser certificate chooser.', recommended: true },
+                { label: 'Cancel', description: 'Do not open the site.' },
+            ],
+            allowFreeformInput: false,
+        }]);
+        return answers?.['Client certificate']?.includes('Continue') === true;
+    };
     const openPreview = async (url: string): Promise<string> => {
         if (getSetting<boolean>('browser.openPreview', true) === false) { return 'VS Code preview: disabled.'; }
         try {
@@ -307,15 +446,59 @@ export function createBrowserTools(ctx: ToolContext): { entries: ToolEntry[]; di
     };
     const entries: ToolEntry[] = [
         {
-            definition: { type: 'function', function: { name: 'browser_open', description: 'Open an http(s) URL in Junior\'s isolated browser, show it in a VS Code preview tab, and return visible page text plus interactive element references.', parameters: { type: 'object', properties: { url: { type: 'string', description: 'Full http:// or https:// URL.' } }, required: ['url'] } } },
+            definition: { type: 'function', function: { name: 'browser_open', description: 'Open an http(s) URL in Junior\'s isolated browser and return visible page text plus interactive element references. Set clientCertificate when the site uses mutual TLS so the user can choose a certificate from the Windows user certificate store.', parameters: { type: 'object', properties: { url: { type: 'string', description: 'Full http:// or https:// URL.' }, clientCertificate: { type: 'boolean', description: 'Open a visible Edge/Chrome window and ask the user to choose a client certificate from the Windows user certificate store.' } }, required: ['url'] } } },
             handler: async args => {
                 const url = String(args.url || '');
                 if (!await ctx.requestConfirmation(`Open browser URL: ${url}`, 'terminal')) { return { success: false, result: 'User declined browser navigation.' }; }
-                return result(async () => {
-                    const previewStatus = await openPreview(url);
+                const clientCertificateRequested = args.clientCertificate === true || getSetting<boolean>('browser.useClientCertificate', false) === true;
+                if (clientCertificateRequested) {
+                    if (process.platform !== 'win32') { return { success: false, result: 'Client-certificate browser selection is currently supported on Windows only.' }; }
+                    if (!await confirmClientCertificate(url)) { return { success: false, result: 'User declined client-certificate browser access.' }; }
+                    return result(async () => {
+                        await session.close();
+                        const snapshot = await session.open(url, true);
+                        return `Visible automation browser opened. Select the client certificate in the browser dialog if prompted.\n\n${formatSnapshot(snapshot)}`;
+                    });
+                }
+                try {
                     const snapshot = await session.open(url);
-                    return `${previewStatus}\n\n${formatSnapshot(snapshot)}`;
-                });
+                    const previewStatus = await openPreview(url);
+                    return { success: true, result: `${previewStatus}\n\n${formatSnapshot(snapshot)}` };
+                } catch (error) {
+                    if (!(error instanceof ClientCertificateRequiredError) || process.platform !== 'win32') {
+                        return { success: false, result: error instanceof Error ? error.message : String(error) };
+                    }
+                    if (!await confirmClientCertificate(url)) { return { success: false, result: 'The site requires a client certificate, and the user declined browser access.' }; }
+                    return result(async () => {
+                        await session.close();
+                        const snapshot = await session.open(url, true);
+                        return `Visible automation browser opened. Select the client certificate in the browser dialog if prompted.\n\n${formatSnapshot(snapshot)}`;
+                    });
+                }
+            },
+        },
+        {
+            definition: { type: 'function', function: { name: 'web_search', description: 'Search the web or a configured intranet search page and return structured result titles, URLs, and snippets. Use this before browser_open when the user asks for research but does not provide a URL.', parameters: { type: 'object', properties: { query: { type: 'string', description: 'Search query.' }, maxResults: { type: 'number', description: 'Maximum number of results to return, 1-10. Defaults to 6.' }, searchUrlTemplate: { type: 'string', description: 'Optional one-time search URL template. Use {query} where the URL-encoded query should be inserted. If omitted, Junior uses junior.browser.searchUrlTemplates.' }, clientCertificate: { type: 'boolean', description: 'Open a visible Edge/Chrome window and ask the user to choose a client certificate for an intranet search page.' } }, required: ['query'] } } },
+            handler: async args => {
+                const query = String(args.query || '');
+                const maxResults = typeof args.maxResults === 'number' ? args.maxResults : 6;
+                if (!await ctx.requestConfirmation(`Search the web for: ${query}`, 'terminal')) { return { success: false, result: 'User declined web search.' }; }
+                const searchUrlTemplate = typeof args.searchUrlTemplate === 'string' ? args.searchUrlTemplate : undefined;
+                const clientCertificateRequested = args.clientCertificate === true || getSetting<boolean>('browser.useClientCertificate', false) === true;
+                if (clientCertificateRequested) {
+                    if (process.platform !== 'win32') { return { success: false, result: 'Client-certificate browser selection is currently supported on Windows only.' }; }
+                    if (!await confirmClientCertificate(query)) { return { success: false, result: 'User declined client-certificate browser access.' }; }
+                    return result(async () => formatSearchResults(await session.search(query, maxResults, searchUrlTemplate, true)));
+                }
+                try {
+                    return { success: true, result: formatSearchResults(await session.search(query, maxResults, searchUrlTemplate)) };
+                } catch (error) {
+                    if (!(error instanceof ClientCertificateRequiredError) || process.platform !== 'win32') {
+                        return { success: false, result: error instanceof Error ? error.message : String(error) };
+                    }
+                    if (!await confirmClientCertificate(query)) { return { success: false, result: 'The search page requires a client certificate, and the user declined browser access.' }; }
+                    return result(async () => formatSearchResults(await session.search(query, maxResults, searchUrlTemplate, true)));
+                }
             },
         },
         { definition: { type: 'function', function: { name: 'browser_snapshot', description: 'Inspect the current page and return visible text plus fresh interactive element references.', parameters: { type: 'object', properties: {} } } }, handler: async () => result(async () => formatSnapshot(await session.snapshot())) },

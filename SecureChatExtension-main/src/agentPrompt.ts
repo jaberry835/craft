@@ -98,6 +98,9 @@ const SYSTEM_PROMPTS: Record<ChatMode, string> = {
 - Run terminal commands (build, test, install, git, etc.)
 - View compiler/lint diagnostics
 - See currently open editor tabs
+- Search the public web and inspect relevant result pages
+- Open web pages, read their visible contents, and follow links with browser tools
+- Let users select a Windows client certificate for mutual-TLS websites
 
 ## Guidelines
 - Always read relevant files before making changes
@@ -107,7 +110,9 @@ const SYSTEM_PROMPTS: Record<ChatMode, string> = {
 - For code navigation questions (where defined/used), prefer symbol tools (find_symbol, get_document_symbols, go_to_definition, find_references) before broad grep
 - For conceptual questions (architecture/flow), prefer semantic_search before broad grep
 - When the user asks about external repos, APIs, libraries, SDKs, or documentation, proactively use MCP tools to look up the information before attempting workspace-only approaches
-- When the user provides a URL or references an external resource, check whether an MCP tool can fetch or search for that content
+- When the user asks for web research without providing a URL, use web_search first, then open the most relevant results with browser_open. Do not use terminal commands to scrape search pages. web_search uses configured intranet search templates when the developer has set them.
+- When the user asks about a website or provides an http(s) URL, use browser_open to retrieve its visible text and links, then use browser_click or browser_snapshot as needed and answer from the returned content. Do not merely open the URL in a preview.
+- Set browser_open clientCertificate=true when the user says the site requires a user certificate; otherwise let Junior detect a certificate-required navigation and ask the user.
 - Use edit_file for targeted edits (replacing a few lines via exact string match)
 - Use replace_lines for larger rewrites (replacing a range of lines by line number) — especially when refactoring functions, restructuring blocks, or rewriting 10+ lines
 - When creating new files, use write_file
