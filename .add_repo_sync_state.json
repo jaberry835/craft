@@ -22,5 +22,6 @@
   "remote::https://github.com/jaberry835/curic-demo::main": "5925e408089ea7cec6cb73adb587b66302686faa",
   "remote::https://github.com/jaberry835/snapseek::deepface-embeddings": "4f7bdb77a4512f8d6e32c1dc4085157b050e7a68",
   "remote::https://github.com/jaberry835/snapseek::main": "c1348f8d4b3f04558f5c5905a7a9a3ee6d4a8a0f",
+  "remote::https://github.com/jaberry835/stigit::main": "11f9e65dd06786f5e065722a73574fadfc9153d2",
   "remote::https://github.com/microsoft/simplechat::main": "ff8059163e09ede433003b1ed2822061c41239fe"
 }

@@ -1,0 +1,86 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "imageTemplateName": { "type": "string" },
+    "location": { "type": "string" },
+    "userAssignedIdentityId": { "type": "string" },
+    "vmSize": { "type": "string" },
+    "sourcePublisher": { "type": "string" },
+    "sourceOffer": { "type": "string" },
+    "sourceSku": { "type": "string" },
+    "sourceVersion": { "type": "string" },
+    "applyScriptUri": { "type": "string" },
+    "validateScriptUri": { "type": "string" },
+    "sysprepScriptUri": { "type": "string" },
+    "galleryImageId": { "type": "string" },
+    "requestedImageVersion": { "type": "string" },
+    "galleryRunOutputName": { "type": "string" }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.VirtualMachineImages/imageTemplates",
+      "apiVersion": "2022-07-01",
+      "name": "[parameters('imageTemplateName')]",
+      "location": "[parameters('location')]",
+      "identity": {
+        "type": "UserAssigned",
+        "userAssignedIdentities": {
+          "[parameters('userAssignedIdentityId')]": {}
+        }
+      },
+      "properties": {
+        "buildTimeoutInMinutes": 240,
+        "vmProfile": {
+          "vmSize": "[parameters('vmSize')]",
+          "osDiskSizeGB": 127
+        },
+        "source": {
+          "type": "PlatformImage",
+          "publisher": "[parameters('sourcePublisher')]",
+          "offer": "[parameters('sourceOffer')]",
+          "sku": "[parameters('sourceSku')]",
+          "version": "[parameters('sourceVersion')]"
+        },
+        "customize": [
+          {
+            "type": "PowerShell",
+            "name": "ApplyStig",
+            "scriptUri": "[parameters('applyScriptUri')]",
+            "runElevated": true,
+            "runAsSystem": true
+          },
+          {
+            "type": "PowerShell",
+            "name": "ValidateStig",
+            "scriptUri": "[parameters('validateScriptUri')]",
+            "runElevated": true,
+            "runAsSystem": true
+          },
+          {
+            "type": "PowerShell",
+            "name": "Sysprep",
+            "scriptUri": "[parameters('sysprepScriptUri')]",
+            "runElevated": true,
+            "runAsSystem": true
+          }
+        ],
+        "distribute": [
+          {
+            "type": "SharedImage",
+            "galleryImageId": "[parameters('galleryImageId')]",
+            "runOutputName": "[parameters('galleryRunOutputName')]",
+            "artifactTags": {
+              "requestedImageVersion": "[parameters('requestedImageVersion')]",
+              "hardeningMode": "direct-local-policy",
+              "sourceControlled": "true"
+            },
+            "replicationRegions": [
+              "[parameters('location')]"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

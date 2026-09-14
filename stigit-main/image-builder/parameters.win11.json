@@ -1,0 +1,21 @@
+{
+  "location": "eastus",
+  "resourceGroupName": "rg-stig-image-build",
+  "imageTemplateName": "it-win11-stig",
+  "managedIdentityName": "id-win11-stig-builder",
+  "stagingStorageAccountName": "ststigbuildreplace",
+  "stagingContainerName": "aib-scripts",
+  "galleryName": "sig_stig_images",
+  "galleryImageDefinitionName": "win11-stig",
+  "galleryImageVersion": "2026.08.31",
+  "vmSize": "Standard_D4s_v5",
+  "source": {
+    "publisher": "MicrosoftWindowsDesktop",
+    "offer": "windows-11",
+    "sku": "win11-23h2-ent",
+    "version": "latest"
+  },
+  "baselinePath": "stig\\baselines\\win11.json",
+  "overlayPath": "stig\\overlays\\org-password-policy.json",
+  "exceptionsPath": "stig\\exceptions\\win11.exceptions.json"
+}

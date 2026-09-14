@@ -1,0 +1,101 @@
+{
+  "metadata": {
+    "name": "Windows 11 STIG starter baseline",
+    "targetOs": "Windows 11",
+    "baselineVersion": "starter-2026.08.31",
+    "source": "Internal text representation derived from approved STIG review; replace starter controls with your approved DISA mapping."
+  },
+  "passwordPolicy": {
+    "MinimumPasswordAge": 1,
+    "MaximumPasswordAge": 60,
+    "MinimumPasswordLength": 14,
+    "PasswordComplexity": 1,
+    "PasswordHistorySize": 24
+  },
+  "accountLockoutPolicy": {
+    "LockoutBadCount": 5,
+    "ResetLockoutCount": 15,
+    "LockoutDuration": 15
+  },
+  "controls": [
+    {
+      "id": "WIN11-STARTER-REG-0001",
+      "title": "Disable anonymous SID/name translation",
+      "type": "registry",
+      "hive": "HKLM",
+      "path": "SYSTEM\\CurrentControlSet\\Control\\Lsa",
+      "name": "TurnOffAnonymousBlock",
+      "valueType": "DWord",
+      "value": 0,
+      "severity": "medium"
+    },
+    {
+      "id": "WIN11-STARTER-REG-0002",
+      "title": "Require UAC Admin Approval Mode for administrators",
+      "type": "registry",
+      "hive": "HKLM",
+      "path": "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System",
+      "name": "EnableLUA",
+      "valueType": "DWord",
+      "value": 1,
+      "severity": "high"
+    },
+    {
+      "id": "WIN11-STARTER-FW-0001",
+      "title": "Enable domain firewall profile",
+      "type": "firewall",
+      "profile": "Domain",
+      "enabled": true,
+      "defaultInboundAction": "Block",
+      "defaultOutboundAction": "Allow",
+      "severity": "medium"
+    },
+    {
+      "id": "WIN11-STARTER-FW-0002",
+      "title": "Enable private firewall profile",
+      "type": "firewall",
+      "profile": "Private",
+      "enabled": true,
+      "defaultInboundAction": "Block",
+      "defaultOutboundAction": "Allow",
+      "severity": "medium"
+    },
+    {
+      "id": "WIN11-STARTER-FW-0003",
+      "title": "Enable public firewall profile",
+      "type": "firewall",
+      "profile": "Public",
+      "enabled": true,
+      "defaultInboundAction": "Block",
+      "defaultOutboundAction": "Allow",
+      "severity": "medium"
+    },
+    {
+      "id": "WIN11-STARTER-AUDIT-0001",
+      "title": "Audit account logon credential validation",
+      "type": "auditPolicy",
+      "subcategory": "Credential Validation",
+      "success": true,
+      "failure": true,
+      "severity": "medium"
+    },
+    {
+      "id": "WIN11-STARTER-SVC-0001",
+      "title": "Disable Xbox accessory management service",
+      "type": "service",
+      "serviceName": "XboxGipSvc",
+      "startupType": "Disabled",
+      "desiredStatus": "Stopped",
+      "severity": "low"
+    },
+    {
+      "id": "WIN11-STARTER-DEF-0001",
+      "title": "Enable Defender real-time monitoring",
+      "type": "defender",
+      "settings": {
+        "DisableRealtimeMonitoring": false
+      },
+      "severity": "high"
+    }
+  ]
+}
