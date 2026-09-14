@@ -210,7 +210,7 @@ Tools are the agent's interface to the workspace. `builtinTools.ts` owns the reg
 | **Search** | `grep_search`, `semantic_search` |
 | **Diagnostics** | `get_diagnostics`, `apply_code_action`, `rename_symbol` |
 | **Terminal** | `run_terminal_command`, `check_terminal_output` |
-| **Browser** | `browser_open`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_screenshot`, `browser_console`, `browser_close` |
+| **Browser** | `web_search`, `browser_open`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_screenshot`, `browser_console`, `browser_close` |
 | **Planning** | `set_plan`, `update_plan_step` |
 | **Editor** | `get_open_editors` |
 
@@ -224,7 +224,9 @@ All file tools validate paths through `validatePath()`:
 
 Write tools (`write_file`, `edit_file`, `replace_lines`) snapshot the original file content before modification, enabling the undo/diff system.
 
-Browser tools show opened URLs in VS Code's built-in browser preview tab by default, then connect to an installed Microsoft Edge or Google Chrome through the Chrome DevTools Protocol for automation. The automation browser uses an isolated temporary profile that is removed when the browser closes or the extension deactivates. Opening a URL uses the terminal approval gate, only `http` and `https` URLs are accepted, and screenshots are restricted to workspace paths and tracked by the normal diff/undo system. Set `junior.browser.openPreview` to `false` to keep browser tools headless-only, or set `junior.browser.executablePath` when automatic browser discovery is not appropriate.
+Browser tools connect to an installed Microsoft Edge or Google Chrome through the Chrome DevTools Protocol for automation. The automation browser uses an isolated temporary profile that is removed when the browser closes or the extension deactivates. `web_search` opens configured search pages and returns structured result titles, URLs, and snippets; `browser_open` then reads selected result pages. Configure `junior.browser.searchUrlTemplates` for intranet search, using `{query}` where the URL-encoded search query should be inserted, for example `https://search.contoso.local/?q={query}`. When no template is configured, Junior uses a public default. Opening a URL or running a web search uses the terminal approval gate, only `http` and `https` URLs are accepted for direct navigation, and screenshots are restricted to workspace paths and tracked by the normal diff/undo system. By default, directly opened URLs also open in VS Code's built-in browser preview; set `junior.browser.openPreview` to `false` to disable that preview, or set `junior.browser.executablePath` when automatic browser discovery is not appropriate.
+
+On Windows, mutual-TLS intranet sites can use certificates in the signed-in user's Windows certificate store. The model sets `clientCertificate: true` on `browser_open` when the request identifies such a site, or the user can enable `junior.browser.useClientCertificate` for every navigation. Junior asks for consent, opens its Edge/Chrome automation window visibly, and the user chooses the certificate in the browser's native certificate dialog. The certificate and private key remain managed by Windows and the browser; Junior does not read, export, persist, or send them through the model. If an unmarked navigation returns Chromium's client-certificate-required error, Junior offers the same visible-browser fallback automatically. The VS Code preview is intentionally skipped for these navigations because it is a separate browser session and cannot share the automation browser's certificate choice.
 
 ### MCP Integration
 

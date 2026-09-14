@@ -69,7 +69,15 @@
         }
     ],
     "junior.azureOpenAI.activeDeployment": "gpt-5.4",
-    "junior.inlineCompletions.deployment": "gpt-5.4"
+    "junior.inlineCompletions.deployment": "gpt-5.4",
+
+    // ── Optional: browser and web research tools ─────────────────────────
+    // Leave searchUrlTemplates empty to use Junior's public default, or point
+    // it at your intranet search page. {query} is URL-encoded automatically.
+    "junior.browser.searchUrlTemplates": [],
+    // "junior.browser.searchUrlTemplates": ["https://search.contoso.local/?q={query}"],
+    "junior.browser.openPreview": true,
+    "junior.browser.useClientCertificate": false
 
     // -------------------------------------------------------------------------
     // OPT-OUT: classic /openai/deployments/{id}/chat/completions instead.

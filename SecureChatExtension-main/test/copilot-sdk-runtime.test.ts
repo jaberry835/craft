@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { CopilotSdkRuntime } from '../src/copilotSdkRuntime';
+import { BuiltinTools } from '../src/builtinTools';
 
 function makeRuntime() {
     return new CopilotSdkRuntime({ sendToWebview: vi.fn() });
@@ -35,5 +36,54 @@ describe('CopilotSdkRuntime long-wait status', () => {
 
         expect(message).toContain('Background task still running: npm test');
         expect(message).toContain('31s since the last update');
+    });
+});
+
+describe('CopilotSdkRuntime browser tools', () => {
+    it('bridges Junior web and browser tools into Copilot CLI sessions', async () => {
+        const handler = vi.fn().mockResolvedValue({ success: true, result: 'Title: Example\nPage text:\nHello' });
+        const builtinTools = {
+            getDefinitions: () => [{
+                type: 'function',
+                function: {
+                    name: 'browser_open',
+                    description: 'Open and inspect a URL.',
+                    parameters: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] },
+                },
+            }, {
+                type: 'function',
+                function: {
+                    name: 'web_search',
+                    description: 'Search the web.',
+                    parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+                },
+            }],
+            getHandler: () => handler,
+        } as unknown as BuiltinTools;
+        const runtime = new CopilotSdkRuntime({ sendToWebview: vi.fn() }, undefined, undefined, undefined, builtinTools);
+
+        const tools = (runtime as any).buildBrowserTools();
+        const result = await tools[0].handler({ url: 'https://example.test' });
+
+        expect(tools).toHaveLength(2);
+        expect(tools[0].name).toBe('browser_open');
+        expect(tools[1].name).toBe('web_search');
+        expect(tools[0].skipPermission).toBe(true);
+        expect(handler).toHaveBeenCalledWith({ url: 'https://example.test' });
+        expect(result).toContain('Page text:');
+    });
+
+    it('reports browser handler failures to the Copilot CLI', async () => {
+        const builtinTools = {
+            getDefinitions: () => [{
+                type: 'function',
+                function: { name: 'browser_open', description: 'Open URL.', parameters: { type: 'object', properties: {} } },
+            }],
+            getHandler: () => vi.fn().mockResolvedValue({ success: false, result: 'Navigation failed.' }),
+        } as unknown as BuiltinTools;
+        const runtime = new CopilotSdkRuntime({ sendToWebview: vi.fn() }, undefined, undefined, undefined, builtinTools);
+        const tools = (runtime as any).buildBrowserTools();
+
+        await expect(tools[0].handler({})).rejects.toThrow('Navigation failed.');
     });
 });

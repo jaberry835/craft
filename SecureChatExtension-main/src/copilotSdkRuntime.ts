@@ -5,8 +5,8 @@
  * and streams assistant responses + tool events back to the webview.
  */
 import * as vscode from 'vscode';
-import { CopilotClient, CopilotSession } from '@github/copilot-sdk';
-import type { MCPServerConfig, PermissionRequest, PermissionRequestResult, SessionConfig } from '@github/copilot-sdk';
+import { CopilotClient, CopilotSession, defineTool } from '@github/copilot-sdk';
+import type { MCPServerConfig, PermissionRequest, PermissionRequestResult, SessionConfig, Tool } from '@github/copilot-sdk';
 import * as path from 'path';
 import { buildCopilotCliProcessEnv, getCopilotCliBearerAuthSessionConfig, resolveConfiguredCopilotCliLaunchSpec, resolveCopilotCliProviderApiKey } from './copilotCliSupport';
 import { BuiltinTools } from './builtinTools';
@@ -368,6 +368,7 @@ export class CopilotSdkRuntime implements AgentRuntime {
             streaming: true,
             systemMessage: this.buildSystemMessageConfig(),
             excludedTools: this.buildExcludedTools(),
+            tools: this.buildBrowserTools(),
             hooks: this.buildSessionHooks(),
             ...(cwd ? { workingDirectory: cwd } : {}),
             ...(mcpServers && Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
@@ -396,6 +397,25 @@ export class CopilotSdkRuntime implements AgentRuntime {
 
         this.log?.(`[copilot-sdk] Session ready: ${this.sessionId}`);
         this.wireSessionEvents();
+    }
+
+    private buildBrowserTools(): Tool<any>[] {
+        if (!this.builtinTools) { return []; }
+        return this.builtinTools.getDefinitions()
+            .filter(definition => definition.function.name.startsWith('browser_') || definition.function.name === 'web_search')
+            .map(definition => defineTool(definition.function.name, {
+                description: definition.function.description,
+                parameters: definition.function.parameters,
+                // Browser handlers apply Junior's own URL, write, and certificate-consent gates.
+                skipPermission: true,
+                handler: async (args: Record<string, unknown>) => {
+                    const handler = this.builtinTools?.getHandler(definition.function.name);
+                    if (!handler) { throw new Error(`Browser tool is unavailable: ${definition.function.name}`); }
+                    const response = await handler(args);
+                    if (!response.success) { throw new Error(response.result); }
+                    return response.result;
+                },
+            }));
     }
 
     private wireSessionEvents(): void {
@@ -1184,7 +1204,8 @@ export class CopilotSdkRuntime implements AgentRuntime {
                         'When workspace context already identifies the language, likely files, active editor, or diagnostics, do not ask the user to repeat those facts.',
                         'Do not use the sql tool as a scratchpad, todo list, or task tracker for workspace coding tasks.',
                         'When the user asks about external repos, APIs, libraries, SDKs, or documentation, proactively use MCP tools to look up the information rather than saying you cannot access it.',
-                        'When the user provides a URL or references an external resource, check whether an MCP tool can fetch or search for that content before declining.',
+                        'When the user asks about a website or provides an http(s) URL, use browser_open to retrieve its visible text and links, then use browser_click or browser_snapshot as needed and answer from the returned content. Do not merely open the URL in a preview.',
+                        'Set browser_open clientCertificate=true when the user says the site requires a user certificate; otherwise let Junior detect a certificate-required navigation and ask the user.',
                     ].join('\n'),
                 },
             },

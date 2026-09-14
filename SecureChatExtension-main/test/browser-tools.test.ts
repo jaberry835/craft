@@ -4,7 +4,8 @@ import * as os from 'os';
 import * as path from 'path';
 import { commands } from 'vscode';
 import { afterEach, describe, expect, it } from 'vitest';
-import { createBrowserTools } from '../src/tools/browserTools';
+import { buildSearchUrl, createBrowserTools } from '../src/tools/browserTools';
+import { AgentLoop } from '../src/agentLoop';
 import { ToolContext } from '../src/tools/types';
 
 function hasInstalledBrowser(): boolean {
@@ -50,6 +51,7 @@ describe.skipIf(!hasInstalledBrowser())('browser tools', () => {
 
         const context = {
             requestConfirmation: async () => true,
+            askUser: async () => null,
             validatePath: (relativePath: string) => {
                 const resolved = path.resolve(workspace, relativePath);
                 return resolved.startsWith(workspace + path.sep) ? resolved : null;
@@ -84,4 +86,74 @@ describe.skipIf(!hasInstalledBrowser())('browser tools', () => {
         const closed = await handlers.get('browser_close')!({});
         expect(closed.success).toBe(true);
     }, 30_000);
+});
+
+describe('browser client certificate access', () => {
+    it('does not launch a browser when the user declines web search', async () => {
+        const context = {
+            requestConfirmation: async () => false,
+            askUser: async () => null,
+        } as unknown as ToolContext;
+        const browserTools = createBrowserTools(context);
+        const search = browserTools.entries.find(entry => entry.definition.function.name === 'web_search')!.handler;
+
+        const response = await search({ query: 'Civic Type R high pressure fuel pump issues' });
+
+        expect(response.success).toBe(false);
+        expect(response.result).toContain('declined web search');
+        await browserTools.dispose();
+    });
+
+    it.runIf(process.platform === 'win32')('does not launch a browser when the user declines certificate access', async () => {
+        const questions: unknown[] = [];
+        const context = {
+            requestConfirmation: async () => true,
+            askUser: async (value: unknown) => { questions.push(value); return { 'Client certificate': ['Cancel'] }; },
+        } as unknown as ToolContext;
+        const browserTools = createBrowserTools(context);
+        const open = browserTools.entries.find(entry => entry.definition.function.name === 'browser_open')!.handler;
+
+        const response = await open({ url: 'https://intranet.example.test', clientCertificate: true });
+
+        expect(response.success).toBe(false);
+        expect(response.result).toContain('declined client-certificate browser access');
+        expect(questions).toHaveLength(1);
+        await browserTools.dispose();
+    });
+});
+
+describe('search URL templates', () => {
+    it('substitutes encoded queries into configured templates', () => {
+        expect(buildSearchUrl('https://search.contoso.local/?q={query}', 'Civic Type R HPFP')).toBe('https://search.contoso.local/?q=Civic%20Type%20R%20HPFP');
+    });
+
+    it('appends q when the template does not include a placeholder', () => {
+        expect(buildSearchUrl('https://search.contoso.local/results', 'fuel pump')).toBe('https://search.contoso.local/results?q=fuel%20pump');
+    });
+
+    it('rejects non-http search URL templates', () => {
+        expect(() => buildSearchUrl('file:///tmp/search?q={query}', 'x')).toThrow('http:// or https://');
+    });
+});
+
+describe('website read request detection', () => {
+    const detect = (text: string) => (AgentLoop.prototype as any).getWebsiteReadRequest(text);
+
+    it('detects requests to summarize a supplied website URL', () => {
+        expect(detect('Can you summarize the topics? https://example.test/forums/thread.php?t=42')).toEqual({
+            url: 'https://example.test/forums/thread.php?t=42',
+            clientCertificate: false,
+        });
+    });
+
+    it('requests visible certificate mode when the user identifies an mTLS site', () => {
+        expect(detect('Read https://intranet.example.test using my user certificate.')).toEqual({
+            url: 'https://intranet.example.test',
+            clientCertificate: true,
+        });
+    });
+
+    it('does not browse a URL that is only present as code context', () => {
+        expect(detect('Replace the API constant https://api.example.test/v1')).toBeNull();
+    });
 });

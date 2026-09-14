@@ -16,7 +16,7 @@ const READ_ONLY_TOOLS = new Set([
     'semantic_search', 'get_file_tree', 'get_document_symbols',
     'find_symbol', 'go_to_definition', 'find_references',
     'check_terminal_output', 'get_diagnostics', 'get_open_editors',
-    'browser_snapshot', 'browser_console',
+    'web_search', 'browser_snapshot', 'browser_console',
 ]);
 
 /** Tools that require user confirmation before execution. */
