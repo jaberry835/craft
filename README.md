@@ -46,5 +46,9 @@ Curated Demo Code
 | 2026-08-12 01:07 UTC | junior-web | main | ~20 |
 | 2026-08-12 01:07 UTC | curic-demo | main | +45 |
 | 2026-08-25 17:52 UTC | SecureChatExtension | main | +3, ~2 |
+<<<<<<< HEAD
 | 2026-09-14 16:42 UTC | SecureChatExtension | main | ~17 |
 | 2026-09-14 16:42 UTC | stigit | main | +20 |
+=======
+| 2026-09-04 14:43 UTC | SecureChatExtension | main | ~17 |
+>>>>>>> e5cde4d3965c1c9509ccd96c149937e591172880
