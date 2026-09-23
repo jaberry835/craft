@@ -3,21 +3,23 @@
 
 $repos = @(
  
-    @{ Url = "https://github.com/adamruderman/AgentChatV2"; Branch = "main" }
+    #@{ Url = "https://github.com/adamruderman/AgentChatV2"; Branch = "main" }
     #@{ Url = "https://github.com/adamruderman/AgentChatV2"; Branch = "experiment/response-api" }
-    @{ Url = "https://github.com/adamruderman/Rude-MCPServer"; Branch = "main" }   
+    #@{ Url = "https://github.com/adamruderman/Rude-MCPServer"; Branch = "main" }   
    
-    @{ Url = "https://github.com/adamruderman/SecureAPI"; Branch = "main" } 
-    @{ Url = "https://github.com/adamruderman/McpServer"; Branch = "main" }
-    @{ Url = "https://github.com/adamruderman/SecureChatExtension"; Branch = "main" }
+    #@{ Url = "https://github.com/adamruderman/SecureAPI"; Branch = "main" } 
+    #@{ Url = "https://github.com/adamruderman/McpServer"; Branch = "main" }
+    #@{ Url = "https://github.com/adamruderman/SecureChatExtension"; Branch = "main" }
      
-    @{ Url = "https://github.com/adamruderman/junior-studio"; Branch = "main" }
+    #@{ Url = "https://github.com/adamruderman/junior-studio"; Branch = "main" }
     @{ Url = "https://github.com/adamruderman/junior-web"; Branch = "main" }
     @{ Url = "https://github.com/jaberry835/GenerateRichDocs"; Branch = "main" }
     #@{ Url = "https://github.com/microsoft/simplechat"; Branch = "main" }
     #@{ Url = "https://github.com/jaberry835/curic-demo"; Branch = "main" }
     @{ Url = "https://github.com/jaberry835/stigit"; Branch = "main" }
-  
+   @{ Url = "https://github.com/jaberry835/mcp-sitebuilder"; Branch = "main" }
+  @{ Url = "https://github.com/jaberry835/aaa"; Branch = "main" }
+  @{ Url = "https://github.com/jaberry835/another-demo"; Branch = "main" }
 )
 
 $scriptDir = $PSScriptRoot
