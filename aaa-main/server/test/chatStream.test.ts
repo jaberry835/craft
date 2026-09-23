@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
+import { setTimeout as wait } from 'node:timers/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { createAaaApp } from '../app.js';
@@ -34,10 +35,15 @@ test('chat stream emits NDJSON and persists assistant only after successful comp
 
   const seenPrompts: string[][] = [];
   const modelClient: ModelChatClient = {
-    async *stream(_connection, messages) {
+    async *stream(_connection, messages, signal) {
       seenPrompts.push(messages.map((message) => message.content));
       const latest = messages.at(-1)?.content;
       yield { type: 'reasoning', text: 'Reviewing' };
+      if (latest === 'abort') {
+        await new Promise<void>((_resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+      }
       yield { type: 'assistant_text', text: 'Assessment ' };
       if (latest === 'fail') {
         throw new Error('provider included MODEL_KEY');
@@ -95,8 +101,25 @@ test('chat stream emits NDJSON and persists assistant only after successful comp
 
   const persisted = await (await fetch(
     `${root}/api/projects/project/sessions/${created.id}`
-  )).json() as { messages: Array<{ role: string; content: string }> };
+  )).json() as {
+    messages: Array<{
+      role: string;
+      content: string;
+      display?: Array<{ kind: string; text?: string }>;
+    }>;
+    runs: Array<{
+      status: string;
+      reasoning: string;
+      assistantMessageId?: string;
+      error?: string;
+    }>;
+  };
   assert.deepEqual(persisted.messages.map((message) => message.role), ['user', 'assistant']);
+  assert.deepEqual(persisted.messages[1]?.display, [{ kind: 'reasoning', text: 'Reviewing' }]);
+  assert.equal(persisted.runs.length, 1);
+  assert.equal(persisted.runs[0]?.status, 'completed');
+  assert.equal(persisted.runs[0]?.reasoning, 'Reviewing');
+  assert.equal(persisted.runs[0]?.assistantMessageId, completed.response.message.id);
 
   const failedResponse = await fetch(
     `${root}/api/projects/project/sessions/${created.id}/chat/stream`,
@@ -114,10 +137,47 @@ test('chat stream emits NDJSON and persists assistant only after successful comp
 
   const afterFailure = await (await fetch(
     `${root}/api/projects/project/sessions/${created.id}`
-  )).json() as { messages: Array<{ role: string }> };
+  )).json() as {
+    messages: Array<{ role: string }>;
+    runs: Array<{ status: string; reasoning: string; assistantText?: string; error?: string }>;
+  };
   assert.deepEqual(afterFailure.messages.map((message) => message.role), [
     'user',
     'assistant',
     'user'
   ]);
+  assert.deepEqual(afterFailure.runs.map((run) => run.status), ['completed', 'failed']);
+  assert.equal(afterFailure.runs[1]?.reasoning, 'Reviewing');
+  assert.equal(afterFailure.runs[1]?.assistantText, 'Assessment ');
+  assert.equal(afterFailure.runs[1]?.error, 'Model response failed.');
+
+  const abortController = new AbortController();
+  const abortedResponse = await fetch(
+    `${root}/api/projects/project/sessions/${created.id}/chat/stream`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: 'abort' }),
+      signal: abortController.signal
+    }
+  );
+  abortController.abort();
+  await assert.rejects(() => abortedResponse.text(), /abort/i);
+  await wait(50);
+
+  const afterAbort = await (await fetch(
+    `${root}/api/projects/project/sessions/${created.id}`
+  )).json() as {
+    messages: Array<{ role: string }>;
+    runs: Array<{ status: string; reasoning: string; error?: string }>;
+  };
+  assert.deepEqual(afterAbort.messages.map((message) => message.role), [
+    'user',
+    'assistant',
+    'user',
+    'user'
+  ]);
+  assert.deepEqual(afterAbort.runs.map((run) => run.status), ['completed', 'failed', 'aborted']);
+  assert.equal(afterAbort.runs[2]?.reasoning, 'Reviewing');
+  assert.equal(afterAbort.runs[2]?.error, 'Request aborted.');
 });

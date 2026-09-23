@@ -14,16 +14,36 @@ test('project API exposes configured metadata, sessions, messages, files, and tr
   const dataRoot = path.join(testRoot, 'data');
   const clientDistPath = path.join(testRoot, 'client');
   const configPath = path.join(testRoot, 'projects.json');
+  const statePath = path.join(dataRoot, 'projects.json');
+  const managedRoot = path.join(dataRoot, 'workspaces');
+  const templatePath = path.join(
+    projectRoot,
+    '.github',
+    'skills',
+    'initialize-security-package',
+    'assets',
+    'security-package-template'
+  );
   await mkdir(projectRoot, { recursive: true });
+  await mkdir(templatePath, { recursive: true });
+  await mkdir(path.join(projectRoot, '.github', 'agents'), { recursive: true });
+  await mkdir(path.join(projectRoot, '.vscode'), { recursive: true });
   await mkdir(clientDistPath, { recursive: true });
   await writeFile(path.join(projectRoot, 'README.md'), '# Assessed project\n', 'utf8');
+  await writeFile(path.join(templatePath, 'package-config.json'), '{"packageName":"Template"}\n', 'utf8');
+  await writeFile(
+    path.join(projectRoot, '.github', 'agents', 'builder.agent.md'),
+    '---\nname: Package Builder\ndescription: Builds packages\n---\n',
+    'utf8'
+  );
+  await writeFile(path.join(projectRoot, '.vscode', 'mcp.json'), '{"servers":{}}\n', 'utf8');
   await writeFile(path.join(clientDistPath, 'index.html'), '<!doctype html><title>AAA test client</title>', 'utf8');
   await writeFile(configPath, JSON.stringify({
     activeProjectId: 'assessed-project',
     projects: [{ id: 'assessed-project', name: 'Assessed Project', rootPath: projectRoot }]
   }), 'utf8');
 
-  const registry = await ProjectRegistry.load(configPath);
+  const registry = await ProjectRegistry.load(configPath, { statePath, managedRoot });
   const server = createServer(createAaaApp({ registry, dataRoot, clientDistPath }));
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   t.after(async () => {
@@ -37,6 +57,51 @@ test('project API exposes configured metadata, sessions, messages, files, and tr
   const projects = await fetch('http://127.0.0.1:' + address.port + '/api/projects');
   assert.equal(projects.status, 200);
   assert.equal((await projects.json() as { activeProjectId: string }).activeProjectId, 'assessed-project');
+
+  const customizations = await fetch(`${baseUrl}/customizations`);
+  assert.equal(customizations.status, 200);
+  const customizationBody = await customizations.json() as {
+    items: Array<{ kind: string; name: string }>;
+  };
+  assert.ok(customizationBody.items.some((item) =>
+    item.kind === 'agent' && item.name === 'Package Builder'));
+  const editorResponse = await fetch(
+    `${baseUrl}/customizations/${encodeURIComponent('agent:builder.agent.md')}`
+  );
+  assert.equal(editorResponse.status, 200);
+  assert.equal((await editorResponse.json() as { kind: string }).kind, 'agent');
+  const disableToolResponse = await fetch(
+    `${baseUrl}/customizations/${encodeURIComponent('tool:write-file')}/enabled`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: false })
+    }
+  );
+  assert.equal(disableToolResponse.status, 200);
+  assert.equal((await disableToolResponse.json() as { enabled: boolean }).enabled, false);
+
+  const createProject = await fetch(`http://127.0.0.1:${address.port}/api/projects`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'New Package', systemName: 'New System' })
+  });
+  assert.equal(createProject.status, 201);
+  const createdProject = await createProject.json() as { id: string; active: boolean };
+  assert.deepEqual(createdProject, {
+    id: 'new-package',
+    name: 'New Package',
+    description: 'Managed AAA authorization project.',
+    rootPath: path.resolve(managedRoot, 'new-package'),
+    active: true
+  });
+  const selectProject = await fetch(`http://127.0.0.1:${address.port}/api/projects/active`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId: 'assessed-project' })
+  });
+  assert.equal(selectProject.status, 200);
+  assert.equal((await selectProject.json() as { active: boolean }).active, true);
 
   const storageStatus = await fetch('http://127.0.0.1:' + address.port + '/api/storage/status');
   assert.equal(storageStatus.status, 200);

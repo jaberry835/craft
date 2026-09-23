@@ -47,8 +47,11 @@ test('complete Cosmos configuration selects Cosmos without constructing a local 
       COSMOS_DB_CHAT_CONTAINER: 'ChatSessions',
       COSMOS_DB_AUTH_MODE: 'entra'
     },
-    createContainer: () => {
+    createContainer: (config) => {
       selected = true;
+      assert.equal(config.ownerId, 'aaa');
+      assert.equal(config.schemaMode, 'native');
+      assert.equal(config.autoCreate, false);
       return {
         container: {} as never,
         settings: {
@@ -56,7 +59,9 @@ test('complete Cosmos configuration selects Cosmos without constructing a local 
           database: 'Aaa',
           container: 'ChatSessions',
           authMode: 'entra',
-          keyConfigured: false
+          keyConfigured: false,
+          schemaMode: 'native',
+          autoCreate: false
         }
       };
     }
@@ -65,6 +70,53 @@ test('complete Cosmos configuration selects Cosmos without constructing a local 
   assert.equal(selected, true);
   assert.equal(persistence.storageStatus.sessions.backend, 'cosmos');
   assert.ok(persistence.sessionStoreFactory('project-a') instanceof CosmosChatSessionStore);
+});
+
+test('Cosmos schema and auto-create settings are explicit and validated', () => {
+  const configured = resolveStorageConfig({
+    COSMOS_DB_ENDPOINT: 'https://safe-account.documents.azure.com/',
+    COSMOS_DB_DATABASE: 'Aaa',
+    COSMOS_DB_CHAT_CONTAINER: 'ChatSessions',
+    COSMOS_DB_AUTH_MODE: 'entra',
+    COSMOS_DB_CHAT_SCHEMA_MODE: 'junior-compatible',
+    COSMOS_DB_AUTO_CREATE: 'true',
+    COSMOS_DB_OWNER_ID: 'aaa-local'
+  });
+  assert.equal(configured.cosmos?.ownerId, 'aaa-local');
+  assert.equal(configured.cosmos?.schemaMode, 'junior-compatible');
+  assert.equal(configured.cosmos?.autoCreate, true);
+  assert.equal(configured.status.sessions.schemaMode, 'junior-compatible');
+  assert.equal(configured.status.sessions.autoCreate, true);
+
+  const invalid = resolveStorageConfig({
+    COSMOS_DB_ENDPOINT: 'https://safe-account.documents.azure.com/',
+    COSMOS_DB_DATABASE: 'Aaa',
+    COSMOS_DB_CHAT_CONTAINER: 'ChatSessions',
+    COSMOS_DB_AUTH_MODE: 'entra',
+    COSMOS_DB_CHAT_SCHEMA_MODE: 'shared',
+    COSMOS_DB_AUTO_CREATE: 'sometimes',
+    COSMOS_DB_OWNER_ID: 'other:owner'
+  });
+  assert.deepEqual(invalid.status.sessions.invalid, [
+    'COSMOS_DB_CHAT_SCHEMA_MODE',
+    'COSMOS_DB_AUTO_CREATE'
+  ]);
+  assert.equal(invalid.status.sessions.ready, false);
+  assert.equal(invalid.cosmos, undefined);
+});
+
+test('Junior-compatible mode rejects unsafe owner partition prefixes', () => {
+  const resolved = resolveStorageConfig({
+    COSMOS_DB_ENDPOINT: 'https://safe-account.documents.azure.com/',
+    COSMOS_DB_DATABASE: 'Aaa',
+    COSMOS_DB_CHAT_CONTAINER: 'ChatSessions',
+    COSMOS_DB_AUTH_MODE: 'entra',
+    COSMOS_DB_CHAT_SCHEMA_MODE: 'junior-compatible',
+    COSMOS_DB_OWNER_ID: 'other:owner'
+  });
+
+  assert.deepEqual(resolved.status.sessions.invalid, ['COSMOS_DB_OWNER_ID']);
+  assert.equal(resolved.status.sessions.ready, false);
 });
 
 test('API-key Cosmos auth is not ready without COSMOS_DB_KEY', () => {
@@ -95,6 +147,8 @@ test('storage status exposes safe metadata without Cosmos or blob credentials', 
 
   assert.equal(resolved.status.sessions.endpointHost, 'safe-account.documents.azure.com');
   assert.equal(resolved.status.sessions.ready, true);
+  assert.equal(resolved.status.sessions.schemaMode, 'native');
+  assert.equal(resolved.status.sessions.autoCreate, false);
   assert.equal(resolved.status.workspaceFiles.backend, 'blob');
   assert.equal(resolved.status.workspaceFiles.ready, true);
   assert.equal(resolved.status.workspaceFiles.active, false);

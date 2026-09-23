@@ -18,9 +18,21 @@ test('sessions persist messages, generated titles, renames, and deletes as proje
     });
     assert.equal(appended.title, 'Assess access controls for this application');
     assert.equal(appended.messages[0]?.content, 'Assess access controls for this application');
+    const withRun = await store.saveRun(created.id, {
+      id: 'run-1',
+      status: 'completed',
+      startedAt: '2026-01-01T00:00:00.000Z',
+      completedAt: '2026-01-01T00:00:01.000Z',
+      userMessageId: appended.messages[0]!.id,
+      modelConnectionId: 'model',
+      reasoning: 'Reviewed the request.',
+      toolEvents: [],
+      changedFiles: []
+    });
+    assert.equal(withRun.runs[0]?.status, 'completed');
 
     const restartedStore = new JsonSessionStore(testRoot, 'project-a');
-    assert.deepEqual(await restartedStore.get(created.id), appended);
+    assert.deepEqual(await restartedStore.get(created.id), withRun);
     assert.equal((await restartedStore.list())[0]?.messageCount, 1);
 
     const persisted = JSON.parse(await readFile(

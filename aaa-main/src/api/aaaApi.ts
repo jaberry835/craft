@@ -4,6 +4,9 @@ import type {
   ChatStreamRequest,
   ChatSession,
   ChatSessionSummary,
+  CustomizationItem,
+  CustomizationEditor,
+  CreateProjectRequest,
   CreateSessionRequest,
   CreateTextFileRequest,
   FileTreeNode,
@@ -12,6 +15,9 @@ import type {
   ProjectTextFile,
   ProjectPathResult,
   ModelConnectionStatus,
+  ProjectCustomizations,
+  SaveCustomizationRequest,
+  SetCustomizationEnabledRequest,
   RenameProjectPathRequest,
   RenameSessionRequest,
   StorageStatus,
@@ -133,9 +139,50 @@ const sessionPath = (projectId: string, sessionId?: string) =>
 
 export const aaaApi = {
   listProjects: () => requestJson<ProjectsResponse>('/api/projects', undefined, 6),
+  createProject: (request: CreateProjectRequest) =>
+    requestJson<ProjectSummary>('/api/projects', {
+      method: 'POST',
+      body: JSON.stringify(request)
+    }),
+  selectProject: (projectId: string) =>
+    requestJson<ProjectSummary>('/api/projects/active', {
+      method: 'PUT',
+      body: JSON.stringify({ projectId })
+    }),
   getModelStatus: () => requestJson<ModelConnectionStatus>('/api/model/status'),
   getStorageStatus: () => requestJson<StorageStatus>('/api/storage/status'),
   getProject: (projectId: string) => requestJson<ProjectSummary>(projectPath(projectId)),
+  getCustomizations: (projectId: string) =>
+    requestJson<ProjectCustomizations>(`${projectPath(projectId)}/customizations`),
+  getCustomization: (projectId: string, itemId: string) =>
+    requestJson<CustomizationEditor>(
+      `${projectPath(projectId)}/customizations/${encodeURIComponent(itemId)}`
+    ),
+  createCustomization: (projectId: string, request: SaveCustomizationRequest) =>
+    requestJson<CustomizationEditor>(`${projectPath(projectId)}/customizations`, {
+      method: 'POST',
+      body: JSON.stringify(request)
+    }),
+  updateCustomization: (projectId: string, itemId: string, request: SaveCustomizationRequest) =>
+    requestJson<CustomizationEditor>(
+      `${projectPath(projectId)}/customizations/${encodeURIComponent(itemId)}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(request)
+      }
+    ),
+  setCustomizationEnabled: (
+    projectId: string,
+    itemId: string,
+    request: SetCustomizationEnabledRequest
+  ) =>
+    requestJson<CustomizationItem>(
+      `${projectPath(projectId)}/customizations/${encodeURIComponent(itemId)}/enabled`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(request)
+      }
+    ),
   getFileTree: (projectId: string) => requestJson<FileTreeNode[]>(`${projectPath(projectId)}/tree`),
   readTextFile: (projectId: string, filePath: string) =>
     requestJson<ProjectTextFile>(`${projectPath(projectId)}/files?path=${encodeURIComponent(filePath)}`),

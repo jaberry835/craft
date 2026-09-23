@@ -1,5 +1,6 @@
 import type {
   AppendMessageRequest,
+  AgentRun,
   ChatSession,
   ChatSessionSummary,
   CreateSessionRequest
@@ -12,6 +13,7 @@ export interface ChatSessionStore {
   rename(sessionId: string, title: string): Promise<ChatSession>;
   delete(sessionId: string): Promise<void>;
   append(sessionId: string, request: AppendMessageRequest): Promise<ChatSession>;
+  saveRun(sessionId: string, run: AgentRun): Promise<ChatSession>;
 }
 
 export type ChatSessionStoreFactory = (projectId: string) => ChatSessionStore;

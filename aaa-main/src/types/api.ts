@@ -11,6 +11,65 @@ export interface ProjectsResponse {
   activeProjectId: string;
 }
 
+export interface CreateProjectRequest {
+  name: string;
+  description?: string;
+  systemName?: string;
+}
+
+export interface CustomizationItem {
+  id: string;
+  name: string;
+  description: string;
+  kind: 'agent' | 'skill' | 'mcp-server' | 'instruction' | 'hook' | 'tool';
+  enabled: boolean;
+  status: 'ready' | 'configured' | 'unavailable';
+  detail?: string;
+  sourcePath?: string;
+}
+
+export interface ProjectCustomizations {
+  projectId: string;
+  items: CustomizationItem[];
+}
+
+export type EditableCustomizationKind = 'agent' | 'skill' | 'mcp-server' | 'tool';
+
+export interface CustomizationEditor {
+  id?: string;
+  kind: EditableCustomizationKind;
+  name: string;
+  description: string;
+  enabled: boolean;
+  sourcePath?: string;
+  instructions?: string;
+  argumentHint?: string;
+  tools?: string;
+  transport?: 'http' | 'stdio';
+  url?: string;
+  command?: string;
+  args?: string;
+  readOnly?: boolean;
+}
+
+export interface SaveCustomizationRequest {
+  kind: EditableCustomizationKind;
+  name: string;
+  description: string;
+  enabled: boolean;
+  instructions?: string;
+  argumentHint?: string;
+  tools?: string;
+  transport?: 'http' | 'stdio';
+  url?: string;
+  command?: string;
+  args?: string;
+}
+
+export interface SetCustomizationEnabledRequest {
+  enabled: boolean;
+}
+
 export type FileTreeNodeType = 'file' | 'directory';
 
 export interface FileTreeNode {
@@ -50,11 +109,44 @@ export interface ProjectPathResult {
 
 export type ChatRole = 'user' | 'assistant' | 'system';
 
+export type ToolEventType = 'read' | 'search' | 'create' | 'edit';
+
+export interface ToolEvent {
+  id: string;
+  type: ToolEventType;
+  label: string;
+  detail?: string;
+  filePath?: string;
+  createdAt: string;
+}
+
+export type ChatMessageDisplayPart =
+  | { kind: 'reasoning'; text: string }
+  | { kind: 'working'; title: string; events: ToolEvent[] };
+
 export interface ChatMessage {
   id: string;
   role: ChatRole;
   content: string;
   createdAt: string;
+  display?: ChatMessageDisplayPart[];
+}
+
+export type AgentRunStatus = 'running' | 'completed' | 'failed' | 'aborted';
+
+export interface AgentRun {
+  id: string;
+  status: AgentRunStatus;
+  startedAt: string;
+  completedAt?: string;
+  userMessageId: string;
+  assistantMessageId?: string;
+  modelConnectionId: string;
+  reasoning: string;
+  toolEvents: ToolEvent[];
+  changedFiles: string[];
+  assistantText?: string;
+  error?: string;
 }
 
 export interface ChatSessionSummary {
@@ -68,6 +160,7 @@ export interface ChatSessionSummary {
 
 export interface ChatSession extends ChatSessionSummary {
   messages: ChatMessage[];
+  runs: AgentRun[];
 }
 
 export interface CreateSessionRequest {
@@ -81,6 +174,7 @@ export interface RenameSessionRequest {
 export interface AppendMessageRequest {
   role: ChatRole;
   content: string;
+  display?: ChatMessageDisplayPart[];
 }
 
 export interface ModelConnectionStatus {
@@ -107,6 +201,8 @@ export interface StorageBackendStatus {
   endpointHost?: string;
   database?: string;
   container?: string;
+  schemaMode?: 'native' | 'junior-compatible';
+  autoCreate?: boolean;
 }
 
 export interface StorageStatus {
@@ -126,7 +222,8 @@ export interface ChatStreamResponse {
 export type ChatStreamEvent =
   | { type: 'assistant_text'; text: string }
   | { type: 'reasoning'; text: string }
-  | { type: 'completed'; response: ChatStreamResponse }
+  | { type: 'tool_event'; event: ToolEvent }
+  | { type: 'completed'; response: ChatStreamResponse; changedFiles: string[] }
   | { type: 'error'; message: string };
 
 export interface ApiError {

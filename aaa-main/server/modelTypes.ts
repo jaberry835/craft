@@ -28,19 +28,45 @@ export interface ResolvedModelConnection {
 }
 
 export interface ModelChatMessage {
-  role: 'system' | 'user' | 'assistant';
+  role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
+  toolCalls?: ModelToolCall[];
+  toolCallId?: string;
+}
+
+export interface ModelToolCall {
+  id: string;
+  type: 'function';
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
+export interface ModelToolDefinition {
+  type: 'function';
+  function: {
+    name: string;
+    description: string;
+    parameters: {
+      type: 'object';
+      properties: Record<string, unknown>;
+      required?: string[];
+    };
+  };
 }
 
 export type ModelStreamChunk =
   | { type: 'assistant_text'; text: string }
   | { type: 'reasoning'; text: string }
+  | { type: 'tool_calls'; calls: ModelToolCall[] }
   | { type: 'completed' };
 
 export interface ModelChatClient {
   stream(
     connection: ResolvedModelConnection,
     messages: ModelChatMessage[],
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    tools?: ModelToolDefinition[]
   ): AsyncIterable<ModelStreamChunk>;
 }

@@ -48,7 +48,13 @@ export function createSessionPersistence(
   try {
     const binding = (options.createContainer ?? createCosmosContainer)(resolved.cosmos);
     return {
-      sessionStoreFactory: (projectId) => new CosmosChatSessionStore(binding, projectId),
+      sessionStoreFactory: (projectId) =>
+        new CosmosChatSessionStore(
+          binding,
+          projectId,
+          resolved.cosmos!.schemaMode,
+          resolved.cosmos!.ownerId
+        ),
       storageStatus: resolved.status
     };
   } catch {
@@ -92,6 +98,10 @@ class UnavailableChatSessionStore implements ChatSessionStore {
   }
 
   append(): Promise<never> {
+    return this.unavailable();
+  }
+
+  saveRun(): Promise<never> {
     return this.unavailable();
   }
 

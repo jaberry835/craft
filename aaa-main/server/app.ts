@@ -1,19 +1,27 @@
 import express from 'express';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type {
   AppendMessageRequest,
+  AgentRun,
+  ChatMessageDisplayPart,
   ChatStreamEvent,
   ChatStreamRequest,
   CreateSessionRequest,
+  CreateProjectRequest,
   CreateTextFileRequest,
   RenameProjectPathRequest,
   RenameSessionRequest,
+  SaveCustomizationRequest,
+  SetCustomizationEnabledRequest,
   WriteTextFileRequest
 } from '../src/types/api.js';
+import { AaaAgentLoop } from './aaaAgentLoop.js';
 import { HttpError } from './httpErrors.js';
 import type { ModelChatClient, ModelChatMessage } from './modelTypes.js';
 import { ProjectFileService } from './projectFileService.js';
+import { ProjectCustomizationService } from './projectCustomizationService.js';
 import { ProjectRegistry } from './projectRegistry.js';
 import type { ModelConnectionConfig } from './services/modelConnectionConfig.js';
 import type { ChatSessionStoreFactory } from './chatSessionStore.js';
@@ -60,6 +68,12 @@ export function createAaaApp({
   const fileService = (request: express.Request) => new ProjectFileService(registry.root(projectId(request)));
 
   app.get('/api/projects', (_request, response) => response.json(registry.list()));
+  app.post('/api/projects', async (request, response) => {
+    response.status(201).json(await registry.create((request.body ?? {}) as CreateProjectRequest));
+  });
+  app.put('/api/projects/active', async (request, response) => {
+    response.json(await registry.select(String((request.body as { projectId?: string } | undefined)?.projectId ?? '')));
+  });
   app.get('/api/storage/status', (_request, response) => response.json(effectiveStorageStatus));
   app.get('/api/model/status', (_request, response) => {
     if (!modelConfig) {
@@ -77,6 +91,31 @@ export function createAaaApp({
     response.json(modelConfig.status());
   });
   app.get('/api/projects/:projectId', (request, response) => response.json(registry.get(projectId(request))));
+  app.get('/api/projects/:projectId/customizations', async (request, response) => {
+    const id = projectId(request);
+    response.json(await new ProjectCustomizationService(id, registry.root(id)).list());
+  });
+  app.post('/api/projects/:projectId/customizations', async (request, response) => {
+    const id = projectId(request);
+    response.status(201).json(await new ProjectCustomizationService(id, registry.root(id))
+      .create((request.body ?? {}) as SaveCustomizationRequest));
+  });
+  app.get('/api/projects/:projectId/customizations/:itemId', async (request, response) => {
+    const id = projectId(request);
+    response.json(await new ProjectCustomizationService(id, registry.root(id))
+      .getEditor(String(request.params.itemId)));
+  });
+  app.put('/api/projects/:projectId/customizations/:itemId', async (request, response) => {
+    const id = projectId(request);
+    response.json(await new ProjectCustomizationService(id, registry.root(id))
+      .update(String(request.params.itemId), (request.body ?? {}) as SaveCustomizationRequest));
+  });
+  app.put('/api/projects/:projectId/customizations/:itemId/enabled', async (request, response) => {
+    const id = projectId(request);
+    const body = (request.body ?? {}) as SetCustomizationEnabledRequest;
+    response.json(await new ProjectCustomizationService(id, registry.root(id))
+      .setEnabled(String(request.params.itemId), body.enabled));
+  });
   app.get('/api/projects/:projectId/tree', async (request, response) =>
     response.json(await fileService(request).listTree()));
   app.get('/api/projects/:projectId/files', async (request, response) =>
@@ -139,6 +178,21 @@ export function createAaaApp({
     const project = registry.get(projectId(request));
     const connection = modelConfig.resolve();
     const session = await store.append(String(request.params.sessionId), { role: 'user', content });
+    const userMessage = session.messages.at(-1);
+    if (!userMessage) {
+      throw new Error('The user message could not be persisted.');
+    }
+    const run: AgentRun = {
+      id: randomUUID(),
+      status: 'running',
+      startedAt: new Date().toISOString(),
+      userMessageId: userMessage.id,
+      modelConnectionId: connection.definition.id,
+      reasoning: '',
+      toolEvents: [],
+      changedFiles: []
+    };
+    await store.saveRun(session.id, run);
     const messages: ModelChatMessage[] = [
       {
         role: 'system',
@@ -146,7 +200,10 @@ export function createAaaApp({
           `You are the AAA authorization workbench assistant for project "${project.name}".`,
           'Help the user inspect and develop an A&A security package using the persisted project conversation.',
           'Prioritize traceable control responses, evidence, validation status, and explicit human review before publication.',
-          'Do not claim to have executed tools, read project files, or retrieved evidence; tools and RAG are not enabled.'
+          'You can inspect and modify project files with the provided tools.',
+          'Use tools when the user asks about project contents or requests a file change; do not merely describe an action you can perform.',
+          'Project paths must be relative. Keep the final answer concise and identify files that changed.',
+          'Do not claim to have retrieved cloud evidence because cloud evidence tools are not enabled yet.'
         ].join(' ')
       },
       ...session.messages.map((message) => ({
@@ -170,46 +227,88 @@ export function createAaaApp({
     request.once('aborted', abort);
     response.once('close', abort);
 
-    let assistantText = '';
-    let completed = false;
+    let streamedText = '';
+    let streamedReasoning = '';
+    const streamedToolEvents: AgentRun['toolEvents'] = [];
     try {
-      for await (const event of modelClient.stream(connection, messages, abortController.signal)) {
-        if (abortController.signal.aborted) {
-          throw abortController.signal.reason;
+      const result = await new AaaAgentLoop(modelClient, fileService(request)).run(
+        connection,
+        messages,
+        abortController.signal,
+        {
+          onAssistantText: (text) => {
+            streamedText += text;
+            writeJsonLine(response, { type: 'assistant_text', text });
+          },
+          onReasoning: (text) => {
+            streamedReasoning += text;
+            writeJsonLine(response, { type: 'reasoning', text });
+          },
+          onToolEvent: (event) => {
+            streamedToolEvents.push(event);
+            writeJsonLine(response, { type: 'tool_event', event });
+          }
         }
-        if (event.type === 'assistant_text') {
-          assistantText += event.text;
-          writeJsonLine(response, event);
-        } else if (event.type === 'reasoning') {
-          writeJsonLine(response, event);
-        } else {
-          completed = true;
-        }
-      }
-      if (!completed || !assistantText.trim()) {
-        throw new Error('The model response did not complete with assistant text.');
-      }
+      );
+      const display: ChatMessageDisplayPart[] = [
+        ...(result.reasoning ? [{ kind: 'reasoning' as const, text: result.reasoning }] : []),
+        ...(result.toolEvents.length > 0
+          ? [{ kind: 'working' as const, title: 'Agent steps', events: result.toolEvents }]
+          : [])
+      ];
       const updated = await store.append(String(request.params.sessionId), {
         role: 'assistant',
-        content: assistantText
+        content: result.content,
+        display
       });
       const message = updated.messages.at(-1);
       if (!message) {
         throw new Error('The assistant message could not be persisted.');
       }
+      await store.saveRun(session.id, {
+        ...run,
+        status: 'completed',
+        completedAt: new Date().toISOString(),
+        assistantMessageId: message.id,
+        reasoning: result.reasoning,
+        toolEvents: result.toolEvents,
+        changedFiles: result.changedFiles,
+        assistantText: result.content
+      });
       writeJsonLine(response, {
         type: 'completed',
-        response: { sessionId: session.id, message }
+        response: { sessionId: session.id, message },
+        changedFiles: result.changedFiles
       });
       finished = true;
       response.end();
     } catch (error) {
       const aborted = abortController.signal.aborted
         || (error instanceof Error && error.name === 'AbortError');
+      const safeError = aborted ? 'Request aborted.' : 'Model response failed.';
+      try {
+        await store.saveRun(session.id, {
+          ...run,
+          status: aborted ? 'aborted' : 'failed',
+          completedAt: new Date().toISOString(),
+          reasoning: streamedReasoning,
+          toolEvents: streamedToolEvents,
+          changedFiles: Array.from(new Set(streamedToolEvents
+            .filter((event) => event.type === 'create' || event.type === 'edit')
+            .map((event) => event.filePath)
+            .filter((filePath): filePath is string => Boolean(filePath)))),
+          ...(streamedText ? { assistantText: streamedText } : {}),
+          error: safeError
+        });
+      } catch (persistenceError) {
+        console.error(`[agent-run] Could not persist ${aborted ? 'aborted' : 'failed'} run ${run.id}: ${
+          persistenceError instanceof Error ? persistenceError.message : String(persistenceError)
+        }`);
+      }
       if (!response.destroyed && !response.writableEnded) {
         writeJsonLine(response, {
           type: 'error',
-          message: aborted ? 'Request aborted.' : 'Model response failed.'
+          message: safeError
         });
         finished = true;
         response.end();

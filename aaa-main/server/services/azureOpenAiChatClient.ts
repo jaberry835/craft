@@ -4,6 +4,8 @@ import type {
   ModelChatClient,
   ModelChatMessage,
   ModelStreamChunk,
+  ModelToolCall,
+  ModelToolDefinition,
   ResolvedModelConnection
 } from '../modelTypes.js';
 
@@ -21,12 +23,13 @@ export class AzureOpenAiChatClient implements ModelChatClient {
   async *stream(
     connection: ResolvedModelConnection,
     messages: ModelChatMessage[],
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    tools?: ModelToolDefinition[]
   ): AsyncGenerator<ModelStreamChunk> {
     const endpointKind = this.resolveEndpointKind(connection);
     const useResponsesApi = endpointKind === 'foundry-project'
       || /\/responses$/i.test(connection.endpoint);
-    const request = this.buildRequest(connection, messages, endpointKind, useResponsesApi);
+    const request = this.buildRequest(connection, messages, endpointKind, useResponsesApi, tools);
     const headers = await this.authHeaders(connection);
 
     let response: Response;
@@ -58,6 +61,8 @@ export class AzureOpenAiChatClient implements ModelChatClient {
     const decoder = new TextDecoder();
     let buffer = '';
     let completed = false;
+    let emittedToolCalls = false;
+    const toolCalls = new Map<number | string, { id: string; name: string; arguments: string }>();
 
     try {
       while (true) {
@@ -76,11 +81,19 @@ export class AzureOpenAiChatClient implements ModelChatClient {
             completed = true;
             continue;
           }
+          if (this.captureToolCallDelta(data, useResponsesApi, toolCalls)) {
+            continue;
+          }
           const event = this.parseEvent(data, useResponsesApi);
           if (!event) {
             continue;
           }
           if (event.type === 'completed') {
+            const calls = this.completedToolCalls(toolCalls);
+            if (calls.length > 0) {
+              emittedToolCalls = true;
+              yield { type: 'tool_calls', calls };
+            }
             completed = true;
           } else {
             yield event;
@@ -99,6 +112,12 @@ export class AzureOpenAiChatClient implements ModelChatClient {
         throw signal.reason instanceof Error ? signal.reason : new DOMException('Aborted', 'AbortError');
       }
       throw new Error('Azure OpenAI streaming response ended before completion.');
+    }
+    if (!emittedToolCalls) {
+      const calls = this.completedToolCalls(toolCalls);
+      if (calls.length > 0) {
+        yield { type: 'tool_calls', calls };
+      }
     }
     yield { type: 'completed' };
   }
@@ -125,7 +144,8 @@ export class AzureOpenAiChatClient implements ModelChatClient {
     connection: ResolvedModelConnection,
     messages: ModelChatMessage[],
     endpointKind: AzureOpenAiEndpointKind,
-    useResponsesApi: boolean
+    useResponsesApi: boolean,
+    tools?: ModelToolDefinition[]
   ): { url: string; body: Record<string, unknown> } {
     const { definition, endpoint, deployment, apiVersion } = connection;
     const temperature = definition.temperature ?? 0.2;
@@ -138,14 +158,18 @@ export class AzureOpenAiChatClient implements ModelChatClient {
           : `${endpoint.replace(/\/+$/, '')}/responses`,
         body: {
           model: deployment,
-          input: messages.map((message) => ({
-            type: 'message',
-            role: message.role,
-            content: [{
-              type: message.role === 'assistant' ? 'output_text' : 'input_text',
-              text: message.content
-            }]
-          })),
+          input: this.toResponsesInput(messages),
+          ...(tools?.length
+            ? {
+              tools: tools.map((tool) => ({
+                type: 'function',
+                name: tool.function.name,
+                description: tool.function.description,
+                parameters: tool.function.parameters
+              })),
+              tool_choice: 'auto'
+            }
+            : {}),
           temperature,
           max_output_tokens: maxTokens,
           stream: true
@@ -159,7 +183,8 @@ export class AzureOpenAiChatClient implements ModelChatClient {
         url: /\/chat\/completions$/i.test(endpoint) ? endpoint : `${normalized}/chat/completions`,
         body: {
           model: deployment,
-          messages,
+          messages: this.toChatMessages(messages),
+          ...(tools?.length ? { tools, tool_choice: 'auto' } : {}),
           temperature,
           max_completion_tokens: maxTokens,
           stream: true
@@ -170,7 +195,8 @@ export class AzureOpenAiChatClient implements ModelChatClient {
     return {
       url: `${endpoint}/openai/deployments/${encodeURIComponent(deployment)}/chat/completions?api-version=${encodeURIComponent(apiVersion)}`,
       body: {
-        messages,
+        messages: this.toChatMessages(messages),
+        ...(tools?.length ? { tools, tool_choice: 'auto' } : {}),
         temperature,
         max_tokens: maxTokens,
         stream: true
@@ -216,6 +242,123 @@ export class AzureOpenAiChatClient implements ModelChatClient {
       return { type: 'reasoning', text: first.delta.reasoning_content };
     }
     return null;
+  }
+
+  private captureToolCallDelta(
+    rawJson: string,
+    responsesApi: boolean,
+    toolCalls: Map<number | string, { id: string; name: string; arguments: string }>
+  ): boolean {
+    let event: Record<string, unknown>;
+    try {
+      event = JSON.parse(rawJson) as Record<string, unknown>;
+    } catch {
+      return false;
+    }
+
+    if (responsesApi) {
+      if (event.type === 'response.output_item.added') {
+        const item = typeof event.item === 'object' && event.item !== null
+          ? event.item as Record<string, unknown>
+          : undefined;
+        if (item?.type !== 'function_call') {
+          return false;
+        }
+        const key = typeof item.id === 'string' ? item.id : String(toolCalls.size);
+        toolCalls.set(key, {
+          id: typeof item.call_id === 'string' ? item.call_id : key,
+          name: typeof item.name === 'string' ? item.name : '',
+          arguments: typeof item.arguments === 'string' ? item.arguments : ''
+        });
+        return true;
+      }
+      if (event.type === 'response.function_call_arguments.delta') {
+        const key = typeof event.item_id === 'string' ? event.item_id : String(toolCalls.size);
+        const current = toolCalls.get(key) ?? { id: key, name: '', arguments: '' };
+        current.arguments += typeof event.delta === 'string' ? event.delta : '';
+        toolCalls.set(key, current);
+        return true;
+      }
+      return false;
+    }
+
+    const choices = Array.isArray(event.choices) ? event.choices : [];
+    const first = choices[0] as {
+      delta?: {
+        tool_calls?: Array<{
+          index?: number;
+          id?: string;
+          function?: { name?: string; arguments?: string };
+        }>;
+      };
+    } | undefined;
+    const deltas = first?.delta?.tool_calls ?? [];
+    for (const delta of deltas) {
+      const key = delta.index ?? 0;
+      const current = toolCalls.get(key) ?? {
+        id: delta.id ?? crypto.randomUUID(),
+        name: '',
+        arguments: ''
+      };
+      if (delta.id) current.id = delta.id;
+      if (delta.function?.name) current.name += delta.function.name;
+      if (delta.function?.arguments) current.arguments += delta.function.arguments;
+      toolCalls.set(key, current);
+    }
+    return deltas.length > 0;
+  }
+
+  private completedToolCalls(
+    toolCalls: Map<number | string, { id: string; name: string; arguments: string }>
+  ): ModelToolCall[] {
+    return Array.from(toolCalls.values())
+      .filter((call) => call.name)
+      .map((call) => ({
+        id: call.id,
+        type: 'function',
+        function: {
+          name: call.name,
+          arguments: call.arguments || '{}'
+        }
+      }));
+  }
+
+  private toChatMessages(messages: ModelChatMessage[]): Array<Record<string, unknown>> {
+    return messages.map((message) => ({
+      role: message.role,
+      content: message.content,
+      ...(message.toolCalls ? { tool_calls: message.toolCalls } : {}),
+      ...(message.toolCallId ? { tool_call_id: message.toolCallId } : {})
+    }));
+  }
+
+  private toResponsesInput(messages: ModelChatMessage[]): Array<Record<string, unknown>> {
+    return messages.flatMap((message) => {
+      if (message.role === 'tool') {
+        return [{
+          type: 'function_call_output',
+          call_id: message.toolCallId ?? '',
+          output: message.content
+        }];
+      }
+      const items: Array<Record<string, unknown>> = [{
+        type: 'message',
+        role: message.role,
+        content: [{
+          type: message.role === 'assistant' ? 'output_text' : 'input_text',
+          text: message.content
+        }]
+      }];
+      for (const toolCall of message.toolCalls ?? []) {
+        items.push({
+          type: 'function_call',
+          call_id: toolCall.id,
+          name: toolCall.function.name,
+          arguments: toolCall.function.arguments
+        });
+      }
+      return items;
+    });
   }
 
   private resolveEndpointKind(connection: ResolvedModelConnection): AzureOpenAiEndpointKind {

@@ -1,41 +1,97 @@
+import { PartitionKeyBuilder } from '@azure/cosmos';
 import { randomUUID } from 'node:crypto';
 import type {
   AppendMessageRequest,
+  AgentRun,
   ChatMessage,
   ChatSession,
   ChatSessionSummary,
   CreateSessionRequest
 } from '../src/types/api.js';
 import type { ChatSessionStore } from './chatSessionStore.js';
-import type { CosmosContainerBinding } from './cosmosContainerFactory.js';
-import { logCosmosError } from './cosmosContainerFactory.js';
+import {
+  CosmosSchemaMismatchError,
+  logCosmosError,
+  type CosmosContainerBinding
+} from './cosmosContainerFactory.js';
 import { BadRequestError, NotFoundError, StorageUnavailableError } from './httpErrors.js';
+import type { CosmosChatSchemaMode } from './storageConfig.js';
 
 const sessionIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-interface ChatSessionDocument extends ChatSession {
+interface NativeChatSessionDocument extends ChatSession {
   type: 'chatSession';
 }
+
+interface JuniorChatSessionDocument extends NativeChatSessionDocument {
+  ownerId: string;
+  workspaceId: string;
+  partitionKey: string;
+}
+
+const legacyPartitionKey = new PartitionKeyBuilder().addNoneValue().build();
 
 export class CosmosChatSessionStore implements ChatSessionStore {
   constructor(
     private readonly binding: CosmosContainerBinding,
-    private readonly projectId: string
+    private readonly projectId: string,
+    private readonly schemaMode: CosmosChatSchemaMode = 'native',
+    private readonly ownerId = 'aaa'
   ) {}
 
   async list(): Promise<ChatSessionSummary[]> {
     return this.withCosmos('list sessions', async () => {
-      const { resources } = await this.binding.container.items.query<ChatSessionDocument>({
-        query: 'SELECT * FROM c WHERE c.projectId = @projectId AND c.type = @type ORDER BY c.updatedAt DESC',
-        parameters: [
-          { name: '@projectId', value: this.projectId },
-          { name: '@type', value: 'chatSession' }
-        ]
-      }, { partitionKey: this.projectId }).fetchAll();
-      return resources.map(({ messages, type: _type, ...summary }) => {
-        void _type;
-        return { ...summary, messageCount: messages.length };
-      });
+      if (this.schemaMode === 'native') {
+        const { resources } =
+          await this.binding.container.items.query<NativeChatSessionDocument>({
+            query: `SELECT * FROM c
+              WHERE c.projectId = @projectId AND c.type = @type
+              ORDER BY c.updatedAt DESC`,
+            parameters: [
+              { name: '@projectId', value: this.projectId },
+              { name: '@type', value: 'chatSession' }
+            ]
+          }, { partitionKey: this.projectId }).fetchAll();
+        return resources.map((document) => this.toSummary(document));
+      }
+
+      const { resources } =
+        await this.binding.container.items.query<JuniorChatSessionDocument>({
+          query: `SELECT * FROM c
+            WHERE c.partitionKey = @partitionKey
+              AND c.ownerId = @ownerId
+              AND c.workspaceId = @projectId
+              AND c.projectId = @projectId
+              AND c.type = @type
+            ORDER BY c.updatedAt DESC`,
+          parameters: [
+            { name: '@partitionKey', value: this.juniorPartitionKey },
+            { name: '@ownerId', value: this.ownerId },
+            { name: '@projectId', value: this.projectId },
+            { name: '@type', value: 'chatSession' }
+          ]
+        }, { partitionKey: this.juniorPartitionKey }).fetchAll();
+      if (resources.length > 0) {
+        return resources.map((document) => this.toSummary(document));
+      }
+
+      const { resources: legacyResources } =
+        await this.binding.container.items.query<NativeChatSessionDocument>({
+          query: `SELECT * FROM c
+            WHERE c.projectId = @projectId
+              AND c.type = @type
+              AND NOT IS_DEFINED(c.partitionKey)
+              AND NOT IS_DEFINED(c.ownerId)
+              AND NOT IS_DEFINED(c.workspaceId)
+            ORDER BY c.updatedAt DESC`,
+          parameters: [
+            { name: '@projectId', value: this.projectId },
+            { name: '@type', value: 'chatSession' }
+          ]
+        }, { partitionKey: legacyPartitionKey }).fetchAll();
+      return legacyResources
+        .filter((document) => this.isLegacyJuniorDocument(document))
+        .map((document) => this.toSummary(document));
     });
   }
 
@@ -48,7 +104,8 @@ export class CosmosChatSessionStore implements ChatSessionStore {
       createdAt: now,
       updatedAt: now,
       messageCount: 0,
-      messages: []
+      messages: [],
+      runs: []
     };
     await this.save(session);
     return session;
@@ -57,20 +114,26 @@ export class CosmosChatSessionStore implements ChatSessionStore {
   async get(sessionId: string): Promise<ChatSession> {
     this.assertSessionId(sessionId);
     try {
-      const { resource } = await this.binding.container.item(sessionId, this.projectId)
-        .read<ChatSessionDocument>();
-      if (!resource) {
-        throw new NotFoundError(`Session was not found: ${sessionId}`);
-      }
-      return this.fromDocument(resource);
+      return await this.withCosmos('get session', async () => {
+        const { resource } = await this.binding.container
+          .item(sessionId, this.itemPartitionKey)
+          .read<NativeChatSessionDocument | JuniorChatSessionDocument>();
+        if (!resource || !this.isCurrentDocument(resource)) {
+          throw new NotFoundError(`Session was not found: ${sessionId}`);
+        }
+        return this.fromDocument(resource);
+      });
     } catch (error) {
       if (error instanceof NotFoundError) {
         throw error;
       }
+      if (this.schemaMode === 'junior-compatible' && cosmosErrorCode(error) === 404) {
+        return this.getLegacyJunior(sessionId);
+      }
       if (cosmosErrorCode(error) === 404) {
         throw new NotFoundError(`Session was not found: ${sessionId}`);
       }
-      return this.fail('get session', error);
+      throw error;
     }
   }
 
@@ -88,12 +151,26 @@ export class CosmosChatSessionStore implements ChatSessionStore {
   async delete(sessionId: string): Promise<void> {
     this.assertSessionId(sessionId);
     try {
-      await this.binding.container.item(sessionId, this.projectId).delete();
+      await this.withCosmos('delete session', async () => {
+        const { resource } = await this.binding.container
+          .item(sessionId, this.itemPartitionKey)
+          .read<NativeChatSessionDocument | JuniorChatSessionDocument>();
+        if (!resource || !this.isCurrentDocument(resource)) {
+          throw new NotFoundError(`Session was not found: ${sessionId}`);
+        }
+        await this.binding.container.item(sessionId, this.itemPartitionKey).delete();
+      });
     } catch (error) {
+      if (error instanceof NotFoundError) {
+        throw error;
+      }
+      if (this.schemaMode === 'junior-compatible' && cosmosErrorCode(error) === 404) {
+        return this.deleteLegacyJunior(sessionId);
+      }
       if (cosmosErrorCode(error) === 404) {
         throw new NotFoundError(`Session was not found: ${sessionId}`);
       }
-      this.fail('delete session', error);
+      throw error;
     }
   }
 
@@ -110,7 +187,8 @@ export class CosmosChatSessionStore implements ChatSessionStore {
       id: randomUUID(),
       role: request.role,
       content,
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      ...(request.display?.length ? { display: request.display } : {})
     };
     const messages = [...session.messages, message];
     const updated: ChatSession = {
@@ -126,18 +204,139 @@ export class CosmosChatSessionStore implements ChatSessionStore {
     return updated;
   }
 
+  async saveRun(sessionId: string, run: AgentRun): Promise<ChatSession> {
+    const session = await this.get(sessionId);
+    const runs = [...(session.runs ?? []).filter((candidate) => candidate.id !== run.id), run];
+    const updated = {
+      ...session,
+      runs,
+      updatedAt: run.completedAt ?? run.startedAt
+    };
+    await this.save(updated);
+    return updated;
+  }
+
   private async save(session: ChatSession): Promise<void> {
     await this.withCosmos('save session', async () => {
-      await this.binding.container.items.upsert<ChatSessionDocument>({
+      if (this.schemaMode === 'native') {
+        await this.binding.container.items.upsert<NativeChatSessionDocument>({
+          ...session,
+          type: 'chatSession'
+        });
+        return;
+      }
+      await this.binding.container.items.upsert<JuniorChatSessionDocument>({
         ...session,
+        ownerId: this.ownerId,
+        workspaceId: this.projectId,
+        partitionKey: this.juniorPartitionKey,
         type: 'chatSession'
       });
     });
   }
 
-  private fromDocument({ type: _type, ...session }: ChatSessionDocument): ChatSession {
+  private get itemPartitionKey(): string {
+    return this.schemaMode === 'native' ? this.projectId : this.juniorPartitionKey;
+  }
+
+  private get juniorPartitionKey(): string {
+    return `${this.ownerId}:${this.projectId}`;
+  }
+
+  private async getLegacyJunior(sessionId: string): Promise<ChatSession> {
+    try {
+      return await this.withCosmos('get legacy session', async () => {
+        const { resource } = await this.binding.container.item(sessionId, legacyPartitionKey)
+          .read<NativeChatSessionDocument>();
+        if (!resource || !this.isLegacyJuniorDocument(resource)) {
+          throw new NotFoundError(`Session was not found: ${sessionId}`);
+        }
+        const session = this.fromDocument(resource);
+        await this.save(session);
+        await this.binding.container.item(sessionId, legacyPartitionKey).delete();
+        return session;
+      });
+    } catch (error) {
+      if (error instanceof NotFoundError) {
+        throw error;
+      }
+      if (cosmosErrorCode(error) === 404) {
+        throw new NotFoundError(`Session was not found: ${sessionId}`);
+      }
+      throw error;
+    }
+  }
+
+  private async deleteLegacyJunior(sessionId: string): Promise<void> {
+    try {
+      await this.withCosmos('delete legacy session', async () => {
+        const { resource } = await this.binding.container.item(sessionId, legacyPartitionKey)
+          .read<NativeChatSessionDocument>();
+        if (!resource || !this.isLegacyJuniorDocument(resource)) {
+          throw new NotFoundError(`Session was not found: ${sessionId}`);
+        }
+        await this.binding.container.item(sessionId, legacyPartitionKey).delete();
+      });
+    } catch (error) {
+      if (error instanceof NotFoundError) {
+        throw error;
+      }
+      if (cosmosErrorCode(error) === 404) {
+        throw new NotFoundError(`Session was not found: ${sessionId}`);
+      }
+      throw error;
+    }
+  }
+
+  private isCurrentDocument(
+    document: NativeChatSessionDocument | JuniorChatSessionDocument
+  ): boolean {
+    if (document.projectId !== this.projectId || document.type !== 'chatSession') {
+      return false;
+    }
+    if (this.schemaMode === 'native') {
+      return !('ownerId' in document)
+        && !('workspaceId' in document)
+        && !('partitionKey' in document);
+    }
+    const junior = document as JuniorChatSessionDocument;
+    return junior.ownerId === this.ownerId
+      && junior.workspaceId === this.projectId
+      && junior.partitionKey === this.juniorPartitionKey;
+  }
+
+  private isLegacyJuniorDocument(document: NativeChatSessionDocument): boolean {
+    return document.projectId === this.projectId
+      && document.type === 'chatSession'
+      && !('partitionKey' in document)
+      && !('ownerId' in document)
+      && !('workspaceId' in document);
+  }
+
+  private fromDocument(
+    document: NativeChatSessionDocument | JuniorChatSessionDocument
+  ): ChatSession {
+    const {
+      type: _type,
+      ownerId: _ownerId,
+      workspaceId: _workspaceId,
+      partitionKey: _partitionKey,
+      ...session
+    } = document as JuniorChatSessionDocument;
     void _type;
-    return { ...session, messageCount: session.messages.length };
+    void _ownerId;
+    void _workspaceId;
+    void _partitionKey;
+    return { ...session, runs: session.runs ?? [], messageCount: session.messages.length };
+  }
+
+  private toSummary(
+    document: NativeChatSessionDocument | JuniorChatSessionDocument
+  ): ChatSessionSummary {
+    const { messages, runs, ...session } = this.fromDocument(document);
+    void messages;
+    void runs;
+    return session;
   }
 
   private cleanTitle(value?: string): string {
@@ -156,17 +355,19 @@ export class CosmosChatSessionStore implements ChatSessionStore {
 
   private async withCosmos<T>(operation: string, action: () => Promise<T>): Promise<T> {
     try {
+      await this.binding.ensureReady?.();
       return await action();
     } catch (error) {
-      return this.fail(operation, error);
+      if (error instanceof NotFoundError || cosmosErrorCode(error) === 404) {
+        throw error;
+      }
+      logCosmosError(operation, this.binding.settings, error);
+      throw new StorageUnavailableError(
+        error instanceof CosmosSchemaMismatchError
+          ? error.message
+          : 'Cosmos DB chat session storage is unavailable. Check its configuration and service connectivity.'
+      );
     }
-  }
-
-  private fail(operation: string, error: unknown): never {
-    logCosmosError(operation, this.binding.settings, error);
-    throw new StorageUnavailableError(
-      'Cosmos DB chat session storage is unavailable. Check its configuration and service connectivity.'
-    );
   }
 }
 

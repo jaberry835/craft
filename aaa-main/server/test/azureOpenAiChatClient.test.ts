@@ -99,3 +99,58 @@ test('azure client maps responses API text and reasoning to provider-neutral chu
     { type: 'completed' }
   ]);
 });
+
+test('azure client sends tools and assembles streamed responses API tool calls', async () => {
+  let requestBody: Record<string, unknown> = {};
+  const client = new AzureOpenAiChatClient(async (_input, init) => {
+    requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return sseResponse([
+      '{"type":"response.output_item.added","item":{"type":"function_call","id":"item-1","call_id":"call-1","name":"write_file"}}',
+      '{"type":"response.function_call_arguments.delta","item_id":"item-1","delta":"{\\"path\\":\\"test.md\\","}',
+      '{"type":"response.function_call_arguments.delta","item_id":"item-1","delta":"\\"content\\":\\"# Test\\"}"}',
+      '{"type":"response.completed"}'
+    ]);
+  });
+  const tools = [{
+    type: 'function' as const,
+    function: {
+      name: 'write_file',
+      description: 'Write a file.',
+      parameters: {
+        type: 'object' as const,
+        properties: { path: { type: 'string' }, content: { type: 'string' } },
+        required: ['path', 'content']
+      }
+    }
+  }];
+  const events = [];
+  for await (const event of client.stream(
+    connection('https://example.services.ai.azure.com/api/projects/aaa/openai/v1/responses'),
+    [{ role: 'user', content: 'create a file' }],
+    undefined,
+    tools
+  )) {
+    events.push(event);
+  }
+
+  assert.deepEqual(requestBody.tools, [{
+    type: 'function',
+    name: 'write_file',
+    description: 'Write a file.',
+    parameters: tools[0].function.parameters
+  }]);
+  assert.deepEqual(events, [
+    {
+      type: 'tool_calls',
+      calls: [{
+        id: 'call-1',
+        type: 'function',
+        function: {
+          name: 'write_file',
+          arguments: '{"path":"test.md","content":"# Test"}'
+        }
+      }]
+    },
+    { type: 'completed' }
+  ]);
+});

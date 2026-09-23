@@ -10,7 +10,10 @@ const repositoryRoot = process.env.AAA_ROOT
   ? path.resolve(process.env.AAA_ROOT)
   : process.cwd();
 const dataRoot = path.join(repositoryRoot, 'data');
-const registry = await ProjectRegistry.load(path.join(repositoryRoot, 'config', 'projects.json'));
+const registry = await ProjectRegistry.load(path.join(repositoryRoot, 'config', 'projects.json'), {
+  statePath: path.join(dataRoot, 'projects.json'),
+  managedRoot: path.join(dataRoot, 'workspaces')
+});
 const modelConfig = await ModelConnectionConfig.load(
   path.join(repositoryRoot, 'config', 'agent-connections.json')
 );

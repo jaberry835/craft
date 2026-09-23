@@ -5,6 +5,7 @@ import { BadRequestError, NotFoundError } from './httpErrors.js';
 import type { ChatSessionStore } from './chatSessionStore.js';
 import type {
   AppendMessageRequest,
+  AgentRun,
   ChatMessage,
   ChatSession,
   ChatSessionSummary,
@@ -26,7 +27,10 @@ export class JsonSessionStore implements ChatSessionStore {
     const sessions = await Promise.all(entries
       .filter((entry) => entry.isFile() && sessionIdPattern.test(entry.name.replace(/\.json$/, '')) && entry.name.endsWith('.json'))
       .map((entry) => this.read(path.join(this.sessionsRoot, entry.name))));
-    return sessions.map(({ messages, ...summary }) => ({ ...summary, messageCount: messages.length }))
+    return sessions.map(({ messages, runs, ...summary }) => {
+      void runs;
+      return { ...summary, messageCount: messages.length };
+    })
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 
@@ -39,7 +43,8 @@ export class JsonSessionStore implements ChatSessionStore {
       createdAt: now,
       updatedAt: now,
       messageCount: 0,
-      messages: []
+      messages: [],
+      runs: []
     };
     await this.save(session);
     return session;
@@ -86,7 +91,8 @@ export class JsonSessionStore implements ChatSessionStore {
       id: randomUUID(),
       role: request.role,
       content,
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      ...(request.display?.length ? { display: request.display } : {})
     };
     const messages = [...session.messages, message];
     const updated: ChatSession = {
@@ -97,6 +103,18 @@ export class JsonSessionStore implements ChatSessionStore {
       updatedAt: message.createdAt,
       messageCount: messages.length,
       messages
+    };
+    await this.save(updated);
+    return updated;
+  }
+
+  async saveRun(sessionId: string, run: AgentRun): Promise<ChatSession> {
+    const session = await this.get(sessionId);
+    const runs = [...(session.runs ?? []).filter((candidate) => candidate.id !== run.id), run];
+    const updated = {
+      ...session,
+      runs,
+      updatedAt: run.completedAt ?? run.startedAt
     };
     await this.save(updated);
     return updated;
@@ -119,7 +137,8 @@ export class JsonSessionStore implements ChatSessionStore {
   }
 
   private async read(filePath: string): Promise<ChatSession> {
-    return JSON.parse(await readFile(filePath, 'utf8')) as ChatSession;
+    const session = JSON.parse(await readFile(filePath, 'utf8')) as ChatSession;
+    return { ...session, runs: session.runs ?? [] };
   }
 
   private filePath(sessionId: string): string {

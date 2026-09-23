@@ -1,6 +1,7 @@
 export type SessionStorageBackend = 'local' | 'cosmos';
 export type WorkspaceStorageBackend = 'local' | 'blob' | 'unsupported';
 export type CosmosAuthMode = 'entra' | 'api-key';
+export type CosmosChatSchemaMode = 'native' | 'junior-compatible';
 
 export interface SessionStorageStatus {
   backend: SessionStorageBackend;
@@ -13,6 +14,8 @@ export interface SessionStorageStatus {
   endpointHost?: string;
   database?: string;
   container?: string;
+  schemaMode?: CosmosChatSchemaMode;
+  autoCreate?: boolean;
 }
 
 export interface WorkspaceFileStorageStatus {
@@ -34,6 +37,9 @@ export interface CosmosSessionConfig {
   database: string;
   container: string;
   authMode: CosmosAuthMode;
+  schemaMode: CosmosChatSchemaMode;
+  autoCreate: boolean;
+  ownerId: string;
   key?: string;
 }
 
@@ -82,6 +88,24 @@ export function resolveStorageConfig(environment: NodeJS.ProcessEnv = process.en
     ? requestedAuthMode
     : undefined;
   const invalid: string[] = requestedAuthMode && !authMode ? ['COSMOS_DB_AUTH_MODE'] : [];
+  const requestedSchemaMode =
+    environment.COSMOS_DB_CHAT_SCHEMA_MODE?.trim().toLowerCase() || 'native';
+  const schemaMode = requestedSchemaMode === 'native'
+    || requestedSchemaMode === 'junior-compatible'
+    ? requestedSchemaMode
+    : undefined;
+  if (!schemaMode) {
+    invalid.push('COSMOS_DB_CHAT_SCHEMA_MODE');
+  }
+  const requestedAutoCreate = environment.COSMOS_DB_AUTO_CREATE?.trim().toLowerCase() || 'false';
+  const autoCreate = requestedAutoCreate === 'true'
+    ? true
+    : requestedAutoCreate === 'false'
+      ? false
+      : undefined;
+  if (autoCreate === undefined) {
+    invalid.push('COSMOS_DB_AUTO_CREATE');
+  }
   if (authMode === 'api-key' && !environment.COSMOS_DB_KEY?.trim()) {
     missing.push('COSMOS_DB_KEY');
   }
@@ -89,8 +113,12 @@ export function resolveStorageConfig(environment: NodeJS.ProcessEnv = process.en
   const endpoint = environment.COSMOS_DB_ENDPOINT?.trim() ?? '';
   const database = environment.COSMOS_DB_DATABASE?.trim() ?? '';
   const container = environment.COSMOS_DB_CHAT_CONTAINER?.trim() ?? '';
+  const ownerId = environment.COSMOS_DB_OWNER_ID?.trim() || 'aaa';
   if (endpoint && !isHttpsUrl(endpoint)) {
     invalid.push('COSMOS_DB_ENDPOINT');
+  }
+  if (schemaMode === 'junior-compatible' && !/^[A-Za-z0-9._-]+$/.test(ownerId)) {
+    invalid.push('COSMOS_DB_OWNER_ID');
   }
   const ready = missing.length === 0 && invalid.length === 0;
   const sessions: SessionStorageStatus = {
@@ -103,17 +131,22 @@ export function resolveStorageConfig(environment: NodeJS.ProcessEnv = process.en
     authMode,
     endpointHost: endpointHost(endpoint),
     database: database || undefined,
-    container: container || undefined
+    container: container || undefined,
+    schemaMode,
+    autoCreate
   };
 
   return {
     status: { sessions, workspaceFiles },
-    cosmos: ready && authMode
+    cosmos: ready && authMode && schemaMode && autoCreate !== undefined
       ? {
           endpoint,
           database,
           container,
           authMode,
+          schemaMode,
+          autoCreate,
+          ownerId,
           key: authMode === 'api-key' ? environment.COSMOS_DB_KEY : undefined
         }
       : undefined
