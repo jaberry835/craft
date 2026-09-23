@@ -1,0 +1,26 @@
+I need the right AI construct within VSCode --- it may be an agent, multiple agents, skills, or other things --- my goal is to simulate a workflow I will describe:  
+
+
+1) Create a standard file structure that will support the creations of a folder structure that will be used to create a security package.  The directories we will need 
+    a. cloud-scan , which will hold json, or other files that are a result of a scan of an azure subscription 
+    b. background-docs - any corresponsponce or other information relevant to the project.  
+    c. security-standards - this will contain some dumps of standard security requirements 
+    d. standard-docs - this will include expected artificats that will be generated
+    e. control-respones - this will be directories with families such as AU, SC, etc.... and in each directory we will be creating markdown files that will answer questions based on the security documentation
+
+2) I will need agent(s) that can read the security standards and answer the questions based on the cloud scan and background docs.   This may be backed by Azure-Ai-Search 
+
+3) I believe I will need an mcp server that retrieves data from azure (will build this sepearte from this project)
+
+4)  I already have an mcp server that publishes the md files for friendlier viewing of the output content.  
+
+5)  We will also need someting like an mcp server or agent that goes and collects links to relevant pages within Azure that could be captured as artificats 
+
+6)  We also may want to link to specfic documents within our Azure docs (held in high side at specific known addresses such as https://docs.azure.purple.ic.gov  that may also be linked to for specific information that may be artifact 
+
+
+reminder that all of this will be Air-Gap, so I need to take in to consideration when brining in other tools (need to ask to see if likely available)
+
+Stage 1 of this is to build the tooling to be used within Agent Window within VsCode for a demo --- build and evaluate security package 
+
+Use the background doc for another AI opinion that seemed pretty good in understanding what we are doing

@@ -59,3 +59,4 @@ Curated Demo Code
 |------|---------|--------|---------|
 | 2026-09-23 01:12 UTC | mcp-sitebuilder | main | +45 |
 | 2026-09-23 01:12 UTC | aaa | main | +19 |
+| 2026-09-23 01:12 UTC | another-demo | main | +34 |

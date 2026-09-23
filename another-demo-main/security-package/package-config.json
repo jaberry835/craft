@@ -1,0 +1,12 @@
+{
+  "packageName": "Security Package Demo",
+  "systemName": "TBD",
+  "assessmentBoundary": "TBD",
+  "azureEnvironment": "air-gapped",
+  "portalBaseUrl": null,
+  "documentationBaseUrl": "https://docs.azure.purple.ic.gov",
+  "controlFamilies": [
+    "AU",
+    "SC"
+  ]
+}
