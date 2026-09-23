@@ -28,84 +28,35 @@ import {
   PanelRightClose,
   Paperclip,
   Plus,
+  RefreshCw,
   Search,
   Send,
   Server,
   Settings2,
   ShieldCheck,
   Sparkles,
+  Square,
   Sun,
   TerminalSquare,
   UserRound,
   Wrench
 } from 'lucide-react';
+import { aaaApi, ApiRequestError } from './api/aaaApi';
+import type {
+  ChatMessage,
+  ChatSession,
+  ChatSessionSummary,
+  FileTreeNode,
+  ModelConnectionStatus,
+  ProjectSummary,
+  ProjectTextFile,
+  StorageStatus
+} from './types/api';
 import './App.css';
 
 type PreviewMode = 'preview' | 'source' | 'browser';
 type ArtifactTab = 'files' | PreviewMode;
 type Theme = 'light' | 'dark';
-type FileKind = 'folder' | 'markdown' | 'json';
-
-interface WorkspaceFile {
-  name: string;
-  kind: FileKind;
-  depth: number;
-  open?: boolean;
-  selected?: boolean;
-}
-
-interface ChatMessage {
-  role: 'user' | 'assistant';
-  content: string;
-}
-
-const files: WorkspaceFile[] = [
-  { name: 'security-package', kind: 'folder', depth: 0, open: true },
-  { name: 'background-docs', kind: 'folder', depth: 1 },
-  { name: 'cloud-scan', kind: 'folder', depth: 1 },
-  { name: 'control-responses', kind: 'folder', depth: 1, open: true },
-  { name: 'AU', kind: 'folder', depth: 2, open: true },
-  { name: 'AU-2.md', kind: 'markdown', depth: 3 },
-  { name: 'SC', kind: 'folder', depth: 2 },
-  { name: 'security-standards', kind: 'folder', depth: 1 },
-  { name: 'standard-docs', kind: 'folder', depth: 1, open: true },
-  { name: 'artifact-index.md', kind: 'markdown', depth: 2 },
-  { name: 'evidence-register.md', kind: 'markdown', depth: 2 },
-  { name: 'validation-report.md', kind: 'markdown', depth: 2, selected: true },
-  { name: 'package-config.json', kind: 'json', depth: 1 }
-];
-
-const markdownContent = `# Validation report
-
-**Package:** Atlas Authorization Package  
-**Scope:** AU-2, SC-7  
-**Overall result:** Ready for human review
-
-## Summary
-
-| Result | Count |
-| --- | ---: |
-| Pass | 12 |
-| Warning | 2 |
-| Fail | 0 |
-
-## Findings
-
-### AU-2 · Event logging
-
-**Determination:** Satisfied
-
-All required event categories are configured in the current policy. Configuration values are supported by evidence **EV-0001** and **EV-0002**.
-
-### SC-7 · Boundary protection
-
-**Determination:** Partially Satisfied
-
-Network controls are present. Reviewer confirmation is still required for the documented exception path.
-
-> AI-generated assessment aid. Final authorization decisions remain with the designated human reviewer.
-`;
-
 const starterPrompts = [
   {
     icon: ShieldCheck,
@@ -124,14 +75,43 @@ const starterPrompts = [
   }
 ];
 
-const initialMessages: ChatMessage[] = [];
 const themeStorageKey = 'aaa-theme';
 
-const sessions = [
-  { title: 'Build AU-2 and SC-7', detail: 'Just now', active: true },
-  { title: 'Validate package evidence', detail: 'Yesterday' },
-  { title: 'Initialize security package', detail: 'Sep 18' }
-];
+function formatRelativeTime(value: string): string {
+  const elapsed = Date.now() - new Date(value).getTime();
+  const minutes = Math.max(0, Math.floor(elapsed / 60_000));
+  if (minutes < 1) return 'Just now';
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return days === 1 ? 'Yesterday' : `${days}d ago`;
+}
+
+function flattenVisibleNodes(
+  nodes: FileTreeNode[],
+  expanded: Set<string>,
+  depth = 0
+): Array<{ node: FileTreeNode; depth: number }> {
+  return nodes.flatMap((node) => [
+    { node, depth },
+    ...(node.type === 'directory' && expanded.has(node.path)
+      ? flattenVisibleNodes(node.children ?? [], expanded, depth + 1)
+      : [])
+  ]);
+}
+
+function findDefaultFile(nodes: FileTreeNode[]): FileTreeNode | undefined {
+  const allFiles = findAllFiles(nodes);
+  return allFiles.find((node) => node.name === 'validation-report.md')
+    ?? allFiles.find((node) => node.name === 'README.md')
+    ?? allFiles.find((node) => node.type === 'file' && node.name.endsWith('.md'))
+    ?? allFiles.find((node) => node.type === 'file');
+}
+
+function findAllFiles(nodes: FileTreeNode[]): FileTreeNode[] {
+  return nodes.flatMap((node) => node.type === 'file' ? [node] : findAllFiles(node.children ?? []));
+}
 
 function getInitialTheme(): Theme {
   const stored = window.localStorage.getItem(themeStorageKey);
@@ -212,12 +192,35 @@ function App() {
   const [rightOpen, setRightOpen] = useState(true);
   const [artifactTab, setArtifactTab] = useState<ArtifactTab>('files');
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
-  const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [activeProjectId, setActiveProjectId] = useState('');
+  const [sessions, setSessions] = useState<ChatSessionSummary[]>([]);
+  const [activeSession, setActiveSession] = useState<ChatSession | null>(null);
+  const [fileTree, setFileTree] = useState<FileTreeNode[]>([]);
+  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
+  const [selectedFile, setSelectedFile] = useState<ProjectTextFile | null>(null);
+  const [sessionSearch, setSessionSearch] = useState('');
   const [draft, setDraft] = useState('');
   const [isThinking, setIsThinking] = useState(false);
-  const [selectedFile, setSelectedFile] = useState('validation-report.md');
-  const activeProject = 'Atlas Authorization';
+  const [streamingText, setStreamingText] = useState('');
+  const [streamingReasoning, setStreamingReasoning] = useState('');
+  const [modelStatus, setModelStatus] = useState<ModelConnectionStatus | null>(null);
+  const [storageStatus, setStorageStatus] = useState<StorageStatus | null>(null);
+  const [isCreatingSession, setIsCreatingSession] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState('');
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const streamAbortRef = useRef<AbortController | null>(null);
+  const activeProject = projects.find((project) => project.id === activeProjectId);
+  const messages = activeSession?.messages ?? [];
+  const visibleFiles = useMemo(
+    () => flattenVisibleNodes(fileTree, expandedPaths),
+    [expandedPaths, fileTree]
+  );
+  const filteredSessions = useMemo(() => {
+    const query = sessionSearch.trim().toLowerCase();
+    return query ? sessions.filter((session) => session.title.toLowerCase().includes(query)) : sessions;
+  }, [sessionSearch, sessions]);
 
   const shellStyle = useMemo(() => ({
     '--left-width': leftOpen ? `${leftWidth}px` : '0px',
@@ -229,34 +232,203 @@ function App() {
   }, [theme]);
 
   useEffect(() => {
-    if (!isThinking) {
-      return;
-    }
+    let cancelled = false;
+    const loadWorkspace = async () => {
+      setIsLoading(true);
+      setError('');
+      try {
+        const [response, status, storage] = await Promise.all([
+          aaaApi.listProjects(),
+          aaaApi.getModelStatus(),
+          aaaApi.getStorageStatus()
+        ]);
+        if (cancelled) return;
+        setProjects(response.projects);
+        setActiveProjectId(response.activeProjectId);
+        setModelStatus(status);
+        setStorageStatus(storage);
+      } catch (loadError) {
+        if (!cancelled) setError(loadError instanceof Error ? loadError.message : 'Could not load projects.');
+      } finally {
+        if (!cancelled) setIsLoading(false);
+      }
+    };
+    void loadWorkspace();
+    return () => { cancelled = true; };
+  }, []);
 
-    const timer = window.setTimeout(() => {
-      setMessages((current) => [
-        ...current,
-        {
-          role: 'assistant',
-          content: 'I’ll use the **Security Package Builder** workflow and ground each response in local evidence. I found 2 controls in scope and will preserve the human-review boundary while generating the draft package.'
-        }
+  const loadProjectData = useCallback(async (projectId: string) => {
+    setIsLoading(true);
+    setError('');
+    try {
+      const [nextSessions, nextTree] = await Promise.all([
+        aaaApi.listSessions(projectId),
+        aaaApi.getFileTree(projectId)
       ]);
-      setIsThinking(false);
-    }, 900);
+      setSessions(nextSessions);
+      setFileTree(nextTree);
+      setExpandedPaths(new Set(nextTree.filter((node) => node.type === 'directory').map((node) => node.path)));
 
-    return () => window.clearTimeout(timer);
-  }, [isThinking]);
+      const preferredSessionId = activeSession?.projectId === projectId ? activeSession.id : nextSessions[0]?.id;
+      setActiveSession(preferredSessionId ? await aaaApi.getSession(projectId, preferredSessionId) : null);
 
-  const sendMessage = useCallback((content = draft) => {
-    const trimmed = content.trim();
-    if (!trimmed || isThinking) {
+      if (!selectedFile || activeProjectId !== projectId) {
+        const defaultFile = findDefaultFile(nextTree);
+        if (defaultFile?.type === 'file') {
+          setSelectedFile(await aaaApi.readTextFile(projectId, defaultFile.path));
+        } else {
+          setSelectedFile(null);
+        }
+      }
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : 'Could not load the project workspace.');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [activeProjectId, activeSession?.id, activeSession?.projectId, selectedFile]);
+
+  useEffect(() => {
+    if (activeProjectId) void loadProjectData(activeProjectId);
+    // Project changes intentionally trigger one complete workspace reload.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeProjectId]);
+
+  const createSession = useCallback(async () => {
+    if (!activeProjectId || isCreatingSession) return;
+    setError('');
+    setIsCreatingSession(true);
+    try {
+      const session = await aaaApi.createSession(activeProjectId);
+      setActiveSession(session);
+      setSessions((current) => [{ ...session }, ...current]);
+      composerRef.current?.focus();
+    } catch (createError) {
+      setError(createError instanceof Error ? createError.message : 'Could not create a session.');
+    } finally {
+      setIsCreatingSession(false);
+    }
+  }, [activeProjectId, isCreatingSession]);
+
+  const selectSession = useCallback(async (sessionId: string) => {
+    if (!activeProjectId || sessionId === activeSession?.id) return;
+    setError('');
+    try {
+      setActiveSession(await aaaApi.getSession(activeProjectId, sessionId));
+    } catch (selectError) {
+      setError(selectError instanceof Error ? selectError.message : 'Could not load the session.');
+    }
+  }, [activeProjectId, activeSession?.id]);
+
+  const openFile = useCallback(async (node: FileTreeNode) => {
+    if (!activeProjectId) return;
+    if (node.type === 'directory') {
+      setExpandedPaths((current) => {
+        const next = new Set(current);
+        if (next.has(node.path)) next.delete(node.path);
+        else next.add(node.path);
+        return next;
+      });
       return;
     }
 
-    setMessages((current) => [...current, { role: 'user', content: trimmed }]);
-    setDraft('');
+    setError('');
+    try {
+      const file = await aaaApi.readTextFile(activeProjectId, node.path);
+      setSelectedFile(file);
+      setArtifactTab(node.name.toLowerCase().endsWith('.md') ? 'preview' : 'source');
+    } catch (fileError) {
+      setError(fileError instanceof Error ? fileError.message : 'Could not open the file.');
+    }
+  }, [activeProjectId]);
+
+  const refreshFiles = useCallback(async () => {
+    if (!activeProjectId) return;
+    try {
+      setFileTree(await aaaApi.getFileTree(activeProjectId));
+    } catch (refreshError) {
+      setError(refreshError instanceof Error ? refreshError.message : 'Could not refresh project files.');
+    }
+  }, [activeProjectId]);
+
+  const sendMessage = useCallback(async (content = draft) => {
+    const trimmed = content.trim();
+    if (!trimmed || isThinking || isCreatingSession) {
+      return;
+    }
+
+    setError('');
     setIsThinking(true);
-  }, [draft, isThinking]);
+    setStreamingText('');
+    setStreamingReasoning('');
+    let requestSessionId = activeSession?.id;
+    try {
+      let session = activeSession;
+      if (!session) {
+        if (!activeProjectId) throw new Error('Select a project before starting a session.');
+        session = await aaaApi.createSession(activeProjectId);
+        setActiveSession(session);
+      }
+      requestSessionId = session.id;
+      setDraft('');
+      const controller = new AbortController();
+      streamAbortRef.current = controller;
+      await aaaApi.streamChat(activeProjectId, session.id, { content: trimmed }, (event) => {
+        if (event.type === 'assistant_text') {
+          setStreamingText((current) => current + event.text);
+        } else if (event.type === 'reasoning') {
+          setStreamingReasoning((current) => current + event.text);
+        } else if (event.type === 'completed') {
+          setActiveSession((current) => current
+            ? {
+                ...current,
+                updatedAt: event.response.message.createdAt,
+                messageCount: current.messageCount + 2,
+                messages: [
+                  ...current.messages,
+                  {
+                    id: `user-${event.response.message.id}`,
+                    role: 'user',
+                    content: trimmed,
+                    createdAt: event.response.message.createdAt
+                  },
+                  event.response.message
+                ]
+              }
+            : current);
+        } else if (event.type === 'error') {
+          throw new Error(event.message);
+        }
+      }, controller.signal);
+      setActiveSession(await aaaApi.getSession(activeProjectId, session.id));
+      setSessions(await aaaApi.listSessions(activeProjectId));
+    } catch (sendError) {
+      if (activeProjectId && requestSessionId) {
+        try {
+          setActiveSession(await aaaApi.getSession(activeProjectId, requestSessionId));
+          setSessions(await aaaApi.listSessions(activeProjectId));
+        } catch {
+          // Preserve the original model or transport error.
+        }
+      }
+      if (sendError instanceof DOMException && sendError.name === 'AbortError') {
+        setError('Response stopped.');
+        return;
+      }
+      const message = sendError instanceof ApiRequestError || sendError instanceof Error
+        ? sendError.message
+        : 'Could not save the message.';
+      setError(message);
+    } finally {
+      streamAbortRef.current = null;
+      setStreamingText('');
+      setStreamingReasoning('');
+      setIsThinking(false);
+    }
+  }, [activeProjectId, activeSession, draft, isCreatingSession, isThinking]);
+
+  const stopResponse = useCallback(() => {
+    streamAbortRef.current?.abort();
+  }, []);
 
   return (
     <div className={`app-shell theme-${theme}`} style={shellStyle}>
@@ -269,9 +441,9 @@ function App() {
           </div>
         </div>
 
-        <button className="project-switcher">
-          <span className="project-icon">AT</span>
-          <span>{activeProject}</span>
+        <button className="project-switcher" title={activeProject?.description}>
+          <span className="project-icon">{activeProject?.name.slice(0, 2).toUpperCase() ?? 'AA'}</span>
+          <span>{activeProject?.name ?? (isLoading ? 'Loading project…' : 'No project')}</span>
           <ChevronDown size={14} />
         </button>
 
@@ -294,26 +466,38 @@ function App() {
           <aside className="sidebar">
             <div className="sidebar-heading">
               <span>Sessions</span>
-              <button className="icon-button small" aria-label="Create session"><Plus size={16} /></button>
+              <button className="icon-button small" aria-label="Create session" disabled={isCreatingSession} onClick={() => void createSession()}><Plus size={16} /></button>
             </div>
 
             <label className="search-box">
               <Search size={15} />
-              <input aria-label="Search sessions" placeholder="Search sessions" />
+              <input
+                aria-label="Search sessions"
+                placeholder="Search sessions"
+                value={sessionSearch}
+                onChange={(event) => setSessionSearch(event.target.value)}
+              />
               <kbd>⌘ K</kbd>
             </label>
 
             <div className="project-list">
-              {sessions.map((session, index) => (
-              <button className={`project-row ${session.active ? 'active' : ''}`} key={session.title}>
-                <span className={`session-icon ${index === 0 ? 'active' : ''}`}><MessageSquareText size={14} /></span>
+              {filteredSessions.map((session) => (
+              <button
+                className={`project-row ${session.id === activeSession?.id ? 'active' : ''}`}
+                key={session.id}
+                onClick={() => void selectSession(session.id)}
+              >
+                <span className={`session-icon ${session.id === activeSession?.id ? 'active' : ''}`}><MessageSquareText size={14} /></span>
                 <span>
                   <strong>{session.title}</strong>
-                  <small>{session.detail}</small>
+                  <small>{formatRelativeTime(session.updatedAt)} · {session.messageCount} messages</small>
                 </span>
-                {index === 0 && <MoreHorizontal size={16} />}
+                {session.id === activeSession?.id && <MoreHorizontal size={16} />}
               </button>
               ))}
+              {!isLoading && filteredSessions.length === 0 && (
+                <div className="empty-sidebar">No sessions yet. Start a new conversation.</div>
+              )}
             </div>
 
             <div className="sidebar-section customizations">
@@ -325,12 +509,16 @@ function App() {
             </div>
 
             <div className="connection-card">
-              <div className="connection-icon"><Server size={16} /></div>
+              <div className="connection-icon"><Database size={16} /></div>
               <div>
-                <strong>Publisher connected</strong>
-                <span>localhost:3000</span>
+                <strong>{storageStatus?.sessions.backend === 'cosmos' ? 'Cosmos sessions' : 'Local sessions'}</strong>
+                <span>
+                  {storageStatus?.sessions.ready
+                    ? storageStatus.sessions.endpointHost ?? 'Air-gap ready'
+                    : 'Storage setup needed'}
+                </span>
               </div>
-              <span className="status-dot" />
+              <span className={storageStatus?.sessions.ready ? 'status-dot' : 'offline-dot'} />
             </div>
 
             <button className="sidebar-settings"><Settings2 size={16} /> Workspace settings</button>
@@ -348,15 +536,19 @@ function App() {
               <span className="agent-avatar"><ShieldCheck size={17} /></span>
               <span>
                 <strong>Security Package Builder</strong>
-                <small><span className="online-dot" /> Ready</small>
+                <small>
+                  <span className={modelStatus?.ready ? 'online-dot' : 'offline-dot'} />
+                  {modelStatus?.ready ? `${modelStatus.name} ready` : 'Model setup needed'}
+                </small>
               </span>
             </div>
             <div>
-              <button className="secondary-button"><Plus size={15} /> New session</button>
+              <button className="secondary-button" disabled={isCreatingSession} onClick={() => void createSession()}><Plus size={15} /> New session</button>
               <button className="icon-button" aria-label="Session options"><MoreHorizontal size={18} /></button>
             </div>
           </div>
 
+          {error && <div className="app-error" role="alert">{error}</div>}
           <div className={`chat-content ${messages.length ? 'has-messages' : ''}`}>
             {messages.length === 0 ? (
               <div className="welcome">
@@ -380,8 +572,8 @@ function App() {
               </div>
             ) : (
               <div className="message-list">
-                {messages.map((message, index) => (
-                  <article className={`message ${message.role}`} key={`${message.role}-${index}`}>
+                {messages.filter((message) => message.role !== 'system').map((message: ChatMessage) => (
+                  <article className={`message ${message.role}`} key={message.id}>
                     <div className="message-avatar">
                       {message.role === 'assistant' ? <BrandMark compact /> : <UserRound size={17} />}
                     </div>
@@ -396,7 +588,10 @@ function App() {
                     <div className="message-avatar"><BrandMark compact /></div>
                     <div>
                       <strong>AAA</strong>
-                      <div className="thinking"><i /><i /><i /></div>
+                      {streamingReasoning && <div className="stream-reasoning">{streamingReasoning}</div>}
+                      {streamingText
+                        ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingText}</ReactMarkdown>
+                        : <div className="thinking"><i /><i /><i /></div>}
                     </div>
                   </article>
                 )}
@@ -425,14 +620,23 @@ function App() {
                   <button className="tool-button"><Paperclip size={16} /> Add evidence</button>
                   <button className="tool-button"><Code2 size={16} /> Skills</button>
                 </div>
-                <button className="send-button" onClick={() => sendMessage()} disabled={!draft.trim() || isThinking} aria-label="Send message">
-                  <Send size={16} />
+                <button
+                  className={`send-button ${isThinking ? 'stop' : ''}`}
+                  onClick={() => isThinking ? stopResponse() : void sendMessage()}
+                  disabled={isCreatingSession || (!isThinking && !draft.trim())}
+                  aria-label={isThinking ? 'Stop response' : 'Send message'}
+                >
+                  {isThinking ? <Square size={13} fill="currentColor" /> : <Send size={16} />}
                 </button>
               </div>
             </div>
             <div className="composer-meta">
               <button><Bot size={13} /> Security Package Builder <ChevronDown size={12} /></button>
-              <span>Grounded in this workspace</span>
+              <span title={modelStatus?.missing.join(', ')}>
+                {modelStatus?.ready
+                  ? `${modelStatus.deployment ?? modelStatus.name} · Grounded in this workspace`
+                  : `Model unavailable${modelStatus?.missing.length ? ` · Missing ${modelStatus.missing.join(', ')}` : ''}`}
+              </span>
             </div>
           </div>
         </section>
@@ -464,63 +668,65 @@ function App() {
             {artifactTab === 'files' && <div className="file-tree">
               <div className="tree-title">
                 <span>PACKAGE FILES</span>
-                <button className="icon-button small"><MoreHorizontal size={15} /></button>
+                <button className="icon-button small" onClick={() => void refreshFiles()} aria-label="Refresh files"><RefreshCw size={14} /></button>
               </div>
-              {files.map((file, index) => {
-                const Icon = file.kind === 'folder'
-                  ? (file.open ? FolderOpen : Folder)
-                  : file.kind === 'json' ? FileJson : FileText;
-                const isSelected = selectedFile === file.name;
+              {visibleFiles.map(({ node, depth }) => {
+                const isExpanded = node.type === 'directory' && expandedPaths.has(node.path);
+                const isJson = node.name.toLowerCase().endsWith('.json');
+                const Icon = node.type === 'directory'
+                  ? (isExpanded ? FolderOpen : Folder)
+                  : isJson ? FileJson : FileText;
+                const isSelected = selectedFile?.path === node.path;
                 return (
                   <button
                     className={`file-row ${isSelected ? 'selected' : ''}`}
-                    key={`${file.name}-${index}`}
-                    style={{ paddingLeft: `${12 + file.depth * 16}px` }}
-                    onClick={() => {
-                      if (file.kind !== 'folder') {
-                        setSelectedFile(file.name);
-                        setArtifactTab(file.kind === 'markdown' ? 'preview' : 'source');
-                      }
-                    }}
+                    key={node.path}
+                    style={{ paddingLeft: `${12 + depth * 16}px` }}
+                    onClick={() => void openFile(node)}
                   >
-                    {file.kind === 'folder'
-                      ? (file.open ? <ChevronDown size={13} /> : <ChevronRight size={13} />)
+                    {node.type === 'directory'
+                      ? (isExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />)
                       : <span className="tree-spacer" />}
                     <Icon size={15} />
-                    <span>{file.name}</span>
-                    {file.name === 'validation-report.md' && <Check size={13} className="file-check" />}
+                    <span>{node.name}</span>
+                    {node.name === 'validation-report.md' && <Check size={13} className="file-check" />}
                   </button>
                 );
               })}
+              {!isLoading && visibleFiles.length === 0 && <div className="empty-sidebar">No project files found.</div>}
             </div>}
 
             {artifactTab !== 'files' && <div className="preview-pane">
               <div className="preview-toolbar">
                 <div className="preview-file-title">
                   <FileText size={15} />
-                  <span>{selectedFile}</span>
+                  <span>{selectedFile?.path ?? 'Select a file'}</span>
                 </div>
                 <button className="icon-button small" onClick={() => setArtifactTab('files')} aria-label="Back to files"><FolderOpen size={15} /></button>
               </div>
               <div className="preview-content">
                 {artifactTab === 'preview' && (
-                  <div className="markdown-preview"><ReactMarkdown remarkPlugins={[remarkGfm]}>{markdownContent}</ReactMarkdown></div>
+                  <div className="markdown-preview">
+                    {selectedFile
+                      ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{selectedFile.content}</ReactMarkdown>
+                      : <p>Select a Markdown file from Files to preview it.</p>}
+                  </div>
                 )}
                 {artifactTab === 'source' && (
-                  <pre className="source-preview"><code>{markdownContent}</code></pre>
+                  <pre className="source-preview"><code>{selectedFile?.content ?? 'Select a text file from Files to view its source.'}</code></pre>
                 )}
                 {artifactTab === 'browser' && (
                   <div className="browser-preview">
                     <div className="browser-bar">
                       <span /><span /><span />
-                      <div><ShieldCheck size={13} /> aaa.local/package/validation-report</div>
+                      <div><ShieldCheck size={13} /> aaa.local/{selectedFile?.path ?? 'preview'}</div>
                     </div>
                     <div className="published-page">
                       <div className="published-brand"><BrandMark compact /> AAA Published</div>
-                      <p className="eyebrow">Authorization package</p>
-                      <h2>Validation report</h2>
-                      <div className="published-status"><Check size={16} /> Ready for human review</div>
-                      <p>12 checks passed with 2 reviewer warnings and no blocking failures.</p>
+                      <p className="eyebrow">Local project preview</p>
+                      <h2>{selectedFile?.path.split('/').at(-1) ?? 'Select a document'}</h2>
+                      <div className="published-status"><Check size={16} /> Local draft</div>
+                      <p>This browser-style view is served entirely from the selected local A&amp;A project.</p>
                     </div>
                   </div>
                 )}
@@ -537,9 +743,9 @@ function App() {
       <footer className="statusbar">
         <div><span className="classification-dot" /> CONTROLLED · LOCAL DEMO</div>
         <div>
-          <span><Database size={12} /> 6 evidence items</span>
-          <span><Link2 size={12} /> 1 MCP connected</span>
-          <span><TerminalSquare size={12} /> No active runs</span>
+          <span title={storageStatus?.sessions.endpointHost}><Database size={12} /> {storageStatus?.sessions.backend ?? '…'} sessions</span>
+          <span title={modelStatus?.endpointHost}><Link2 size={12} /> {modelStatus?.ready ? modelStatus.deployment : 'Model unavailable'}</span>
+          <span><TerminalSquare size={12} /> {isThinking ? 'Model running' : 'No active runs'}</span>
         </div>
       </footer>
     </div>

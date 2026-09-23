@@ -1,0 +1,11 @@
+{
+  "activeProjectId": "another-demo",
+  "projects": [
+    {
+      "id": "another-demo",
+      "name": "Another Demo",
+      "description": "Initial local A&A assessment project.",
+      "rootPath": "C:\\dev\\another-demo"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+[
+  {
+    "id": "default-azure-openai",
+    "name": "AAA Azure OpenAI",
+    "type": "azure-openai",
+    "authMode": "entra",
+    "cloud": "public",
+    "endpointKind": "auto",
+    "endpointEnv": "AZURE_OPENAI_ENDPOINT",
+    "apiKeyEnv": "AZURE_OPENAI_API_KEY",
+    "deploymentEnv": "AZURE_OPENAI_DEPLOYMENT",
+    "apiVersionEnv": "AZURE_OPENAI_API_VERSION",
+    "defaultApiVersion": "2025-01-01-preview",
+    "temperature": 0.2,
+    "maxTokens": 1200
+  }
+]
