@@ -1,0 +1,32 @@
+{
+  "name": "@mcp-sitebuilder/service",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/server.js",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@azure/monitor-opentelemetry": "^1.14.0",
+    "@mcp-sitebuilder/application": "0.1.0",
+    "@mcp-sitebuilder/azure-adapters": "0.1.0",
+    "@mcp-sitebuilder/contracts": "0.1.0",
+    "@modelcontextprotocol/express": "^2.0.0",
+    "@modelcontextprotocol/node": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "express": "^5.2.1",
+    "helmet": "^8.1.0",
+    "pino": "^9.9.5",
+    "pino-http": "^10.5.0",
+    "swagger-ui-express": "^5.0.1",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/supertest": "^6.0.3",
+    "@types/swagger-ui-express": "^4.1.8",
+    "supertest": "^7.1.4"
+  }
+}

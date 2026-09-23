@@ -1,0 +1,9 @@
+{
+  "servers": {
+    "markdown-site-builder": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${workspaceFolder}/apps/service/dist/stdio.js"]
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/contracts" },
+    { "path": "./packages/generator" },
+    { "path": "./packages/application" },
+    { "path": "./packages/azure-adapters" },
+    { "path": "./apps/service" }
+  ]
+}

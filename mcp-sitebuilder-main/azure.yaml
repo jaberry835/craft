@@ -1,0 +1,17 @@
+name: mcp-sitebuilder
+metadata:
+  template: mcp-sitebuilder@0.1.0
+infra:
+  provider: bicep
+  path: infra
+services:
+  sitebuilder:
+    project: .
+    language: js
+    host: appservice
+    resourceName: ${SERVICE_SITEBUILDER_NAME}
+hooks:
+  prepackage:
+    shell: sh
+    run: npm ci && npm run build
+    continueOnError: false
