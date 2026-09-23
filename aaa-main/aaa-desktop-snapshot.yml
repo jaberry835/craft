@@ -1,0 +1,140 @@
+- generic [ref=e3] [box=0,0,1440,900]:
+  - banner [ref=e4] [box=0,0,1440,58]:
+    - generic [ref=e5] [box=18,13,575,32]:
+      - generic "AAA" [ref=e6] [box=18,13,32,32]:
+        - generic [ref=e7] [box=17,15,9,14]: A
+        - generic [ref=e8] [box=17,33,9,14]: A
+      - generic [ref=e10] [box=60,13,122,30]:
+        - strong [ref=e11] [box=60,13,32,15]: AAA
+        - generic [ref=e12] [box=60,32,122,12]: Authorization workbench
+    - button "AT Northstar ATO" [ref=e375] [cursor=pointer] [box=613,9,218,39]:
+      - generic [ref=e14] [box=621,16,25,25]: AT
+      - generic [ref=e15] [box=655,21,142,16]: Northstar ATO
+    - generic [ref=e18] [box=1235,13,191,32]:
+      - generic [ref=e19] [box=1235,15,115,28]: Local workspace
+      - button "Help" [ref=e21] [cursor=pointer] [box=1357,13,32,32]
+      - button "User profile" [ref=e25] [cursor=pointer] [box=1396,14,30,30]: JD
+  - main [ref=e26] [box=0,58,1440,818]:
+    - complementary [ref=e27] [box=0,58,267,818]:
+      - generic [ref=e28] [box=10,72,246,35]:
+        - generic [ref=e29] [box=17,77,45,16]: Projects
+        - button "Create project" [ref=e30] [cursor=pointer] [box=225,72,26,26]
+      - generic [ref=e32] [box=12,107,242,34]:
+        - textbox "Search projects" [ref=e36] [box=45,115,168,18]
+        - generic [ref=e37] [box=221,109,23,31]: ⌘ K
+      - generic [ref=e38] [box=10,153,246,142]:
+        - button "AT Atlas Authorization Updated just now" [ref=e39] [cursor=pointer] [box=10,153,246,46]:
+          - generic [ref=e40] [box=17,162,29,29]: AT
+          - generic [ref=e41] [box=55,160,169,32]
+        - button "BR Beacon Review Updated yesterday" [ref=e48] [cursor=pointer] [box=10,201,246,46]:
+          - generic [ref=e49] [box=17,210,29,29]: BR
+          - generic [ref=e50] [box=55,208,185,32]
+        - button "NS Northstar ATO Updated 4 days ago" [ref=e53] [cursor=pointer] [box=10,249,246,46]:
+          - generic [ref=e54] [box=17,258,29,29]: NS
+          - generic [ref=e55] [box=55,256,185,32]
+      - generic [ref=e58] [box=10,295,246,132]:
+        - generic [ref=e59] [box=10,313,246,18]: Workspace
+        - button "Sessions 3" [ref=e60] [cursor=pointer] [box=10,331,246,32]:
+          - generic [ref=e63] [box=43,339,191,16]: Sessions
+          - generic [ref=e64] [box=243,340,5,14]: "3"
+        - button "Activity" [ref=e65] [cursor=pointer] [box=10,363,246,32]
+        - button "Reviews 2" [ref=e71] [cursor=pointer] [box=10,395,246,32]:
+          - generic [ref=e76] [box=43,403,191,16]: Reviews
+          - generic [ref=e77] [box=243,404,5,14]: "2"
+      - generic [ref=e78] [box=10,429,246,164]:
+        - generic [ref=e79] [box=10,447,246,18]: Capabilities
+        - button "Agents 1" [ref=e80] [cursor=pointer] [box=10,465,246,32]:
+          - generic [ref=e84] [box=43,473,191,16]: Agents
+          - generic [ref=e85] [box=243,474,5,14]: "1"
+        - button "Skills 4" [ref=e86] [cursor=pointer] [box=10,497,246,32]:
+          - generic [ref=e89] [box=43,505,191,16]: Skills
+          - generic [ref=e90] [box=243,506,5,14]: "4"
+        - button "MCP servers 1" [ref=e91] [cursor=pointer] [box=10,529,246,32]:
+          - generic [ref=e95] [box=43,537,191,16]: MCP servers
+          - generic [ref=e96] [box=243,538,5,14]: "1"
+        - button "Tools 6" [ref=e97] [cursor=pointer] [box=10,561,246,32]:
+          - generic [ref=e100] [box=43,569,191,16]: Tools
+          - generic [ref=e101] [box=243,570,5,14]: "6"
+      - generic [ref=e107] [box=60,788,168,28]:
+        - strong [ref=e108] [box=60,788,168,14]: Publisher connected
+        - generic [ref=e109] [box=60,804,168,12]: localhost:3000
+      - button "Workspace settings" [ref=e111] [cursor=pointer] [box=10,834,246,32]
+    - separator [ref=e115] [box=267,58,5,818]
+    - generic [ref=e117] [box=272,58,773,818]:
+      - generic [ref=e118] [box=272,58,773,51]:
+        - generic [ref=e119] [box=284,67,218,32]:
+          - button "Toggle projects panel" [ref=e120] [cursor=pointer] [box=284,67,32,32]
+          - generic [ref=e128] [box=363,68,139,31]
+        - generic [ref=e132] [box=893,67,140,32]:
+          - button "New session" [ref=e133] [cursor=pointer] [box=893,68,99,30]
+          - button "Session options" [ref=e135] [cursor=pointer] [box=1001,67,32,32]
+      - generic [ref=e141] [box=344,109,630,634]:
+        - generic "AAA" [ref=e143] [box=344,265,42,42]:
+          - generic [ref=e144] [box=354,275,12,23]: A
+          - generic [ref=e145] [box=363,275,12,23]: A
+        - paragraph [ref=e147] [box=344,327,630,14]: Evidence-driven authorization
+        - heading "What are we assessing today?" [level=1] [ref=e148] [box=344,349,630,46]
+        - paragraph [ref=e149] [box=344,409,530,43]: Build and validate security packages from local standards, cloud scans, and background documentation.
+        - generic [ref=e150] [box=344,477,630,125]:
+          - button "Build control responses Analyze AU-2 and SC-7 against available evidence" [ref=e151] [cursor=pointer] [box=344,477,204,125]
+          - button "Review cloud evidence Summarize relevant findings from the latest Azure scan" [ref=e160] [cursor=pointer] [box=557,477,204,125]
+          - button "Validate this package Check traceability, citations, and reviewer boundaries" [ref=e168] [cursor=pointer] [box=770,477,204,125]
+      - generic [ref=e178] [box=309,743,700,133]:
+        - generic [ref=e179] [box=309,743,700,99]:
+          - textbox "Ask AAA to build, assess, or validate..." [ref=e180] [box=310,744,698,52]
+          - generic [ref=e181] [box=310,800,698,41]
+        - generic [ref=e198] [box=309,842,700,20]:
+          - button "Security Package Builder" [ref=e199] [cursor=pointer] [box=312,849,132,13]
+          - generic [ref=e205] [box=895,850,111,12]: Grounded in this workspace
+    - separator [ref=e206] [box=1045,58,5,818]
+    - complementary [ref=e208] [box=1050,58,390,818]:
+      - generic [ref=e209] [box=1051,58,389,51]:
+        - generic [ref=e210] [box=1063,67,87,32]:
+          - button "Close artifact panel" [ref=e211] [cursor=pointer] [box=1063,67,32,32]
+          - strong [ref=e215] [box=1102,75,48,16]: Artifacts
+        - generic [ref=e216] [box=1357,67,71,32]:
+          - button "Open externally" [ref=e217] [cursor=pointer] [box=1357,67,32,32]
+          - button "Maximize preview" [ref=e222] [cursor=pointer] [box=1396,67,32,32]
+      - generic [ref=e228] [box=1051,109,389,38]:
+        - button "Files" [ref=e229] [cursor=pointer] [box=1061,114,59,32]
+        - button "Run" [ref=e232] [cursor=pointer] [box=1123,114,57,32]
+      - generic [ref=e235] [box=1051,147,389,294]:
+        - generic [ref=e236] [box=1057,154,362,26]:
+          - generic [ref=e237] [box=1065,161,74,12]: PACKAGE FILES
+          - button [ref=e238] [cursor=pointer] [box=1389,154,26,26]
+        - button "security-package" [ref=e243] [cursor=pointer] [box=1057,180,362,25]
+        - button "background-docs" [ref=e249] [cursor=pointer] [box=1057,205,362,25]
+        - button "cloud-scan" [ref=e255] [cursor=pointer] [box=1057,230,362,25]
+        - button "control-responses" [ref=e261] [cursor=pointer] [box=1057,255,362,25]
+        - button "AU" [ref=e267] [cursor=pointer] [box=1057,280,362,25]
+        - button "AU-2.md" [ref=e273] [cursor=pointer] [box=1057,305,362,25]
+        - button "SC" [ref=e278] [cursor=pointer] [box=1057,330,362,25]
+        - button "security-standards" [ref=e284] [cursor=pointer] [box=1057,355,362,25]
+        - button "standard-docs" [ref=e290] [cursor=pointer] [box=1057,380,362,25]
+        - button "artifact-index.md" [ref=e296] [cursor=pointer] [box=1057,405,362,25]
+        - button "evidence-register.md" [ref=e301] [cursor=pointer] [box=1057,430,362,25]
+        - button "validation-report.md" [ref=e306] [cursor=pointer] [box=1057,455,362,25]
+        - button "package-config.json" [ref=e313] [cursor=pointer] [box=1057,480,362,25]
+      - generic [ref=e320] [box=1051,441,389,435]:
+        - generic [ref=e321] [box=1051,441,389,42]:
+          - generic [ref=e322] [box=1064,454,112,15]: validation-report.md
+          - generic [ref=e327] [box=1318,448,112,28]
+        - generic [ref=e337] [box=1051,483,374,604]:
+          - heading "Validation report" [level=1] [ref=e338] [box=1075,506,326,38]
+          - paragraph [ref=e339] [box=1075,552,326,53]
+          - heading "Summary" [level=2] [ref=e343] [box=1075,630,326,33]
+          - paragraph [ref=e344] [box=1075,670,326,18]: "| Result | Count | | --- | ---: | | Pass | 12 | | Warning | 2 | | Fail | 0 |"
+          - heading "Findings" [level=2] [ref=e345] [box=1075,713,326,33]
+          - heading "AU-2 · Event logging" [level=3] [ref=e346] [box=1075,764,326,18]
+          - paragraph [ref=e347] [box=1075,789,326,18]
+          - paragraph [ref=e349] [box=1075,814,326,53]
+          - heading "SC-7 · Boundary protection" [level=3] [ref=e352] [box=1075,885,326,18]
+          - paragraph [ref=e353] [box=1075,910,326,18]
+          - paragraph [ref=e355] [box=1075,935,326,35]: Network controls are present. Reviewer confirmation is still required for the documented exception path.
+          - blockquote [ref=e356] [box=1075,988,326,65]
+  - contentinfo [ref=e358] [box=0,876,1440,24]:
+    - generic [ref=e359] [box=12,883,120,11]: CONTROLLED · LOCAL DEMO
+    - generic [ref=e361] [box=1164,883,264,12]:
+      - generic [ref=e362] [box=1164,883,80,12]: 6 evidence items
+      - generic [ref=e367] [box=1259,883,83,12]: 1 MCP connected
+      - generic [ref=e371] [box=1357,883,71,12]: No active runs
