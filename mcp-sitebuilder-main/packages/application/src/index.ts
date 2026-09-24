@@ -53,6 +53,8 @@ function summarizeDraft(draft: SiteDraft): SiteDraftSummary {
     displayName: draft.displayName,
     ...(draft.description ? { description: draft.description } : {}),
     themeId: draft.themeId,
+    templateId: draft.templateId,
+    features: draft.features,
     classification: draft.classification,
     revision: draft.revision,
     updatedAt: draft.updatedAt,
@@ -120,6 +122,8 @@ export class SiteBuilderApplication {
         displayName: current.displayName,
         ...(current.description ? { description: current.description } : {}),
         themeId: current.themeId,
+        templateId: current.templateId,
+        features: current.features,
         classification: current.classification,
         documents: [...documents.values()],
       });
@@ -146,6 +150,8 @@ export class SiteBuilderApplication {
       displayName: draft.displayName,
       ...(draft.description ? { description: draft.description } : {}),
       themeId: draft.themeId,
+      templateId: draft.templateId,
+      features: draft.features,
       classification: draft.classification,
       documents: draft.documents,
     });

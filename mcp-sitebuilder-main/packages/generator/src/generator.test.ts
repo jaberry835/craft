@@ -38,6 +38,28 @@ describe('static site generator', () => {
     expect(generateSite(site).version).toBe(generateSite(site).version);
   });
 
+  it('adds only repository-owned assets for the interactive template', () => {
+    const site = SiteManifestSchema.parse({
+      siteId: 'interactive-site',
+      displayName: 'Interactive Site',
+      templateId: 'interactive-docs-v1',
+      features: { search: true, tableOfContents: true, copyCode: true },
+      documents: [
+        { path: 'index.md', content: '# Hello\n\n## Details\n\n```ts\nconst ok = true;\n```' },
+      ],
+    });
+
+    const result = generateSite(site);
+    const home = result.files.find((file) => file.path === 'index.html');
+    const script = result.files.find((file) => file.path === 'assets/interactive-docs.js');
+    const searchIndex = result.files.find((file) => file.path === 'assets/search-index.json');
+
+    expect(home?.content).toContain('data-template="interactive-docs-v1"');
+    expect(home?.content).toContain('src="assets/interactive-docs.js"');
+    expect(script?.contentType).toBe('text/javascript; charset=utf-8');
+    expect(searchIndex?.content).toContain('Hello');
+  });
+
   it('renders text files as escaped preformatted pages linked from Markdown', () => {
     const site = SiteManifestSchema.parse({
       siteId: 'text-site',

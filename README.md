@@ -18,3 +18,4 @@ Curated Demo Code
 | 2026-09-23 13:48 UTC | aaa | main | +32, ~7 |
 | 2026-09-23 20:50 UTC | aaa | main | +6, ~24 |
 | 2026-09-24 11:25 UTC | aaa | main | ~10 |
+| 2026-09-24 14:43 UTC | mcp-sitebuilder | main | ~11 |

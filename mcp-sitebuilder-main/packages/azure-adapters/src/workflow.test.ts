@@ -24,8 +24,19 @@ describe('publish workflow', () => {
     const app = new SiteBuilderApplication(store);
     await app.initialize();
 
-    const empty = await app.createDraft({ siteId: 'draft-site', displayName: 'Draft Site' });
-    expect(empty).toMatchObject({ fileCount: 0, files: [], revision: 0 });
+    const empty = await app.createDraft({
+      siteId: 'draft-site',
+      displayName: 'Draft Site',
+      templateId: 'interactive-docs-v1',
+      features: { search: true, copyCode: true },
+    });
+    expect(empty).toMatchObject({
+      fileCount: 0,
+      files: [],
+      revision: 0,
+      templateId: 'interactive-docs-v1',
+      features: { search: true, copyCode: true },
+    });
 
     await app.upsertDraftFiles({
       siteId: 'draft-site',
@@ -50,6 +61,10 @@ describe('publish workflow', () => {
     expect(queued.status).toBe('queued');
     await app.processNext();
     expect((await app.getOperation(queued.operationId))?.status).toBe('succeeded');
-    expect((await app.getSite('draft-site'))?.siteId).toBe('draft-site');
+    expect(await app.getSite('draft-site')).toMatchObject({
+      siteId: 'draft-site',
+      templateId: 'interactive-docs-v1',
+      features: { search: true, copyCode: true },
+    });
   });
 });

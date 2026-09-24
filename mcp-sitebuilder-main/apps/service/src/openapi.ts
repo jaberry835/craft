@@ -88,6 +88,13 @@ export const openApiDocument = {
                     displayName: 'Example Documentation',
                     description: 'A small documentation site.',
                     themeId: 'clarity',
+                    templateId: 'interactive-docs-v1',
+                    features: {
+                      search: true,
+                      tableOfContents: true,
+                      copyCode: true,
+                      themeToggle: true,
+                    },
                     classification: 'UNCLASSIFIED',
                     documents: [
                       {
@@ -246,6 +253,21 @@ export const openApiDocument = {
         properties: { ready: { type: 'boolean', const: true } },
       },
       ThemeId: { type: 'string', enum: ['clarity', 'slate', 'paper'], default: 'clarity' },
+      TemplateId: {
+        type: 'string',
+        enum: ['static-docs', 'interactive-docs-v1'],
+        default: 'static-docs',
+      },
+      TemplateFeatures: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          search: { type: 'boolean', default: false },
+          tableOfContents: { type: 'boolean', default: false },
+          copyCode: { type: 'boolean', default: false },
+          themeToggle: { type: 'boolean', default: false },
+        },
+      },
       Classification: {
         type: 'string',
         enum: ['UNCLASSIFIED', 'CUI', 'CONFIDENTIAL', 'SECRET', 'TOP_SECRET'],
@@ -287,6 +309,8 @@ export const openApiDocument = {
           displayName: { type: 'string', minLength: 1, maxLength: 100 },
           description: { type: 'string', maxLength: 500 },
           themeId: { $ref: '#/components/schemas/ThemeId' },
+          templateId: { $ref: '#/components/schemas/TemplateId' },
+          features: { $ref: '#/components/schemas/TemplateFeatures' },
           classification: { $ref: '#/components/schemas/Classification' },
           documents: {
             type: 'array',
@@ -321,6 +345,8 @@ export const openApiDocument = {
           'displayName',
           'classification',
           'themeId',
+          'templateId',
+          'features',
           'version',
           'url',
           'updatedAt',
@@ -331,6 +357,8 @@ export const openApiDocument = {
           description: { type: 'string' },
           classification: { $ref: '#/components/schemas/Classification' },
           themeId: { $ref: '#/components/schemas/ThemeId' },
+          templateId: { $ref: '#/components/schemas/TemplateId' },
+          features: { $ref: '#/components/schemas/TemplateFeatures' },
           version: { type: 'string' },
           url: { type: 'string', format: 'uri' },
           updatedAt: { type: 'string', format: 'date-time' },

@@ -11,6 +11,24 @@ export const limits = {
 export const ThemeIdSchema = z.enum(['clarity', 'slate', 'paper']);
 export type ThemeId = z.infer<typeof ThemeIdSchema>;
 
+export const TemplateIdSchema = z.enum(['static-docs', 'interactive-docs-v1']);
+export type TemplateId = z.infer<typeof TemplateIdSchema>;
+
+export const TemplateFeaturesSchema = z.object({
+  search: z.boolean().default(false),
+  tableOfContents: z.boolean().default(false),
+  copyCode: z.boolean().default(false),
+  themeToggle: z.boolean().default(false),
+});
+export type TemplateFeatures = z.infer<typeof TemplateFeaturesSchema>;
+
+const defaultTemplateFeatures: TemplateFeatures = {
+  search: false,
+  tableOfContents: false,
+  copyCode: false,
+  themeToggle: false,
+};
+
 export const ClassificationSchema = z.enum([
   'UNCLASSIFIED',
   'CUI',
@@ -57,7 +75,7 @@ export const DocumentPathSchema = z
     },
     { message: 'Path must be a safe relative .md or .txt path.' },
   )
-  .transform((value) => {
+  .overwrite((value) => {
     try {
       return normalizeDocumentPath(value);
     } catch {
@@ -84,6 +102,12 @@ const siteMetadataShape = {
   displayName: z.string().trim().min(1).max(100).describe('Human-readable site title.'),
   description: z.string().trim().max(500).optional().describe('Optional catalog summary.'),
   themeId: ThemeIdSchema.default('clarity').describe('Preset visual theme; defaults to clarity.'),
+  templateId: TemplateIdSchema.default('static-docs').describe(
+    'Trusted bundled template; defaults to static-docs.',
+  ),
+  features: TemplateFeaturesSchema.default(defaultTemplateFeatures).describe(
+    'Validated enhancements for interactive-docs-v1.',
+  ),
   classification: ClassificationSchema.default('UNCLASSIFIED').describe(
     'Classification bar shown on every page; defaults to UNCLASSIFIED.',
   ),
@@ -192,6 +216,8 @@ export const SiteCatalogEntrySchema = z.object({
   description: z.string().optional(),
   classification: ClassificationSchema,
   themeId: ThemeIdSchema,
+  templateId: TemplateIdSchema,
+  features: TemplateFeaturesSchema,
   version: z.string(),
   url: z.string(),
   updatedAt: z.iso.datetime(),
@@ -201,7 +227,11 @@ export type SiteCatalogEntry = z.infer<typeof SiteCatalogEntrySchema>;
 export interface GeneratedFile {
   path: string;
   content: string;
-  contentType: 'text/html; charset=utf-8' | 'text/css; charset=utf-8' | 'application/json';
+  contentType:
+    | 'text/html; charset=utf-8'
+    | 'text/css; charset=utf-8'
+    | 'text/javascript; charset=utf-8'
+    | 'application/json';
   cacheControl: string;
 }
 

@@ -37,10 +37,16 @@ Send `POST /api/v1/sites` with JSON containing:
 - `displayName`: catalog and site title.
 - `description`: optional catalog description.
 - `themeId`: `clarity`, `slate`, or `paper`.
+- `templateId`: `static-docs` (default) or the trusted `interactive-docs-v1` template.
+- `features`: optional `search`, `tableOfContents`, `copyCode`, and `themeToggle` booleans.
 - `classification`: controlled marking; omitted means `UNCLASSIFIED`.
 - `documents`: array of `{ path, content }` objects where each path is a safe relative `.md` or `.txt` path. Text files render as escaped preformatted text.
 
 The API returns `202 Accepted` and an operation URL. Poll it until the status is `succeeded` or `failed`.
+
+The interactive template remains fully usable without JavaScript. Its repository-owned browser
+bundle progressively adds enabled features; publisher-provided JavaScript, CSS, packages, and
+template paths are never accepted or executed.
 
 ## MCP tools
 
