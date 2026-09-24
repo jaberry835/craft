@@ -38,9 +38,13 @@ Local JSON session storage is the default and remains suitable for air-gapped us
 
 ## Local document preview
 
-Selecting a Markdown file in the Web tab renders it through AAA's local `published` route in a sandboxed frame. The generated document uses a restrictive content security policy and does not load external resources. The Preview tab remains the in-workbench draft rendering; reviewed publication workflow state will be added with the security-package workflow.
+Selecting a Markdown file renders its current draft in Preview. Saved Markdown starts in **Draft** state and must be marked **Reviewed** before the Web tab or published-preview route will render it. AAA stores a SHA-256 hash of the reviewed content in the project's local `.aaa\publication.json`; any subsequent saved edit automatically returns the document to Draft. The generated Web document runs in a sandboxed frame, uses a restrictive content security policy, and does not load external resources.
+
+Supported BMP, GIF, JPEG, PNG, and WebP files open directly in Preview through a project-boundary-checked image route. SVG is intentionally excluded from direct rendering.
 
 The Source tab is an editor for supported text files. It tracks unsaved changes, supports `Ctrl+S` / `Cmd+S`, uses the file timestamp for optimistic concurrency, and provides create, rename, and delete controls through in-app dialogs. Conflicting external changes are reported without overwriting either version.
+
+The Files tab also accepts local uploads. Select a folder to make it the Upload-button destination, drop files on a folder to import them there, or drop files on the Files pane to import them at the project root. Uploads are limited to supported document, image, and text formats up to 10 MB per file. Existing paths are never overwritten, and the backend applies the same project-root, excluded-directory, and symbolic-link protections used by the editor.
 
 ## Projects and customizations
 
@@ -56,6 +60,18 @@ npm start
 ```
 
 Open `http://127.0.0.1:8787`. The single local server hosts both the built client and API.
+
+## Air-gapped installation
+
+Dependencies are pinned by `package-lock.json`. On a connected staging machine with the same Node.js and npm versions, run `npm ci` and preserve either the resulting `node_modules` directory or npm's populated cache with the source bundle. In the air-gapped environment, use the transferred `node_modules` directly or run:
+
+```powershell
+npm ci --offline
+npm run build
+npm start
+```
+
+`npm ci --offline` succeeds only when every package tarball referenced by the lock file is already present in the transferred npm cache. Normal browser startup has been audited to request only the local AAA origin; configured model and Cosmos connections are made by the backend and remain optional for local JSON operation.
 
 ## Validate
 

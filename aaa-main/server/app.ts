@@ -15,6 +15,7 @@ import type {
   RenameSessionRequest,
   SaveCustomizationRequest,
   SetCustomizationEnabledRequest,
+  UploadProjectFileRequest,
   WriteTextFileRequest
 } from '../src/types/api.js';
 import { AaaAgentLoop } from './aaaAgentLoop.js';
@@ -51,7 +52,7 @@ export function createAaaApp({
   storageStatus
 }: AaaAppDependencies): express.Express {
   const app = express();
-  app.use(express.json({ limit: '2mb' }));
+  app.use(express.json({ limit: '15mb' }));
   const localPersistence = sessionStoreFactory && storageStatus
     ? undefined
     : createSessionPersistence(dataRoot, { environment: {} });
@@ -128,12 +129,30 @@ export function createAaaApp({
     const body = (request.body ?? {}) as CreateTextFileRequest;
     response.status(201).json(await fileService(request).createTextFile(body.path, body.content));
   });
+  app.post('/api/projects/:projectId/uploads', async (request, response) => {
+    const body = (request.body ?? {}) as UploadProjectFileRequest;
+    response.status(201).json(await fileService(request).uploadFile(body.path, body.contentBase64));
+  });
   app.patch('/api/projects/:projectId/paths', async (request, response) => {
     const body = (request.body ?? {}) as RenameProjectPathRequest;
     response.json(await fileService(request).renamePath(body.path, body.newPath));
   });
   app.delete('/api/projects/:projectId/paths', async (request, response) =>
     response.json(await fileService(request).deletePath(String(request.query.path ?? ''))));
+  app.get('/api/projects/:projectId/images', async (request, response) => {
+    const image = await fileService(request).readImage(String(request.query.path ?? ''));
+    response
+      .set('Content-Security-Policy', "default-src 'none'; sandbox")
+      .set('X-Content-Type-Options', 'nosniff')
+      .type(image.contentType)
+      .send(image.content);
+  });
+  app.get('/api/projects/:projectId/publication-status', async (request, response) =>
+    response.json(await fileService(request).publicationStatus(String(request.query.path ?? ''))));
+  app.put('/api/projects/:projectId/publication-status', async (request, response) =>
+    response.json(await fileService(request).markReviewed(
+      String((request.body as { path?: string } | undefined)?.path ?? '')
+    )));
   app.get('/api/projects/:projectId/published', async (request, response) => {
     const html = await fileService(request).renderPublishedMarkdown(String(request.query.path ?? ''));
     response.type('html').send(html);

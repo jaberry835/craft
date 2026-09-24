@@ -97,6 +97,23 @@ export interface CreateTextFileRequest {
   content: string;
 }
 
+export interface UploadProjectFileRequest {
+  path: string;
+  contentBase64: string;
+}
+
+export interface UploadedProjectFile {
+  path: string;
+  type: 'file';
+  size: number;
+}
+
+export interface PublicationStatus {
+  path: string;
+  reviewed: boolean;
+  reviewedAt?: string;
+}
+
 export interface RenameProjectPathRequest {
   path: string;
   newPath: string;

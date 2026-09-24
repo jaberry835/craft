@@ -14,6 +14,7 @@ import type {
   ProjectsResponse,
   ProjectTextFile,
   ProjectPathResult,
+  PublicationStatus,
   ModelConnectionStatus,
   ProjectCustomizations,
   SaveCustomizationRequest,
@@ -21,6 +22,8 @@ import type {
   RenameProjectPathRequest,
   RenameSessionRequest,
   StorageStatus,
+  UploadedProjectFile,
+  UploadProjectFileRequest,
   WriteTextFileRequest
 } from '../types/api.js';
 
@@ -196,6 +199,11 @@ export const aaaApi = {
       method: 'POST',
       body: JSON.stringify(request)
     }),
+  uploadFile: (projectId: string, request: UploadProjectFileRequest) =>
+    requestJson<UploadedProjectFile>(`${projectPath(projectId)}/uploads`, {
+      method: 'POST',
+      body: JSON.stringify(request)
+    }),
   renamePath: (projectId: string, request: RenameProjectPathRequest) =>
     requestJson<ProjectPathResult>(`${projectPath(projectId)}/paths`, {
       method: 'PATCH',
@@ -204,6 +212,17 @@ export const aaaApi = {
   deletePath: (projectId: string, filePath: string) =>
     requestJson<ProjectPathResult>(`${projectPath(projectId)}/paths?path=${encodeURIComponent(filePath)}`, {
       method: 'DELETE'
+    }),
+  imageUrl: (projectId: string, filePath: string) =>
+    `${projectPath(projectId)}/images?path=${encodeURIComponent(filePath)}`,
+  getPublicationStatus: (projectId: string, filePath: string) =>
+    requestJson<PublicationStatus>(
+      `${projectPath(projectId)}/publication-status?path=${encodeURIComponent(filePath)}`
+    ),
+  markReviewed: (projectId: string, filePath: string) =>
+    requestJson<PublicationStatus>(`${projectPath(projectId)}/publication-status`, {
+      method: 'PUT',
+      body: JSON.stringify({ path: filePath })
     }),
   publishedMarkdownUrl: (projectId: string, filePath: string) =>
     `${projectPath(projectId)}/published?path=${encodeURIComponent(filePath)}`,

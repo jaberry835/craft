@@ -65,10 +65,13 @@ This list tracks the path from the visual prototype to a working local A&A demo.
 - [x] Build a real file tree from the selected project directory.
 - [x] Expand and collapse directories.
 - [x] Refresh the tree.
-- [~] Open text, Markdown, JSON, and supported image files.
+- [x] Open text, Markdown, JSON, and supported raster image files.
 - [x] Render selected Markdown in Preview.
 - [x] Show selected text files in Source.
 - [x] Add safe file create, rename, save, and delete operations.
+- [x] Upload one or more local files into the project root or a selected folder.
+- [x] Drag local files onto the Files pane or a folder while preserving project boundaries.
+- [x] Reject duplicate names, excluded paths, unsupported types, and files larger than 10 MB.
 - [x] Add an editable Source view with `Ctrl S` / `Cmd S` save and optimistic concurrency.
 - [x] Add create, rename, and delete controls with in-app confirmation dialogs.
 - [x] Indicate unsaved changes, protect navigation, and surface file-operation failures and conflicts.
@@ -80,7 +83,7 @@ This list tracks the path from the visual prototype to a working local A&A demo.
 - [x] Serve reviewed Markdown through a local preview route.
 - [x] Display the selected Markdown document in the Web tab through the local preview route.
 - [x] Keep navigation local and air-gap compatible.
-- [ ] Distinguish draft preview from reviewed/published output.
+- [x] Distinguish draft preview from reviewed/published output using exact-content review hashes.
 
 **Acceptance criteria:** A selected Markdown file has a locally served browser-style view without an external network dependency.
 
@@ -125,8 +128,8 @@ This list tracks the path from the visual prototype to a working local A&A demo.
 - [x] Report Junior-compatible blob settings as configured/ready but inactive until project-file storage is abstracted.
 - [~] Add browser tests for the core project/session/chat/file flow.
 - [x] Verify light and dark visual contrast for the project and customization milestone.
-- [ ] Verify no unintended external runtime requests.
-- [~] Produce pinned dependency and offline installation guidance.
+- [x] Verify a normal browser reload makes no unintended external runtime requests.
+- [x] Produce pinned dependency and offline installation guidance.
 
 **Acceptance criteria:** Build, lint, tests, and core browser flow pass; the runtime is demonstrably local-first.
 

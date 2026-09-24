@@ -22,6 +22,7 @@ import {
   FolderOpen,
   Globe2,
   Home,
+  Image as ImageIcon,
   LayoutPanelLeft,
   Link2,
   Lightbulb,
@@ -47,6 +48,7 @@ import {
   Sun,
   TerminalSquare,
   Trash2,
+  Upload,
   UserRound,
   Wrench,
   X,
@@ -65,6 +67,7 @@ import type {
   ModelConnectionStatus,
   ProjectSummary,
   ProjectTextFile,
+  PublicationStatus,
   StorageStatus,
   ToolEvent
 } from './types/api';
@@ -97,6 +100,12 @@ const starterPrompts = [
 ];
 
 const themeStorageKey = 'aaa-theme';
+const previewImageExtensions = new Set(['.bmp', '.gif', '.jpeg', '.jpg', '.png', '.webp']);
+
+function isPreviewImage(filePath: string): boolean {
+  const extension = filePath.slice(filePath.lastIndexOf('.')).toLowerCase();
+  return previewImageExtensions.has(extension);
+}
 
 function formatRelativeTime(value: string): string {
   const elapsed = Date.now() - new Date(value).getTime();
@@ -282,9 +291,15 @@ function App() {
   const [fileTree, setFileTree] = useState<FileTreeNode[]>([]);
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
   const [selectedFile, setSelectedFile] = useState<ProjectTextFile | null>(null);
+  const [selectedImagePath, setSelectedImagePath] = useState('');
+  const [publicationStatus, setPublicationStatus] = useState<PublicationStatus | null>(null);
+  const [isReviewingFile, setIsReviewingFile] = useState(false);
   const [editorContent, setEditorContent] = useState('');
   const [isSavingFile, setIsSavingFile] = useState(false);
   const [fileDialog, setFileDialog] = useState<FileDialogState | null>(null);
+  const [uploadTargetPath, setUploadTargetPath] = useState('');
+  const [dragTargetPath, setDragTargetPath] = useState<string | null>(null);
+  const [isUploadingFiles, setIsUploadingFiles] = useState(false);
   const [showDiscardDialog, setShowDiscardDialog] = useState(false);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [showCreateProject, setShowCreateProject] = useState(false);
@@ -313,13 +328,18 @@ function App() {
   const chatContentRef = useRef<HTMLDivElement>(null);
   const streamAbortRef = useRef<AbortController | null>(null);
   const pendingFileActionRef = useRef<(() => void) | null>(null);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
   const activeProject = projects.find((project) => project.id === activeProjectId);
   const messages = activeSession?.messages ?? [];
   const lastRun = activeSession?.runs.at(-1);
   const isMarkdownSelected = selectedFile?.path.toLowerCase().endsWith('.md') ?? false;
+  const selectedArtifactPath = selectedFile?.path ?? selectedImagePath;
   const isFileDirty = selectedFile !== null && editorContent !== selectedFile.content;
-  const publishedUrl = activeProjectId && selectedFile && isMarkdownSelected
+  const publishedUrl = activeProjectId && selectedFile && isMarkdownSelected && publicationStatus?.reviewed
     ? aaaApi.publishedMarkdownUrl(activeProjectId, selectedFile.path)
+    : '';
+  const imageUrl = activeProjectId && selectedImagePath
+    ? aaaApi.imageUrl(activeProjectId, selectedImagePath)
     : '';
   const visibleFiles = useMemo(
     () => flattenVisibleNodes(fileTree, expandedPaths),
@@ -359,6 +379,24 @@ function App() {
   useEffect(() => {
     setEditorContent(selectedFile?.content ?? '');
   }, [selectedFile?.content, selectedFile?.path]);
+
+  useEffect(() => {
+    if (!activeProjectId || !selectedFile || !isMarkdownSelected) {
+      setPublicationStatus(null);
+      return;
+    }
+    let cancelled = false;
+    aaaApi.getPublicationStatus(activeProjectId, selectedFile.path)
+      .then((status) => {
+        if (!cancelled) setPublicationStatus(status);
+      })
+      .catch((statusError) => {
+        if (!cancelled) setError(statusError instanceof Error
+          ? statusError.message
+          : 'Could not load publication status.');
+      });
+    return () => { cancelled = true; };
+  }, [activeProjectId, isMarkdownSelected, selectedFile]);
 
   useEffect(() => {
     const warnOnUnsavedFile = (event: BeforeUnloadEvent) => {
@@ -469,9 +507,16 @@ function App() {
       if (!selectedFile || activeProjectId !== projectId) {
         const defaultFile = findDefaultFile(nextTree);
         if (defaultFile?.type === 'file') {
-          setSelectedFile(await aaaApi.readTextFile(projectId, defaultFile.path));
+          if (isPreviewImage(defaultFile.path)) {
+            setSelectedFile(null);
+            setSelectedImagePath(defaultFile.path);
+          } else {
+            setSelectedFile(await aaaApi.readTextFile(projectId, defaultFile.path));
+            setSelectedImagePath('');
+          }
         } else {
           setSelectedFile(null);
+          setSelectedImagePath('');
         }
       }
     } catch (loadError) {
@@ -517,6 +562,7 @@ function App() {
       await aaaApi.selectProject(projectId);
       setActiveSession(null);
       setSelectedFile(null);
+      setSelectedImagePath('');
       setFileTree([]);
       setSessions([]);
       setActiveProjectId(projectId);
@@ -540,6 +586,7 @@ function App() {
       setProjects(response.projects);
       setActiveSession(null);
       setSelectedFile(null);
+      setSelectedImagePath('');
       setFileTree([]);
       setSessions([]);
       setActiveProjectId(project.id);
@@ -679,19 +726,26 @@ function App() {
     const loadFile = async () => {
       setError('');
       try {
+        if (isPreviewImage(node.path)) {
+          setSelectedFile(null);
+          setSelectedImagePath(node.path);
+          setArtifactTab('preview');
+          return;
+        }
         const file = await aaaApi.readTextFile(activeProjectId, node.path);
         setSelectedFile(file);
+        setSelectedImagePath('');
         setArtifactTab(node.name.toLowerCase().endsWith('.md') ? 'preview' : 'source');
       } catch (fileError) {
         setError(fileError instanceof Error ? fileError.message : 'Could not open the file.');
       }
     };
-    if (selectedFile?.path === node.path) {
+    if (selectedArtifactPath === node.path) {
       setArtifactTab(node.name.toLowerCase().endsWith('.md') ? 'preview' : 'source');
       return;
     }
     requestFileAction(() => void loadFile());
-  }, [activeProjectId, requestFileAction, selectedFile?.path]);
+  }, [activeProjectId, requestFileAction, selectedArtifactPath]);
 
   const refreshFiles = useCallback(async () => {
     if (!activeProjectId) return;
@@ -727,15 +781,60 @@ function App() {
     requestFileAction(() => setFileDialog({ kind: 'create', value: 'new-document.md' }));
   }, [activeProjectId, requestFileAction]);
 
+  const uploadFiles = useCallback(async (files: File[], destination: string) => {
+    if (!activeProjectId || files.length === 0 || isUploadingFiles) return;
+    setError('');
+    setIsUploadingFiles(true);
+    const failures: string[] = [];
+    let uploaded = 0;
+    try {
+      for (const file of files) {
+        const relativePath = destination ? `${destination}/${file.name}` : file.name;
+        try {
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          let binary = '';
+          const chunkSize = 32_768;
+          for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+            binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+          }
+          await aaaApi.uploadFile(activeProjectId, {
+            path: relativePath,
+            contentBase64: window.btoa(binary)
+          });
+          uploaded += 1;
+        } catch (uploadError) {
+          failures.push(`${file.name}: ${uploadError instanceof Error ? uploadError.message : 'Upload failed.'}`);
+        }
+      }
+      await refreshFiles();
+      if (failures.length > 0) {
+        setError(`${uploaded} file${uploaded === 1 ? '' : 's'} uploaded. ${failures.join(' ')}`);
+      }
+    } finally {
+      setIsUploadingFiles(false);
+      setDragTargetPath(null);
+    }
+  }, [activeProjectId, isUploadingFiles, refreshFiles]);
+
+  const handleFileDrop = useCallback((
+    event: React.DragEvent<HTMLElement>,
+    destination: string
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setUploadTargetPath(destination);
+    void uploadFiles(Array.from(event.dataTransfer.files), destination);
+  }, [uploadFiles]);
+
   const renameSelectedFile = useCallback(() => {
-    if (!activeProjectId || !selectedFile) return;
-    requestFileAction(() => setFileDialog({ kind: 'rename', value: selectedFile.path }));
-  }, [activeProjectId, requestFileAction, selectedFile]);
+    if (!activeProjectId || !selectedArtifactPath) return;
+    requestFileAction(() => setFileDialog({ kind: 'rename', value: selectedArtifactPath }));
+  }, [activeProjectId, requestFileAction, selectedArtifactPath]);
 
   const deleteSelectedFile = useCallback(() => {
-    if (!activeProjectId || !selectedFile) return;
-    setFileDialog({ kind: 'delete', value: selectedFile.path });
-  }, [activeProjectId, selectedFile]);
+    if (!activeProjectId || !selectedArtifactPath) return;
+    setFileDialog({ kind: 'delete', value: selectedArtifactPath });
+  }, [activeProjectId, selectedArtifactPath]);
 
   const submitFileDialog = useCallback(async () => {
     if (!activeProjectId || !fileDialog) return;
@@ -747,12 +846,19 @@ function App() {
         const created = await aaaApi.createTextFile(activeProjectId, { path, content: '' });
         setSelectedFile(created);
         setArtifactTab('source');
-      } else if (fileDialog.kind === 'rename' && selectedFile && path !== selectedFile.path) {
-        await aaaApi.renamePath(activeProjectId, { path: selectedFile.path, newPath: path });
-        setSelectedFile(await aaaApi.readTextFile(activeProjectId, path));
-      } else if (fileDialog.kind === 'delete' && selectedFile) {
-        await aaaApi.deletePath(activeProjectId, selectedFile.path);
+      } else if (fileDialog.kind === 'rename' && selectedArtifactPath && path !== selectedArtifactPath) {
+        await aaaApi.renamePath(activeProjectId, { path: selectedArtifactPath, newPath: path });
+        if (isPreviewImage(path)) {
+          setSelectedFile(null);
+          setSelectedImagePath(path);
+        } else {
+          setSelectedFile(await aaaApi.readTextFile(activeProjectId, path));
+          setSelectedImagePath('');
+        }
+      } else if (fileDialog.kind === 'delete' && selectedArtifactPath) {
+        await aaaApi.deletePath(activeProjectId, selectedArtifactPath);
         setSelectedFile(null);
+        setSelectedImagePath('');
         setEditorContent('');
         setArtifactTab('files');
       }
@@ -761,7 +867,21 @@ function App() {
     } catch (operationError) {
       setError(operationError instanceof Error ? operationError.message : 'Could not update the file.');
     }
-  }, [activeProjectId, fileDialog, refreshFiles, selectedFile]);
+  }, [activeProjectId, fileDialog, refreshFiles, selectedArtifactPath]);
+
+  const markSelectedFileReviewed = useCallback(async () => {
+    if (!activeProjectId || !selectedFile || !isMarkdownSelected || isFileDirty || isReviewingFile) return;
+    setError('');
+    setIsReviewingFile(true);
+    try {
+      setPublicationStatus(await aaaApi.markReviewed(activeProjectId, selectedFile.path));
+      setArtifactTab('browser');
+    } catch (reviewError) {
+      setError(reviewError instanceof Error ? reviewError.message : 'Could not mark this file reviewed.');
+    } finally {
+      setIsReviewingFile(false);
+    }
+  }, [activeProjectId, isFileDirty, isMarkdownSelected, isReviewingFile, selectedFile]);
 
   const discardAndContinue = useCallback(() => {
     setEditorContent(selectedFile?.content ?? '');
@@ -1148,27 +1268,103 @@ function App() {
               <button className={artifactTab === 'browser' ? 'active icon-only' : 'icon-only'} onClick={() => setArtifactTab('browser')} aria-label="Web preview"><Globe2 size={15} /></button>
             </div>
 
-            {artifactTab === 'files' && <div className="file-tree">
+            {artifactTab === 'files' && (
+              <div
+               className={`file-tree ${dragTargetPath === '' ? 'drop-active' : ''}`}
+               onDragEnter={(event) => {
+                 if (event.dataTransfer.types.includes('Files')) {
+                   event.preventDefault();
+                   setDragTargetPath('');
+                 }
+               }}
+               onDragOver={(event) => {
+                 if (event.dataTransfer.types.includes('Files')) {
+                   event.preventDefault();
+                   event.dataTransfer.dropEffect = 'copy';
+                 }
+               }}
+               onDragLeave={(event) => {
+                 if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                   setDragTargetPath(null);
+                 }
+               }}
+               onDrop={(event) => handleFileDrop(event, '')}
+              >
               <div className="tree-title">
-                <span>PACKAGE FILES</span>
+                <span>
+                  PACKAGE FILES
+                  <small>Upload to {uploadTargetPath ? `/${uploadTargetPath}` : 'project root'}</small>
+                </span>
                 <div>
+                  <input
+                    ref={uploadInputRef}
+                    className="visually-hidden"
+                    type="file"
+                    multiple
+                    onChange={(event) => {
+                      void uploadFiles(Array.from(event.target.files ?? []), uploadTargetPath);
+                      event.currentTarget.value = '';
+                    }}
+                  />
+                  <button
+                    className="icon-button small"
+                    disabled={isUploadingFiles}
+                    onClick={() => uploadInputRef.current?.click()}
+                    aria-label={`Upload files to ${uploadTargetPath || 'project root'}`}
+                    title={`Upload files to ${uploadTargetPath ? `/${uploadTargetPath}` : 'project root'}`}
+                  >
+                    <Upload size={14} />
+                  </button>
                   <button className="icon-button small" onClick={() => void createFile()} aria-label="Create text file" title="Create text file"><FilePlus2 size={14} /></button>
                   <button className="icon-button small" onClick={() => void refreshFiles()} aria-label="Refresh files" title="Refresh files"><RefreshCw size={14} /></button>
                 </div>
+              </div>
+              <div className={`file-drop-hint ${isUploadingFiles ? 'uploading' : ''}`}>
+                <Upload size={14} />
+                {isUploadingFiles ? 'Uploading files…' : 'Drop files here for the project root, or onto a folder'}
               </div>
               {visibleFiles.map(({ node, depth }) => {
                 const isExpanded = node.type === 'directory' && expandedPaths.has(node.path);
                 const isJson = node.name.toLowerCase().endsWith('.json');
                 const Icon = node.type === 'directory'
                   ? (isExpanded ? FolderOpen : Folder)
-                  : isJson ? FileJson : FileText;
-                const isSelected = selectedFile?.path === node.path;
+                  : isPreviewImage(node.path) ? ImageIcon : isJson ? FileJson : FileText;
+                const isSelected = selectedArtifactPath === node.path;
                 return (
                   <button
-                    className={`file-row ${isSelected ? 'selected' : ''}`}
+                    className={[
+                      'file-row',
+                      isSelected ? 'selected' : '',
+                      node.type === 'directory' && uploadTargetPath === node.path ? 'upload-target' : '',
+                      node.type === 'directory' && dragTargetPath === node.path ? 'drop-target' : ''
+                    ].filter(Boolean).join(' ')}
                     key={node.path}
                     style={{ paddingLeft: `${12 + depth * 16}px` }}
-                    onClick={() => void openFile(node)}
+                    onClick={() => {
+                      if (node.type === 'directory') setUploadTargetPath(node.path);
+                      void openFile(node);
+                    }}
+                    onDragEnter={node.type === 'directory'
+                      ? (event) => {
+                          if (event.dataTransfer.types.includes('Files')) {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            setDragTargetPath(node.path);
+                          }
+                        }
+                      : undefined}
+                    onDragOver={node.type === 'directory'
+                      ? (event) => {
+                          if (event.dataTransfer.types.includes('Files')) {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            event.dataTransfer.dropEffect = 'copy';
+                          }
+                        }
+                      : undefined}
+                    onDrop={node.type === 'directory'
+                      ? (event) => handleFileDrop(event, node.path)
+                      : undefined}
                   >
                     {node.type === 'directory'
                       ? (isExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />)
@@ -1180,27 +1376,50 @@ function App() {
                 );
               })}
               {!isLoading && visibleFiles.length === 0 && <div className="empty-sidebar">No project files found.</div>}
-            </div>}
+            </div>
+            )}
 
             {artifactTab !== 'files' && <div className="preview-pane">
               <div className="preview-toolbar">
                 <div className="preview-file-title">
-                  <FileText size={15} />
-                  <span>{selectedFile?.path ?? 'Select a file'}</span>
+                  {selectedImagePath ? <ImageIcon size={15} /> : <FileText size={15} />}
+                  <span>{selectedArtifactPath || 'Select a file'}</span>
                   {isFileDirty && <small className="dirty-indicator">Unsaved</small>}
+                  {isMarkdownSelected && publicationStatus && (
+                    <small className={`publication-badge ${publicationStatus.reviewed ? 'reviewed' : 'draft'}`}>
+                      {publicationStatus.reviewed ? 'Reviewed' : 'Draft'}
+                    </small>
+                  )}
                 </div>
                 <div className="file-actions">
+                  {isMarkdownSelected && !publicationStatus?.reviewed && (
+                    <button
+                      className="review-button"
+                      disabled={isFileDirty || isReviewingFile}
+                      onClick={() => void markSelectedFileReviewed()}
+                      title={isFileDirty ? 'Save changes before review' : 'Mark this saved version reviewed'}
+                    >
+                      <FileCheck2 size={13} /> {isReviewingFile ? 'Reviewing…' : 'Mark reviewed'}
+                    </button>
+                  )}
                   <button className="icon-button small" onClick={() => void createFile()} aria-label="Create text file" title="Create text file"><FilePlus2 size={14} /></button>
-                  <button className="icon-button small" disabled={!selectedFile} onClick={() => void renameSelectedFile()} aria-label="Rename selected file" title="Rename"><Pencil size={14} /></button>
+                  <button className="icon-button small" disabled={!selectedArtifactPath} onClick={() => void renameSelectedFile()} aria-label="Rename selected file" title="Rename"><Pencil size={14} /></button>
                   <button className="icon-button small" disabled={!isFileDirty || isSavingFile} onClick={() => void saveSelectedFile()} aria-label="Save selected file" title="Save"><Save size={14} /></button>
-                  <button className="icon-button small danger-icon" disabled={!selectedFile} onClick={() => void deleteSelectedFile()} aria-label="Delete selected file" title="Delete"><Trash2 size={14} /></button>
+                  <button className="icon-button small danger-icon" disabled={!selectedArtifactPath} onClick={() => void deleteSelectedFile()} aria-label="Delete selected file" title="Delete"><Trash2 size={14} /></button>
                   <button className="icon-button small" onClick={() => setArtifactTab('files')} aria-label="Back to files" title="Files"><FolderOpen size={15} /></button>
                 </div>
               </div>
               <div className="preview-content">
                 {artifactTab === 'preview' && (
                   <div className="markdown-preview">
-                    {selectedFile
+                    {selectedImagePath
+                      ? (
+                        <div className="image-preview">
+                          <img src={imageUrl} alt={selectedImagePath.split('/').at(-1)} />
+                          <small>{selectedImagePath}</small>
+                        </div>
+                      )
+                      : selectedFile
                       ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{editorContent}</ReactMarkdown>
                       : <p>Select a Markdown file from Files to preview it.</p>}
                   </div>
@@ -1242,9 +1461,20 @@ function App() {
                       : (
                         <div className="published-page published-empty">
                           <div className="published-brand"><BrandMark compact /> AAA Published</div>
-                          <p className="eyebrow">Local project preview</p>
-                          <h2>Select a Markdown document</h2>
-                          <p>The Web view renders Markdown through AAA's local published-preview route.</p>
+                          <p className="eyebrow">{isMarkdownSelected ? 'Review required' : 'Local project preview'}</p>
+                          <h2>{isMarkdownSelected ? 'This document is still a draft' : 'Select a Markdown document'}</h2>
+                          <p>{isMarkdownSelected
+                            ? 'Save the document and mark this exact version reviewed before opening its published Web view.'
+                            : 'The Web view renders reviewed Markdown through AAA’s local published-preview route.'}</p>
+                          {isMarkdownSelected && (
+                            <button
+                              className="dialog-primary"
+                              disabled={isFileDirty || isReviewingFile}
+                              onClick={() => void markSelectedFileReviewed()}
+                            >
+                              <FileCheck2 size={14} /> Mark reviewed
+                            </button>
+                          )}
                         </div>
                       )}
                   </div>

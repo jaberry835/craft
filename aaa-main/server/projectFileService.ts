@@ -1,8 +1,15 @@
-import { cp, lstat, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { setTimeout as wait } from 'node:timers/promises';
 import path from 'node:path';
 import { BadRequestError, ConflictError, NotFoundError, PathBoundaryError, UnsupportedFileError } from './httpErrors.js';
-import type { FileTreeNode, ProjectPathResult, ProjectTextFile } from '../src/types/api.js';
+import type {
+  FileTreeNode,
+  PublicationStatus,
+  ProjectPathResult,
+  ProjectTextFile,
+  UploadedProjectFile
+} from '../src/types/api.js';
 
 const excludedDirectories = new Set([
   'node_modules', 'dist', 'build', 'coverage', 'out', 'target', 'vendor',
@@ -10,11 +17,29 @@ const excludedDirectories = new Set([
   '.venv', 'venv', '__pycache__'
 ]);
 const maximumTextFileBytes = 2 * 1024 * 1024;
+const maximumUploadBytes = 10 * 1024 * 1024;
 const textExtensions = new Set([
   '.c', '.cc', '.conf', '.cpp', '.cs', '.css', '.csv', '.go', '.h', '.hpp', '.html',
   '.ini', '.java', '.js', '.json', '.jsx', '.log', '.md', '.mjs', '.py', '.rb',
   '.rs', '.sh', '.sql', '.toml', '.ts', '.tsx', '.txt', '.xml', '.yaml', '.yml'
 ]);
+const uploadExtensions = new Set([
+  ...textExtensions,
+  '.bmp', '.doc', '.docx', '.gif', '.jpeg', '.jpg', '.odp', '.ods', '.odt',
+  '.pdf', '.png', '.ppt', '.pptx', '.svg', '.tif', '.tiff', '.webp', '.xls', '.xlsx'
+]);
+const imageContentTypes = new Map([
+  ['.bmp', 'image/bmp'],
+  ['.gif', 'image/gif'],
+  ['.jpeg', 'image/jpeg'],
+  ['.jpg', 'image/jpeg'],
+  ['.png', 'image/png'],
+  ['.webp', 'image/webp']
+]);
+
+interface PublicationState {
+  reviewed: Record<string, { hash: string; reviewedAt: string }>;
+}
 
 async function renameWithRetry(source: string, destination: string): Promise<void> {
   const attempts = process.platform === 'win32' ? 4 : 1;
@@ -94,6 +119,34 @@ export class ProjectFileService {
     return this.readTextFile(normalizedPath);
   }
 
+  async uploadFile(relativePath: string, contentBase64: string): Promise<UploadedProjectFile> {
+    const normalizedPath = this.normalizeRelativePath(relativePath);
+    this.assertUploadExtension(normalizedPath);
+    if (typeof contentBase64 !== 'string') {
+      throw new BadRequestError('Uploaded file content is required.', 'upload_content_required');
+    }
+    if (contentBase64.length > Math.ceil(maximumUploadBytes / 3) * 4) {
+      throw new UnsupportedFileError('Uploaded files must be 10 MB or smaller.', 'file_too_large');
+    }
+    if (!isValidBase64(contentBase64)) {
+      throw new BadRequestError('Uploaded file content is not valid base64.', 'invalid_upload_content');
+    }
+    const content = Buffer.from(contentBase64, 'base64');
+    if (content.length > maximumUploadBytes) {
+      throw new UnsupportedFileError('Uploaded files must be 10 MB or smaller.', 'file_too_large');
+    }
+    const absolutePath = await this.resolveNewPath(normalizedPath);
+    try {
+      await writeFile(absolutePath, content, { flag: 'wx' });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new ConflictError(`Project path already exists: ${normalizedPath}`, 'path_already_exists');
+      }
+      throw error;
+    }
+    return { path: normalizedPath, type: 'file', size: content.length };
+  }
+
   async renamePath(relativePath: string, newRelativePath: string): Promise<ProjectPathResult> {
     const normalizedPath = this.normalizeRelativePath(relativePath);
     const normalizedNewPath = this.normalizeRelativePath(newRelativePath);
@@ -114,6 +167,7 @@ export class ProjectFileService {
       }
       throw error;
     }
+    await this.movePublicationReviews(normalizedPath, normalizedNewPath);
     return { path: normalizedNewPath, type: sourceStats.isDirectory() ? 'directory' : 'file' };
   }
 
@@ -122,13 +176,62 @@ export class ProjectFileService {
     const absolutePath = await this.resolveExistingPath(normalizedPath);
     const fileStats = await stat(absolutePath);
     await rm(absolutePath, { recursive: fileStats.isDirectory(), force: false });
+    await this.removePublicationReviews(normalizedPath);
     return { path: normalizedPath, type: fileStats.isDirectory() ? 'directory' : 'file' };
+  }
+
+  async readImage(relativePath: string): Promise<{ content: Buffer; contentType: string }> {
+    const normalizedPath = this.normalizeRelativePath(relativePath);
+    const contentType = imageContentTypes.get(path.posix.extname(normalizedPath).toLowerCase());
+    if (!contentType) {
+      throw new UnsupportedFileError('Only supported raster images can be previewed.', 'image_required');
+    }
+    const absolutePath = await this.resolveExistingPath(normalizedPath);
+    const fileStats = await stat(absolutePath);
+    if (!fileStats.isFile()) {
+      throw new BadRequestError(`Project path is not a file: ${normalizedPath}`, 'path_not_file');
+    }
+    if (fileStats.size > maximumUploadBytes) {
+      throw new UnsupportedFileError('Image is too large to preview.', 'file_too_large');
+    }
+    return { content: await readFile(absolutePath), contentType };
+  }
+
+  async publicationStatus(relativePath: string): Promise<PublicationStatus> {
+    const normalizedPath = this.normalizeRelativePath(relativePath);
+    this.assertMarkdown(normalizedPath);
+    const file = await this.readTextFile(normalizedPath);
+    const state = await this.readPublicationState();
+    const review = state.reviewed[normalizedPath];
+    return {
+      path: normalizedPath,
+      reviewed: review?.hash === contentHash(file.content),
+      ...(review?.hash === contentHash(file.content) ? { reviewedAt: review.reviewedAt } : {})
+    };
+  }
+
+  async markReviewed(relativePath: string): Promise<PublicationStatus> {
+    const normalizedPath = this.normalizeRelativePath(relativePath);
+    this.assertMarkdown(normalizedPath);
+    const file = await this.readTextFile(normalizedPath);
+    const state = await this.readPublicationState();
+    state.reviewed[normalizedPath] = {
+      hash: contentHash(file.content),
+      reviewedAt: new Date().toISOString()
+    };
+    await this.writePublicationState(state);
+    return this.publicationStatus(normalizedPath);
   }
 
   async renderPublishedMarkdown(relativePath: string): Promise<string> {
     const normalizedPath = this.normalizeRelativePath(relativePath);
-    if (path.posix.extname(normalizedPath).toLowerCase() !== '.md') {
-      throw new UnsupportedFileError('Only Markdown files can be published.', 'markdown_required');
+    this.assertMarkdown(normalizedPath);
+    const status = await this.publicationStatus(normalizedPath);
+    if (!status.reviewed) {
+      throw new ConflictError(
+        'This Markdown version must be reviewed before it can be published.',
+        'review_required'
+      );
     }
     const file = await this.readTextFile(normalizedPath);
     const title = path.posix.basename(normalizedPath, path.posix.extname(normalizedPath));
@@ -258,6 +361,66 @@ export class ProjectFileService {
     }
   }
 
+  private assertUploadExtension(relativePath: string): void {
+    if (!uploadExtensions.has(path.posix.extname(relativePath).toLowerCase())) {
+      throw new UnsupportedFileError(
+        'This file type is not supported for project uploads.',
+        'unsupported_upload_extension'
+      );
+    }
+  }
+
+  private assertMarkdown(relativePath: string): void {
+    if (path.posix.extname(relativePath).toLowerCase() !== '.md') {
+      throw new UnsupportedFileError('Only Markdown files can be published.', 'markdown_required');
+    }
+  }
+
+  private async readPublicationState(): Promise<PublicationState> {
+    try {
+      const content = await readFile(path.join(this.rootPath, '.aaa', 'publication.json'), 'utf8');
+      const state = JSON.parse(content) as Partial<PublicationState>;
+      return {
+        reviewed: state.reviewed && typeof state.reviewed === 'object' ? state.reviewed : {}
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { reviewed: {} };
+      throw error;
+    }
+  }
+
+  private async writePublicationState(state: PublicationState): Promise<void> {
+    const statePath = path.join(this.rootPath, '.aaa', 'publication.json');
+    await mkdir(path.dirname(statePath), { recursive: true });
+    await writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+  }
+
+  private async movePublicationReviews(sourcePath: string, destinationPath: string): Promise<void> {
+    const state = await this.readPublicationState();
+    let changed = false;
+    for (const [reviewedPath, review] of Object.entries(state.reviewed)) {
+      if (reviewedPath === sourcePath || reviewedPath.startsWith(`${sourcePath}/`)) {
+        const suffix = reviewedPath.slice(sourcePath.length);
+        state.reviewed[`${destinationPath}${suffix}`] = review;
+        delete state.reviewed[reviewedPath];
+        changed = true;
+      }
+    }
+    if (changed) await this.writePublicationState(state);
+  }
+
+  private async removePublicationReviews(deletedPath: string): Promise<void> {
+    const state = await this.readPublicationState();
+    let changed = false;
+    for (const reviewedPath of Object.keys(state.reviewed)) {
+      if (reviewedPath === deletedPath || reviewedPath.startsWith(`${deletedPath}/`)) {
+        delete state.reviewed[reviewedPath];
+        changed = true;
+      }
+    }
+    if (changed) await this.writePublicationState(state);
+  }
+
   private validateContent(content: string): void {
     if (typeof content !== 'string') {
       throw new BadRequestError('File content must be text.', 'invalid_content');
@@ -286,6 +449,32 @@ export class ProjectFileService {
     }
     return content;
   }
+}
+
+function isValidBase64(value: string): boolean {
+  if (value.length % 4 !== 0) return false;
+  const paddingStart = value.endsWith('==')
+    ? value.length - 2
+    : value.endsWith('=')
+      ? value.length - 1
+      : value.length;
+  for (let index = 0; index < paddingStart; index += 1) {
+    const code = value.charCodeAt(index);
+    const valid = (code >= 65 && code <= 90)
+      || (code >= 97 && code <= 122)
+      || (code >= 48 && code <= 57)
+      || code === 43
+      || code === 47;
+    if (!valid) return false;
+  }
+  for (let index = paddingStart; index < value.length; index += 1) {
+    if (value[index] !== '=') return false;
+  }
+  return true;
+}
+
+function contentHash(content: string): string {
+  return createHash('sha256').update(content, 'utf8').digest('hex');
 }
 
 function escapeHtml(value: string): string {

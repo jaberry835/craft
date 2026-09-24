@@ -30,6 +30,7 @@ test('project API exposes configured metadata, sessions, messages, files, and tr
   await mkdir(path.join(projectRoot, '.vscode'), { recursive: true });
   await mkdir(clientDistPath, { recursive: true });
   await writeFile(path.join(projectRoot, 'README.md'), '# Assessed project\n', 'utf8');
+  await writeFile(path.join(projectRoot, 'evidence.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
   await writeFile(path.join(templatePath, 'package-config.json'), '{"packageName":"Template"}\n', 'utf8');
   await writeFile(
     path.join(projectRoot, '.github', 'agents', 'builder.agent.md'),
@@ -151,6 +152,13 @@ test('project API exposes configured metadata, sessions, messages, files, and tr
   assert.equal(traversalResponse.status, 400);
   assert.equal((await traversalResponse.json() as { code: string }).code, 'path_outside_project');
 
+  const imageResponse = await fetch(`${baseUrl}/images?path=evidence.png`);
+  assert.equal(imageResponse.status, 200);
+  assert.equal(imageResponse.headers.get('content-type'), 'image/png');
+  assert.equal(imageResponse.headers.get('x-content-type-options'), 'nosniff');
+  assert.match(imageResponse.headers.get('content-security-policy') ?? '', /default-src 'none'/);
+  assert.deepEqual(Buffer.from(await imageResponse.arrayBuffer()), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+
   const file = await (await fetch(`${baseUrl}/files?path=README.md`)).json() as { updatedAt: string };
   const saveResponse = await fetch(`${baseUrl}/files`, {
     method: 'PUT',
@@ -172,10 +180,34 @@ test('project API exposes configured metadata, sessions, messages, files, and tr
     body: JSON.stringify({ path: 'published.md', content: '# Published\n\n<script>unsafe()</script>\n' })
   });
   assert.equal(createFileResponse.status, 201);
+  const uploadResponse = await fetch(`${baseUrl}/uploads`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      path: 'evidence.pdf',
+      contentBase64: Buffer.from('%PDF demo evidence').toString('base64')
+    })
+  });
+  assert.equal(uploadResponse.status, 201);
+  assert.deepEqual(await uploadResponse.json(), {
+    path: 'evidence.pdf',
+    type: 'file',
+    size: 18
+  });
   const previewResponse = await fetch(`${baseUrl}/published?path=published.md`);
-  assert.equal(previewResponse.status, 200);
-  assert.match(previewResponse.headers.get('content-type') ?? '', /^text\/html/);
-  const preview = await previewResponse.text();
+  assert.equal(previewResponse.status, 409);
+  assert.equal((await previewResponse.json() as { code: string }).code, 'review_required');
+  const reviewResponse = await fetch(`${baseUrl}/publication-status`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: 'published.md' })
+  });
+  assert.equal(reviewResponse.status, 200);
+  assert.equal((await reviewResponse.json() as { reviewed: boolean }).reviewed, true);
+  const reviewedPreviewResponse = await fetch(`${baseUrl}/published?path=published.md`);
+  assert.equal(reviewedPreviewResponse.status, 200);
+  assert.match(reviewedPreviewResponse.headers.get('content-type') ?? '', /^text\/html/);
+  const preview = await reviewedPreviewResponse.text();
   assert.match(preview, /<h1>Published<\/h1>/);
   assert.match(preview, /&lt;script&gt;unsafe\(\)&lt;\/script&gt;/);
   assert.doesNotMatch(preview, /<script>/);

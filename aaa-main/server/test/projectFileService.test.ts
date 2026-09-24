@@ -89,6 +89,43 @@ test('text files can be created, conflict-protected, renamed, and deleted', asyn
   }
 });
 
+test('files can be uploaded into project folders without overwriting existing content', async () => {
+  const root = `${fixtureRoot}-uploads`;
+  await rm(root, { recursive: true, force: true });
+  await mkdir(path.join(root, 'evidence'), { recursive: true });
+  const service = new ProjectFileService(root);
+  try {
+    const imageBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff]);
+    const uploaded = await service.uploadFile('evidence/screenshot.png', imageBytes.toString('base64'));
+    assert.deepEqual(uploaded, { path: 'evidence/screenshot.png', type: 'file', size: 6 });
+    assert.deepEqual(await readFile(path.join(root, 'evidence', 'screenshot.png')), imageBytes);
+
+    const empty = await service.uploadFile('evidence/empty.txt', '');
+    assert.equal(empty.size, 0);
+    assert.deepEqual(await readFile(path.join(root, 'evidence', 'empty.txt')), Buffer.alloc(0));
+
+    await assert.rejects(
+      () => service.uploadFile('evidence/screenshot.png', Buffer.from('replacement').toString('base64')),
+      (error: unknown) => error instanceof ConflictError && error.code === 'path_already_exists'
+    );
+    await assert.rejects(
+      () => service.uploadFile('evidence/archive.exe', Buffer.from('unsafe').toString('base64')),
+      (error: unknown) =>
+        error instanceof UnsupportedFileError && error.code === 'unsupported_upload_extension'
+    );
+    await assert.rejects(
+      () => service.uploadFile('evidence/invalid.pdf', 'not-base64'),
+      (error: unknown) => error instanceof BadRequestError && error.code === 'invalid_upload_content'
+    );
+    await assert.rejects(
+      () => service.uploadFile('evidence/large.pdf', Buffer.alloc(10 * 1024 * 1024 + 1).toString('base64')),
+      (error: unknown) => error instanceof UnsupportedFileError && error.code === 'file_too_large'
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('mutations reject traversal, excluded paths, symlinks, unsupported extensions, and invalid content', async () => {
   const root = `${fixtureRoot}-safety`;
   const outside = `${outsideRoot}-safety`;
@@ -107,6 +144,10 @@ test('mutations reject traversal, excluded paths, symlinks, unsupported extensio
       (error: unknown) => error instanceof BadRequestError && error.code === 'excluded_path'
     );
     await assert.rejects(() => service.createTextFile('linked/new.md', 'x'), PathBoundaryError);
+    await assert.rejects(
+      () => service.uploadFile('linked/evidence.pdf', Buffer.from('evidence').toString('base64')),
+      PathBoundaryError
+    );
     await assert.rejects(
       () => service.createTextFile('docs/image.png', 'not an image'),
       (error: unknown) => error instanceof UnsupportedFileError && error.code === 'unsupported_text_extension'
@@ -145,6 +186,17 @@ test('published Markdown is rendered as a complete escaped local-only document',
   );
   const service = new ProjectFileService(root);
   try {
+    assert.deepEqual(await service.publicationStatus('publish.md'), {
+      path: 'publish.md',
+      reviewed: false
+    });
+    await assert.rejects(
+      () => service.renderPublishedMarkdown('publish.md'),
+      (error: unknown) => error instanceof ConflictError && error.code === 'review_required'
+    );
+    const reviewed = await service.markReviewed('publish.md');
+    assert.equal(reviewed.reviewed, true);
+    assert.ok(reviewed.reviewedAt);
     const html = await service.renderPublishedMarkdown('publish.md');
     assert.match(html, /<!doctype html>/);
     assert.match(html, /<h1>Published<\/h1>/);
@@ -152,9 +204,45 @@ test('published Markdown is rendered as a complete escaped local-only document',
     assert.match(html, /&lt;script&gt;alert\(&quot;x&quot;\)&lt;\/script&gt;/);
     assert.doesNotMatch(html, /<script>|href="https:/);
     assert.match(html, /Content-Security-Policy/);
+    const opened = await service.readTextFile('publish.md');
+    await service.writeTextFile('publish.md', `${opened.content}\nChanged after review.\n`, opened.updatedAt);
+    assert.equal((await service.publicationStatus('publish.md')).reviewed, false);
+    await assert.rejects(
+      () => service.renderPublishedMarkdown('publish.md'),
+      (error: unknown) => error instanceof ConflictError && error.code === 'review_required'
+    );
+    await service.markReviewed('publish.md');
+    await service.renamePath('publish.md', 'renamed.md');
+    assert.equal((await service.publicationStatus('renamed.md')).reviewed, true);
+    await service.deletePath('renamed.md');
+    const publicationState = JSON.parse(
+      await readFile(path.join(root, '.aaa', 'publication.json'), 'utf8')
+    ) as { reviewed: Record<string, unknown> };
+    assert.deepEqual(publicationState.reviewed, {});
     await assert.rejects(
       () => service.renderPublishedMarkdown('publish.txt'),
       (error: unknown) => error instanceof UnsupportedFileError && error.code === 'markdown_required'
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('supported raster images are served with a fixed content type', async () => {
+  const root = `${fixtureRoot}-images`;
+  await rm(root, { recursive: true, force: true });
+  await mkdir(root, { recursive: true });
+  const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+  await writeFile(path.join(root, 'evidence.png'), bytes);
+  await writeFile(path.join(root, 'unsafe.svg'), '<svg><script>alert(1)</script></svg>', 'utf8');
+  const service = new ProjectFileService(root);
+  try {
+    const image = await service.readImage('evidence.png');
+    assert.equal(image.contentType, 'image/png');
+    assert.deepEqual(image.content, bytes);
+    await assert.rejects(
+      () => service.readImage('unsafe.svg'),
+      (error: unknown) => error instanceof UnsupportedFileError && error.code === 'image_required'
     );
   } finally {
     await rm(root, { recursive: true, force: true });
