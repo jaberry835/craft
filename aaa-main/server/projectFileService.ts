@@ -1,4 +1,5 @@
-import { cp, lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { copyFile, cp, lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { setTimeout as wait } from 'node:timers/promises';
 import path from 'node:path';
@@ -21,7 +22,7 @@ const maximumUploadBytes = 10 * 1024 * 1024;
 const textExtensions = new Set([
   '.c', '.cc', '.conf', '.cpp', '.cs', '.css', '.csv', '.go', '.h', '.hpp', '.html',
   '.ini', '.java', '.js', '.json', '.jsx', '.log', '.md', '.mjs', '.py', '.rb',
-  '.rs', '.sh', '.sql', '.toml', '.ts', '.tsx', '.txt', '.xml', '.yaml', '.yml'
+  '.rs', '.sh', '.sql', '.svg', '.toml', '.ts', '.tsx', '.txt', '.xml', '.yaml', '.yml'
 ]);
 const uploadExtensions = new Set([
   ...textExtensions,
@@ -34,11 +35,32 @@ const imageContentTypes = new Map([
   ['.jpeg', 'image/jpeg'],
   ['.jpg', 'image/jpeg'],
   ['.png', 'image/png'],
+  ['.svg', 'image/svg+xml'],
   ['.webp', 'image/webp']
 ]);
 
 interface PublicationState {
   reviewed: Record<string, { hash: string; reviewedAt: string }>;
+}
+
+function assertSafeSvg(content: string): void {
+  if (!/<svg(?:\s|>)/i.test(content)) {
+    throw new UnsupportedFileError('The file is not a valid SVG document.', 'invalid_svg');
+  }
+  const unsafe = [
+    /<!doctype|<!entity|<\?xml-stylesheet/i,
+    /<(?:script|foreignObject|iframe|object|embed|style)\b/i,
+    /\bon[a-z]+\s*=/i,
+    /\b(?:href|src)\s*=\s*["']\s*(?!#|["'])/i,
+    /\burl\s*\(/i,
+    /@import/i
+  ];
+  if (unsafe.some((pattern) => pattern.test(content))) {
+    throw new UnsupportedFileError(
+      'SVG preview blocks scripts, event handlers, embedded HTML, stylesheets, and external resources.',
+      'unsafe_svg'
+    );
+  }
 }
 
 async function renameWithRetry(source: string, destination: string): Promise<void> {
@@ -65,8 +87,100 @@ async function renameWithRetry(source: string, destination: string): Promise<voi
 export class ProjectFileService {
   constructor(private readonly rootPath: string) {}
 
-  async listTree(): Promise<FileTreeNode[]> {
-    return this.readDirectory('');
+  async listTree(options: { includeHidden?: boolean; path?: string } = {}): Promise<FileTreeNode[]> {
+    const relativePath = options.path ? this.normalizeRelativePath(options.path) : '';
+    return this.readDirectory(relativePath, options.includeHidden ?? false);
+  }
+
+  /** Case-insensitive text search across supported text files under an optional project subdirectory. */
+  async searchFiles(
+    query: string,
+    options: { path?: string; maxResults?: number } = {}
+  ): Promise<Array<{ path: string; line: number; text: string }>> {
+    if (typeof query !== 'string' || !query.trim()) {
+      throw new BadRequestError('A search query is required.', 'query_required');
+    }
+    const needle = query.toLowerCase();
+    const maxResults = options.maxResults ?? 100;
+    const results: Array<{ path: string; line: number; text: string }> = [];
+    const files: string[] = [];
+    const collect = (nodes: FileTreeNode[]) => {
+      for (const node of nodes) {
+        if (node.type === 'directory') collect(node.children ?? []);
+        else if (textExtensions.has(path.posix.extname(node.name).toLowerCase())) files.push(node.path);
+      }
+    };
+    if (options.path) {
+      const normalized = this.normalizeRelativePath(options.path);
+      const target = await stat(await this.resolveExistingPath(normalized));
+      if (target.isDirectory()) collect(await this.readDirectory(normalized, true));
+      else files.push(normalized);
+    } else {
+      collect(await this.readDirectory('', false));
+    }
+    for (const filePath of files) {
+      let content: string;
+      try {
+        content = (await this.readTextFile(filePath)).content;
+      } catch {
+        continue;
+      }
+      const lines = content.split(/\r?\n/);
+      for (let index = 0; index < lines.length; index += 1) {
+        if (lines[index]!.toLowerCase().includes(needle)) {
+          results.push({ path: filePath, line: index + 1, text: lines[index]!.trim().slice(0, 300) });
+          if (results.length >= maxResults) return results;
+        }
+      }
+    }
+    return results;
+  }
+
+  /**
+   * Copies a project file or directory to a new location inside the project.
+   * Existing destination files are always preserved, so repeated copies only fill gaps.
+   */
+  async copyPath(sourcePath: string, destinationPath: string): Promise<{ created: string[]; preserved: string[] }> {
+    const source = this.normalizeRelativePath(sourcePath);
+    const destination = this.normalizeRelativePath(destinationPath);
+    if (destination === source || destination.startsWith(`${source}/`)) {
+      throw new BadRequestError('The copy destination cannot be the source or inside it.', 'invalid_copy_destination');
+    }
+    const created: string[] = [];
+    const preserved: string[] = [];
+    const maximumFiles = 500;
+    const copyEntry = async (relativeSource: string, relativeDestination: string): Promise<void> => {
+      const absoluteSource = await this.resolveExistingPath(relativeSource);
+      const sourceStats = await stat(absoluteSource);
+      if (sourceStats.isDirectory()) {
+        await this.ensureDirectory(relativeDestination);
+        const entries = await readdir(absoluteSource, { withFileTypes: true });
+        for (const entry of entries) {
+          if (entry.isSymbolicLink() || (entry.isDirectory() && excludedDirectories.has(entry.name.toLowerCase()))) {
+            continue;
+          }
+          await copyEntry(`${relativeSource}/${entry.name}`, `${relativeDestination}/${entry.name}`);
+        }
+        return;
+      }
+      if (created.length + preserved.length >= maximumFiles) {
+        throw new BadRequestError(`Copy is limited to ${maximumFiles} files.`, 'copy_too_large');
+      }
+      const normalizedDestination = this.normalizeRelativePath(relativeDestination);
+      const parent = path.posix.dirname(normalizedDestination);
+      if (parent !== '.') await this.ensureDirectory(parent);
+      const absoluteDestination = path.resolve(this.rootPath, normalizedDestination);
+      this.assertWithinRoot(absoluteDestination);
+      try {
+        await copyFile(absoluteSource, absoluteDestination, fsConstants.COPYFILE_EXCL);
+        created.push(normalizedDestination);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        preserved.push(normalizedDestination);
+      }
+    };
+    await copyEntry(source, destination);
+    return { created, preserved };
   }
 
   async readTextFile(relativePath: string): Promise<ProjectTextFile> {
@@ -103,10 +217,18 @@ export class ProjectFileService {
     return this.readTextFile(normalizedPath);
   }
 
-  async createTextFile(relativePath: string, content: string): Promise<ProjectTextFile> {
+  async createTextFile(
+    relativePath: string,
+    content: string,
+    options: { createParents?: boolean } = {}
+  ): Promise<ProjectTextFile> {
     const normalizedPath = this.normalizeRelativePath(relativePath);
     this.assertTextExtension(normalizedPath);
     this.validateContent(content);
+    const parent = path.posix.dirname(normalizedPath);
+    if (options.createParents && parent !== '.') {
+      await this.ensureDirectory(parent);
+    }
     const absolutePath = await this.resolveNewPath(normalizedPath);
     try {
       await writeFile(absolutePath, content, { encoding: 'utf8', flag: 'wx' });
@@ -119,7 +241,11 @@ export class ProjectFileService {
     return this.readTextFile(normalizedPath);
   }
 
-  async uploadFile(relativePath: string, contentBase64: string): Promise<UploadedProjectFile> {
+  async uploadFile(
+    relativePath: string,
+    contentBase64: string,
+    options: { createParents?: boolean } = {}
+  ): Promise<UploadedProjectFile> {
     const normalizedPath = this.normalizeRelativePath(relativePath);
     this.assertUploadExtension(normalizedPath);
     if (typeof contentBase64 !== 'string') {
@@ -134,6 +260,10 @@ export class ProjectFileService {
     const content = Buffer.from(contentBase64, 'base64');
     if (content.length > maximumUploadBytes) {
       throw new UnsupportedFileError('Uploaded files must be 10 MB or smaller.', 'file_too_large');
+    }
+    const parent = path.posix.dirname(normalizedPath);
+    if (options.createParents && parent !== '.') {
+      await this.ensureDirectory(parent);
     }
     const absolutePath = await this.resolveNewPath(normalizedPath);
     try {
@@ -184,7 +314,7 @@ export class ProjectFileService {
     const normalizedPath = this.normalizeRelativePath(relativePath);
     const contentType = imageContentTypes.get(path.posix.extname(normalizedPath).toLowerCase());
     if (!contentType) {
-      throw new UnsupportedFileError('Only supported raster images can be previewed.', 'image_required');
+      throw new UnsupportedFileError('Only supported images can be previewed.', 'image_required');
     }
     const absolutePath = await this.resolveExistingPath(normalizedPath);
     const fileStats = await stat(absolutePath);
@@ -194,7 +324,11 @@ export class ProjectFileService {
     if (fileStats.size > maximumUploadBytes) {
       throw new UnsupportedFileError('Image is too large to preview.', 'file_too_large');
     }
-    return { content: await readFile(absolutePath), contentType };
+    const content = await readFile(absolutePath);
+    if (contentType === 'image/svg+xml') {
+      assertSafeSvg(content.toString('utf8'));
+    }
+    return { content, contentType };
   }
 
   async publicationStatus(relativePath: string): Promise<PublicationStatus> {
@@ -242,11 +376,31 @@ export class ProjectFileService {
 </head><body><main>${renderMarkdown(file.content)}</main></body></html>`;
   }
 
-  private async readDirectory(relativePath: string): Promise<FileTreeNode[]> {
+  private async ensureDirectory(relativePath: string): Promise<void> {
+    let current = this.rootPath;
+    for (const segment of this.normalizeRelativePath(relativePath).split('/')) {
+      current = path.join(current, segment);
+      this.assertWithinRoot(current);
+      try {
+        const entryStats = await lstat(current);
+        if (entryStats.isSymbolicLink()) {
+          throw new PathBoundaryError('Symbolic links are not allowed in project paths.');
+        }
+        if (!entryStats.isDirectory()) {
+          throw new BadRequestError(`Project path is not a directory: ${relativePath}`, 'parent_not_directory');
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        await mkdir(current);
+      }
+    }
+  }
+
+  private async readDirectory(relativePath: string, includeHidden = false): Promise<FileTreeNode[]> {
     const absolutePath = relativePath ? await this.resolveExistingPath(relativePath) : this.rootPath;
     const entries = await readdir(absolutePath, { withFileTypes: true });
     const visibleEntries = entries.filter((entry) =>
-      !entry.name.startsWith('.')
+      (includeHidden || !entry.name.startsWith('.'))
       && !entry.isSymbolicLink()
       && !(entry.isDirectory() && excludedDirectories.has(entry.name.toLowerCase()))
     );
@@ -258,7 +412,7 @@ export class ProjectFileService {
         type: entry.isDirectory() ? 'directory' : 'file'
       };
       if (entry.isDirectory()) {
-        node.children = await this.readDirectory(childPath);
+        node.children = await this.readDirectory(childPath, includeHidden);
       }
       return node;
     }));

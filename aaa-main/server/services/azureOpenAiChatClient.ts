@@ -8,8 +8,10 @@ import type {
   ModelToolDefinition,
   ResolvedModelConnection
 } from '../modelTypes.js';
+import { AgentRunError } from '../httpErrors.js';
 
 type Fetch = typeof globalThis.fetch;
+const defaultMaxTokens = 16000;
 interface TokenCredentialLike {
   getToken(scopes: string | string[]): Promise<{ token: string } | null>;
 }
@@ -81,6 +83,7 @@ export class AzureOpenAiChatClient implements ModelChatClient {
             completed = true;
             continue;
           }
+          this.assertOutputNotTruncated(data, useResponsesApi, connection);
           if (this.captureToolCallDelta(data, useResponsesApi, toolCalls)) {
             continue;
           }
@@ -149,7 +152,7 @@ export class AzureOpenAiChatClient implements ModelChatClient {
   ): { url: string; body: Record<string, unknown> } {
     const { definition, endpoint, deployment, apiVersion } = connection;
     const temperature = definition.temperature ?? 0.2;
-    const maxTokens = definition.maxTokens ?? 1200;
+    const maxTokens = definition.maxTokens ?? defaultMaxTokens;
 
     if (useResponsesApi) {
       return {
@@ -242,6 +245,34 @@ export class AzureOpenAiChatClient implements ModelChatClient {
       return { type: 'reasoning', text: first.delta.reasoning_content };
     }
     return null;
+  }
+
+  private assertOutputNotTruncated(
+    rawJson: string,
+    responsesApi: boolean,
+    connection: ResolvedModelConnection
+  ): void {
+    let event: Record<string, unknown>;
+    try {
+      event = JSON.parse(rawJson) as Record<string, unknown>;
+    } catch {
+      return;
+    }
+    let truncated = false;
+    if (responsesApi) {
+      const response = event.response as { incomplete_details?: { reason?: string } } | undefined;
+      truncated = event.type === 'response.incomplete'
+        && response?.incomplete_details?.reason === 'max_output_tokens';
+    } else {
+      const choices = Array.isArray(event.choices) ? event.choices : [];
+      truncated = (choices[0] as { finish_reason?: unknown } | undefined)?.finish_reason === 'length';
+    }
+    if (truncated) {
+      throw new AgentRunError(
+        `The model reached its ${connection.definition.maxTokens ?? defaultMaxTokens}-token output limit before finishing. `
+        + 'Increase maxTokens in config/agent-connections.json or ask for smaller steps, such as one file at a time.'
+      );
+    }
   }
 
   private captureToolCallDelta(

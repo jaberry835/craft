@@ -228,21 +228,25 @@ test('published Markdown is rendered as a complete escaped local-only document',
   }
 });
 
-test('supported raster images are served with a fixed content type', async () => {
+test('supported images use fixed content types and unsafe SVG is rejected', async () => {
   const root = `${fixtureRoot}-images`;
   await rm(root, { recursive: true, force: true });
   await mkdir(root, { recursive: true });
   const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
   await writeFile(path.join(root, 'evidence.png'), bytes);
+  await writeFile(path.join(root, 'architecture.svg'), '<svg viewBox="0 0 10 10"><title>Safe</title><rect width="10" height="10" fill="#245b37"/></svg>', 'utf8');
   await writeFile(path.join(root, 'unsafe.svg'), '<svg><script>alert(1)</script></svg>', 'utf8');
   const service = new ProjectFileService(root);
   try {
     const image = await service.readImage('evidence.png');
     assert.equal(image.contentType, 'image/png');
     assert.deepEqual(image.content, bytes);
+    const svg = await service.readImage('architecture.svg');
+    assert.equal(svg.contentType, 'image/svg+xml');
+    assert.match(svg.content.toString('utf8'), /<title>Safe<\/title>/);
     await assert.rejects(
       () => service.readImage('unsafe.svg'),
-      (error: unknown) => error instanceof UnsupportedFileError && error.code === 'image_required'
+      (error: unknown) => error instanceof UnsupportedFileError && error.code === 'unsafe_svg'
     );
   } finally {
     await rm(root, { recursive: true, force: true });

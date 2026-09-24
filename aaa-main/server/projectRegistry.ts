@@ -1,4 +1,4 @@
-import { cp, mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
+import { cp, mkdir, readdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { BadRequestError, ConflictError, NotFoundError } from './httpErrors.js';
 import type { CreateProjectRequest, ProjectSummary, ProjectsResponse } from '../src/types/api.js';
@@ -11,8 +11,18 @@ interface ProjectConfig {
 }
 
 interface ProjectsConfig {
-  activeProjectId: string;
+  activeProjectId?: string;
   projects: ProjectConfig[];
+}
+
+async function exists(target: string): Promise<boolean> {
+  try {
+    await stat(target);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
 }
 
 export class ProjectRegistry {
@@ -26,10 +36,14 @@ export class ProjectRegistry {
 
   static async load(
     configPath: string,
-    options: { statePath?: string; managedRoot?: string } = {}
+    options: { statePath?: string; managedRoot?: string; templateRoot?: string } = {}
   ): Promise<ProjectRegistry> {
     const config = JSON.parse(await readFile(configPath, 'utf8')) as ProjectsConfig;
-    if (!Array.isArray(config.projects) || config.projects.length === 0) {
+    if (!Array.isArray(config.projects)) {
+      throw new Error('The project configuration must contain a projects array.');
+    }
+    const templateRoot = options.templateRoot ?? config.projects[0]?.rootPath;
+    if (config.projects.length === 0 && !(options.statePath && options.managedRoot && templateRoot)) {
       throw new Error('At least one configured project is required.');
     }
     let state: ProjectsConfig | undefined;
@@ -55,8 +69,8 @@ export class ProjectRegistry {
       try {
         projectStats = await stat(project.rootPath);
       } catch (error) {
-        if (state?.projects.some((candidate) => candidate.id === project.id)
-          && (error as NodeJS.ErrnoException).code === 'ENOENT') {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          console.warn(`[projects] Skipping project "${project.id}": root not found at ${project.rootPath}`);
           continue;
         }
         throw error;
@@ -66,20 +80,22 @@ export class ProjectRegistry {
       }
       projects.push({ ...project, rootPath: await realpath(path.resolve(project.rootPath)) });
     }
-    const activeProjectId = state?.activeProjectId
-      && projects.some((project) => project.id === state.activeProjectId)
-      ? state.activeProjectId
-      : config.activeProjectId;
-    if (!projects.some((project) => project.id === activeProjectId)) {
-      throw new Error(`Active project is not configured: ${activeProjectId}`);
-    }
-    return new ProjectRegistry(
+    const preferredActiveId = [state?.activeProjectId, config.activeProjectId]
+      .find((id) => id && projects.some((project) => project.id === id));
+    const registry = new ProjectRegistry(
       projects,
-      activeProjectId,
+      preferredActiveId ?? projects[0]?.id ?? '',
       options.statePath,
       options.managedRoot,
-      config.projects[0]?.rootPath
+      templateRoot
     );
+    if (projects.length === 0) {
+      if (!registry.statePath || !registry.managedRoot || !registry.templateRoot) {
+        throw new Error('No configured project root exists and project creation is not enabled.');
+      }
+      await registry.create({ name: 'Demo Project', description: 'Starter A&A project created from the bundled template.' });
+    }
+    return registry;
   }
 
   list(): ProjectsResponse {
@@ -151,29 +167,44 @@ export class ProjectRegistry {
     return this.summary(project);
   }
 
+  /**
+   * Copies the whole template root into the new project. When the template has no
+   * `security-package/` folder, the package skeleton bundled with the
+   * initialize-security-package skill is used instead, if present.
+   */
   private async seedProject(rootPath: string, name: string, systemName?: string): Promise<void> {
-    const template = path.join(
-      this.templateRoot!,
-      '.github',
-      'skills',
-      'initialize-security-package',
-      'assets',
-      'security-package-template'
-    );
-    await cp(template, path.join(rootPath, 'security-package'), { recursive: true });
-    for (const directory of ['.github', '.vscode']) {
-      await cp(path.join(this.templateRoot!, directory), path.join(rootPath, directory), {
+    const templateRoot = this.templateRoot!;
+    const entries = await readdir(templateRoot, { withFileTypes: true });
+    for (const entry of entries) {
+      if (['.git', 'node_modules', 'README.md'].includes(entry.name)) continue;
+      await cp(path.join(templateRoot, entry.name), path.join(rootPath, entry.name), {
         recursive: true,
         force: false
       });
     }
-    const configPath = path.join(rootPath, 'security-package', 'package-config.json');
-    const packageConfig = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
-    packageConfig.packageName = name;
-    packageConfig.systemName = typeof systemName === 'string' && systemName.trim()
-      ? systemName.trim()
-      : 'TBD';
-    await writeFile(configPath, `${JSON.stringify(packageConfig, null, 2)}\n`, 'utf8');
+    const packageRoot = path.join(rootPath, 'security-package');
+    if (!await exists(packageRoot)) {
+      const skillTemplate = path.join(
+        templateRoot,
+        '.github',
+        'skills',
+        'initialize-security-package',
+        'assets',
+        'security-package-template'
+      );
+      if (await exists(skillTemplate)) {
+        await cp(skillTemplate, packageRoot, { recursive: true, force: false });
+      }
+    }
+    const configPath = path.join(packageRoot, 'package-config.json');
+    if (await exists(configPath)) {
+      const packageConfig = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
+      packageConfig.packageName = name;
+      packageConfig.systemName = typeof systemName === 'string' && systemName.trim()
+        ? systemName.trim()
+        : 'TBD';
+      await writeFile(configPath, `${JSON.stringify(packageConfig, null, 2)}\n`, 'utf8');
+    }
     await writeFile(
       path.join(rootPath, 'README.md'),
       `# ${name}\n\nManaged locally by AAA — A&A Accelerator.\n`,

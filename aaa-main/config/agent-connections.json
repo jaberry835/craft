@@ -12,6 +12,6 @@
     "apiVersionEnv": "AZURE_OPENAI_API_VERSION",
     "defaultApiVersion": "2025-01-01-preview",
     "temperature": 0.2,
-    "maxTokens": 1200
+    "maxTokens": 16000
   }
 ]

@@ -58,7 +58,7 @@ test('azure client uses legacy deployment request shape and streams chat deltas'
     'https://example.openai.azure.com/openai/deployments/gpt-test/chat/completions?api-version=2025-01-01-preview'
   );
   assert.equal(requestBody.model, undefined);
-  assert.equal(requestBody.max_tokens, 1200);
+  assert.equal(requestBody.max_tokens, 16000);
   assert.equal(requestBody.stream, true);
   assert.deepEqual(events, [
     { type: 'assistant_text', text: 'Hello' },
@@ -78,7 +78,7 @@ test('azure client uses v1 request shape without api-version', async () => {
   await consume(client, connection('https://example.openai.azure.com/openai/v1'));
   assert.equal(requestUrl, 'https://example.openai.azure.com/openai/v1/chat/completions');
   assert.equal(requestBody.model, 'gpt-test');
-  assert.equal(requestBody.max_completion_tokens, 1200);
+  assert.equal(requestBody.max_completion_tokens, 16000);
   assert.equal(Object.hasOwn(requestBody, 'max_tokens'), false);
 });
 
@@ -153,4 +153,16 @@ test('azure client sends tools and assembles streamed responses API tool calls',
     },
     { type: 'completed' }
   ]);
+});
+
+test('azure client reports an actionable error when output hits the token limit', async () => {
+  const client = new AzureOpenAiChatClient(async () => sseResponse([
+    '{"choices":[{"delta":{"content":"Partial"}}]}',
+    '{"choices":[{"delta":{},"finish_reason":"length"}]}',
+    '[DONE]'
+  ]));
+  await assert.rejects(
+    () => consume(client, connection('https://example.openai.azure.com/openai/v1')),
+    /16000-token output limit/
+  );
 });

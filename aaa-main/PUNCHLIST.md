@@ -16,6 +16,7 @@ This list tracks the path from the visual prototype to a working local A&A demo.
 - [x] Add light and dark themes with local preference persistence.
 - [x] Add Files, Preview, Source, and Web artifact tabs.
 - [x] Add desktop and compact responsive layouts.
+- [x] Pin Capabilities and Project customizations to the bottom of the left pane while sessions scroll independently.
 - [x] Keep the chat anchored to the newest content during session loads, sends, model streaming, reasoning, and tool-step updates.
 - [x] Add a stable non-wrapping `Ctrl K` session-search shortcut that focuses the search field.
 
@@ -25,10 +26,12 @@ This list tracks the path from the visual prototype to a working local A&A demo.
 - [x] Discover configured A&A project directories.
 - [x] Return project metadata and the active project.
 - [x] Create managed authorization projects from the bundled package and customization template.
+- [x] Bundle the reference project template in the repository (`templates/default-project`), replaceable with high-side agents, skills, and MCP configuration.
+- [x] Skip configured project roots that do not exist on this machine and create a starter project when none remain.
 - [x] Switch projects from the top bar and persist the active selection across restarts.
 - [x] Keep runtime-created projects under ignored local data without rewriting tracked seed configuration.
 - [x] Enforce project-root path boundaries for every file operation.
-- [x] Persist local application data outside the assessed project files.
+- [x] Persist local application data outside the assessed project files; per-project review and customization state lives in the project's `.aaa/` folder.
 
 **Acceptance criteria:** AAA starts locally with one command, can create and switch persistent projects, and cannot read outside an allowed project root.
 
@@ -51,8 +54,14 @@ This list tracks the path from the visual prototype to a working local A&A demo.
 - [x] Persist assistant messages and structured run events with running, completed, failed, and aborted lifecycle states.
 - [x] Stream assistant output to the UI.
 - [x] Render Junior Web-style live and persisted reasoning and agent-step boxes.
-- [x] Stop an active response.
+- [x] Stop an active response, including before any queued tool call runs.
 - [x] Run a bounded model-driven agent loop with safe project file list, read, create, replace, and targeted edit tools.
+- [x] Bound each run by rounds, tool calls, and wall-clock time with actionable limit errors.
+- [x] Load project agents, skills, prompts, and HTTP MCP servers into the harness the same way VS Code agent mode does.
+- [x] Add search, template copy, and load-skill tools; create missing parent folders on agent writes.
+- [x] Connect HTTP MCP servers from `.vscode/mcp.json` with `aaa-file:` references for sending project files.
+- [x] Repair double-escaped newlines in model-written Markdown and report output-token truncation instead of saving partial files.
+- [x] Detect chat streams that end without a terminal event.
 - [x] Refresh the artifact tree and selected file after agent-driven file changes.
 - [ ] Add review/approval policy for higher-impact agent actions before expanding beyond project file tools.
 - [x] Show actionable errors rather than success-shaped fallback responses.
@@ -65,7 +74,7 @@ This list tracks the path from the visual prototype to a working local A&A demo.
 - [x] Build a real file tree from the selected project directory.
 - [x] Expand and collapse directories.
 - [x] Refresh the tree.
-- [x] Open text, Markdown, JSON, and supported raster image files.
+- [x] Open text, Markdown, formatted JSON, supported raster images, and safety-checked SVG files.
 - [x] Render selected Markdown in Preview.
 - [x] Show selected text files in Source.
 - [x] Add safe file create, rename, save, and delete operations.
@@ -87,12 +96,28 @@ This list tracks the path from the visual prototype to a working local A&A demo.
 
 **Acceptance criteria:** A selected Markdown file has a locally served browser-style view without an external network dependency.
 
+## 6a. Browser evidence and generated diagrams
+
+- [x] Add project-scoped persistent Playwright sessions that launch installed Microsoft Edge visibly by default.
+- [x] Add optional headless mode and explicit Edge channel/executable configuration.
+- [x] Add Web-tab launch, navigation, capture, close, status, and recent-capture controls.
+- [x] Restrict navigation to user-entered absolute HTTP and HTTPS addresses.
+- [x] Save PNG captures with adjacent JSON source URL, timestamp, browser-mode, and capture metadata.
+- [x] Expose deterministic browser operations to agents through `browser_capture` and a reference capture skill.
+- [x] Add a grounded architecture/CONOPS SVG-generation skill.
+- [x] Preview SVG only after rejecting active content and external resources.
+- [x] Fix formatted identity/JSON preview and dark-mode text contrast in chat, editor, and preview surfaces.
+- [ ] Build a dynamic interactive architecture diagram from cloud-scan output using the selected React component (explicitly deferred until after the portable demo move).
+
+**Acceptance criteria:** A user can authenticate in visible Edge, navigate to an HTTP(S) page, save screenshot evidence with provenance, and preview generated safe SVG and JSON artifacts without leaving AAA.
+
 ## 7. Security-package workflow
 
 - [ ] Detect package configuration and expected folder structure.
 - [ ] Surface control families, control responses, evidence, and validation status.
-- [ ] Wire package initialization to the existing offline skill/script.
-- [ ] Show structured progress for analyze and validate workflows.
+- [x] Wire package initialization to the offline skill by copying its bundled template (no script execution).
+- [~] Show structured progress for analyze and validate workflows (agent steps are shown; no dedicated package view yet).
+- [x] Publish package Markdown through the configured MCP publisher.
 - [ ] Preserve the human-review and publication boundary.
 
 **Acceptance criteria:** A user can initialize, inspect, build, and validate the demo package while retaining traceable local evidence.
@@ -102,14 +127,14 @@ This list tracks the path from the visual prototype to a working local A&A demo.
 - [x] Add a dismissible VS Code-inspired project customization window.
 - [x] Discover project agents, skills, MCP servers, instructions, and built-in tools.
 - [x] Add friendly category navigation, counts, search, status, and enable toggles.
-- [x] Persist enabled/disabled customization choices per project.
+- [x] Persist enabled/disabled customization choices per project and apply them to the agent's tool surface.
 - [x] Add friendly create/edit forms for agents, skills, MCP servers, and built-in tool availability.
 - [x] Store agent and skill changes in project Markdown and MCP changes in `.vscode/mcp.json`.
 - [x] Mark Instructions and Hooks as disabled coming-soon capabilities.
 - [ ] Add friendly create/edit forms for Instructions and Hooks.
 - [ ] Test MCP server connections without exposing endpoint credentials.
-- [ ] Replace permanent capability navigation with a compact Agent picker.
-- [ ] Add Skills as a searchable composer popover.
+- [~] Replace permanent capability navigation with a compact Agent picker (composer agent picker added; sidebar navigation remains).
+- [x] Add Skills as a searchable composer popover (`/` prompts and skills).
 - [ ] Add MCP servers and tools as status/configuration popovers.
 - [ ] Add an evidence/context attachment popover.
 - [ ] Keep advanced editing behind secondary configuration views.
@@ -118,6 +143,7 @@ This list tracks the path from the visual prototype to a working local A&A demo.
 
 ## 9. Reliability and offline packaging
 
+- [x] Add a hidden-files toggle to the Files tree.
 - [x] Add focused API and persistence tests.
 - [x] Add path-boundary and invalid-input tests.
 - [x] Keep project-partitioned JSON session storage as the default local and air-gap backend.
@@ -135,7 +161,7 @@ This list tracks the path from the visual prototype to a working local A&A demo.
 
 ### Storage slice provenance and deliberate omissions
 
-Adapted from Junior Web:
+Adapted from these Junior Web source files (paths are in the Junior Web repository, not this one):
 
 - `server/services/chatSessionStore.ts`
 - `server/services/localChatSessionStore.ts`
@@ -146,10 +172,42 @@ Adapted from Junior Web:
 - `server/test/persistenceFactories.test.ts`
 - `server/test/workspaceStorageFactory.test.ts`
 
+The AAA implementations live in `server/chatSessionStore.ts`, `server/sessionStore.ts`, `server/cosmosChatSessionStore.ts`, `server/cosmosContainerFactory.ts`, `server/sessionStoreFactory.ts`, and `server/storageConfig.ts`, with tests in `server/test/`.
+
 Deliberately omitted Junior Web's chat-session fallback wrapper because an explicitly configured Cosmos backend must fail visibly rather than write to a divergent local store. Blob workspace storage and its fallback/cache implementation are also not ported: AAA only validates and reports the compatible `JUNIOR_WORKSPACE_*` configuration until project-file storage has its own abstraction. Azure provisioning, deployment scripts, and live-service tests remain out of scope.
 
 The current connected demo environment has dedicated `AaaChat` / `AaaChatSessions` resources with `/projectId` partitioning. A live create, read, list, and delete cycle has been verified through the AAA API.
 
 ### Agent-loop provenance
 
-The reasoning display, model tool-call loop, bounded execution, workspace tools, and persisted agent-step metadata are being adapted from Junior Web's `JuniorAgentLoop`, `JuniorAgentPlanner`, `workspaceTools`, streaming API route, and message display parts. AAA keeps the first tool surface intentionally narrow and project-root constrained before adding skills, MCP, cloud evidence, or package workflow actions.
+The reasoning display, model tool-call loop, bounded execution, workspace tools, and persisted agent-step metadata are adapted from Junior Web's `JuniorAgentLoop`, `JuniorAgentPlanner`, `workspaceTools`, streaming API route, and message display parts. `server/projectWorkflowService.ts` adds VS Code-compatible agent, skill, prompt, and MCP loading; `server/services/mcpHttpClient.ts` is a minimal in-repo Streamable HTTP MCP client, so no MCP SDK dependency is required. All tools stay project-root constrained, and the harness never executes commands or scripts.
+
+## 10. Deferred review items
+
+Findings from the air-gap code review that are intentionally postponed. Items already fixed are listed in sections 4, 8, and 9.
+
+Security
+
+- [ ] Add authentication, per-project authorization, and CSRF/origin checks before binding beyond `127.0.0.1`.
+- [ ] Protect `.aaa/` review and customization state from agent writes (the agent can read and write dotfiles by design).
+- [ ] Add an approval gate for consequential agent edits and treat tool results as untrusted in policy, not only in the prompt.
+- [ ] Validate uploaded file signatures, not just extensions, before preview or evidence use.
+- [ ] Render the published Web preview from the exact bytes that were hash-verified (currently read twice).
+
+Correctness
+
+- [ ] Make Source-editor saves atomic compare-and-replace (the timestamp check and write are separate steps today).
+- [ ] Add concurrency tests for simultaneous saves and review marking.
+
+Packaging and offline install
+
+- [ ] Pin Node.js and npm versions (`engines`, `.nvmrc`); the locked Azure packages need Node 22 or later.
+- [ ] Move `vite` and `@vitejs/plugin-react` to `devDependencies` and document staging versus runtime installs.
+- [ ] Rehearse an offline install on the target OS/architecture, including `esbuild`'s platform binary.
+- [ ] Review tracked screenshots and stray files (`image.png`, `aaa-desktop.png`, `aaa-desktop-snapshot.yml`, `aaa-logo-update.png`, `background`) before transfer.
+
+MCP and harness
+
+- [ ] Support `stdio` MCP servers and `${input:...}` values, or keep them clearly marked unsupported.
+- [ ] Add an MCP connection test in Project customizations.
+- [ ] Add a browser end-to-end test for create project → `/initialize-security-package` → `/build-security-package` → publish.

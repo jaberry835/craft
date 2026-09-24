@@ -73,3 +73,44 @@ test('managed projects are seeded, selected, collision-safe, and restored', asyn
   );
 });
 
+
+test('missing configured roots are skipped and a starter project is created from the bundled template', async (t) => {
+  const root = path.join(process.cwd(), '.test-data', 'project-registry-portable');
+  await rm(root, { recursive: true, force: true });
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const templateRoot = path.join(root, 'templates', 'default-project');
+  const configPath = path.join(root, 'config', 'projects.json');
+  const statePath = path.join(root, 'data', 'projects.json');
+  const managedRoot = path.join(root, 'data', 'workspaces');
+  await mkdir(path.join(templateRoot, '.github', 'skills', 'demo'), { recursive: true });
+  await mkdir(path.join(templateRoot, 'security-package'), { recursive: true });
+  await writeFile(path.join(templateRoot, '.github', 'skills', 'demo', 'SKILL.md'), '# Demo\n', 'utf8');
+  await writeFile(
+    path.join(templateRoot, 'security-package', 'package-config.json'),
+    JSON.stringify({ packageName: 'Template', controlFamilies: [] }),
+    'utf8'
+  );
+  await writeFile(path.join(templateRoot, 'README.md'), '# Template notes\n', 'utf8');
+  await mkdir(path.dirname(configPath), { recursive: true });
+  await writeFile(configPath, JSON.stringify({
+    activeProjectId: 'missing',
+    projects: [{ id: 'missing', name: 'Missing', rootPath: path.join(root, 'does-not-exist') }]
+  }), 'utf8');
+
+  const registry = await ProjectRegistry.load(configPath, { statePath, managedRoot, templateRoot });
+  const { projects, activeProjectId } = registry.list();
+  assert.deepEqual(projects.map((project) => project.id), ['demo-project']);
+  assert.equal(activeProjectId, 'demo-project');
+  const projectRoot = projects[0]!.rootPath;
+  assert.equal(await readFile(path.join(projectRoot, '.github', 'skills', 'demo', 'SKILL.md'), 'utf8'), '# Demo\n');
+  assert.match(await readFile(path.join(projectRoot, 'README.md'), 'utf8'), /Managed locally by AAA/);
+  const packageConfig = JSON.parse(await readFile(
+    path.join(projectRoot, 'security-package', 'package-config.json'),
+    'utf8'
+  )) as { packageName: string };
+  assert.equal(packageConfig.packageName, 'Demo Project');
+
+  const restored = await ProjectRegistry.load(configPath, { statePath, managedRoot, templateRoot });
+  assert.deepEqual(restored.list().projects.map((project) => project.id), ['demo-project']);
+});

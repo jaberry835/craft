@@ -256,8 +256,12 @@ export class ProjectCustomizationService {
     return [
       ['list-files', 'List files', 'Inspect project paths without leaving the project root.', 'read'],
       ['read-file', 'Read file', 'Read supported UTF-8 project files.', 'read'],
+      ['search-files', 'Search files', 'Find text across project files.', 'search'],
       ['write-file', 'Write file', 'Create or replace supported project text files.', 'edit'],
-      ['edit-file', 'Edit file', 'Apply a targeted exact-text replacement.', 'edit']
+      ['edit-file', 'Edit file', 'Apply a targeted exact-text replacement.', 'edit'],
+      ['copy-path', 'Copy path', 'Copy template files or folders without overwriting existing files.', 'edit'],
+      ['browser-capture', 'Browser capture', 'Launch Microsoft Edge, navigate to web pages, and save screenshot evidence.', 'browser'],
+      ['load-skill', 'Load skill', 'Load a project skill procedure when a request matches it.', 'skills']
     ].map(([id, name, description, detail]) => ({
       id: `tool:${id}`,
       name,
@@ -314,7 +318,7 @@ async function safeReadDirectory(directory: string) {
   }
 }
 
-function parseMarkdown(content: string): { metadata: Record<string, string>; body: string } {
+export function parseMarkdown(content: string): { metadata: Record<string, string>; body: string } {
   if (!content.startsWith('---')) return { metadata: {}, body: content.trim() };
   const end = content.indexOf('\n---', 3);
   if (end < 0) return { metadata: {}, body: content.trim() };
@@ -376,7 +380,7 @@ function toolList(value?: string): string {
   return `[${tools.map((tool) => JSON.stringify(tool)).join(', ')}]`;
 }
 
-function toolNames(value?: string): string[] {
+export function toolNames(value?: string): string[] {
   return (value ?? '')
     .replace(/^\[|\]$/g, '')
     .split(',')

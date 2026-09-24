@@ -10,6 +10,7 @@
     "build": "tsc -b && vite build",
     "start": "node dist/server/server/index.js",
     "test:server": "tsx --test server/test/**/*.test.ts",
+    "test:mcp-live": "tsx --test --test-name-pattern \"live MCP\" server/test/mcpHttpClient.test.ts",
     "lint": "eslint .",
     "preview": "npm run start"
   },
@@ -20,6 +21,7 @@
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
     "lucide-react": "^0.468.0",
+    "playwright-core": "^1.63.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "react-markdown": "^10.1.0",

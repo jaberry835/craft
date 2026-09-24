@@ -43,3 +43,11 @@ export class StorageUnavailableError extends HttpError {
     super(message, 503, 'storage_unavailable');
   }
 }
+
+/** An agent-run failure whose message is credential-safe and actionable for the user. */
+export class AgentRunError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AgentRunError';
+  }
+}

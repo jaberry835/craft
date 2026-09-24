@@ -45,7 +45,7 @@ test('customizations discover project agents, skills, instructions, MCP servers,
   assert.equal(result.items.filter((item) => item.kind === 'instruction').length, 1);
   assert.equal(result.items.find((item) => item.kind === 'instruction')?.status, 'unavailable');
   assert.equal(result.items.find((item) => item.kind === 'instruction')?.enabled, false);
-  assert.equal(result.items.filter((item) => item.kind === 'tool').length, 4);
+  assert.equal(result.items.filter((item) => item.kind === 'tool').length, 8);
   const mcp = result.items.find((item) => item.kind === 'mcp-server');
   assert.equal(mcp?.description, 'Connects to example.test:8443');
   assert.doesNotMatch(mcp?.description ?? '', /secret|demo-user|token/);
@@ -57,7 +57,7 @@ test('missing customization folders return only built-in tools', async (t) => {
   t.after(() => rm(emptyRoot, { recursive: true, force: true }));
 
   const result = await new ProjectCustomizationService('empty', emptyRoot).list();
-  assert.equal(result.items.length, 4);
+  assert.equal(result.items.length, 8);
   assert.ok(result.items.every((item) => item.kind === 'tool'));
 });
 

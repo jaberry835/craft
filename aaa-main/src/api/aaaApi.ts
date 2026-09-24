@@ -1,5 +1,10 @@
 import type {
   AppendMessageRequest,
+  BrowserCaptureRequest,
+  BrowserCaptureResult,
+  BrowserLaunchRequest,
+  BrowserNavigateRequest,
+  BrowserSessionStatus,
   ChatStreamEvent,
   ChatStreamRequest,
   ChatSession,
@@ -17,6 +22,7 @@ import type {
   PublicationStatus,
   ModelConnectionStatus,
   ProjectCustomizations,
+  ProjectWorkflowSummary,
   SaveCustomizationRequest,
   SetCustomizationEnabledRequest,
   RenameProjectPathRequest,
@@ -133,7 +139,14 @@ async function requestStream(
   if (!response.body) {
     throw new Error('Streaming is not available in this browser session.');
   }
-  await parseNdjsonStream(response.body, onEvent);
+  let terminal = false;
+  await parseNdjsonStream(response.body, (event) => {
+    if (event.type === 'completed' || event.type === 'error') terminal = true;
+    return onEvent(event);
+  });
+  if (!terminal && !init.signal?.aborted) {
+    throw new Error('The response stream ended before the agent finished. Reload the session to see any saved progress.');
+  }
 }
 
 const projectPath = (projectId: string) => `/api/projects/${encodeURIComponent(projectId)}`;
@@ -186,7 +199,9 @@ export const aaaApi = {
         body: JSON.stringify(request)
       }
     ),
-  getFileTree: (projectId: string) => requestJson<FileTreeNode[]>(`${projectPath(projectId)}/tree`),
+  getWorkflow: (projectId: string) => requestJson<ProjectWorkflowSummary>(`${projectPath(projectId)}/workflow`),
+  getFileTree: (projectId: string, includeHidden = false) =>
+    requestJson<FileTreeNode[]>(`${projectPath(projectId)}/tree${includeHidden ? '?hidden=true' : ''}`),
   readTextFile: (projectId: string, filePath: string) =>
     requestJson<ProjectTextFile>(`${projectPath(projectId)}/files?path=${encodeURIComponent(filePath)}`),
   writeTextFile: (projectId: string, request: WriteTextFileRequest) =>
@@ -226,6 +241,25 @@ export const aaaApi = {
     }),
   publishedMarkdownUrl: (projectId: string, filePath: string) =>
     `${projectPath(projectId)}/published?path=${encodeURIComponent(filePath)}`,
+  getBrowserStatus: (projectId: string) =>
+    requestJson<BrowserSessionStatus>(`${projectPath(projectId)}/browser`),
+  launchBrowser: (projectId: string, request: BrowserLaunchRequest) =>
+    requestJson<BrowserSessionStatus>(`${projectPath(projectId)}/browser/launch`, {
+      method: 'POST',
+      body: JSON.stringify(request)
+    }),
+  navigateBrowser: (projectId: string, request: BrowserNavigateRequest) =>
+    requestJson<BrowserSessionStatus>(`${projectPath(projectId)}/browser/navigate`, {
+      method: 'POST',
+      body: JSON.stringify(request)
+    }),
+  captureBrowser: (projectId: string, request: BrowserCaptureRequest) =>
+    requestJson<BrowserCaptureResult>(`${projectPath(projectId)}/browser/capture`, {
+      method: 'POST',
+      body: JSON.stringify(request)
+    }),
+  closeBrowser: (projectId: string) =>
+    requestJson<BrowserSessionStatus>(`${projectPath(projectId)}/browser`, { method: 'DELETE' }),
   listSessions: (projectId: string) => requestJson<ChatSessionSummary[]>(sessionPath(projectId)),
   createSession: (projectId: string, request: CreateSessionRequest = {}) =>
     requestJson<ChatSession>(sessionPath(projectId), { method: 'POST', body: JSON.stringify(request) }),

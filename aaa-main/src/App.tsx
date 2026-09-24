@@ -13,6 +13,8 @@ import {
   Code2,
   Database,
   ExternalLink,
+  Eye,
+  EyeOff,
   FileCheck2,
   FileCode2,
   FilePlus2,
@@ -60,6 +62,8 @@ import type {
   ChatMessageDisplayPart,
   ChatSession,
   ChatSessionSummary,
+  BrowserCaptureResult,
+  BrowserSessionStatus,
   CustomizationEditor,
   CustomizationItem,
   EditableCustomizationKind,
@@ -67,6 +71,7 @@ import type {
   ModelConnectionStatus,
   ProjectSummary,
   ProjectTextFile,
+  ProjectWorkflowSummary,
   PublicationStatus,
   StorageStatus,
   ToolEvent
@@ -100,11 +105,39 @@ const starterPrompts = [
 ];
 
 const themeStorageKey = 'aaa-theme';
-const previewImageExtensions = new Set(['.bmp', '.gif', '.jpeg', '.jpg', '.png', '.webp']);
+const hiddenFilesStorageKey = 'aaa-show-hidden-files';
+const agentSelectionStorageKey = 'aaa-agent-selection';
+const previewImageExtensions = new Set(['.bmp', '.gif', '.jpeg', '.jpg', '.png', '.svg', '.webp']);
+
+function getInitialAgentSelections(): Record<string, string> {
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(agentSelectionStorageKey) ?? '{}') as unknown;
+    return stored && typeof stored === 'object' ? stored as Record<string, string> : {};
+  } catch {
+    return {};
+  }
+}
 
 function isPreviewImage(filePath: string): boolean {
   const extension = filePath.slice(filePath.lastIndexOf('.')).toLowerCase();
   return previewImageExtensions.has(extension);
+}
+
+function JsonPreview({ content }: { content: string }) {
+  try {
+    const value = JSON.parse(content) as unknown;
+    return <pre className="json-preview">{JSON.stringify(value, null, 2)}</pre>;
+  } catch (error) {
+    return (
+      <div className="json-preview-error" role="alert">
+        <Braces size={18} />
+        <div>
+          <strong>Invalid JSON</strong>
+          <span>{error instanceof Error ? error.message : 'This file could not be parsed.'}</span>
+        </div>
+      </div>
+    );
+  }
 }
 
 function formatRelativeTime(value: string): string {
@@ -262,7 +295,11 @@ function MessageDetails({
                   <div className="working-event" key={event.id}>
                     {event.type === 'read' || event.type === 'search'
                       ? <Search size={13} />
-                      : <FileCheck2 size={13} />}
+                      : event.type === 'skill'
+                        ? <Sparkles size={13} />
+                        : event.type === 'mcp'
+                          ? <Plug size={13} />
+                          : <FileCheck2 size={13} />}
                     <div>
                       <span>{event.label}</span>
                       {event.detail && <small>{event.detail}</small>}
@@ -292,6 +329,12 @@ function App() {
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
   const [selectedFile, setSelectedFile] = useState<ProjectTextFile | null>(null);
   const [selectedImagePath, setSelectedImagePath] = useState('');
+  const [browserStatus, setBrowserStatus] = useState<BrowserSessionStatus>({ active: false });
+  const [browserUrl, setBrowserUrl] = useState('https://');
+  const [browserHeadless, setBrowserHeadless] = useState(false);
+  const [browserOutputPath, setBrowserOutputPath] = useState('');
+  const [browserCapture, setBrowserCapture] = useState<BrowserCaptureResult | null>(null);
+  const [browserBusy, setBrowserBusy] = useState(false);
   const [publicationStatus, setPublicationStatus] = useState<PublicationStatus | null>(null);
   const [isReviewingFile, setIsReviewingFile] = useState(false);
   const [editorContent, setEditorContent] = useState('');
@@ -323,6 +366,14 @@ function App() {
   const [isCreatingSession, setIsCreatingSession] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState('');
+  const [workflow, setWorkflow] = useState<ProjectWorkflowSummary | null>(null);
+  const [agentSelections, setAgentSelections] = useState<Record<string, string>>(getInitialAgentSelections);
+  const [agentMenuOpen, setAgentMenuOpen] = useState(false);
+  const [commandMenuOpen, setCommandMenuOpen] = useState(false);
+  const [showHiddenFiles, setShowHiddenFiles] = useState(
+    () => window.localStorage.getItem(hiddenFilesStorageKey) === 'true'
+  );
+  const showHiddenFilesRef = useRef(showHiddenFiles);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const sessionSearchRef = useRef<HTMLInputElement>(null);
   const chatContentRef = useRef<HTMLDivElement>(null);
@@ -333,6 +384,7 @@ function App() {
   const messages = activeSession?.messages ?? [];
   const lastRun = activeSession?.runs.at(-1);
   const isMarkdownSelected = selectedFile?.path.toLowerCase().endsWith('.md') ?? false;
+  const isJsonSelected = selectedFile?.path.toLowerCase().endsWith('.json') ?? false;
   const selectedArtifactPath = selectedFile?.path ?? selectedImagePath;
   const isFileDirty = selectedFile !== null && editorContent !== selectedFile.content;
   const publishedUrl = activeProjectId && selectedFile && isMarkdownSelected && publicationStatus?.reviewed
@@ -360,6 +412,20 @@ function App() {
     (kind: CustomizationItem['kind']) => customizationItems.filter((item) => item.kind === kind).length,
     [customizationItems]
   );
+  const selectedAgent = useMemo(() => {
+    const agents = workflow?.agents ?? [];
+    const requested = agentSelections[activeProjectId];
+    if (requested === 'default') return undefined;
+    return agents.find((agent) => agent.id === requested) ?? agents[0];
+  }, [activeProjectId, agentSelections, workflow?.agents]);
+  const agentLabel = selectedAgent?.name ?? 'AAA Assistant';
+  const slashQuery = /^\/(\S*)$/.exec(draft)?.[1]?.toLowerCase();
+  const commandSuggestions = useMemo(() => {
+    const commands = workflow?.commands ?? [];
+    if (slashQuery === undefined) return commandMenuOpen ? commands : [];
+    return commands.filter((command) =>
+      command.name.includes(slashQuery) || command.label.toLowerCase().includes(slashQuery));
+  }, [commandMenuOpen, slashQuery, workflow?.commands]);
 
   const shellStyle = useMemo(() => ({
     '--left-width': leftOpen ? `${leftWidth}px` : '0px',
@@ -368,13 +434,21 @@ function App() {
 
   const refreshCustomizations = useCallback(async () => {
     if (!activeProjectId) return;
-    const response = await aaaApi.getCustomizations(activeProjectId);
+    const [response, nextWorkflow] = await Promise.all([
+      aaaApi.getCustomizations(activeProjectId),
+      aaaApi.getWorkflow(activeProjectId)
+    ]);
     setCustomizationItems(response.items);
+    setWorkflow(nextWorkflow);
   }, [activeProjectId]);
 
   useEffect(() => {
     window.localStorage.setItem(themeStorageKey, theme);
   }, [theme]);
+
+  useEffect(() => {
+    window.localStorage.setItem(agentSelectionStorageKey, JSON.stringify(agentSelections));
+  }, [agentSelections]);
 
   useEffect(() => {
     setEditorContent(selectedFile?.content ?? '');
@@ -420,9 +494,12 @@ function App() {
   useEffect(() => {
     if (!activeProjectId) return;
     let cancelled = false;
-    aaaApi.getCustomizations(activeProjectId)
-      .then((response) => {
-        if (!cancelled) setCustomizationItems(response.items);
+    setWorkflow(null);
+    Promise.all([aaaApi.getCustomizations(activeProjectId), aaaApi.getWorkflow(activeProjectId)])
+      .then(([response, nextWorkflow]) => {
+        if (cancelled) return;
+        setCustomizationItems(response.items);
+        setWorkflow(nextWorkflow);
       })
       .catch((loadError) => {
         if (!cancelled) setError(loadError instanceof Error ? loadError.message : 'Could not load customizations.');
@@ -493,12 +570,15 @@ function App() {
     setIsLoading(true);
     setError('');
     try {
-      const [nextSessions, nextTree] = await Promise.all([
+      const [nextSessions, nextTree, nextBrowserStatus] = await Promise.all([
         aaaApi.listSessions(projectId),
-        aaaApi.getFileTree(projectId)
+        aaaApi.getFileTree(projectId, showHiddenFilesRef.current),
+        aaaApi.getBrowserStatus(projectId)
       ]);
       setSessions(nextSessions);
       setFileTree(nextTree);
+      setBrowserStatus(nextBrowserStatus);
+      if (nextBrowserStatus.currentUrl?.startsWith('http')) setBrowserUrl(nextBrowserStatus.currentUrl);
       setExpandedPaths(new Set(nextTree.filter((node) => node.type === 'directory').map((node) => node.path)));
 
       const preferredSessionId = activeSession?.projectId === projectId ? activeSession.id : nextSessions[0]?.id;
@@ -685,6 +765,7 @@ function App() {
       });
       setCustomizationItems((current) => current.map((candidate) =>
         candidate.id === item.id ? updated : candidate));
+      setWorkflow(await aaaApi.getWorkflow(activeProjectId));
     } catch (toggleError) {
       setCustomizationEditorError(toggleError instanceof Error
         ? toggleError.message
@@ -735,13 +816,13 @@ function App() {
         const file = await aaaApi.readTextFile(activeProjectId, node.path);
         setSelectedFile(file);
         setSelectedImagePath('');
-        setArtifactTab(node.name.toLowerCase().endsWith('.md') ? 'preview' : 'source');
+        setArtifactTab(/\.(md|json)$/i.test(node.name) ? 'preview' : 'source');
       } catch (fileError) {
         setError(fileError instanceof Error ? fileError.message : 'Could not open the file.');
       }
     };
     if (selectedArtifactPath === node.path) {
-      setArtifactTab(node.name.toLowerCase().endsWith('.md') ? 'preview' : 'source');
+      setArtifactTab(/\.(md|json)$/i.test(node.name) ? 'preview' : 'source');
       return;
     }
     requestFileAction(() => void loadFile());
@@ -750,11 +831,101 @@ function App() {
   const refreshFiles = useCallback(async () => {
     if (!activeProjectId) return;
     try {
-      setFileTree(await aaaApi.getFileTree(activeProjectId));
+      setFileTree(await aaaApi.getFileTree(activeProjectId, showHiddenFilesRef.current));
     } catch (refreshError) {
       setError(refreshError instanceof Error ? refreshError.message : 'Could not refresh project files.');
     }
   }, [activeProjectId]);
+
+  const launchBrowser = useCallback(async () => {
+    if (!activeProjectId || browserBusy) return;
+    setBrowserBusy(true);
+    setError('');
+    try {
+      setBrowserStatus(await aaaApi.launchBrowser(activeProjectId, { headless: browserHeadless }));
+    } catch (browserError) {
+      setError(browserError instanceof Error ? browserError.message : 'Could not launch Microsoft Edge.');
+    } finally {
+      setBrowserBusy(false);
+    }
+  }, [activeProjectId, browserBusy, browserHeadless]);
+
+  const navigateBrowser = useCallback(async () => {
+    if (!activeProjectId || browserBusy) return;
+    setBrowserBusy(true);
+    setError('');
+    try {
+      setBrowserStatus(await aaaApi.navigateBrowser(activeProjectId, { url: browserUrl }));
+    } catch (browserError) {
+      setError(browserError instanceof Error ? browserError.message : 'Could not navigate Microsoft Edge.');
+    } finally {
+      setBrowserBusy(false);
+    }
+  }, [activeProjectId, browserBusy, browserUrl]);
+
+  const captureBrowser = useCallback(async () => {
+    if (!activeProjectId || browserBusy) return;
+    setBrowserBusy(true);
+    setError('');
+    try {
+      const captured = await aaaApi.captureBrowser(activeProjectId, {
+        outputPath: browserOutputPath.trim() || undefined,
+        fullPage: true
+      });
+      setBrowserCapture(captured);
+      setBrowserOutputPath('');
+      await refreshFiles();
+    } catch (browserError) {
+      setError(browserError instanceof Error ? browserError.message : 'Could not capture browser evidence.');
+    } finally {
+      setBrowserBusy(false);
+    }
+  }, [activeProjectId, browserBusy, browserOutputPath, refreshFiles]);
+
+  const closeBrowser = useCallback(async () => {
+    if (!activeProjectId || browserBusy) return;
+    setBrowserBusy(true);
+    setError('');
+    try {
+      setBrowserStatus(await aaaApi.closeBrowser(activeProjectId));
+    } catch (browserError) {
+      setError(browserError instanceof Error ? browserError.message : 'Could not close Microsoft Edge.');
+    } finally {
+      setBrowserBusy(false);
+    }
+  }, [activeProjectId, browserBusy]);
+
+  useEffect(() => {
+    window.localStorage.setItem(hiddenFilesStorageKey, String(showHiddenFiles));
+    if (showHiddenFilesRef.current === showHiddenFiles) return;
+    showHiddenFilesRef.current = showHiddenFiles;
+    void refreshFiles();
+  }, [refreshFiles, showHiddenFiles]);
+
+  useEffect(() => {
+    if (!agentMenuOpen) return;
+    const close = (event: MouseEvent | KeyboardEvent) => {
+      if (event instanceof KeyboardEvent ? event.key === 'Escape' : !(event.target as Element).closest?.('.agent-picker')) {
+        setAgentMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', close);
+    document.addEventListener('keydown', close);
+    return () => {
+      document.removeEventListener('mousedown', close);
+      document.removeEventListener('keydown', close);
+    };
+  }, [agentMenuOpen]);
+
+  const insertCommand = useCallback((name: string) => {
+    setDraft(`/${name} `);
+    setCommandMenuOpen(false);
+    window.requestAnimationFrame(() => {
+      const composer = composerRef.current;
+      composer?.focus();
+      composer?.setSelectionRange(composer.value.length, composer.value.length);
+    });
+  }, []);
 
   const saveSelectedFile = useCallback(async () => {
     if (!activeProjectId || !selectedFile || !isFileDirty || isSavingFile) return;
@@ -915,7 +1086,7 @@ function App() {
       setDraft('');
       const controller = new AbortController();
       streamAbortRef.current = controller;
-      await aaaApi.streamChat(activeProjectId, session.id, { content: trimmed }, (event) => {
+      await aaaApi.streamChat(activeProjectId, session.id, { content: trimmed, agentId: selectedAgent?.id ?? 'default' }, (event) => {
         if (event.type === 'assistant_text') {
           setStreamingText((current) => current + event.text);
         } else if (event.type === 'reasoning') {
@@ -974,7 +1145,7 @@ function App() {
       setStreamingToolEvents([]);
       setIsThinking(false);
     }
-  }, [activeProjectId, activeSession, draft, isCreatingSession, isFileDirty, isThinking, refreshFiles, scrollChatToEnd, selectedFile]);
+  }, [activeProjectId, activeSession, draft, isCreatingSession, isFileDirty, isThinking, refreshFiles, scrollChatToEnd, selectedAgent?.id, selectedFile]);
 
   const stopResponse = useCallback(() => {
     streamAbortRef.current?.abort();
@@ -1081,28 +1252,30 @@ function App() {
               )}
             </div>
 
-            <div className="sidebar-section customizations">
-              <div className="sidebar-label">Capabilities</div>
-              <SidebarItem icon={Bot} label="Agents" count={customizationCount('agent')} onClick={() => openCustomizations('agent')} />
-              <SidebarItem icon={Sparkles} label="Skills" count={customizationCount('skill')} onClick={() => openCustomizations('skill')} />
-              <SidebarItem icon={Server} label="MCP servers" count={customizationCount('mcp-server')} onClick={() => openCustomizations('mcp-server')} />
-              <SidebarItem icon={Wrench} label="Tools" count={customizationCount('tool')} onClick={() => openCustomizations('tool')} />
-            </div>
-
-            <div className="connection-card">
-              <div className="connection-icon"><Database size={16} /></div>
-              <div>
-                <strong>{storageStatus?.sessions.backend === 'cosmos' ? 'Cosmos sessions' : 'Local sessions'}</strong>
-                <span>
-                  {storageStatus?.sessions.ready
-                    ? storageStatus.sessions.endpointHost ?? 'Air-gap ready'
-                    : 'Storage setup needed'}
-                </span>
+            <div className="sidebar-bottom">
+              <div className="sidebar-section customizations">
+                <div className="sidebar-label">Capabilities</div>
+                <SidebarItem icon={Bot} label="Agents" count={customizationCount('agent')} onClick={() => openCustomizations('agent')} />
+                <SidebarItem icon={Sparkles} label="Skills" count={customizationCount('skill')} onClick={() => openCustomizations('skill')} />
+                <SidebarItem icon={Server} label="MCP servers" count={customizationCount('mcp-server')} onClick={() => openCustomizations('mcp-server')} />
+                <SidebarItem icon={Wrench} label="Tools" count={customizationCount('tool')} onClick={() => openCustomizations('tool')} />
               </div>
-              <span className={storageStatus?.sessions.ready ? 'status-dot' : 'offline-dot'} />
-            </div>
 
-            <button className="sidebar-settings" onClick={() => openCustomizations()}><Settings2 size={16} /> Project customizations</button>
+              <div className="connection-card">
+                <div className="connection-icon"><Database size={16} /></div>
+                <div>
+                  <strong>{storageStatus?.sessions.backend === 'cosmos' ? 'Cosmos sessions' : 'Local sessions'}</strong>
+                  <span>
+                    {storageStatus?.sessions.ready
+                      ? storageStatus.sessions.endpointHost ?? 'Air-gap ready'
+                      : 'Storage setup needed'}
+                  </span>
+                </div>
+                <span className={storageStatus?.sessions.ready ? 'status-dot' : 'offline-dot'} />
+              </div>
+
+              <button className="sidebar-settings" onClick={() => openCustomizations()}><Settings2 size={16} /> Project customizations</button>
+            </div>
           </aside>
         )}
 
@@ -1116,7 +1289,7 @@ function App() {
               </button>
               <span className="agent-avatar"><ShieldCheck size={17} /></span>
               <span>
-                <strong>Security Package Builder</strong>
+                <strong>{agentLabel}</strong>
                 <small>
                   <span className={modelStatus?.ready ? 'online-dot' : 'offline-dot'} />
                   {modelStatus?.ready ? `${modelStatus.name} ready` : 'Model setup needed'}
@@ -1190,25 +1363,67 @@ function App() {
           </div>
 
           <div className="composer-wrap">
+            {commandSuggestions.length > 0 && (
+              <div className="command-menu" role="listbox" aria-label="Prompts and skills">
+                <div className="command-menu-header">
+                  <strong>Prompts &amp; skills</strong>
+                  <small>Type / to filter · Tab to complete</small>
+                </div>
+                {commandSuggestions.map((command) => (
+                  <button
+                    key={`${command.kind}:${command.name}`}
+                    role="option"
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => insertCommand(command.name)}
+                    title={command.description}
+                  >
+                    {command.kind === 'prompt' ? <MessageSquareText size={14} /> : <Sparkles size={14} />}
+                    <span>
+                      <strong>/{command.name}</strong>
+                      <small>{command.argumentHint ?? command.description}</small>
+                    </span>
+                    <em>{command.kind}</em>
+                  </button>
+                ))}
+              </div>
+            )}
             <div className="composer">
               <textarea
                 ref={composerRef}
                 value={draft}
                 onChange={(event) => setDraft(event.target.value)}
                 onKeyDown={(event) => {
+                  if (event.key === 'Tab' && slashQuery !== undefined && commandSuggestions[0]) {
+                    event.preventDefault();
+                    insertCommand(commandSuggestions[0].name);
+                    return;
+                  }
+                  if (event.key === 'Escape' && commandMenuOpen) {
+                    setCommandMenuOpen(false);
+                    return;
+                  }
                   if (event.key === 'Enter' && !event.shiftKey) {
                     event.preventDefault();
+                    setCommandMenuOpen(false);
                     sendMessage();
                   }
                 }}
-                placeholder="Ask AAA to build, assess, or validate..."
+                placeholder="Ask AAA to build, assess, or validate... Type / for prompts and skills"
                 rows={1}
               />
               <div className="composer-toolbar">
                 <div>
                   <button className="tool-button"><Plus size={17} /></button>
                   <button className="tool-button"><Paperclip size={16} /> Add evidence</button>
-                  <button className="tool-button"><Code2 size={16} /> Skills</button>
+                  <button
+                    className={`tool-button ${commandMenuOpen ? 'active' : ''}`}
+                    aria-expanded={commandMenuOpen}
+                    disabled={!workflow?.commands.length}
+                    title={workflow?.commands.length ? 'Insert a prompt or skill' : 'This project has no prompts or skills'}
+                    onClick={() => setCommandMenuOpen((open) => !open)}
+                  >
+                    <Code2 size={16} /> Skills
+                  </button>
                 </div>
                 <button
                   className={`send-button ${isThinking ? 'stop' : ''}`}
@@ -1221,7 +1436,38 @@ function App() {
               </div>
             </div>
             <div className="composer-meta">
-              <button><Bot size={13} /> Security Package Builder <ChevronDown size={12} /></button>
+              <div className="agent-picker">
+                <button
+                  aria-haspopup="menu"
+                  aria-expanded={agentMenuOpen}
+                  onClick={() => setAgentMenuOpen((open) => !open)}
+                  title={selectedAgent?.description ?? 'Run without a project agent'}
+                >
+                  <Bot size={13} /> {agentLabel} <ChevronDown size={12} />
+                </button>
+                {agentMenuOpen && (
+                  <div className="agent-menu" role="menu">
+                    {[...(workflow?.agents ?? []), { id: 'default', name: 'AAA Assistant', description: 'General assistant without project agent instructions.' }]
+                      .map((agent) => (
+                        <button
+                          key={agent.id}
+                          role="menuitemradio"
+                          aria-checked={(selectedAgent?.id ?? 'default') === agent.id}
+                          onClick={() => {
+                            setAgentSelections((current) => ({ ...current, [activeProjectId]: agent.id }));
+                            setAgentMenuOpen(false);
+                          }}
+                        >
+                          <span>
+                            <strong>{agent.name}</strong>
+                            <small>{agent.description}</small>
+                          </span>
+                          {(selectedAgent?.id ?? 'default') === agent.id && <Check size={13} />}
+                        </button>
+                      ))}
+                  </div>
+                )}
+              </div>
               <span title={modelStatus?.missing.join(', ')}>
                 {modelStatus?.ready
                   ? `${modelStatus.deployment ?? modelStatus.name} · Grounded in this workspace`
@@ -1316,6 +1562,15 @@ function App() {
                     <Upload size={14} />
                   </button>
                   <button className="icon-button small" onClick={() => void createFile()} aria-label="Create text file" title="Create text file"><FilePlus2 size={14} /></button>
+                  <button
+                    className={`icon-button small ${showHiddenFiles ? 'active' : ''}`}
+                    onClick={() => setShowHiddenFiles((show) => !show)}
+                    aria-pressed={showHiddenFiles}
+                    aria-label={showHiddenFiles ? 'Hide dotfiles' : 'Show dotfiles'}
+                    title={showHiddenFiles ? 'Hide dotfiles (.github, .vscode, .aaa)' : 'Show dotfiles (.github, .vscode, .aaa)'}
+                  >
+                    {showHiddenFiles ? <Eye size={14} /> : <EyeOff size={14} />}
+                  </button>
                   <button className="icon-button small" onClick={() => void refreshFiles()} aria-label="Refresh files" title="Refresh files"><RefreshCw size={14} /></button>
                 </div>
               </div>
@@ -1382,7 +1637,7 @@ function App() {
             {artifactTab !== 'files' && <div className="preview-pane">
               <div className="preview-toolbar">
                 <div className="preview-file-title">
-                  {selectedImagePath ? <ImageIcon size={15} /> : <FileText size={15} />}
+                  {selectedImagePath ? <ImageIcon size={15} /> : isJsonSelected ? <Braces size={15} /> : <FileText size={15} />}
                   <span>{selectedArtifactPath || 'Select a file'}</span>
                   {isFileDirty && <small className="dirty-indicator">Unsaved</small>}
                   {isMarkdownSelected && publicationStatus && (
@@ -1420,7 +1675,9 @@ function App() {
                         </div>
                       )
                       : selectedFile
-                      ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{editorContent}</ReactMarkdown>
+                      ? isJsonSelected
+                        ? <JsonPreview content={editorContent} />
+                        : <ReactMarkdown remarkPlugins={[remarkGfm]}>{editorContent}</ReactMarkdown>
                       : <p>Select a Markdown file from Files to preview it.</p>}
                   </div>
                 )}
@@ -1447,18 +1704,76 @@ function App() {
                   <div className="browser-preview">
                     <div className="browser-bar">
                       <span /><span /><span />
-                      <div><ShieldCheck size={13} /> aaa.local/{selectedFile?.path ?? 'preview'}</div>
+                      <div>
+                        <ShieldCheck size={13} />
+                        {browserStatus.active ? browserStatus.currentUrl ?? 'Edge session active' : 'Microsoft Edge capture is not running'}
+                      </div>
                     </div>
-                    {publishedUrl
-                      ? (
+                    <div className="browser-capture-panel">
+                      <div className="browser-capture-heading">
+                        <div>
+                          <strong>Authenticated web evidence</strong>
+                          <span>{browserStatus.active
+                            ? `${browserStatus.headless ? 'Headless' : 'Visible'} Edge · profile retained for this project`
+                            : 'Launch visible Edge, authenticate, navigate, then capture evidence.'}</span>
+                        </div>
+                        <label className="browser-headless">
+                          <input
+                            type="checkbox"
+                            checked={browserHeadless}
+                            disabled={browserStatus.active || browserBusy}
+                            onChange={(event) => setBrowserHeadless(event.target.checked)}
+                          />
+                          Headless
+                        </label>
+                      </div>
+                      <div className="browser-address-row">
+                        <input
+                          aria-label="Browser address"
+                          value={browserUrl}
+                          onChange={(event) => setBrowserUrl(event.target.value)}
+                          placeholder="https://portal.example"
+                        />
+                        <button className="secondary-button" disabled={!browserStatus.active || browserBusy} onClick={() => void navigateBrowser()}>
+                          <Globe2 size={14} /> Go
+                        </button>
+                      </div>
+                      <div className="browser-address-row">
+                        <input
+                          aria-label="Screenshot output path"
+                          value={browserOutputPath}
+                          onChange={(event) => setBrowserOutputPath(event.target.value)}
+                          placeholder="evidence/screenshots/portal.png (optional)"
+                        />
+                        <button className="secondary-button" disabled={!browserStatus.active || browserBusy} onClick={() => void captureBrowser()}>
+                          <ImageIcon size={14} /> Capture
+                        </button>
+                      </div>
+                      <div className="browser-actions">
+                        {!browserStatus.active
+                          ? <button className="dialog-primary" disabled={browserBusy} onClick={() => void launchBrowser()}><ExternalLink size={14} /> Launch Edge</button>
+                          : <button className="secondary-button" disabled={browserBusy} onClick={() => void closeBrowser()}><X size={14} /> Close Edge</button>}
+                        <small>HTTP and HTTPS addresses are allowed. Credentials remain in the project-scoped Edge profile and are never stored in package artifacts.</small>
+                      </div>
+                      {browserCapture && (
+                        <button
+                          className="browser-capture-result"
+                          onClick={() => void openFile({ name: browserCapture.path.split('/').at(-1)!, path: browserCapture.path, type: 'file' })}
+                        >
+                          <img src={aaaApi.imageUrl(activeProjectId, browserCapture.path)} alt="Most recent browser capture" />
+                          <span><strong>{browserCapture.path}</strong><small>{browserCapture.sourceUrl}</small></span>
+                        </button>
+                      )}
+                    </div>
+                    <div className="browser-published">
+                      {publishedUrl ? (
                         <iframe
                           className="published-frame"
                           src={publishedUrl}
                           title={`Published preview of ${selectedFile?.path}`}
                           sandbox=""
                         />
-                      )
-                      : (
+                      ) : (
                         <div className="published-page published-empty">
                           <div className="published-brand"><BrandMark compact /> AAA Published</div>
                           <p className="eyebrow">{isMarkdownSelected ? 'Review required' : 'Local project preview'}</p>
@@ -1477,6 +1792,7 @@ function App() {
                           )}
                         </div>
                       )}
+                    </div>
                   </div>
                 )}
               </div>

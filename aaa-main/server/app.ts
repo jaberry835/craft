@@ -5,6 +5,9 @@ import path from 'node:path';
 import type {
   AppendMessageRequest,
   AgentRun,
+  BrowserCaptureRequest,
+  BrowserLaunchRequest,
+  BrowserNavigateRequest,
   ChatMessageDisplayPart,
   ChatStreamEvent,
   ChatStreamRequest,
@@ -19,11 +22,14 @@ import type {
   WriteTextFileRequest
 } from '../src/types/api.js';
 import { AaaAgentLoop } from './aaaAgentLoop.js';
-import { HttpError } from './httpErrors.js';
+import { AgentRunError, HttpError } from './httpErrors.js';
 import type { ModelChatClient, ModelChatMessage } from './modelTypes.js';
 import { ProjectFileService } from './projectFileService.js';
 import { ProjectCustomizationService } from './projectCustomizationService.js';
 import { ProjectRegistry } from './projectRegistry.js';
+import { ProjectWorkflowService } from './projectWorkflowService.js';
+import { McpHttpClient, McpToolbox } from './services/mcpHttpClient.js';
+import { BrowserCaptureService } from './services/browserCaptureService.js';
 import type { ModelConnectionConfig } from './services/modelConnectionConfig.js';
 import type { ChatSessionStoreFactory } from './chatSessionStore.js';
 import { createSessionPersistence } from './sessionStoreFactory.js';
@@ -37,6 +43,8 @@ export interface AaaAppDependencies {
   modelClient?: ModelChatClient;
   sessionStoreFactory?: ChatSessionStoreFactory;
   storageStatus?: StorageStatus;
+  /** Fetch implementation for project MCP servers; injectable for tests. */
+  mcpFetch?: typeof globalThis.fetch;
 }
 
 const writeJsonLine = (response: express.Response, event: ChatStreamEvent): boolean =>
@@ -49,7 +57,8 @@ export function createAaaApp({
   modelConfig,
   modelClient,
   sessionStoreFactory,
-  storageStatus
+  storageStatus,
+  mcpFetch = globalThis.fetch
 }: AaaAppDependencies): express.Express {
   const app = express();
   app.use(express.json({ limit: '15mb' }));
@@ -58,6 +67,7 @@ export function createAaaApp({
     : createSessionPersistence(dataRoot, { environment: {} });
   const createSessionStore = sessionStoreFactory ?? localPersistence!.sessionStoreFactory;
   const effectiveStorageStatus = storageStatus ?? localPersistence!.storageStatus;
+  const browserCapture = new BrowserCaptureService(dataRoot);
 
   const projectId = (request: express.Request): string => {
     const id = String(request.params.projectId);
@@ -117,8 +127,12 @@ export function createAaaApp({
     response.json(await new ProjectCustomizationService(id, registry.root(id))
       .setEnabled(String(request.params.itemId), body.enabled));
   });
+  app.get('/api/projects/:projectId/workflow', async (request, response) => {
+    const id = projectId(request);
+    response.json(await new ProjectWorkflowService(id, registry.root(id)).summary());
+  });
   app.get('/api/projects/:projectId/tree', async (request, response) =>
-    response.json(await fileService(request).listTree()));
+    response.json(await fileService(request).listTree({ includeHidden: request.query.hidden === 'true' })));
   app.get('/api/projects/:projectId/files', async (request, response) =>
     response.json(await fileService(request).readTextFile(String(request.query.path ?? ''))));
   app.put('/api/projects/:projectId/files', async (request, response) => {
@@ -157,6 +171,26 @@ export function createAaaApp({
     const html = await fileService(request).renderPublishedMarkdown(String(request.query.path ?? ''));
     response.type('html').send(html);
   });
+  app.get('/api/projects/:projectId/browser', (request, response) =>
+    response.json(browserCapture.status(projectId(request))));
+  app.post('/api/projects/:projectId/browser/launch', async (request, response) => {
+    const id = projectId(request);
+    response.json(await browserCapture.launch(id, (request.body ?? {}) as BrowserLaunchRequest));
+  });
+  app.post('/api/projects/:projectId/browser/navigate', async (request, response) => {
+    const id = projectId(request);
+    response.json(await browserCapture.navigate(id, (request.body ?? {}) as BrowserNavigateRequest));
+  });
+  app.post('/api/projects/:projectId/browser/capture', async (request, response) => {
+    const id = projectId(request);
+    response.status(201).json(await browserCapture.capture(
+      id,
+      new ProjectFileService(registry.root(id)),
+      (request.body ?? {}) as BrowserCaptureRequest
+    ));
+  });
+  app.delete('/api/projects/:projectId/browser', async (request, response) =>
+    response.json(await browserCapture.close(projectId(request))));
 
   app.get('/api/projects/:projectId/sessions', async (request, response) =>
     response.json(await sessionStore(request).list()));
@@ -196,6 +230,13 @@ export function createAaaApp({
     const store = sessionStore(request);
     const project = registry.get(projectId(request));
     const connection = modelConfig.resolve();
+    const workflow = await new ProjectWorkflowService(project.id, project.rootPath).load();
+    const expanded = ProjectWorkflowService.expandCommand(workflow, content);
+    const agent = ProjectWorkflowService.resolveAgent(
+      workflow,
+      expanded.agentId ?? (typeof body.agentId === 'string' ? body.agentId : undefined)
+    );
+    const toolSelection = ProjectWorkflowService.selectTools(workflow, agent);
     const session = await store.append(String(request.params.sessionId), { role: 'user', content });
     const userMessage = session.messages.at(-1);
     if (!userMessage) {
@@ -215,19 +256,16 @@ export function createAaaApp({
     const messages: ModelChatMessage[] = [
       {
         role: 'system',
-        content: [
-          `You are the AAA authorization workbench assistant for project "${project.name}".`,
-          'Help the user inspect and develop an A&A security package using the persisted project conversation.',
-          'Prioritize traceable control responses, evidence, validation status, and explicit human review before publication.',
-          'You can inspect and modify project files with the provided tools.',
-          'Use tools when the user asks about project contents or requests a file change; do not merely describe an action you can perform.',
-          'Project paths must be relative. Keep the final answer concise and identify files that changed.',
-          'Do not claim to have retrieved cloud evidence because cloud evidence tools are not enabled yet.'
-        ].join(' ')
+        content: ProjectWorkflowService.systemPrompt({
+          projectName: project.name,
+          agent,
+          skills: workflow.skills,
+          tools: toolSelection
+        })
       },
       ...session.messages.map((message) => ({
         role: message.role,
-        content: message.content
+        content: message.id === userMessage.id ? expanded.content : message.content
       }))
     ];
 
@@ -250,7 +288,16 @@ export function createAaaApp({
     let streamedReasoning = '';
     const streamedToolEvents: AgentRun['toolEvents'] = [];
     try {
-      const result = await new AaaAgentLoop(modelClient, fileService(request)).run(
+      const result = await new AaaAgentLoop(modelClient, fileService(request), {
+        tools: toolSelection.builtIns,
+        skills: workflow.skills,
+        mcp: toolSelection.mcpServers.length > 0
+          ? new McpToolbox(toolSelection.mcpServers.map((server) => new McpHttpClient(server, mcpFetch)))
+          : undefined,
+        mcpFilter: toolSelection.allowMcpTool,
+        browserCapture,
+        projectId: project.id
+      }).run(
         connection,
         messages,
         abortController.signal,
@@ -304,7 +351,14 @@ export function createAaaApp({
     } catch (error) {
       const aborted = abortController.signal.aborted
         || (error instanceof Error && error.name === 'AbortError');
-      const safeError = aborted ? 'Request aborted.' : 'Model response failed.';
+      const safeError = aborted
+        ? 'Request aborted.'
+        : error instanceof AgentRunError
+          ? error.message
+          : 'Model response failed.';
+      if (!aborted && !(error instanceof AgentRunError)) {
+        console.error(`[agent-run] Run ${run.id} failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
       try {
         await store.saveRun(session.id, {
           ...run,

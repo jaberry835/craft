@@ -108,6 +108,34 @@ export interface UploadedProjectFile {
   size: number;
 }
 
+export interface BrowserLaunchRequest {
+  headless?: boolean;
+  url?: string;
+}
+
+export interface BrowserNavigateRequest {
+  url: string;
+}
+
+export interface BrowserCaptureRequest {
+  outputPath?: string;
+  fullPage?: boolean;
+}
+
+export interface BrowserSessionStatus {
+  active: boolean;
+  headless?: boolean;
+  currentUrl?: string;
+  launchedAt?: string;
+}
+
+export interface BrowserCaptureResult {
+  path: string;
+  metadataPath: string;
+  sourceUrl: string;
+  capturedAt: string;
+}
+
 export interface PublicationStatus {
   path: string;
   reviewed: boolean;
@@ -126,7 +154,7 @@ export interface ProjectPathResult {
 
 export type ChatRole = 'user' | 'assistant' | 'system';
 
-export type ToolEventType = 'read' | 'search' | 'create' | 'edit';
+export type ToolEventType = 'read' | 'search' | 'create' | 'edit' | 'skill' | 'mcp' | 'browser';
 
 export interface ToolEvent {
   id: string;
@@ -229,6 +257,29 @@ export interface StorageStatus {
 
 export interface ChatStreamRequest {
   content: string;
+  /** Project agent id or name; `default` runs without a project agent. */
+  agentId?: string;
+}
+
+export interface WorkflowAgentSummary {
+  id: string;
+  name: string;
+  description: string;
+  argumentHint?: string;
+}
+
+export interface WorkflowCommandSummary {
+  name: string;
+  kind: 'prompt' | 'skill';
+  label: string;
+  description: string;
+  argumentHint?: string;
+}
+
+export interface ProjectWorkflowSummary {
+  agents: WorkflowAgentSummary[];
+  commands: WorkflowCommandSummary[];
+  mcpServers: Array<{ name: string; available: boolean; reason?: string }>;
 }
 
 export interface ChatStreamResponse {
