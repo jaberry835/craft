@@ -4,7 +4,7 @@
 
 | Path | Purpose |
 | --- | --- |
-| `.github/agents/*.agent.md` | Agents shown in the composer picker. The body is the agent's instructions; `tools` limits its tool access (`read`, `search`, `edit`, `browser`, `<mcp-server>/*`). |
+| `.github/agents/*.agent.md` | Agents shown in the composer picker. The body is the agent's instructions; `tools` limits built-in access (`read`, `search`, `edit`, `browser`) and may narrow a named MCP server. Enabled project MCP servers are otherwise exposed automatically. |
 | `.github/skills/<id>/SKILL.md` | Skills the agent loads with `load_skill`. Put files the skill copies under the skill's `assets/` folder. |
 | `.github/prompts/*.prompt.md` | Slash commands. The `agent` frontmatter picks the agent that runs the prompt. |
 | `.vscode/mcp.json` | HTTP MCP servers (`"type": "http"`, `"url"`, optional `"headers"` using `${env:NAME}`). |

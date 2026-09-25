@@ -27,7 +27,12 @@ export interface BrowserResponseLike {
 export interface BrowserPageLike {
   url(): string;
   goto(url: string, options: { waitUntil: 'domcontentloaded'; timeout: number }): Promise<BrowserResponseLike | null>;
-  screenshot(options: { type: 'png'; fullPage: boolean }): Promise<Buffer>;
+  viewportSize(): { width: number; height: number } | null;
+  evaluate(expression: string): Promise<number>;
+  screenshot(options: {
+    type: 'png';
+    clip: { x: number; y: number; width: number; height: number };
+  }): Promise<Buffer>;
 }
 
 export interface BrowserContextLike {
@@ -149,9 +154,14 @@ export class BrowserCaptureService {
     const session = this.requireSession(projectId);
     const currentUrl = normalizeBrowserUrl(session.page.url()).href;
     const outputPath = capturePath(request.outputPath);
+    const viewport = session.page.viewportSize() ?? defaultViewport;
+    const documentHeight = await session.page.evaluate(
+      'Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight ?? 0)'
+    );
+    const captureHeight = Math.max(1, Math.min(documentHeight, viewport.height * 2));
     const content = await session.page.screenshot({
       type: 'png',
-      fullPage: request.fullPage ?? true
+      clip: { x: 0, y: 0, width: viewport.width, height: captureHeight }
     });
     await fileService.uploadFile(outputPath, content.toString('base64'), { createParents: true });
     const capturedAt = new Date().toISOString();
@@ -161,7 +171,11 @@ export class BrowserCaptureService {
       capturedAt,
       browser: 'Microsoft Edge',
       headless: session.headless,
-      fullPage: request.fullPage ?? true,
+      captureRegion: 'top',
+      viewportWidth: viewport.width,
+      viewportHeight: viewport.height,
+      capturedHeight: captureHeight,
+      maximumViewportHeights: 2,
       screenshotPath: outputPath
     }, null, 2)}\n`, { createParents: true });
     return { path: outputPath, metadataPath, sourceUrl: currentUrl, capturedAt };

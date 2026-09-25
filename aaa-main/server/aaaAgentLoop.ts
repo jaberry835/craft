@@ -110,15 +110,14 @@ const builtInDefinitions: Record<BuiltInToolName, ModelToolDefinition> = {
     type: 'function',
     function: {
       name: 'browser_capture',
-      description: 'Control the project Microsoft Edge evidence-capture session. Launch visible Edge by default for interactive authentication, navigate to an absolute HTTP(S) URL, capture a PNG with JSON provenance, inspect status, or close the session.',
+      description: 'Control the project Microsoft Edge evidence-capture session. Launch visible Edge by default for interactive authentication, navigate to an absolute HTTP(S) URL, capture the top of the page up to two viewport heights as a PNG with JSON provenance, inspect status, or close the session.',
       parameters: {
         type: 'object',
         properties: {
           action: { type: 'string', enum: ['launch', 'status', 'navigate', 'capture', 'close'] },
           url: { type: 'string', description: 'Absolute HTTP(S) URL for launch or navigate.' },
           headless: { type: 'boolean', description: 'Launch headless when true; defaults to visible Edge.' },
-          outputPath: { type: 'string', description: 'Optional project-relative PNG path.' },
-          fullPage: { type: 'boolean', description: 'Capture the full page; defaults to true.' }
+          outputPath: { type: 'string', description: 'Optional project-relative PNG path.' }
         },
         required: ['action']
       }
@@ -455,8 +454,7 @@ export class AaaAgentLoop {
           }
           if (action === 'capture') {
             const result = await browserCapture.capture(projectId, this.fileService, {
-              outputPath: optionalString(args, 'outputPath'),
-              fullPage: optionalBoolean(args, 'fullPage')
+              outputPath: optionalString(args, 'outputPath')
             });
             changedFiles.add(result.path);
             changedFiles.add(result.metadataPath);

@@ -869,8 +869,7 @@ function App() {
     setError('');
     try {
       const captured = await aaaApi.captureBrowser(activeProjectId, {
-        outputPath: browserOutputPath.trim() || undefined,
-        fullPage: true
+        outputPath: browserOutputPath.trim() || undefined
       });
       setBrowserCapture(captured);
       setBrowserOutputPath('');

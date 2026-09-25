@@ -12,7 +12,7 @@ Use the `browser_capture` tool for every browser operation.
 2. If no session is active, call it with `action: "launch"` and `headless: false`. Visible Edge is the default because the user may need to authenticate.
 3. Tell the user to complete authentication in Edge when needed. Do not request or store their credentials.
 4. Call `browser_capture` with `action: "navigate"` and the requested absolute HTTP or HTTPS URL.
-5. Call `browser_capture` with `action: "capture"`. Prefer a descriptive path under `evidence/screenshots/`.
+5. Call `browser_capture` with `action: "capture"`. Prefer a descriptive path under `evidence/screenshots/`. Captures contain the top of the page and are capped at two viewport heights; do not attempt to create a long full-page image.
 6. Report both the PNG and adjacent JSON provenance file.
 
 Use `headless: true` only when the user explicitly requests it or the target does not require interactive authentication. Close the session only when the user asks or the workflow no longer needs its authenticated state.

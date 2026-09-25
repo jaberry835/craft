@@ -119,7 +119,6 @@ export interface BrowserNavigateRequest {
 
 export interface BrowserCaptureRequest {
   outputPath?: string;
-  fullPage?: boolean;
 }
 
 export interface BrowserSessionStatus {

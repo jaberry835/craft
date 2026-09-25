@@ -102,7 +102,7 @@ This list tracks the path from the visual prototype to a working local A&A demo.
 - [x] Add optional headless mode and explicit Edge channel/executable configuration.
 - [x] Add Web-tab launch, navigation, capture, close, status, and recent-capture controls.
 - [x] Restrict navigation to user-entered absolute HTTP and HTTPS addresses.
-- [x] Save PNG captures with adjacent JSON source URL, timestamp, browser-mode, and capture metadata.
+- [x] Save top-of-page PNG captures capped at two viewport heights, with adjacent JSON source URL, timestamp, browser-mode, viewport, and capture metadata.
 - [x] Expose deterministic browser operations to agents through `browser_capture` and a reference capture skill.
 - [x] Add a grounded architecture/CONOPS SVG-generation skill.
 - [x] Preview SVG only after rejecting active content and external resources.

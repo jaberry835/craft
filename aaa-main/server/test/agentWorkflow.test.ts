@@ -4,6 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { AaaAgentLoop, repairEscapedNewlines } from '../aaaAgentLoop.js';
 import type { ModelChatClient, ModelStreamChunk, ResolvedModelConnection } from '../modelTypes.js';
+import { ProjectCustomizationService } from '../projectCustomizationService.js';
 import { ProjectFileService } from '../projectFileService.js';
 import { ProjectWorkflowService } from '../projectWorkflowService.js';
 
@@ -116,6 +117,66 @@ test('disabled customizations are removed from the tool surface', async (t) => {
   assert.equal(tools.builtIns.has('write_file'), false);
   assert.equal(tools.mcpServers.length, 0);
   assert.equal(workflow.skills.some((skill) => skill.id === 'collect-artifact-links'), false);
+});
+
+test('new enabled MCP servers are exposed without editing existing agent tools', async (t) => {
+  await freshProject();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(path.join(root, '.vscode', 'mcp.json'), JSON.stringify({
+    servers: {
+      'mcp-publisher': { type: 'http', url: 'http://localhost:3000/mcp' },
+      'dynamic-evidence': { type: 'http', url: 'http://localhost:3001/mcp' }
+    }
+  }), 'utf8');
+
+  const workflow = await new ProjectWorkflowService('demo', root).load();
+  const tools = ProjectWorkflowService.selectTools(workflow, ProjectWorkflowService.resolveAgent(workflow));
+
+  assert.deepEqual(tools.mcpServers.map((server) => server.name), ['mcp-publisher', 'dynamic-evidence']);
+  assert.equal(tools.allowMcpTool('dynamic-evidence', 'collect_evidence'), true);
+});
+
+test('new enabled agents and skills are exposed without editing existing customizations', async (t) => {
+  await freshProject();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const customizations = new ProjectCustomizationService('demo', root);
+  await customizations.create({
+    kind: 'agent',
+    name: 'Dynamic Reviewer',
+    description: 'Reviews dynamically added evidence.',
+    argumentHint: 'Name an artifact',
+    tools: 'read',
+    instructions: '# Dynamic Reviewer\n\nReview only grounded project evidence.',
+    enabled: true
+  });
+  await customizations.create({
+    kind: 'skill',
+    name: 'Dynamic Evidence Review',
+    description: 'Reviews evidence added after project creation.',
+    argumentHint: 'Name an evidence file',
+    instructions: '# Dynamic Evidence Review\n\nRead and review the requested evidence.',
+    enabled: true
+  });
+
+  const workflowService = new ProjectWorkflowService('demo', root);
+  const workflow = await workflowService.load();
+  const summary = await workflowService.summary();
+  const agent = ProjectWorkflowService.resolveAgent(workflow, 'dynamic-reviewer');
+  const tools = ProjectWorkflowService.selectTools(workflow, agent);
+  const system = ProjectWorkflowService.systemPrompt({
+    projectName: 'Demo',
+    agent,
+    skills: workflow.skills,
+    tools
+  });
+
+  assert.equal(agent?.name, 'Dynamic Reviewer');
+  assert.ok(summary.agents.some((candidate) => candidate.id === 'dynamic-reviewer'));
+  assert.ok(workflow.skills.some((skill) => skill.id === 'dynamic-evidence-review'));
+  assert.ok(summary.commands.some((command) =>
+    command.kind === 'skill' && command.name === 'dynamic-evidence-review'));
+  assert.equal(tools.builtIns.has('load_skill'), true);
+  assert.match(system, /- dynamic-evidence-review: Reviews evidence added after project creation\./);
 });
 
 test('initialize skill runs through load_skill and copy_path without scripts', async (t) => {

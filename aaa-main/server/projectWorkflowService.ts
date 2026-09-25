@@ -251,6 +251,11 @@ export class ProjectWorkflowService {
       }
     }
     if (workflow.skills.length === 0) builtIns.delete('load_skill');
+    // MCP servers are project capabilities. Newly added enabled servers should be
+    // available immediately even when an existing agent predates their names.
+    workflow.mcpServers.forEach((server) => {
+      if (!mcpRules.has(server.name)) mcpRules.set(server.name, '*');
+    });
     const mcpServers = workflow.mcpServers.filter((server) => server.available && mcpRules.has(server.name));
     return {
       builtIns,

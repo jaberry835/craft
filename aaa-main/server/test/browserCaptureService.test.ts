@@ -31,6 +31,7 @@ test('Edge capture session navigates and writes PNG evidence with provenance', a
   let currentUrl = 'about:blank';
   let closed = false;
   let closeListener = () => {};
+  let screenshotClip: { x: number; y: number; width: number; height: number } | undefined;
   const page: BrowserPageLike = {
     url: () => currentUrl,
     goto: async (url) => {
@@ -38,7 +39,12 @@ test('Edge capture session navigates and writes PNG evidence with provenance', a
       currentUrl = response.url;
       return { status: () => response.status };
     },
-    screenshot: async () => Buffer.from([0x89, 0x50, 0x4e, 0x47])
+    viewportSize: () => ({ width: 1440, height: 1000 }),
+    evaluate: async () => 5400,
+    screenshot: async (options) => {
+      screenshotClip = options.clip;
+      return Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    }
   };
   const context: BrowserContextLike = {
     pages: () => closed ? [] : [page],
@@ -61,6 +67,7 @@ test('Edge capture session navigates and writes PNG evidence with provenance', a
     outputPath: 'evidence/screenshots/portal.png'
   });
   assert.equal(capture.path, 'evidence/screenshots/portal.png');
+  assert.deepEqual(screenshotClip, { x: 0, y: 0, width: 1440, height: 2000 });
   assert.deepEqual(
     await readFile(path.join(projectRoot, 'evidence', 'screenshots', 'portal.png')),
     Buffer.from([0x89, 0x50, 0x4e, 0x47])
@@ -68,10 +75,31 @@ test('Edge capture session navigates and writes PNG evidence with provenance', a
   const metadata = JSON.parse(await readFile(
     path.join(projectRoot, 'evidence', 'screenshots', 'portal.json'),
     'utf8'
-  )) as { sourceUrl: string; browser: string; headless: boolean };
+  )) as {
+    sourceUrl: string;
+    browser: string;
+    headless: boolean;
+    viewportHeight: number;
+    capturedHeight: number;
+    maximumViewportHeights: number;
+  };
   assert.deepEqual(
-    { sourceUrl: metadata.sourceUrl, browser: metadata.browser, headless: metadata.headless },
-    { sourceUrl: target, browser: 'Microsoft Edge', headless: true }
+    {
+      sourceUrl: metadata.sourceUrl,
+      browser: metadata.browser,
+      headless: metadata.headless,
+      viewportHeight: metadata.viewportHeight,
+      capturedHeight: metadata.capturedHeight,
+      maximumViewportHeights: metadata.maximumViewportHeights
+    },
+    {
+      sourceUrl: target,
+      browser: 'Microsoft Edge',
+      headless: true,
+      viewportHeight: 1000,
+      capturedHeight: 2000,
+      maximumViewportHeights: 2
+    }
   );
   assert.deepEqual(await service.close('demo'), { active: false });
 });
