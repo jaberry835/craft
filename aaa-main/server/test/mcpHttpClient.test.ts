@@ -7,7 +7,7 @@ import express from 'express';
 import { AaaAgentLoop } from '../aaaAgentLoop.js';
 import type { ModelChatClient, ResolvedModelConnection } from '../modelTypes.js';
 import { ProjectFileService } from '../projectFileService.js';
-import { McpHttpClient, McpToolbox } from '../services/mcpHttpClient.js';
+import { markMcpServerHealthy, McpHttpClient, McpToolbox, resetMcpServerHealth } from '../services/mcpHttpClient.js';
 
 interface RpcRequest {
   jsonrpc: '2.0';
@@ -184,4 +184,111 @@ test('live MCP publisher receives every Markdown file and publishes a site', {
   }
   assert.match(status, /succeeded/i, `Publish did not succeed: ${status}`);
   console.log(`[mcp-live] Published ${files.length} Markdown files as ${siteId}: ${status}`);
+});
+
+/** A fetch that never answers until aborted, like a host that drops packets. */
+const blackhole: typeof fetch = (_input, init) => new Promise((_resolve, reject) => {
+  init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+});
+
+test('down MCP servers time out quickly in parallel and never block healthy servers', async (t) => {
+  resetMcpServerHealth();
+  const fake = await startFakeMcpServer();
+  t.after(() => fake.close());
+  const started = Date.now();
+  const toolbox = new McpToolbox([
+    new McpHttpClient({ name: 'down-a', url: 'http://10.255.255.1/mcp' }, blackhole, 120_000, 300),
+    new McpHttpClient({ name: 'down-b', url: 'http://10.255.255.2/mcp' }, blackhole, 120_000, 300),
+    new McpHttpClient({ name: 'publisher', url: fake.url })
+  ]);
+  t.mock.method(console, 'error', () => {});
+  const loaded = await toolbox.load();
+  const elapsed = Date.now() - started;
+
+  assert.ok(elapsed < 900, `load took ${elapsed} ms; down servers should time out in parallel`);
+  assert.ok(loaded.definitions.some((definition) => definition.function.name === 'mcp_publisher_upsert_site_files'));
+  assert.equal(loaded.errors.length, 2);
+  assert.match(loaded.errors[0]!, /^MCP server down-a did not respond within 300 ms at 10\.255\.255\.1\./);
+  assert.match(loaded.errors[0]!, /Continuing without its tools/);
+});
+
+test('a recently failed MCP server is skipped on the next run until it recovers or is tested', async (t) => {
+  resetMcpServerHealth();
+  t.mock.method(console, 'error', () => {});
+  let attempts = 0;
+  const refused: typeof fetch = async () => {
+    attempts += 1;
+    throw new TypeError('fetch failed: ECONNREFUSED');
+  };
+  const server = { name: 'flaky', url: 'http://127.0.0.1:9/mcp' };
+  const first = await new McpToolbox([new McpHttpClient(server, refused)]).load();
+  assert.match(first.errors[0]!, /could not be reached/);
+  assert.equal(attempts, 1);
+
+  const second = await new McpToolbox([new McpHttpClient(server, refused)]).load();
+  assert.equal(attempts, 1, 'the second run should not wait on the known-down server');
+  assert.match(second.errors[0]!, /Skipped; AAA retries it in about \d+ s/);
+
+  markMcpServerHealthy(server);
+  await new McpToolbox([new McpHttpClient(server, refused)]).load();
+  assert.equal(attempts, 2);
+
+  resetMcpServerHealth();
+  const shortMemory = new McpToolbox([new McpHttpClient(server, refused)], 1);
+  await shortMemory.load();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  await new McpToolbox([new McpHttpClient(server, refused)], 1).load();
+  assert.equal(attempts, 4, 'retries once the remembered failure expires');
+});
+
+test('agent runs continue with a warning when an MCP server is down or a tool call fails', async (t) => {
+  resetMcpServerHealth();
+  t.mock.method(console, 'error', () => {});
+  let callAttempts = 0;
+  const failingCalls: typeof fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as RpcRequest;
+    if (body.id === undefined) return new Response(null, { status: 202 });
+    if (body.method === 'initialize') return Response.json({ jsonrpc: '2.0', id: body.id, result: { protocolVersion: '2025-06-18' } });
+    if (body.method === 'tools/list') {
+      return Response.json({ jsonrpc: '2.0', id: body.id, result: { tools: [{ name: 'fetch_json', inputSchema: { type: 'object', properties: {} } }] } });
+    }
+    callAttempts += 1;
+    throw new TypeError('socket hang up');
+  };
+  const seenTools: string[][] = [];
+  const toolResults: string[] = [];
+  let round = 0;
+  const client: ModelChatClient = {
+    async *stream(_connection, messages, _signal, tools) {
+      round += 1;
+      seenTools.push((tools ?? []).map((tool) => tool.function.name));
+      if (round === 1) {
+        yield { type: 'tool_calls', calls: [{ id: 'c1', type: 'function', function: { name: 'mcp_evidence_fetch_json', arguments: '{}' } }] };
+        yield { type: 'completed' };
+        return;
+      }
+      toolResults.push(messages.at(-1)?.content ?? '');
+      yield { type: 'assistant_text', text: 'Continued without MCP.' };
+      yield { type: 'completed' };
+    }
+  };
+  const events: string[] = [];
+  const result = await new AaaAgentLoop(client, new ProjectFileService(process.cwd()), {
+    tools: [],
+    mcp: new McpToolbox([
+      new McpHttpClient({ name: 'down', url: 'http://10.255.255.1/mcp' }, blackhole, 120_000, 200),
+      new McpHttpClient({ name: 'evidence', url: 'http://evidence.test/mcp' }, failingCalls)
+    ])
+  }).run(
+    { definition: {}, endpoint: '', deployment: '', apiVersion: '' } as ResolvedModelConnection,
+    [{ role: 'user', content: 'Fetch the evidence JSON.' }],
+    new AbortController().signal,
+    { onToolEvent: (event) => { events.push(`${event.type}:${event.label}`); } }
+  );
+
+  assert.equal(result.content, 'Continued without MCP.');
+  assert.deepEqual(seenTools[0], ['mcp_evidence_fetch_json']);
+  assert.equal(callAttempts, 1);
+  assert.match(toolResults[0]!, /failed: MCP server evidence could not be reached[\s\S]*Continue without it/);
+  assert.deepEqual(events, ['mcp:MCP server unavailable', 'mcp:MCP tool failed: mcp_evidence_fetch_json']);
 });

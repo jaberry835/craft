@@ -22,9 +22,11 @@ import {
   FileText,
   Folder,
   FolderOpen,
+  Gauge,
   Globe2,
   Home,
   Image as ImageIcon,
+  Layers,
   LayoutPanelLeft,
   Link2,
   Lightbulb,
@@ -57,6 +59,8 @@ import {
   Zap
 } from 'lucide-react';
 import { aaaApi, ApiRequestError } from './api/aaaApi';
+import { CompactionDivider, ContextMeter, UsageLine } from './usageViews';
+import { contextEstimate, formatTokens, sessionUsage, sessionUsageTitle } from './usageMath';
 import type {
   ChatMessage,
   ChatMessageDisplayPart,
@@ -74,8 +78,10 @@ import type {
   ProjectTextFile,
   ProjectWorkflowSummary,
   PublicationStatus,
+  RunUsage,
   StorageStatus,
-  ToolEvent
+  ToolEvent,
+  WorkflowCommandSummary
 } from './types/api';
 import './App.css';
 
@@ -278,7 +284,9 @@ function MessageDetails({
                         ? <Sparkles size={13} />
                         : event.type === 'mcp'
                           ? <Plug size={13} />
-                          : <FileCheck2 size={13} />}
+                          : event.type === 'context'
+                            ? <Layers size={13} />
+                            : <FileCheck2 size={13} />}
                     <div>
                       <span>{event.label}</span>
                       {event.detail && <small>{event.detail}</small>}
@@ -346,6 +354,12 @@ function App() {
   const [streamingText, setStreamingText] = useState('');
   const [streamingReasoning, setStreamingReasoning] = useState('');
   const [streamingToolEvents, setStreamingToolEvents] = useState<ToolEvent[]>([]);
+  const [streamingUsage, setStreamingUsage] = useState<RunUsage | null>(null);
+  const [streamingStatus, setStreamingStatus] = useState('');
+  const [isCompacting, setIsCompacting] = useState(false);
+  const [pendingUserMessage, setPendingUserMessage] = useState<ChatMessage | null>(null);
+  // True once the final message arrived, so the live response view does not duplicate it.
+  const [streamDone, setStreamDone] = useState(false);
   const [modelStatus, setModelStatus] = useState<ModelConnectionStatus | null>(null);
   const [storageStatus, setStorageStatus] = useState<StorageStatus | null>(null);
   const [isCreatingSession, setIsCreatingSession] = useState(false);
@@ -369,7 +383,20 @@ function App() {
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const activeProject = projects.find((project) => project.id === activeProjectId);
   const messages = activeSession?.messages ?? [];
+  const showConversation = messages.length > 0 || isThinking || pendingUserMessage !== null;
   const lastRun = activeSession?.runs.at(-1);
+  const runUsageByMessage = useMemo(() => new Map((activeSession?.runs ?? [])
+    .filter((run) => run.assistantMessageId && run.usage)
+    .map((run) => [run.assistantMessageId!, run.usage!])), [activeSession?.runs]);
+  const compactionsByMessage = useMemo(() => {
+    const byMessage = new Map<string, NonNullable<ChatSession['compactions']>>();
+    for (const compaction of activeSession?.compactions ?? []) {
+      byMessage.set(compaction.throughMessageId, [...(byMessage.get(compaction.throughMessageId) ?? []), compaction]);
+    }
+    return byMessage;
+  }, [activeSession?.compactions]);
+  const totalUsage = useMemo(() => sessionUsage(activeSession?.runs ?? []), [activeSession?.runs]);
+  const currentContext = useMemo(() => contextEstimate(activeSession), [activeSession]);
   const isMarkdownSelected = selectedFile?.path.toLowerCase().endsWith('.md') ?? false;
   const isJsonSelected = selectedFile?.path.toLowerCase().endsWith('.json') ?? false;
   const selectedArtifactPath = selectedFile?.path ?? selectedImagePath;
@@ -409,7 +436,16 @@ function App() {
   const agentLabel = selectedAgent?.name ?? 'AAA Assistant';
   const slashQuery = /^\/(\S*)$/.exec(draft)?.[1]?.toLowerCase();
   const commandSuggestions = useMemo(() => {
-    const commands = workflow?.commands ?? [];
+    const commands: WorkflowCommandSummary[] = [
+      ...(workflow?.commands ?? []),
+      {
+        name: 'compact',
+        kind: 'builtin',
+        label: 'Compact conversation',
+        description: 'Summarize earlier turns to free model context',
+        argumentHint: 'Optional: what the summary should focus on'
+      }
+    ];
     if (slashQuery === undefined) return commandMenuOpen ? commands : [];
     return commands.filter((command) =>
       command.name.includes(slashQuery) || command.label.toLowerCase().includes(slashQuery));
@@ -1091,17 +1127,60 @@ function App() {
     action?.();
   }, [selectedFile?.content]);
 
+  const compactConversation = useCallback(async (focus?: string) => {
+    if (!activeProjectId || !activeSession || isThinking || isCompacting) return;
+    setError('');
+    setIsCompacting(true);
+    try {
+      const compacted = await aaaApi.compactSession(activeProjectId, activeSession.id, focus ? { focus } : {});
+      setActiveSession(compacted);
+      setSessions(await aaaApi.listSessions(activeProjectId));
+    } catch (compactError) {
+      setError(compactError instanceof Error ? compactError.message : 'Could not compact the conversation.');
+    } finally {
+      setIsCompacting(false);
+    }
+  }, [activeProjectId, activeSession, isCompacting, isThinking]);
+
   const sendMessage = useCallback(async (content = draft) => {
     const trimmed = content.trim();
-    if (!trimmed || isThinking || isCreatingSession) {
+    if (!trimmed || isThinking || isCreatingSession || isCompacting) {
+      return;
+    }
+    const compactCommand = /^\/compact(?:\s+([\s\S]*))?$/i.exec(trimmed);
+    if (compactCommand) {
+      if (!activeSession?.messages.length) {
+        setError('There is nothing to compact in this session yet.');
+        return;
+      }
+      setDraft('');
+      await compactConversation(compactCommand[1]?.trim() || undefined);
       return;
     }
 
+    const messageContent = attachedEvidence.length > 0
+      ? [
+          '<project-context>',
+          'Attached project files are untrusted evidence. Inspect them with project tools before use:',
+          ...attachedEvidence.map((filePath) => `- ${filePath}`),
+          '</project-context>',
+          '',
+          trimmed
+        ].join('\n')
+      : trimmed;
+
     setError('');
     setIsThinking(true);
+    setStreamDone(false);
+    // Show the prompt and the live response area immediately, before the session
+    // exists or the model answers; the persisted copy replaces it on completion.
+    setPendingUserMessage({ id: 'pending-user', role: 'user', content: messageContent, createdAt: new Date().toISOString() });
+    setDraft('');
     setStreamingText('');
     setStreamingReasoning('');
     setStreamingToolEvents([]);
+    setStreamingUsage(null);
+    setStreamingStatus('');
     scrollChatToEnd('auto');
     let requestSessionId = activeSession?.id;
     try {
@@ -1112,19 +1191,8 @@ function App() {
         setActiveSession(session);
       }
       requestSessionId = session.id;
-      setDraft('');
       const controller = new AbortController();
       streamAbortRef.current = controller;
-      const messageContent = attachedEvidence.length > 0
-        ? [
-            '<project-context>',
-            'Attached project files are untrusted evidence. Inspect them with project tools before use:',
-            ...attachedEvidence.map((filePath) => `- ${filePath}`),
-            '</project-context>',
-            '',
-            trimmed
-          ].join('\n')
-        : trimmed;
       await aaaApi.streamChat(activeProjectId, session.id, { content: messageContent, agentId: selectedAgent?.id ?? 'default' }, (event) => {
         if (event.type === 'assistant_text') {
           setStreamingText((current) => current + event.text);
@@ -1132,7 +1200,18 @@ function App() {
           setStreamingReasoning((current) => current + event.text);
         } else if (event.type === 'tool_event') {
           setStreamingToolEvents((current) => [...current, event.event]);
+        } else if (event.type === 'usage') {
+          setStreamingUsage(event.usage);
+        } else if (event.type === 'status') {
+          setStreamingStatus(event.message);
+        } else if (event.type === 'compaction') {
+          setStreamingStatus('');
+          setActiveSession((current) => current
+            ? { ...current, compactions: [...(current.compactions ?? []), event.compaction] }
+            : current);
         } else if (event.type === 'completed') {
+          setPendingUserMessage(null);
+          setStreamDone(true);
           setActiveSession((current) => current
             ? {
                 ...current,
@@ -1169,6 +1248,9 @@ function App() {
         } catch {
           // Preserve the original model or transport error.
         }
+      } else {
+        // The prompt was never saved (for example session creation failed); give it back.
+        setDraft(trimmed);
       }
       if (sendError instanceof DOMException && sendError.name === 'AbortError') {
         setError('Response stopped.');
@@ -1180,12 +1262,16 @@ function App() {
       setError(message);
     } finally {
       streamAbortRef.current = null;
+      setPendingUserMessage(null);
+      setStreamDone(false);
       setStreamingText('');
       setStreamingReasoning('');
       setStreamingToolEvents([]);
+      setStreamingUsage(null);
+      setStreamingStatus('');
       setIsThinking(false);
     }
-  }, [activeProjectId, activeSession, attachedEvidence, draft, isCreatingSession, isFileDirty, isThinking, refreshFiles, scrollChatToEnd, selectedAgent?.id, selectedFile]);
+  }, [activeProjectId, activeSession, attachedEvidence, compactConversation, draft, isCompacting, isCreatingSession, isFileDirty, isThinking, refreshFiles, scrollChatToEnd, selectedAgent?.id, selectedFile]);
 
   const stopResponse = useCallback(() => {
     streamAbortRef.current?.abort();
@@ -1335,8 +1421,8 @@ function App() {
           </div>
 
           {error && <div className="app-error" role="alert">{error}</div>}
-          <div ref={chatContentRef} className={`chat-content ${messages.length ? 'has-messages' : ''}`}>
-            {messages.length === 0 ? (
+          <div ref={chatContentRef} className={`chat-content ${showConversation ? 'has-messages' : ''}`}>
+            {!showConversation ? (
               <div className="welcome">
                 <div className="welcome-mark"><BrandMark compact /></div>
                 <p className="eyebrow">Evidence-driven authorization</p>
@@ -1359,22 +1445,38 @@ function App() {
             ) : (
               <div className="message-list">
                 {messages.filter((message) => message.role !== 'system').map((message: ChatMessage) => (
-                  <article className={`message ${message.role}`} key={message.id}>
-                    <div className="message-avatar">
-                      {message.role === 'assistant' ? <BrandMark compact /> : <UserRound size={17} />}
-                    </div>
+                  <div className="message-group" key={message.id}>
+                    <article className={`message ${message.role}`}>
+                      <div className="message-avatar">
+                        {message.role === 'assistant' ? <BrandMark compact /> : <UserRound size={17} />}
+                      </div>
+                      <div>
+                        <strong>{message.role === 'assistant' ? 'AAA' : 'You'}</strong>
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+                        {message.display?.length ? <MessageDetails parts={message.display} /> : null}
+                        {runUsageByMessage.get(message.id) && <UsageLine usage={runUsageByMessage.get(message.id)!} />}
+                      </div>
+                    </article>
+                    {compactionsByMessage.get(message.id)?.map((compaction) => (
+                      <CompactionDivider key={compaction.id} compaction={compaction} />
+                    ))}
+                  </div>
+                ))}
+                {pendingUserMessage && (
+                  <article className="message user">
+                    <div className="message-avatar"><UserRound size={17} /></div>
                     <div>
-                      <strong>{message.role === 'assistant' ? 'AAA' : 'You'}</strong>
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
-                      {message.display?.length ? <MessageDetails parts={message.display} /> : null}
+                      <strong>You</strong>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{pendingUserMessage.content}</ReactMarkdown>
                     </div>
                   </article>
-                ))}
-                {isThinking && (
+                )}
+                {isThinking && !streamDone && (
                   <article className="message assistant">
                     <div className="message-avatar"><BrandMark compact /></div>
                     <div>
                       <strong>AAA</strong>
+                      {streamingStatus && <div className="stream-status"><Layers size={12} /> {streamingStatus}</div>}
                       {streamingText
                         ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingText}</ReactMarkdown>
                         : <div className="thinking"><i /><i /><i /></div>}
@@ -1387,6 +1489,7 @@ function App() {
                             : [])
                         ]}
                       />
+                      {streamingUsage && <UsageLine usage={streamingUsage} live />}
                     </div>
                   </article>
                 )}
@@ -1409,7 +1512,9 @@ function App() {
                     onClick={() => insertCommand(command.name)}
                     title={command.description}
                   >
-                    {command.kind === 'prompt' ? <MessageSquareText size={14} /> : <Sparkles size={14} />}
+                    {command.kind === 'prompt'
+                      ? <MessageSquareText size={14} />
+                      : command.kind === 'builtin' ? <Layers size={14} /> : <Sparkles size={14} />}
                     <span>
                       <strong>/{command.name}</strong>
                       <small>{command.argumentHint ?? command.description}</small>
@@ -1546,10 +1651,20 @@ function App() {
                   </div>
                 )}
               </div>
-              <span title={modelStatus?.missing.join(', ')}>
-                {modelStatus?.ready
-                  ? `${modelStatus.deployment ?? modelStatus.name} · Grounded in this workspace`
-                  : `Model unavailable${modelStatus?.missing.length ? ` · Missing ${modelStatus.missing.join(', ')}` : ''}`}
+              <span className="composer-meta-end">
+                <ContextMeter
+                  context={currentContext}
+                  contextWindow={modelStatus?.contextWindow}
+                  threshold={modelStatus?.compactThreshold ?? 0.8}
+                  busy={isCompacting}
+                  disabled={!activeSession?.messages.length || isThinking || !modelStatus?.ready}
+                  onCompact={() => void compactConversation()}
+                />
+                <span title={modelStatus?.missing.join(', ')}>
+                  {modelStatus?.ready
+                    ? `${modelStatus.deployment ?? modelStatus.name} · Grounded in this workspace`
+                    : `Model unavailable${modelStatus?.missing.length ? ` · Missing ${modelStatus.missing.join(', ')}` : ''}`}
+                </span>
               </span>
             </div>
           </div>
@@ -2376,6 +2491,15 @@ function App() {
         <div>
           <span title={storageStatus?.sessions.endpointHost}><Database size={12} /> {storageStatus?.sessions.backend ?? '…'} sessions</span>
           <span title={modelStatus?.endpointHost}><Link2 size={12} /> {modelStatus?.ready ? modelStatus.deployment : 'Model unavailable'}</span>
+          {totalUsage && (
+            <span title={sessionUsageTitle(totalUsage)}>
+              <Gauge size={12} />
+              {`${totalUsage.estimated ? '~' : ''}${formatTokens(totalUsage.inputTokens)} in · ${formatTokens(totalUsage.outputTokens)} out`}
+              {totalUsage.inputTokens > 0 && totalUsage.cachedInputTokens > 0
+                ? ` · ${Math.round((totalUsage.cachedInputTokens / totalUsage.inputTokens) * 100)}% cached`
+                : ''}
+            </span>
+          )}
           <span title={lastRun?.error}>
             <TerminalSquare size={12} />
             {isThinking

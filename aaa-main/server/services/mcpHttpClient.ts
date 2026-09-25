@@ -29,10 +29,37 @@ interface JsonRpcMessage {
 
 const protocolVersion = '2025-06-18';
 
+function envMilliseconds(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+/**
+ * Servers that recently failed to connect are skipped for a short period so that an
+ * unreachable server (common on isolated networks, where packets are dropped rather
+ * than refused) does not stall every chat turn. Keyed by server name and URL.
+ */
+const unreachableServers = new Map<string, { until: number; message: string }>();
+const healthKey = (server: McpServerConfig) => `${server.name}|${server.url}`;
+
+/** Clears the remembered failure for a server, e.g. after a successful connection test. */
+export function markMcpServerHealthy(server: McpServerConfig): void {
+  unreachableServers.delete(healthKey(server));
+}
+
+/** Test hook: forget every remembered MCP server failure. */
+export function resetMcpServerHealth(): void {
+  unreachableServers.clear();
+}
+
 /**
  * Minimal MCP client for the Streamable HTTP transport. It supports the subset AAA
  * needs (initialize, tools/list, tools/call) with JSON or SSE responses and optional
  * Mcp-Session-Id sessions, without adding an SDK dependency to the offline bundle.
+ *
+ * Connecting and listing tools use a short timeout (`AAA_MCP_CONNECT_TIMEOUT_MS`,
+ * default 8 s) so a down server fails fast; tool calls use a longer one
+ * (`AAA_MCP_TOOL_TIMEOUT_MS`, default 120 s) for legitimately slow work.
  */
 export class McpHttpClient {
   private sessionId?: string;
@@ -43,11 +70,16 @@ export class McpHttpClient {
   constructor(
     private readonly server: McpServerConfig,
     private readonly fetchImpl: Fetch = globalThis.fetch,
-    private readonly timeoutMs = 120_000
+    private readonly callTimeoutMs = envMilliseconds('AAA_MCP_TOOL_TIMEOUT_MS', 120_000),
+    private readonly connectTimeoutMs = envMilliseconds('AAA_MCP_CONNECT_TIMEOUT_MS', 8_000)
   ) {}
 
   get name(): string {
     return this.server.name;
+  }
+
+  get config(): McpServerConfig {
+    return this.server;
   }
 
   async listTools(signal?: AbortSignal): Promise<McpTool[]> {
@@ -55,7 +87,7 @@ export class McpHttpClient {
     const tools: McpTool[] = [];
     let cursor: string | undefined;
     for (let page = 0; page < 20; page += 1) {
-      const result = await this.request('tools/list', cursor ? { cursor } : {}, signal) as {
+      const result = await this.request('tools/list', cursor ? { cursor } : {}, signal, this.connectTimeoutMs) as {
         tools?: McpTool[];
         nextCursor?: string;
       };
@@ -68,7 +100,7 @@ export class McpHttpClient {
 
   async callTool(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<McpToolResult> {
     await this.initialize(signal);
-    const result = await this.request('tools/call', { name, arguments: args }, signal) as {
+    const result = await this.request('tools/call', { name, arguments: args }, signal, this.callTimeoutMs) as {
       content?: Array<{ type?: string; text?: string; resource?: { text?: string; uri?: string } }>;
       structuredContent?: unknown;
       isError?: boolean;
@@ -90,16 +122,21 @@ export class McpHttpClient {
       protocolVersion,
       capabilities: {},
       clientInfo: { name: 'aaa-workbench', version: '0.1.0' }
-    }, signal) as { protocolVersion?: string };
+    }, signal, this.connectTimeoutMs) as { protocolVersion?: string };
     this.negotiatedVersion = typeof result?.protocolVersion === 'string' ? result.protocolVersion : protocolVersion;
-    const acknowledgement = await this.post({ jsonrpc: '2.0', method: 'notifications/initialized' }, signal);
+    const acknowledgement = await this.post({ jsonrpc: '2.0', method: 'notifications/initialized' }, signal, this.connectTimeoutMs);
     await acknowledgement.body?.cancel().catch(() => undefined);
     this.initialized = true;
   }
 
-  private async request(method: string, params: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
+  private async request(
+    method: string,
+    params: Record<string, unknown>,
+    signal: AbortSignal | undefined,
+    timeoutMs: number
+  ): Promise<unknown> {
     const id = this.nextId++;
-    const response = await this.post({ jsonrpc: '2.0', id, method, params }, signal);
+    const response = await this.post({ jsonrpc: '2.0', id, method, params }, signal, timeoutMs);
     const sessionId = response.headers.get('mcp-session-id');
     if (sessionId) this.sessionId = sessionId;
     const contentType = response.headers.get('content-type') ?? '';
@@ -112,8 +149,9 @@ export class McpHttpClient {
     return message.result ?? {};
   }
 
-  private async post(body: Record<string, unknown>, signal?: AbortSignal): Promise<Response> {
-    const signals = [AbortSignal.timeout(this.timeoutMs), ...(signal ? [signal] : [])];
+  private async post(body: Record<string, unknown>, signal: AbortSignal | undefined, timeoutMs: number): Promise<Response> {
+    const timeout = AbortSignal.timeout(timeoutMs);
+    const signals = [timeout, ...(signal ? [signal] : [])];
     let response: Response;
     try {
       response = await this.fetchImpl(this.server.url, {
@@ -130,7 +168,9 @@ export class McpHttpClient {
       });
     } catch (error) {
       if (signal?.aborted) throw error;
-      throw new Error(`MCP server ${this.server.name} could not be reached at ${safeHost(this.server.url)}.`, {
+      throw new Error(timeout.aborted
+        ? `MCP server ${this.server.name} did not respond within ${timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)} s` : `${timeoutMs} ms`} at ${safeHost(this.server.url)}.`
+        : `MCP server ${this.server.name} could not be reached at ${safeHost(this.server.url)}.`, {
         cause: error
       });
     }
@@ -173,24 +213,47 @@ export class McpHttpClient {
 export class McpToolbox {
   private readonly routes = new Map<string, { client: McpHttpClient; tool: string }>();
 
-  constructor(private readonly clients: McpHttpClient[]) {}
+  constructor(
+    private readonly clients: McpHttpClient[],
+    private readonly retryAfterMs = envMilliseconds('AAA_MCP_RETRY_AFTER_MS', 60_000)
+  ) {}
 
+  /**
+   * Lists every server's tools in parallel. A server that fails, times out, or failed
+   * recently is reported in `errors` and skipped; it never fails or blocks the run.
+   */
   async load(
     signal?: AbortSignal,
     filter?: (server: string, tool: string) => boolean
   ): Promise<{ definitions: ModelToolDefinition[]; errors: string[] }> {
-    const definitions: ModelToolDefinition[] = [];
-    const errors: string[] = [];
-    for (const client of this.clients) {
-      let tools: McpTool[];
+    const listed = await Promise.all(this.clients.map(async (client) => {
+      const key = healthKey(client.config);
+      const known = unreachableServers.get(key);
+      if (known && known.until > Date.now()) {
+        const seconds = Math.ceil((known.until - Date.now()) / 1000);
+        return { client, error: `${known.message} Skipped; AAA retries it in about ${seconds} s.` };
+      }
       try {
-        tools = await client.listTools(signal);
+        const tools = await client.listTools(signal);
+        unreachableServers.delete(key);
+        return { client, tools };
       } catch (error) {
         if (signal?.aborted) throw error;
-        errors.push(error instanceof Error ? error.message : `MCP server ${client.name} is unavailable.`);
+        const message = error instanceof Error ? error.message : `MCP server ${client.name} is unavailable.`;
+        unreachableServers.set(key, { until: Date.now() + this.retryAfterMs, message });
+        console.error(`[mcp] ${message} Continuing without its tools.`);
+        return { client, error: `${message} Continuing without its tools.` };
+      }
+    }));
+
+    const definitions: ModelToolDefinition[] = [];
+    const errors: string[] = [];
+    for (const { client, tools, error } of listed) {
+      if (error) {
+        errors.push(error);
         continue;
       }
-      for (const tool of tools) {
+      for (const tool of tools ?? []) {
         if (filter && !filter(client.name, tool.name)) continue;
         const functionName = this.uniqueName(`mcp_${client.name}_${tool.name}`);
         this.routes.set(functionName, { client, tool: tool.name });

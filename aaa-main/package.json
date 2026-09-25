@@ -11,6 +11,7 @@
     "start": "node dist/server/server/index.js",
     "test:server": "tsx --test server/test/**/*.test.ts",
     "test:mcp-live": "tsx --test --test-name-pattern \"live MCP\" server/test/mcpHttpClient.test.ts",
+    "model:probe": "tsx server/modelProbe.ts",
     "lint": "eslint .",
     "preview": "npm run start"
   },

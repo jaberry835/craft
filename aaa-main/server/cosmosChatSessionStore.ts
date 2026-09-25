@@ -6,9 +6,11 @@ import type {
   ChatMessage,
   ChatSession,
   ChatSessionSummary,
-  CreateSessionRequest
+  CreateSessionRequest,
+  SessionCompaction
 } from '../src/types/api.js';
 import type { ChatSessionStore } from './chatSessionStore.js';
+import { withCompaction } from './sessionCompaction.js';
 import {
   CosmosSchemaMismatchError,
   logCosmosError,
@@ -216,6 +218,12 @@ export class CosmosChatSessionStore implements ChatSessionStore {
     return updated;
   }
 
+  async saveCompaction(sessionId: string, compaction: SessionCompaction): Promise<ChatSession> {
+    const updated = withCompaction(await this.get(sessionId), compaction);
+    await this.save(updated);
+    return updated;
+  }
+
   private async save(session: ChatSession): Promise<void> {
     await this.withCosmos('save session', async () => {
       if (this.schemaMode === 'native') {
@@ -333,9 +341,10 @@ export class CosmosChatSessionStore implements ChatSessionStore {
   private toSummary(
     document: NativeChatSessionDocument | JuniorChatSessionDocument
   ): ChatSessionSummary {
-    const { messages, runs, ...session } = this.fromDocument(document);
+    const { messages, runs, compactions, ...session } = this.fromDocument(document);
     void messages;
     void runs;
+    void compactions;
     return session;
   }
 

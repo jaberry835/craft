@@ -11,11 +11,14 @@ import type {
   ChatMessageDisplayPart,
   ChatStreamEvent,
   ChatStreamRequest,
+  ChatSession,
+  CompactSessionRequest,
   CreateSessionRequest,
   CreateProjectRequest,
   CreateTextFileRequest,
   RenameProjectPathRequest,
   RenameSessionRequest,
+  RunUsage,
   SaveCustomizationRequest,
   SetCustomizationEnabledRequest,
   UploadProjectFileRequest,
@@ -32,6 +35,7 @@ import { McpHttpClient, McpToolbox } from './services/mcpHttpClient.js';
 import { BrowserCaptureService } from './services/browserCaptureService.js';
 import type { ModelConnectionConfig } from './services/modelConnectionConfig.js';
 import type { ChatSessionStoreFactory } from './chatSessionStore.js';
+import { compactSession, summaryPromptSection, uncompactedMessages } from './sessionCompaction.js';
 import { createSessionPersistence } from './sessionStoreFactory.js';
 import type { StorageStatus } from './storageConfig.js';
 
@@ -95,7 +99,11 @@ export function createAaaApp({
         ready: false,
         missing: ['model configuration'],
         authMode: 'entra',
-        endpointKind: 'auto'
+        endpointKind: 'auto',
+        api: 'auto',
+        adaptive: true,
+        autoCompact: false,
+        compactThreshold: 0.8
       });
       return;
     }
@@ -220,6 +228,36 @@ export function createAaaApp({
       (request.body ?? {}) as AppendMessageRequest
     ));
   });
+  app.post('/api/projects/:projectId/sessions/:sessionId/compact', async (request, response) => {
+    if (!modelConfig || !modelClient) {
+      response.status(503).json({ error: 'The model connection is not configured.', code: 'model_unavailable' });
+      return;
+    }
+    const store = sessionStore(request);
+    const body = (request.body ?? {}) as CompactSessionRequest;
+    const session = await store.get(String(request.params.sessionId));
+    let compaction;
+    try {
+      compaction = await compactSession({
+        session,
+        connection: modelConfig.resolve(),
+        modelClient,
+        trigger: 'manual',
+        focus: typeof body.focus === 'string' ? body.focus : undefined
+      });
+    } catch (error) {
+      if (error instanceof HttpError) throw error;
+      if (!(error instanceof AgentRunError)) {
+        console.error(`[compaction] Session ${session.id} failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      response.status(502).json({
+        error: error instanceof AgentRunError ? error.message : 'Compaction failed because the model request did not complete.',
+        code: 'compaction_failed'
+      });
+      return;
+    }
+    response.json(await store.saveCompaction(session.id, compaction));
+  });
   app.post('/api/projects/:projectId/sessions/:sessionId/chat/stream', async (request, response) => {
     const body = (request.body ?? {}) as ChatStreamRequest;
     const content = typeof body.content === 'string' ? body.content.trim() : '';
@@ -258,21 +296,20 @@ export function createAaaApp({
       changedFiles: []
     };
     await store.saveRun(session.id, run);
-    const messages: ModelChatMessage[] = [
-      {
-        role: 'system',
-        content: ProjectWorkflowService.systemPrompt({
-          projectName: project.name,
-          agent,
-          skills: workflow.skills,
-          tools: toolSelection
-        })
-      },
-      ...session.messages.map((message) => ({
+    const systemPrompt = ProjectWorkflowService.systemPrompt({
+      projectName: project.name,
+      agent,
+      skills: workflow.skills,
+      tools: toolSelection
+    });
+    const modelMessages = (state: ChatSession): ModelChatMessage[] => [
+      { role: 'system', content: systemPrompt + summaryPromptSection(state) },
+      ...uncompactedMessages(state).map((message) => ({
         role: message.role,
         content: message.id === userMessage.id ? expanded.content : message.content
       }))
     ];
+    const messages = modelMessages(session);
 
     response.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
     response.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -291,7 +328,9 @@ export function createAaaApp({
 
     let streamedText = '';
     let streamedReasoning = '';
+    let streamedUsage: RunUsage | undefined;
     const streamedToolEvents: AgentRun['toolEvents'] = [];
+    const autoCompact = modelConfig.status().autoCompact;
     try {
       const result = await new AaaAgentLoop(modelClient, fileService(request), {
         tools: toolSelection.builtIns,
@@ -301,7 +340,41 @@ export function createAaaApp({
           : undefined,
         mcpFilter: toolSelection.allowMcpTool,
         browserCapture,
-        projectId: project.id
+        projectId: project.id,
+        notices: toolSelection.unavailableMcpServers.map((server) => ({
+          type: 'mcp' as const,
+          label: 'MCP server unavailable',
+          detail: `MCP server ${server.name} is enabled but cannot be used: ${server.reason ?? 'unsupported configuration'}`
+        })),
+        onContextPressure: autoCompact
+          ? async () => {
+            const earlier = uncompactedMessages(session).at(-2);
+            if (!earlier) return undefined;
+            writeJsonLine(response, { type: 'status', message: 'Compacting earlier conversation to fit the context window…' });
+            try {
+              const compaction = await compactSession({
+                session,
+                connection,
+                modelClient,
+                trigger: 'auto',
+                throughMessageId: earlier.id,
+                signal: abortController.signal
+              });
+              const compacted = await store.saveCompaction(session.id, compaction);
+              writeJsonLine(response, { type: 'compaction', compaction });
+              return { messages: modelMessages(compacted), usage: compaction.usage };
+            } catch (error) {
+              if (abortController.signal.aborted) throw error;
+              const detail = error instanceof AgentRunError || error instanceof HttpError
+                ? error.message
+                : 'the model request did not complete';
+              console.error(`[compaction] Automatic compaction for session ${session.id} failed: ${
+                error instanceof Error ? error.message : String(error)}`);
+              writeJsonLine(response, { type: 'status', message: `Automatic compaction skipped: ${detail}` });
+              return undefined;
+            }
+          }
+          : undefined
       }).run(
         connection,
         messages,
@@ -318,6 +391,10 @@ export function createAaaApp({
           onToolEvent: (event) => {
             streamedToolEvents.push(event);
             writeJsonLine(response, { type: 'tool_event', event });
+          },
+          onUsage: (usage) => {
+            streamedUsage = usage;
+            writeJsonLine(response, { type: 'usage', usage });
           }
         }
       );
@@ -344,7 +421,8 @@ export function createAaaApp({
         reasoning: result.reasoning,
         toolEvents: result.toolEvents,
         changedFiles: result.changedFiles,
-        assistantText: result.content
+        assistantText: result.content,
+        usage: result.usage
       });
       writeJsonLine(response, {
         type: 'completed',
@@ -376,6 +454,7 @@ export function createAaaApp({
             .map((event) => event.filePath)
             .filter((filePath): filePath is string => Boolean(filePath)))),
           ...(streamedText ? { assistantText: streamedText } : {}),
+          ...(streamedUsage ? { usage: streamedUsage } : {}),
           error: safeError
         });
       } catch (persistenceError) {

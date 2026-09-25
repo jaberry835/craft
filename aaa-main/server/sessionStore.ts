@@ -9,8 +9,10 @@ import type {
   ChatMessage,
   ChatSession,
   ChatSessionSummary,
-  CreateSessionRequest
+  CreateSessionRequest,
+  SessionCompaction
 } from '../src/types/api.js';
+import { withCompaction } from './sessionCompaction.js';
 
 const sessionIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -27,8 +29,9 @@ export class JsonSessionStore implements ChatSessionStore {
     const sessions = await Promise.all(entries
       .filter((entry) => entry.isFile() && sessionIdPattern.test(entry.name.replace(/\.json$/, '')) && entry.name.endsWith('.json'))
       .map((entry) => this.read(path.join(this.sessionsRoot, entry.name))));
-    return sessions.map(({ messages, runs, ...summary }) => {
+    return sessions.map(({ messages, runs, compactions, ...summary }) => {
       void runs;
+      void compactions;
       return { ...summary, messageCount: messages.length };
     })
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
@@ -116,6 +119,12 @@ export class JsonSessionStore implements ChatSessionStore {
       runs,
       updatedAt: run.completedAt ?? run.startedAt
     };
+    await this.save(updated);
+    return updated;
+  }
+
+  async saveCompaction(sessionId: string, compaction: SessionCompaction): Promise<ChatSession> {
+    const updated = withCompaction(await this.get(sessionId), compaction);
     await this.save(updated);
     return updated;
   }

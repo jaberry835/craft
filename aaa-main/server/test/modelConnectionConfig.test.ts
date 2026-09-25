@@ -70,3 +70,42 @@ test('model config rejects literal or malformed environment references', async (
     /Invalid environment variable reference/
   );
 });
+
+test('model config validates compatibility settings and reports them in status', async (t) => {
+  t.after(() => rm(testRoot, { recursive: true, force: true }));
+  await mkdir(testRoot, { recursive: true });
+  const base = {
+    id: 'model',
+    name: 'Test model',
+    type: 'azure-openai',
+    endpointEnv: 'TEST_MODEL_ENDPOINT',
+    deploymentEnv: 'TEST_MODEL_DEPLOYMENT',
+    defaultApiVersion: '2025-01-01-preview'
+  };
+  await writeFile(configPath, JSON.stringify([{ ...base, api: 'responses', adaptive: false, temperature: null }]), 'utf8');
+  const status = (await ModelConnectionConfig.load(configPath, {})).status();
+  assert.equal(status.api, 'responses');
+  assert.equal(status.adaptive, false);
+  assert.equal(status.autoCompact, false);
+
+  await writeFile(configPath, JSON.stringify([{ ...base, contextWindow: 200000, compaction: { threshold: 0.7 } }]), 'utf8');
+  const withWindow = (await ModelConnectionConfig.load(configPath, {})).status();
+  assert.equal(withWindow.contextWindow, 200000);
+  assert.equal(withWindow.autoCompact, true);
+  assert.equal(withWindow.compactThreshold, 0.7);
+
+  for (const [override, pattern] of [
+    [{ api: 'completions' }, /api must be one of/],
+    [{ tokenParameter: 'max' }, /tokenParameter must be one of/],
+    [{ temperature: 'warm' }, /temperature must be a number/],
+    [{ adaptive: 'yes' }, /adaptive must be true or false/],
+    [{ maxTokens: 0 }, /maxTokens must be a positive integer/],
+    [{ contextWindow: 100 }, /contextWindow must be an integer of at least 1024/],
+    [{ compaction: { threshold: 0.99 } }, /compaction.threshold must be a number from 0.3 to 0.95/],
+    [{ compaction: { auto: 'on' } }, /compaction.auto must be true or false/],
+    [{ maxRetries: 50 }, /maxRetries must be an integer from 0 to 10/]
+  ] as const) {
+    await writeFile(configPath, JSON.stringify([{ ...base, ...override }]), 'utf8');
+    await assert.rejects(() => ModelConnectionConfig.load(configPath, {}), pattern);
+  }
+});

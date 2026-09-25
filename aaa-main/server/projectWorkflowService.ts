@@ -2,19 +2,10 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { CapabilityTestResult, ProjectWorkflowSummary } from '../src/types/api.js';
 import { parseMarkdown, ProjectCustomizationService, toolNames } from './projectCustomizationService.js';
-import { McpHttpClient, type McpServerConfig, type McpTool } from './services/mcpHttpClient.js';
+import { markMcpServerHealthy, McpHttpClient, type McpServerConfig, type McpTool } from './services/mcpHttpClient.js';
+import { builtInToolItemId, builtInToolNameFromItemId, builtInToolNames, type BuiltInToolName } from './builtInTools.js';
 
-export const builtInToolNames = [
-  'list_files',
-  'read_file',
-  'search_files',
-  'write_file',
-  'edit_file',
-  'copy_path',
-  'browser_capture',
-  'load_skill'
-] as const;
-export type BuiltInToolName = (typeof builtInToolNames)[number];
+export { builtInToolNames, type BuiltInToolName } from './builtInTools.js';
 
 export interface WorkflowAgent {
   id: string;
@@ -22,7 +13,10 @@ export interface WorkflowAgent {
   description: string;
   argumentHint?: string;
   instructions: string;
-  /** Tool tokens from the agent frontmatter; undefined means every enabled tool. */
+  /**
+   * Tool tokens from the agent frontmatter, kept for VS Code compatibility and display.
+   * They never narrow the tool surface: every enabled tool is available to every agent.
+   */
   tools?: string[];
   sourcePath: string;
 }
@@ -61,8 +55,11 @@ export interface ProjectWorkflow {
 
 export interface WorkflowToolSelection {
   builtIns: Set<BuiltInToolName>;
+  /** Enabled MCP servers that can be connected this run. */
   mcpServers: WorkflowMcpServer[];
-  /** Returns whether a specific MCP tool may be exposed for the selected agent. */
+  /** Enabled MCP servers whose configuration cannot be used; reported to the user, never silently dropped. */
+  unavailableMcpServers: WorkflowMcpServer[];
+  /** Returns whether a specific MCP tool may be exposed. Every tool of an enabled server is allowed. */
   allowMcpTool: (server: string, tool: string) => boolean;
 }
 
@@ -71,21 +68,6 @@ export interface ExpandedCommand {
   agentId?: string;
   command?: { kind: 'prompt' | 'skill'; id: string; name: string };
 }
-
-const toolAliases: Record<string, BuiltInToolName[]> = {
-  read: ['list_files', 'read_file'],
-  readfile: ['read_file'],
-  search: ['list_files', 'search_files'],
-  codebase: ['list_files', 'search_files'],
-  textsearch: ['search_files'],
-  filesearch: ['list_files'],
-  edit: ['write_file', 'edit_file', 'copy_path'],
-  editfiles: ['write_file', 'edit_file', 'copy_path'],
-  createfile: ['write_file'],
-  browser: ['browser_capture'],
-  screenshot: ['browser_capture'],
-  skills: ['load_skill']
-};
 
 /**
  * Resolves a project's VS Code-style customizations (.github/agents, .github/skills,
@@ -149,7 +131,9 @@ export class ProjectWorkflowService {
 
     const mcpServers = (await this.mcpServers())
       .filter((server) => enabled(`mcp-server:${server.name}`));
-    const enabledTools = new Set(builtInToolNames.filter((name) => enabled(`tool:${name.replace('_', '-')}`)));
+    // Tools are on unless the user explicitly turned them off.
+    const enabledTools = new Set(builtInToolNames.filter((name) =>
+      items.find((item) => item.id === builtInToolItemId(name))?.enabled ?? true));
     return { agents, skills, prompts, mcpServers, enabledTools };
   }
 
@@ -190,7 +174,7 @@ export class ProjectWorkflowService {
       return { itemId, ok: false, testedAt, summary: `${item.name} is disabled for this project.` };
     }
     if (item.kind === 'tool') {
-      const toolName = itemId.slice('tool:'.length).replace(/-/g, '_');
+      const toolName = builtInToolNameFromItemId(itemId);
       const registered = (builtInToolNames as readonly string[]).includes(toolName);
       return {
         itemId,
@@ -214,7 +198,8 @@ export class ProjectWorkflowService {
     }
     let tools: McpTool[];
     try {
-      tools = await new McpHttpClient(server, fetchImpl, 10_000).listTools();
+      tools = await new McpHttpClient(server, fetchImpl, 10_000, 10_000).listTools();
+      markMcpServerHealthy(server);
     } catch {
       return {
         itemId,
@@ -278,49 +263,21 @@ export class ProjectWorkflowService {
     return { content };
   }
 
-  static selectTools(workflow: ProjectWorkflow, agent?: WorkflowAgent): WorkflowToolSelection {
-    const builtIns = new Set<BuiltInToolName>();
-    const mcpRules = new Map<string, Set<string> | '*'>();
-    if (!agent?.tools || agent.tools.length === 0) {
-      workflow.enabledTools.forEach((tool) => builtIns.add(tool));
-      workflow.mcpServers.forEach((server) => mcpRules.set(server.name, '*'));
-    } else {
-      for (const token of agent.tools) {
-        const [serverName, toolName] = token.includes('/') ? token.split('/', 2) as [string, string] : [token, ''];
-        const server = workflow.mcpServers.find((candidate) => candidate.name === serverName);
-        if (server) {
-          if (!toolName || toolName === '*') {
-            mcpRules.set(server.name, '*');
-          } else {
-            const current = mcpRules.get(server.name);
-            if (current !== '*') mcpRules.set(server.name, new Set([...(current ?? []), toolName]));
-          }
-          continue;
-        }
-        const normalized = token.toLowerCase().replace(/[^a-z_]/g, '');
-        const aliased = toolAliases[normalized]
-          ?? ((builtInToolNames as readonly string[]).includes(normalized) ? [normalized as BuiltInToolName] : []);
-        aliased.forEach((tool) => builtIns.add(tool));
-      }
-      builtIns.add('load_skill');
-      for (const tool of [...builtIns]) {
-        if (!workflow.enabledTools.has(tool)) builtIns.delete(tool);
-      }
-    }
+  /**
+   * Every enabled built-in tool and every enabled MCP server is exposed to every agent.
+   * Availability is controlled only by the Project customizations toggles; agent
+   * frontmatter `tools` never removes a capability the user turned on.
+   */
+  static selectTools(workflow: ProjectWorkflow, _agent?: WorkflowAgent): WorkflowToolSelection {
+    void _agent;
+    const builtIns = new Set<BuiltInToolName>(workflow.enabledTools);
+    // load_skill has nothing to load without enabled skills.
     if (workflow.skills.length === 0) builtIns.delete('load_skill');
-    // MCP servers are project capabilities. Newly added enabled servers should be
-    // available immediately even when an existing agent predates their names.
-    workflow.mcpServers.forEach((server) => {
-      if (!mcpRules.has(server.name)) mcpRules.set(server.name, '*');
-    });
-    const mcpServers = workflow.mcpServers.filter((server) => server.available && mcpRules.has(server.name));
     return {
       builtIns,
-      mcpServers,
-      allowMcpTool: (server, tool) => {
-        const rule = mcpRules.get(server);
-        return rule === '*' || Boolean(rule?.has(tool));
-      }
+      mcpServers: workflow.mcpServers.filter((server) => server.available),
+      unavailableMcpServers: workflow.mcpServers.filter((server) => !server.available),
+      allowMcpTool: () => true
     };
   }
 

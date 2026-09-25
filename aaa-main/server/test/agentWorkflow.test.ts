@@ -7,6 +7,7 @@ import type { ModelChatClient, ModelStreamChunk, ResolvedModelConnection } from 
 import { ProjectCustomizationService } from '../projectCustomizationService.js';
 import { ProjectFileService } from '../projectFileService.js';
 import { ProjectWorkflowService } from '../projectWorkflowService.js';
+import { builtInToolCatalog, builtInToolItemId, builtInToolNameFromItemId } from '../builtInTools.js';
 
 const root = path.join(process.cwd(), '.test-data', 'agent-workflow');
 const templateRoot = path.join(process.cwd(), 'templates', 'default-project');
@@ -311,4 +312,74 @@ test('agent run time limit produces an actionable error', async (t) => {
       .run(connection, [{ role: 'user', content: 'go' }], new AbortController().signal),
     /time limit/
   );
+});
+
+test('agent frontmatter tools never narrow the enabled tool surface', async (t) => {
+  await freshProject();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(path.join(root, '.github', 'agents', 'narrow.agent.md'),
+    '---\nname: "Narrow"\ndescription: "Declares only read"\ntools: [read, mcp-publisher/only_one]\n---\n\n# Narrow\n', 'utf8');
+  const workflow = await new ProjectWorkflowService('demo', root).load();
+  const agent = ProjectWorkflowService.resolveAgent(workflow, 'narrow');
+  assert.equal(agent?.name, 'Narrow');
+  const tools = ProjectWorkflowService.selectTools(workflow, agent);
+  assert.deepEqual([...tools.builtIns].sort(), builtInToolCatalog.map((tool) => tool.name).sort());
+  assert.deepEqual(tools.mcpServers.map((server) => server.name), ['mcp-publisher']);
+  assert.equal(tools.allowMcpTool('mcp-publisher', 'any_other_tool'), true);
+});
+
+test('every registered built-in tool is listed, enabled by default, and exposed by the loop', async (t) => {
+  await freshProject();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const items = (await new ProjectCustomizationService('demo', root).list()).items.filter((item) => item.kind === 'tool');
+  assert.deepEqual(items.map((item) => item.id).sort(), builtInToolCatalog.map((tool) => builtInToolItemId(tool.name)).sort());
+  assert.ok(items.every((item) => item.enabled));
+
+  const workflow = await new ProjectWorkflowService('demo', root).load();
+  assert.equal(workflow.enabledTools.size, builtInToolCatalog.length);
+
+  const seen: string[][] = [];
+  const client: ModelChatClient = {
+    async *stream(_connection, _messages, _signal, tools) {
+      seen.push((tools ?? []).map((tool) => tool.function.name));
+      yield { type: 'assistant_text', text: 'ok' };
+      yield { type: 'completed' };
+    }
+  };
+  await new AaaAgentLoop(client, new ProjectFileService(root), {
+    tools: workflow.enabledTools,
+    skills: workflow.skills
+  }).run(connection, [{ role: 'user', content: 'hi' }], new AbortController().signal);
+  assert.deepEqual(seen[0]!.sort(), builtInToolCatalog.map((tool) => tool.name).sort());
+});
+
+test('tool item ids map every underscore so multi-word tools keep their enabled state', () => {
+  assert.equal(builtInToolItemId('fetch_url_as_json'), 'tool:fetch-url-as-json');
+  assert.equal(builtInToolNameFromItemId('tool:fetch-url-as-json'), 'fetch_url_as_json');
+  for (const tool of builtInToolCatalog) {
+    assert.equal(builtInToolNameFromItemId(builtInToolItemId(tool.name)), tool.name);
+  }
+});
+
+test('only an explicit disable removes a tool, and unusable MCP servers are reported instead of dropped', async (t) => {
+  await freshProject();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(path.join(root, '.aaa'), { recursive: true });
+  await writeFile(path.join(root, '.aaa', 'customizations.json'), JSON.stringify({
+    enabled: { 'tool:browser-capture': false },
+    metadata: {}
+  }), 'utf8');
+  await writeFile(path.join(root, '.vscode', 'mcp.json'), JSON.stringify({
+    servers: {
+      'mcp-publisher': { type: 'http', url: 'http://localhost:3000/mcp' },
+      local: { type: 'stdio', command: 'node', args: ['server.js'] }
+    }
+  }), 'utf8');
+  const workflow = await new ProjectWorkflowService('demo', root).load();
+  const tools = ProjectWorkflowService.selectTools(workflow, ProjectWorkflowService.resolveAgent(workflow));
+  assert.equal(tools.builtIns.has('browser_capture'), false);
+  assert.equal(tools.builtIns.size, builtInToolCatalog.length - 1);
+  assert.deepEqual(tools.mcpServers.map((server) => server.name), ['mcp-publisher']);
+  assert.deepEqual(tools.unavailableMcpServers.map((server) => server.name), ['local']);
+  assert.match(tools.unavailableMcpServers[0]!.reason ?? '', /Streamable HTTP/);
 });

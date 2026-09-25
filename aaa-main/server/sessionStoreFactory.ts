@@ -105,6 +105,10 @@ class UnavailableChatSessionStore implements ChatSessionStore {
     return this.unavailable();
   }
 
+  saveCompaction(): Promise<never> {
+    return this.unavailable();
+  }
+
   private unavailable(): Promise<never> {
     return Promise.reject(new StorageUnavailableError(this.message));
   }

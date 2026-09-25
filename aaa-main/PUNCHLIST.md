@@ -65,6 +65,17 @@ This list tracks the path from the visual prototype to a working local A&A demo.
 - [x] Refresh the artifact tree and selected file after agent-driven file changes.
 - [ ] Add review/approval policy for higher-impact agent actions before expanding beyond project file tools.
 - [x] Show actionable errors rather than success-shaped fallback responses.
+- [x] Support explicit `api`, `tokenParameter`, temperature, reasoning, and streaming settings with bounded, logged compatibility adaptation across Chat Completions and Responses.
+- [x] Add `npm run model:probe` to verify plain chat, tool definitions, and tool-result replay per API and recommend settings for a new environment.
+- [x] Retry 429, 408, transient 5xx, and network failures with `Retry-After`-aware, abortable backoff.
+- [x] Track input, cached-input, output, and reasoning tokens per request, run, and session, with live usage in the chat, a context meter, and status-bar totals.
+- [x] Add `/compact [focus]` and automatic threshold-based compaction that keeps the visible transcript and stores structured summaries per session.
+- [x] Trim the oldest already-seen tool outputs inside long runs before they overflow the configured context window.
+- [ ] Add optional per-deployment pricing (per 1M input, cached-input, and output tokens) to show estimated run and session cost.
+- [ ] Send an opt-in `prompt_cache_key` (for example the session id) to improve cache routing where supported.
+- [ ] Summarize large tool outputs instead of removing them, and allow reverting the latest compaction.
+- [ ] Add per-project or per-session token budgets with warnings before a run starts.
+- [ ] Export run usage and timing as OpenTelemetry GenAI spans for Application Insights or an offline collector.
 - [x] Keep the model/provider boundary replaceable for an air-gapped runtime.
 
 **Acceptance criteria:** A restored session displays the complete conversation, reasoning, and agent steps; new messages stream without losing history; and a user can ask the agent to inspect or change a project file and see the persisted result in Artifacts.
@@ -152,7 +163,7 @@ This list tracks the path from the visual prototype to a working local A&A demo.
 - [x] Surface configured Cosmos failures without silently falling back to local session files.
 - [x] Add a credential-safe storage readiness endpoint for session and workspace-file backends.
 - [x] Report Junior-compatible blob settings as configured/ready but inactive until project-file storage is abstracted.
-- [~] Add browser tests for the core project/session/chat/file flow.
+- [~] Add browser tests for the core project/session/chat/file flow (Edge-driven first-prompt streaming test in `server/test/e2eChat.test.ts`; skipped without a client build or Edge).
 - [x] Verify light and dark visual contrast for the project and customization milestone.
 - [x] Verify a normal browser reload makes no unintended external runtime requests.
 - [x] Produce pinned dependency and offline installation guidance.

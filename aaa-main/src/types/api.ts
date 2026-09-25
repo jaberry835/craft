@@ -166,7 +166,7 @@ export interface ProjectPathResult {
 
 export type ChatRole = 'user' | 'assistant' | 'system';
 
-export type ToolEventType = 'read' | 'search' | 'create' | 'edit' | 'skill' | 'mcp' | 'browser';
+export type ToolEventType = 'read' | 'search' | 'create' | 'edit' | 'skill' | 'mcp' | 'browser' | 'context';
 
 export interface ToolEvent {
   id: string;
@@ -191,6 +191,42 @@ export interface ChatMessage {
 
 export type AgentRunStatus = 'running' | 'completed' | 'failed' | 'aborted';
 
+/** Token counts reported by the model provider for one or more requests. */
+export interface TokenUsage {
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
+  totalTokens: number;
+}
+
+export interface RunUsage extends TokenUsage {
+  /** Model requests in the run, including compaction and tool rounds. */
+  requests: number;
+  /** Input tokens of the first request: system prompt, tools, and conversation history. */
+  promptTokens: number;
+  /** Largest single-request input, i.e. the peak context used by the run. */
+  peakInputTokens: number;
+  /** True when the provider did not report usage for at least one request and it was estimated. */
+  estimated: boolean;
+}
+
+export type CompactionTrigger = 'manual' | 'auto';
+
+export interface SessionCompaction {
+  id: string;
+  createdAt: string;
+  trigger: CompactionTrigger;
+  /** Messages up to and including this id are represented by `summary` in model context. */
+  throughMessageId: string;
+  summary: string;
+  messagesCompacted: number;
+  estimatedTokensBefore: number;
+  estimatedTokensAfter: number;
+  focus?: string;
+  usage?: TokenUsage;
+}
+
 export interface AgentRun {
   id: string;
   status: AgentRunStatus;
@@ -204,6 +240,7 @@ export interface AgentRun {
   changedFiles: string[];
   assistantText?: string;
   error?: string;
+  usage?: RunUsage;
 }
 
 export interface ChatSessionSummary {
@@ -218,6 +255,7 @@ export interface ChatSessionSummary {
 export interface ChatSession extends ChatSessionSummary {
   messages: ChatMessage[];
   runs: AgentRun[];
+  compactions?: SessionCompaction[];
 }
 
 export interface CreateSessionRequest {
@@ -242,6 +280,12 @@ export interface ModelConnectionStatus {
   missing: string[];
   authMode: 'entra' | 'api-key';
   endpointKind: 'auto' | 'foundry-project' | 'openai-v1' | 'azure-openai-legacy';
+  api: 'auto' | 'chat-completions' | 'responses';
+  adaptive: boolean;
+  /** Configured model context window in tokens; auto-compaction is off when absent. */
+  contextWindow?: number;
+  autoCompact: boolean;
+  compactThreshold: number;
   endpointHost?: string;
   deployment?: string;
   apiVersion?: string;
@@ -282,7 +326,8 @@ export interface WorkflowAgentSummary {
 
 export interface WorkflowCommandSummary {
   name: string;
-  kind: 'prompt' | 'skill';
+  /** `builtin` commands (such as /compact) are handled by AAA rather than the project. */
+  kind: 'prompt' | 'skill' | 'builtin';
   label: string;
   description: string;
   argumentHint?: string;
@@ -303,8 +348,16 @@ export type ChatStreamEvent =
   | { type: 'assistant_text'; text: string }
   | { type: 'reasoning'; text: string }
   | { type: 'tool_event'; event: ToolEvent }
+  | { type: 'usage'; usage: RunUsage }
+  | { type: 'compaction'; compaction: SessionCompaction }
+  | { type: 'status'; message: string }
   | { type: 'completed'; response: ChatStreamResponse; changedFiles: string[] }
   | { type: 'error'; message: string };
+
+export interface CompactSessionRequest {
+  /** Optional instruction about what the summary should preserve. */
+  focus?: string;
+}
 
 export interface ApiError {
   error: string;

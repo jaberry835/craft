@@ -5,17 +5,27 @@ import type {
   ModelChatMessage,
   ModelToolCall,
   ModelToolDefinition,
+  ModelUsage,
   ResolvedModelConnection
 } from './modelTypes.js';
 import { ProjectFileService } from './projectFileService.js';
 import { builtInToolNames, type BuiltInToolName, type WorkflowSkill } from './projectWorkflowService.js';
 import type { BrowserCaptureService } from './services/browserCaptureService.js';
 import type { McpToolbox } from './services/mcpHttpClient.js';
-import type { FileTreeNode, ToolEvent } from '../src/types/api.js';
+import type { FileTreeNode, RunUsage, ToolEvent } from '../src/types/api.js';
+import {
+  addRequestUsage,
+  emptyRunUsage,
+  estimateMessageTokens,
+  estimateTextTokens,
+  estimateToolTokens,
+  estimatedUsage
+} from './tokenUsage.js';
 
 const noReasoningMessage = 'No reasoning was emitted for this turn.';
 const maximumToolOutputCharacters = 60_000;
 const fileReferencePrefix = 'aaa-file:';
+const trimmedToolOutputPrefix = '[AAA removed this earlier tool output';
 
 const builtInDefinitions: Record<BuiltInToolName, ModelToolDefinition> = {
   list_files: {
@@ -141,6 +151,8 @@ export interface AaaAgentProgressHandlers {
   onReasoning?: (text: string) => void | Promise<void>;
   onAssistantText?: (text: string) => void | Promise<void>;
   onToolEvent?: (event: ToolEvent) => void | Promise<void>;
+  /** Called after every model request with the cumulative run usage. */
+  onUsage?: (usage: RunUsage) => void | Promise<void>;
 }
 
 export interface AaaAgentRunResult {
@@ -148,6 +160,7 @@ export interface AaaAgentRunResult {
   reasoning: string;
   toolEvents: ToolEvent[];
   changedFiles: string[];
+  usage: RunUsage;
 }
 
 export interface AaaAgentLoopOptions {
@@ -161,6 +174,15 @@ export interface AaaAgentLoopOptions {
   maxRounds?: number;
   maxToolCalls?: number;
   timeoutMs?: number;
+  /** Warnings shown as agent steps at the start of the run, e.g. unusable MCP servers. */
+  notices?: Array<{ type: ToolEvent['type']; label: string; detail?: string }>;
+  /**
+   * Called once before the first request when the estimated prompt (messages plus tool
+   * definitions) exceeds `contextWindow * threshold`. May return replacement messages,
+   * for example after compacting the conversation, and the usage that work consumed.
+   */
+  onContextPressure?: (estimatedTokens: number, budgetTokens: number) =>
+    Promise<{ messages: ModelChatMessage[]; usage?: ModelUsage } | undefined>;
 }
 
 export class AaaAgentLoop {
@@ -201,9 +223,13 @@ export class AaaAgentLoop {
     const loopMessages = [...messages];
     const toolEvents: ToolEvent[] = [];
     const changedFiles = new Set<string>();
+    const usage = emptyRunUsage();
     let reasoning = '';
     let content = '';
     let toolCallCount = 0;
+    // Actual input tokens of the previous request and how many messages it covered,
+    // used to estimate the next request's context size.
+    let measuredInput: { tokens: number; messageCount: number } | undefined;
 
     const emit = async (event: ToolEvent) => {
       toolEvents.push(event);
@@ -211,6 +237,9 @@ export class AaaAgentLoop {
     };
 
     const tools = [...this.builtIns].map((name) => builtInDefinitions[name]);
+    for (const notice of this.options.notices ?? []) {
+      await emit(createToolEvent(notice.type, notice.label, notice.detail));
+    }
     if (this.options.mcp) {
       const loaded = await this.options.mcp.load(signal, this.options.mcpFilter).catch((error: unknown) => {
         throwIfStopped();
@@ -223,10 +252,34 @@ export class AaaAgentLoop {
     }
 
     try {
+      const window = connection.definition.contextWindow;
+      if (window && this.options.onContextPressure) {
+        const budget = window * (connection.definition.compaction?.threshold ?? 0.8);
+        const estimate = estimateMessageTokens(loopMessages) + estimateToolTokens(tools);
+        if (estimate > budget) {
+          const relieved = await this.options.onContextPressure(estimate, budget);
+          throwIfStopped();
+          if (relieved) {
+            loopMessages.splice(0, loopMessages.length, ...relieved.messages);
+            if (relieved.usage) {
+              addRequestUsage(usage, relieved.usage, { auxiliary: true });
+              await handlers.onUsage?.({ ...usage });
+            }
+          }
+        }
+      }
+
       for (let round = 0; round < this.maxRounds; round += 1) {
         let roundContent = '';
         let roundToolCalls: ModelToolCall[] = [];
+        let roundUsage: ModelUsage | undefined;
         let completed = false;
+
+        const trimmed = this.trimContext(connection, loopMessages, tools, measuredInput);
+        if (trimmed) {
+          await emit(trimmed.event);
+          if (measuredInput) measuredInput.tokens = Math.max(0, measuredInput.tokens - trimmed.removedTokens);
+        }
 
         for await (const chunk of this.modelClient.stream(connection, loopMessages, signal, tools)) {
           throwIfStopped();
@@ -239,6 +292,8 @@ export class AaaAgentLoop {
             await handlers.onReasoning?.(chunk.text);
           } else if (chunk.type === 'tool_calls') {
             roundToolCalls = chunk.calls;
+          } else if (chunk.type === 'usage') {
+            roundUsage = chunk.usage;
           } else {
             completed = true;
           }
@@ -248,6 +303,14 @@ export class AaaAgentLoop {
         if (!completed) {
           throw new Error('The model response ended before completing the agent round.');
         }
+        const requestUsage = roundUsage ?? estimatedUsage(
+          estimateMessageTokens(loopMessages) + estimateToolTokens(tools),
+          estimateTextTokens(roundContent) + estimateMessageTokens([{ role: 'assistant', content: '', toolCalls: roundToolCalls }])
+        );
+        addRequestUsage(usage, requestUsage, { estimated: !roundUsage });
+        measuredInput = { tokens: requestUsage.inputTokens, messageCount: loopMessages.length };
+        await handlers.onUsage?.({ ...usage });
+
         if (roundToolCalls.length === 0) {
           const finalContent = content.trim();
           if (!finalContent) {
@@ -257,7 +320,8 @@ export class AaaAgentLoop {
             content: finalContent,
             reasoning: reasoning.trim() || noReasoningMessage,
             toolEvents,
-            changedFiles: [...changedFiles]
+            changedFiles: [...changedFiles],
+            usage
           };
         }
 
@@ -296,6 +360,58 @@ export class AaaAgentLoop {
     throw new AgentRunError(
       `The agent exceeded the ${this.maxRounds}-round safety limit. Ask it to continue from where it stopped.`
     );
+  }
+
+  /**
+   * Keeps a long run inside the configured context window. When the next request is
+   * estimated to exceed `contextWindow * threshold`, the oldest tool outputs the model
+   * has already seen are replaced with a short placeholder until the estimate falls to
+   * 70% of that budget (hysteresis keeps the prompt prefix stable for caching).
+   */
+  private trimContext(
+    connection: ResolvedModelConnection,
+    loopMessages: ModelChatMessage[],
+    tools: ModelToolDefinition[],
+    measured: { tokens: number; messageCount: number } | undefined
+  ): { event: ToolEvent; removedTokens: number } | undefined {
+    const window = connection.definition.contextWindow;
+    if (!window) return undefined;
+    const budget = window * (connection.definition.compaction?.threshold ?? 0.8);
+    let estimate = measured
+      ? measured.tokens + estimateMessageTokens(loopMessages.slice(measured.messageCount))
+      : estimateMessageTokens(loopMessages) + estimateToolTokens(tools);
+    if (estimate <= budget) return undefined;
+
+    // Results after the last assistant turn have not been seen by the model yet.
+    let lastAssistant = -1;
+    loopMessages.forEach((message, index) => {
+      if (message.role === 'assistant') lastAssistant = index;
+    });
+    const target = budget * 0.7;
+    let removedResults = 0;
+    let removedTokens = 0;
+    for (let index = 0; index < lastAssistant && estimate > target; index += 1) {
+      const message = loopMessages[index]!;
+      if (message.role !== 'tool' || message.content.startsWith(trimmedToolOutputPrefix)) continue;
+      const placeholder = `${trimmedToolOutputPrefix} (${message.content.length} characters) to stay within the `
+        + 'model context window. Call the tool again if you still need it.]';
+      const saved = estimateTextTokens(message.content) - estimateTextTokens(placeholder);
+      if (saved <= 0) continue;
+      loopMessages[index] = { ...message, content: placeholder };
+      estimate -= saved;
+      removedResults += 1;
+      removedTokens += saved;
+    }
+    if (removedResults === 0) return undefined;
+    return {
+      removedTokens,
+      event: createToolEvent(
+        'context',
+        'Trimmed earlier tool output',
+        `Removed ${removedResults} earlier tool result${removedResults === 1 ? '' : 's'} (~${removedTokens.toLocaleString('en-US')} tokens) `
+          + `to stay within the ${window.toLocaleString('en-US')}-token context window.`
+      )
+    };
   }
 
   private async executeTool(
@@ -497,10 +613,15 @@ export class AaaAgentLoop {
       }
     } catch (error) {
       if (signal.aborted) throw error;
-      return this.failedToolEvent(
-        toolName,
-        error instanceof Error ? error.message : 'Tool execution failed.'
-      );
+      const message = error instanceof Error ? error.message : 'Tool execution failed.';
+      if (this.options.mcp?.has(toolName)) {
+        console.error(`[mcp] Tool ${toolName} failed: ${message}`);
+        return {
+          output: `Tool ${toolName} failed: ${message} Continue without it or try another approach.`,
+          event: createToolEvent('mcp', `MCP tool failed: ${toolName}`, message)
+        };
+      }
+      return this.failedToolEvent(toolName, message);
     }
   }
 

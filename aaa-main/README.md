@@ -26,6 +26,47 @@ The default connection uses `DefaultAzureCredential`. To use an API key instead,
 
 `maxTokens` in the connection definition is the per-response output budget (default `16000`). Reasoning models spend part of it on reasoning, so a low value truncates large file writes; when the model hits the limit AAA reports an actionable error instead of saving a partial result.
 
+### Endpoint and API compatibility
+
+Deployments differ in URL style, wire protocol, and accepted parameters, so the connection definition states them explicitly:
+
+| Setting | Values | Meaning |
+| --- | --- | --- |
+| `endpointKind` | `auto`, `azure-openai-legacy`, `openai-v1`, `foundry-project` | URL style. `auto` infers it: `/api/projects/` → Foundry project, `/openai/v1` → v1, otherwise legacy `/openai/deployments/...?api-version=`. |
+| `api` | `auto`, `chat-completions`, `responses` | Wire protocol. `auto` uses Responses for Foundry project or `/responses` endpoints, otherwise Chat Completions. |
+| `tokenParameter` | `auto`, `max_tokens`, `max_completion_tokens`, `max_output_tokens`, `omit` | Output-limit parameter. `auto` uses `max_tokens` for legacy Chat Completions, `max_completion_tokens` for v1, and `max_output_tokens` for Responses. |
+| `temperature` | number or `null` | `null` omits it for models that accept only the default. |
+| `reasoningEffort`, `reasoningSummary` | optional | Sent only when set (`reasoning_effort`, or `reasoning.effort`/`reasoning.summary` for Responses). |
+| `adaptive` | `true` (default) or `false` | Allows bounded compatibility retries; `false` sends exactly the configured shape. |
+| `stream` | `true` (default) or `false` | Requests SSE streaming. Complete JSON responses, for example from buffering gateways, are handled either way. |
+
+An explicit `api` or `tokenParameter` is never overridden. With `auto` values and `adaptive` enabled, AAA retries up to three times, only for recognized compatibility failures: a 404 route switches API; a rejected `max_tokens`, `max_completion_tokens`, `temperature`, `tool_choice`, or reasoning parameter is swapped or omitted; and a 400 on a request that replays tool results (the second round of every skill, prompt, or file-editing run) tries the other API. Each retry is logged and the working shape is remembered until restart. Content-filter, context-length, authentication, and quota errors are never retried; their Azure error code, message, and filtered categories are shown with the API key redacted.
+
+When moving to a new environment, run the probe after configuring `.env`:
+
+```powershell
+npm run model:probe
+```
+
+It sends three small requests for each API (plain chat, tool definitions, and a replayed tool result, which is what skills need) and prints the `api` / `tokenParameter` / `temperature` settings to pin in `config\agent-connections.json`.
+
+Throttling (`429`), request timeouts (`408`), transient `5xx` responses, and network failures are retried up to `maxRetries` times (default `3`, maximum `10`), honoring `retry-after-ms`, `x-ms-retry-after-ms`, or `Retry-After` and otherwise backing off exponentially. Waiting stops immediately when you press **Stop**.
+
+### Token usage and context management
+
+Every model request reports input, cached-input, output, and reasoning tokens (Chat Completions streams request `stream_options.include_usage`; set `includeUsage` to `false`, or let adaptation drop it, for deployments that reject it). Each run stores cumulative usage, the first request's prompt size, and its peak request size. The chat shows a per-reply usage line, the composer shows a context meter, and the status bar shows session totals with the cached share. When a provider does not report usage, AAA estimates it and marks the numbers with `~`.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `contextWindow` | none | The deployment's context window in tokens. Required for the meter percentage, auto-compaction, and the in-run guard; set it to the model's real limit. |
+| `compaction.auto` | `true` | Compact automatically before a turn when the estimated prompt crosses the threshold. |
+| `compaction.threshold` | `0.8` | Fraction of `contextWindow` (0.3–0.95) that triggers compaction and tool-output trimming. |
+| `compaction.summaryMaxTokens` | `min(maxTokens, 8000)` | Output budget for the summary request. |
+
+**Compaction** summarizes earlier turns, plus any previous summary, into a structured Markdown record: goals, decisions, files changed, key facts such as control IDs, open items, and dead ends. The model then receives that summary in its system prompt, followed only by the turns after the boundary. The visible transcript is never rewritten: a divider marks the boundary and expands to show the summary. Run it manually with `/compact [what to focus on]` or by clicking the context meter. Automatic compaction runs only when `contextWindow` is set. A failed compaction leaves the conversation unchanged; for automatic runs it is reported as a status line and the turn continues.
+
+**In-run guard:** tool results are replayed within a single run (prior turns carry only their final text), so long skill runs are what fill the window. When the next request would cross the threshold, AAA replaces the oldest tool outputs the model has already seen with a short placeholder until the estimate falls to 70% of the budget, and records a "Trimmed earlier tool output" step. Results the model has not yet seen are never trimmed. Estimates use a conservative 3.5 characters per token, calibrated against the provider's actual count from the previous request.
+
 The backend chat route is `POST /api/projects/:projectId/sessions/:sessionId/chat/stream`. It accepts `{ content, agentId? }` and returns newline-delimited JSON events (`assistant_text`, `reasoning`, `tool_event`, `completed`, or `error`). Every stream ends with exactly one `completed` or `error` event; the client reports a dropped connection if neither arrives. Reasoning and tool steps are persisted with the assistant turn and restored as expandable chat details.
 
 Each session also stores structured agent runs with `running`, `completed`, `failed`, or `aborted` status; start/completion timestamps; model connection ID; associated user and assistant message IDs; reasoning; tool events; changed files; partial assistant text; and a credential-safe error when applicable.
@@ -36,18 +77,20 @@ AAA runs a project's GitHub Copilot-style customizations the same way VS Code ag
 
 | Project file | What AAA does with it |
 | --- | --- |
-| `.github/agents/*.agent.md` | Selectable in the composer's agent picker. The body becomes the agent's instructions; the `tools` frontmatter limits which tools it gets. |
+| `.github/agents/*.agent.md` | Selectable in the composer's agent picker. The body becomes the agent's instructions. The `tools` frontmatter is kept for VS Code compatibility but never removes tools: every enabled tool is available to every agent. |
 | `.github/skills/<id>/SKILL.md` | Listed to the model by id and description. The model calls `load_skill` to read the full procedure and its bundled file list when a request matches. |
 | `.github/prompts/*.prompt.md` | Runs as a slash command, for example `/build-security-package AU-2`. A prompt's `agent` frontmatter selects the agent. |
 | `.vscode/mcp.json` | HTTP (Streamable HTTP) MCP servers are connected per run; their tools appear as `mcp_<server>_<tool>`. |
 
 Type `/` in the composer (or use **Skills**) to pick a prompt or skill. `/skill-id args` asks the agent to load and follow that skill.
 
-Built-in tools are `list_files`, `read_file`, `search_files`, `write_file`, `edit_file`, `copy_path`, `browser_capture`, and `load_skill`. Agent `tools` tokens map as follows: `read` → list/read, `search` → list/search, `edit` → write/edit/copy, `browser` or `screenshot` → Edge evidence capture, and `<server>/*` or `<server>/<tool>` → optional MCP tool narrowing. Every enabled, available project MCP server is exposed automatically, including servers added after an agent was created; disabling an MCP server in **Project customizations** removes it from the next run. `execute` is ignored: AAA never runs commands or scripts, so skills should copy bundled template files with `copy_path` rather than calling a script. `write_file` creates missing parent folders, and `copy_path` never overwrites existing files. Disabling an agent, skill, or built-in tool also removes it from the next run.
+Built-in tools are `list_files`, `read_file`, `search_files`, `write_file`, `edit_file`, `copy_path`, `browser_capture`, and `load_skill`, all registered in `server/builtInTools.ts`; a tool added there is listed in **Project customizations**, enabled by default, and exposed to every agent. Tool availability has one control: the enable toggles in **Project customizations**. If a tool, skill, or MCP server is on, every agent gets it, including ones created after the agent; only an explicit disable removes it from the next run. Agent `tools` frontmatter does not narrow anything. An enabled MCP server whose configuration cannot be used (for example `stdio`) is reported as an agent step instead of being dropped silently. `execute` is ignored: AAA never runs commands or scripts, so skills should copy bundled template files with `copy_path` rather than calling a script. `write_file` creates missing parent folders, and `copy_path` never overwrites existing files.
 
 The composer Agent picker is the primary agent-selection surface and links to advanced project settings. **Project customizations** shows every built-in tool, provides safe availability tests, and can test HTTP MCP connections while listing the tools they expose without returning endpoint credentials. The composer’s **Add evidence** menu attaches project-file references as explicitly untrusted context. When the selected agent inspects a reference through its project tools, that file content may be sent to the configured model provider.
 
 MCP tool calls may pass `aaa-file:<project-relative-path>` as any string argument; AAA substitutes that file's text before calling the server, so the model can publish many Markdown files without re-typing them. Only `http` MCP servers are supported (not `stdio`); header values may use `${env:NAME}`, but `${input:...}` prompts are not supported.
+
+A down MCP server never blocks the chat. Servers are contacted in parallel with a short connect timeout (`AAA_MCP_CONNECT_TIMEOUT_MS`, default 8 s); one that fails is shown as an "MCP server unavailable" step, logged to the server console, and the run continues with the remaining tools. A failed server is skipped without waiting for `AAA_MCP_RETRY_AFTER_MS` (default 60 s), and a successful **Test connection** in Project customizations clears that immediately. Tool calls use a longer timeout (`AAA_MCP_TOOL_TIMEOUT_MS`, default 120 s); a failed call is returned to the model as an error so it can continue.
 
 Each run is bounded by `AAA_AGENT_MAX_ROUNDS` (default 30 model rounds), `AAA_AGENT_MAX_TOOL_CALLS` (default 120), and `AAA_AGENT_TIMEOUT_MS` (default 15 minutes). **Stop** is checked before every tool call, so queued file edits do not run after you stop a response. Some models double-escape tool arguments so a whole file arrives as one line full of literal `\n`; for Markdown, text, CSV, and YAML files AAA converts those escapes back into real line breaks before writing.
 

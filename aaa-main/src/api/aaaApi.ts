@@ -10,6 +10,7 @@ import type {
   ChatSession,
   ChatSessionSummary,
   CapabilityTestResult,
+  CompactSessionRequest,
   CustomizationItem,
   CustomizationEditor,
   CreateProjectRequest,
@@ -277,6 +278,11 @@ export const aaaApi = {
     requestJson<{ deleted: true; id: string }>(sessionPath(projectId, sessionId), { method: 'DELETE' }),
   appendMessage: (projectId: string, sessionId: string, request: AppendMessageRequest) =>
     requestJson<ChatSession>(`${sessionPath(projectId, sessionId)}/messages`, {
+      method: 'POST',
+      body: JSON.stringify(request)
+    }),
+  compactSession: (projectId: string, sessionId: string, request: CompactSessionRequest = {}) =>
+    requestJson<ChatSession>(`${sessionPath(projectId, sessionId)}/compact`, {
       method: 'POST',
       body: JSON.stringify(request)
     }),

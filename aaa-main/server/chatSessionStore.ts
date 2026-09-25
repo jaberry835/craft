@@ -3,7 +3,8 @@ import type {
   AgentRun,
   ChatSession,
   ChatSessionSummary,
-  CreateSessionRequest
+  CreateSessionRequest,
+  SessionCompaction
 } from '../src/types/api.js';
 
 export interface ChatSessionStore {
@@ -14,6 +15,7 @@ export interface ChatSessionStore {
   delete(sessionId: string): Promise<void>;
   append(sessionId: string, request: AppendMessageRequest): Promise<ChatSession>;
   saveRun(sessionId: string, run: AgentRun): Promise<ChatSession>;
+  saveCompaction(sessionId: string, compaction: SessionCompaction): Promise<ChatSession>;
 }
 
 export type ChatSessionStoreFactory = (projectId: string) => ChatSessionStore;

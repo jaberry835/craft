@@ -6,12 +6,20 @@
     "authMode": "entra",
     "cloud": "public",
     "endpointKind": "auto",
+    "api": "auto",
+    "tokenParameter": "auto",
+    "adaptive": true,
     "endpointEnv": "AZURE_OPENAI_ENDPOINT",
     "apiKeyEnv": "AZURE_OPENAI_API_KEY",
     "deploymentEnv": "AZURE_OPENAI_DEPLOYMENT",
     "apiVersionEnv": "AZURE_OPENAI_API_VERSION",
     "defaultApiVersion": "2025-01-01-preview",
     "temperature": 0.2,
-    "maxTokens": 16000
+    "maxTokens": 16000,
+    "contextWindow": 128000,
+    "compaction": {
+      "auto": true,
+      "threshold": 0.8
+    }
   }
 ]
