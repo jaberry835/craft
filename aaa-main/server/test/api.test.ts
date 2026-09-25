@@ -94,8 +94,11 @@ test('project API exposes configured metadata, sessions, messages, files, and tr
     name: 'New Package',
     description: 'Managed AAA authorization project.',
     rootPath: path.resolve(managedRoot, 'new-package'),
-    active: true
+    active: true,
+    managed: true
   });
+  await mkdir(path.join(dataRoot, 'projects', 'new-package', 'sessions'), { recursive: true });
+  await writeFile(path.join(dataRoot, 'projects', 'new-package', 'sessions', 'session.json'), '{}', 'utf8');
   const selectProject = await fetch(`http://127.0.0.1:${address.port}/api/projects/active`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -103,6 +106,20 @@ test('project API exposes configured metadata, sessions, messages, files, and tr
   });
   assert.equal(selectProject.status, 200);
   assert.equal((await selectProject.json() as { active: boolean }).active, true);
+  const deleteProject = await fetch(
+    `http://127.0.0.1:${address.port}/api/projects/new-package`,
+    { method: 'DELETE' }
+  );
+  assert.equal(deleteProject.status, 200);
+  assert.equal((await deleteProject.json() as { activeProjectId: string }).activeProjectId, 'assessed-project');
+  await assert.rejects(
+    () => writeFile(path.join(managedRoot, 'new-package', 'probe.txt'), 'deleted', 'utf8'),
+    { code: 'ENOENT' }
+  );
+  await assert.rejects(
+    () => writeFile(path.join(dataRoot, 'projects', 'new-package', 'probe.txt'), 'deleted', 'utf8'),
+    { code: 'ENOENT' }
+  );
 
   const storageStatus = await fetch('http://127.0.0.1:' + address.port + '/api/storage/status');
   assert.equal(storageStatus.status, 200);
@@ -185,14 +202,14 @@ test('project API exposes configured metadata, sessions, messages, files, and tr
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       path: 'evidence.pdf',
-      contentBase64: Buffer.from('%PDF demo evidence').toString('base64')
+      contentBase64: Buffer.from('%PDF-1.7 demo evidence').toString('base64')
     })
   });
   assert.equal(uploadResponse.status, 201);
   assert.deepEqual(await uploadResponse.json(), {
     path: 'evidence.pdf',
     type: 'file',
-    size: 18
+    size: 22
   });
   const previewResponse = await fetch(`${baseUrl}/published?path=published.md`);
   assert.equal(previewResponse.status, 409);

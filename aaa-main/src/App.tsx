@@ -61,7 +61,11 @@ import {
 import { aaaApi, ApiRequestError } from './api/aaaApi';
 import { CompactionDivider, ContextMeter, UsageLine } from './usageViews';
 import { ModelDiagnosticsPanel } from './modelDiagnostics';
+import { McpAuthFields } from './mcpAuthFields';
+import { signOut } from './auth';
+import type { SignedInUser } from './authGate';
 import { contextEstimate, formatTokens, sessionUsage, sessionUsageTitle } from './usageMath';
+import { resolveUploadDestination } from './uploadDestination';
 import type {
   ChatMessage,
   ChatMessageDisplayPart,
@@ -93,7 +97,7 @@ type CustomizationSection = 'overview' | 'model' | CustomizationItem['kind'];
 type FileDialogState =
   | { kind: 'create'; value: string }
   | { kind: 'rename'; value: string }
-  | { kind: 'delete'; value: string };
+  | { kind: 'delete'; value: string; target?: 'file' | 'directory'; fileCount?: number };
 const starterPrompts = [
   {
     icon: ShieldCheck,
@@ -306,7 +310,12 @@ function flattenFiles(nodes: FileTreeNode[]): FileTreeNode[] {
   return nodes.flatMap((node) => node.type === 'file' ? [node] : flattenFiles(node.children ?? []));
 }
 
-function App() {
+function initials(name: string): string {
+  const parts = name.split(/[\s@._-]+/).filter(Boolean);
+  return ((parts[0]?.[0] ?? '') + (parts.length > 1 ? parts.at(-1)![0] : '')).toUpperCase() || '?';
+}
+
+function App({ user }: { user?: SignedInUser } = {}) {
   const [leftWidth, setLeftWidth] = useState(268);
   const [rightWidth, setRightWidth] = useState(390);
   const [leftOpen, setLeftOpen] = useState(true);
@@ -338,6 +347,7 @@ function App() {
   const [showDiscardDialog, setShowDiscardDialog] = useState(false);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [showCreateProject, setShowCreateProject] = useState(false);
+  const [showDeleteProject, setShowDeleteProject] = useState(false);
   const [projectDraft, setProjectDraft] = useState({ name: '', systemName: '', description: '' });
   const [customizationsOpen, setCustomizationsOpen] = useState(false);
   const [customizationSection, setCustomizationSection] = useState<CustomizationSection>('overview');
@@ -359,6 +369,7 @@ function App() {
   const [streamingStatus, setStreamingStatus] = useState('');
   const [isCompacting, setIsCompacting] = useState(false);
   const [pendingUserMessage, setPendingUserMessage] = useState<ChatMessage | null>(null);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
   // True once the final message arrived, so the live response view does not duplicate it.
   const [streamDone, setStreamDone] = useState(false);
   const [modelStatus, setModelStatus] = useState<ModelConnectionStatus | null>(null);
@@ -703,6 +714,25 @@ function App() {
     }
   }, [projectDraft]);
 
+  const deleteActiveProject = useCallback(async () => {
+    if (!activeProjectId) return;
+    setError('');
+    try {
+      const response = await aaaApi.deleteProject(activeProjectId);
+      setProjects(response.projects);
+      setActiveSession(null);
+      setSelectedFile(null);
+      setSelectedImagePath('');
+      setFileTree([]);
+      setSessions([]);
+      setActiveProjectId(response.activeProjectId);
+      setShowDeleteProject(false);
+      setProjectMenuOpen(false);
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : 'Could not delete the project.');
+    }
+  }, [activeProjectId]);
+
   const openCustomizations = useCallback((section: CustomizationSection = 'overview') => {
     setCustomizationSection(section);
     setCustomizationSearch('');
@@ -715,7 +745,7 @@ function App() {
     setCustomizationEditorOpen(true);
     if (!item) {
       const kind = customizationSection as EditableCustomizationKind;
-      if (!['agent', 'skill', 'mcp-server'].includes(kind)) {
+      if (!['agent', 'skill', 'mcp-server', 'instruction'].includes(kind)) {
         setCustomizationEditorOpen(false);
         return;
       }
@@ -725,8 +755,10 @@ function App() {
         description: '',
         enabled: true,
         ...(kind === 'mcp-server'
-          ? { transport: 'http', url: '' }
-          : { instructions: '', argumentHint: '', ...(kind === 'agent' ? { tools: '' } : {}) })
+          ? { transport: 'http', url: '', auth: { type: 'none' } }
+          : kind === 'instruction'
+            ? { instructions: '', applyTo: '' }
+            : { instructions: '', argumentHint: '', ...(kind === 'agent' ? { tools: '' } : {}) })
       });
       return;
     }
@@ -756,7 +788,9 @@ function App() {
         transport: customizationDraft.transport,
         url: customizationDraft.url,
         command: customizationDraft.command,
-        args: customizationDraft.args
+        args: customizationDraft.args,
+        auth: customizationDraft.auth,
+        applyTo: customizationDraft.applyTo
       };
       if (customizationDraft.id) {
         await aaaApi.updateCustomization(activeProjectId, customizationDraft.id, request);
@@ -1026,7 +1060,8 @@ function App() {
     let uploaded = 0;
     try {
       for (const file of files) {
-        const relativePath = destination ? `${destination}/${file.name}` : file.name;
+        const resolvedDestination = resolveUploadDestination(file.name, destination);
+        const relativePath = resolvedDestination ? `${resolvedDestination}/${file.name}` : file.name;
         try {
           const bytes = new Uint8Array(await file.arrayBuffer());
           let binary = '';
@@ -1070,8 +1105,18 @@ function App() {
 
   const deleteSelectedFile = useCallback(() => {
     if (!activeProjectId || !selectedArtifactPath) return;
-    setFileDialog({ kind: 'delete', value: selectedArtifactPath });
+    setFileDialog({ kind: 'delete', value: selectedArtifactPath, target: 'file' });
   }, [activeProjectId, selectedArtifactPath]);
+
+  const deleteTreeNode = useCallback((node: FileTreeNode) => {
+    if (!activeProjectId) return;
+    setFileDialog({
+      kind: 'delete',
+      value: node.path,
+      target: node.type,
+      ...(node.type === 'directory' ? { fileCount: flattenFiles(node.children ?? []).length } : {})
+    });
+  }, [activeProjectId]);
 
   const submitFileDialog = useCallback(async () => {
     if (!activeProjectId || !fileDialog) return;
@@ -1092,12 +1137,14 @@ function App() {
           setSelectedFile(await aaaApi.readTextFile(activeProjectId, path));
           setSelectedImagePath('');
         }
-      } else if (fileDialog.kind === 'delete' && selectedArtifactPath) {
-        await aaaApi.deletePath(activeProjectId, selectedArtifactPath);
-        setSelectedFile(null);
-        setSelectedImagePath('');
-        setEditorContent('');
-        setArtifactTab('files');
+      } else if (fileDialog.kind === 'delete') {
+        await aaaApi.deletePath(activeProjectId, path);
+        if (selectedArtifactPath && (selectedArtifactPath === path || selectedArtifactPath.startsWith(`${path}/`))) {
+          setSelectedFile(null);
+          setSelectedImagePath('');
+          setEditorContent('');
+          setArtifactTab('files');
+        }
       }
       await refreshFiles();
       setFileDialog(null);
@@ -1321,6 +1368,11 @@ function App() {
               <button className="project-menu-create" onClick={() => setShowCreateProject(true)}>
                 <Plus size={15} /> Create project
               </button>
+              {activeProject?.managed && projects.length > 1 && (
+                <button className="project-menu-delete" onClick={() => setShowDeleteProject(true)}>
+                  <Trash2 size={15} /> Delete current project
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -1335,7 +1387,27 @@ function App() {
             {theme === 'light' ? <Moon size={17} /> : <Sun size={17} />}
           </button>
           <button className="icon-button" aria-label="Help"><CircleHelp size={18} /></button>
-          <button className="avatar" aria-label="User profile">JD</button>
+          <div className="user-menu-wrap">
+            <button
+              className="avatar"
+              aria-label="User profile"
+              aria-haspopup={user ? 'menu' : undefined}
+              aria-expanded={user ? userMenuOpen : undefined}
+              title={user ? `${user.displayName}${user.username ? ` (${user.username})` : ''}` : 'Local mode: app sign-in is off'}
+              onClick={() => user && setUserMenuOpen((open) => !open)}
+            >
+              {user ? initials(user.displayName) : 'JD'}
+            </button>
+            {user && userMenuOpen && (
+              <div className="user-menu" role="menu">
+                <div>
+                  <strong>{user.displayName}</strong>
+                  {user.username && <small>{user.username}</small>}
+                </div>
+                <button role="menuitem" onClick={() => void signOut()}>Sign out</button>
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
@@ -1733,7 +1805,9 @@ function App() {
               <div className="tree-title">
                 <span>
                   PACKAGE FILES
-                  <small>Upload to {uploadTargetPath ? `/${uploadTargetPath}` : 'project root'}</small>
+                  <small>
+                    Upload to {uploadTargetPath ? `/${uploadTargetPath}` : 'project root (images → /evidence/screenshots)'}
+                  </small>
                 </span>
                 <div>
                   <input
@@ -1750,8 +1824,8 @@ function App() {
                     className="icon-button small"
                     disabled={isUploadingFiles}
                     onClick={() => uploadInputRef.current?.click()}
-                    aria-label={`Upload files to ${uploadTargetPath || 'project root'}`}
-                    title={`Upload files to ${uploadTargetPath ? `/${uploadTargetPath}` : 'project root'}`}
+                    aria-label={`Upload files to ${uploadTargetPath || 'project root; images go to evidence screenshots'}`}
+                    title={`Upload files to ${uploadTargetPath ? `/${uploadTargetPath}` : 'project root; images go to /evidence/screenshots'}`}
                   >
                     <Upload size={14} />
                   </button>
@@ -1770,7 +1844,7 @@ function App() {
               </div>
               <div className={`file-drop-hint ${isUploadingFiles ? 'uploading' : ''}`}>
                 <Upload size={14} />
-                {isUploadingFiles ? 'Uploading files…' : 'Drop files here for the project root, or onto a folder'}
+                {isUploadingFiles ? 'Uploading files…' : 'Drop files here (images go to evidence/screenshots), or onto a folder'}
               </div>
               {visibleFiles.map(({ node, depth }) => {
                 const isExpanded = node.type === 'directory' && expandedPaths.has(node.path);
@@ -1780,6 +1854,7 @@ function App() {
                   : isPreviewImage(node.path) ? ImageIcon : isJson ? FileJson : FileText;
                 const isSelected = selectedArtifactPath === node.path;
                 return (
+                  <div className="file-row-wrap" key={node.path}>
                   <button
                     className={[
                       'file-row',
@@ -1787,7 +1862,6 @@ function App() {
                       node.type === 'directory' && uploadTargetPath === node.path ? 'upload-target' : '',
                       node.type === 'directory' && dragTargetPath === node.path ? 'drop-target' : ''
                     ].filter(Boolean).join(' ')}
-                    key={node.path}
                     style={{ paddingLeft: `${12 + depth * 16}px` }}
                     onClick={() => {
                       if (node.type === 'directory') setUploadTargetPath(node.path);
@@ -1822,6 +1896,16 @@ function App() {
                     <span>{node.name}</span>
                     {node.name === 'validation-report.md' && <Check size={13} className="file-check" />}
                   </button>
+                  <button
+                    type="button"
+                    className="file-row-delete"
+                    onClick={() => deleteTreeNode(node)}
+                    aria-label={`Delete ${node.type === 'directory' ? 'folder' : 'file'} ${node.path}`}
+                    title={`Delete ${node.type === 'directory' ? 'folder' : 'file'}`}
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                  </div>
                 );
               })}
               {!isLoading && visibleFiles.length === 0 && <div className="empty-sidebar">No project files found.</div>}
@@ -2036,6 +2120,27 @@ function App() {
         </div>
       )}
 
+      {showDeleteProject && activeProject && (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            className="file-dialog project-create-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-project-title"
+          >
+            <div>
+              <strong id="delete-project-title">Delete {activeProject.name}?</strong>
+              <button type="button" className="icon-button small" onClick={() => setShowDeleteProject(false)} aria-label="Close delete project dialog"><X size={15} /></button>
+            </div>
+            <p>This permanently deletes the project workspace, its local chat sessions, and browser profile. This action cannot be undone.</p>
+            <div className="file-dialog-actions">
+              <button type="button" className="secondary-button" onClick={() => setShowDeleteProject(false)}>Cancel</button>
+              <button type="button" className="dialog-danger" onClick={() => void deleteActiveProject()}>Delete project</button>
+            </div>
+          </section>
+        </div>
+      )}
+
       {customizationsOpen && (
         <div className="customizations-backdrop" role="presentation">
           <section className="customizations-window" role="dialog" aria-modal="true" aria-labelledby="customizations-title">
@@ -2058,16 +2163,16 @@ function App() {
                   ['tool', Wrench, 'Tools']
                 ] as const).map(([id, Icon, label]) => (
                   <button
-                    className={`${customizationSection === id ? 'active' : ''} ${id === 'instruction' || id === 'hook' ? 'coming-soon' : ''}`}
+                    className={`${customizationSection === id ? 'active' : ''} ${id === 'hook' ? 'coming-soon' : ''}`}
                     key={id}
                     onClick={() => setCustomizationSection(id)}
-                    disabled={id === 'instruction' || id === 'hook'}
-                    title={id === 'instruction' || id === 'hook' ? `${label} are coming soon` : undefined}
+                    disabled={id === 'hook'}
+                    title={id === 'hook' ? `${label} are coming soon` : undefined}
                   >
                     <Icon size={16} />
                     <span>{label}</span>
                     {id !== 'overview' && id !== 'model' && (
-                      <small>{id === 'instruction' || id === 'hook' ? 'Soon' : customizationCount(id)}</small>
+                      <small>{id === 'hook' ? 'Soon' : customizationCount(id)}</small>
                     )}
                   </button>
                 ))}
@@ -2108,10 +2213,10 @@ function App() {
                         ['skill', Sparkles, 'Skills', 'Reusable procedures for package initialization, analysis, and validation.'],
                         ['mcp-server', Server, 'MCP Servers', 'Connect approved local and remote tools and services.'],
                         ['tool', Wrench, 'Tools', 'Review the file and workspace capabilities available to agents.'],
-                        ['instruction', BookOpen, 'Instructions', 'Reusable instruction sets are coming soon.'],
+                        ['instruction', BookOpen, 'Instructions', 'Standing project instructions and reusable prompt files.'],
                         ['hook', Zap, 'Hooks', 'Lifecycle automation hooks are coming soon.']
                       ] as const).map(([kind, Icon, label, description]) => {
-                        const comingSoon = kind === 'instruction' || kind === 'hook';
+                        const comingSoon = kind === 'hook';
                         return (
                         <button
                           key={kind}
@@ -2241,13 +2346,17 @@ function App() {
                       ? <Sparkles size={18} />
                       : customizationDraft?.kind === 'mcp-server'
                         ? <Server size={18} />
-                        : <Wrench size={18} />}
+                        : customizationDraft?.kind === 'instruction'
+                          ? <BookOpen size={18} />
+                          : <Wrench size={18} />}
                 </span>
                 <div>
                   <strong id="capability-editor-title">
                     {customizationDraft?.id ? 'Edit' : 'Add'} {customizationDraft?.kind === 'mcp-server'
                       ? 'MCP server'
-                      : customizationDraft?.kind ?? 'capability'}
+                      : customizationDraft?.sourcePath?.toLowerCase().endsWith('.prompt.md')
+                        ? 'prompt file'
+                        : customizationDraft?.kind ?? 'capability'}
                   </strong>
                   <small>{customizationDraft?.sourcePath ?? 'Project capability'}</small>
                 </div>
@@ -2274,7 +2383,7 @@ function App() {
                       <input
                         autoFocus
                         required
-                        readOnly={customizationDraft.readOnly}
+                        readOnly={customizationDraft.readOnly || customizationDraft.sourcePath === '.github/copilot-instructions.md'}
                         value={customizationDraft.name}
                         onChange={(event) => setCustomizationDraft((current) =>
                           current ? { ...current, name: event.target.value } : current)}
@@ -2297,7 +2406,7 @@ function App() {
                     Description
                     <textarea
                       required
-                      readOnly={customizationDraft.readOnly}
+                      readOnly={customizationDraft.readOnly || customizationDraft.sourcePath === '.github/copilot-instructions.md'}
                       rows={3}
                       value={customizationDraft.description}
                       onChange={(event) => setCustomizationDraft((current) =>
@@ -2306,27 +2415,41 @@ function App() {
                     <small>Shown in capability pickers so users know when to use it.</small>
                   </label>
 
-                  {(customizationDraft.kind === 'agent' || customizationDraft.kind === 'skill') && (
+                  {(customizationDraft.kind === 'agent' || customizationDraft.kind === 'skill' || customizationDraft.kind === 'instruction') && (
                     <>
-                      <label>
-                        Suggested prompt
-                        <input
-                          value={customizationDraft.argumentHint ?? ''}
-                          placeholder="Describe what a user should ask this capability to do"
-                          onChange={(event) => setCustomizationDraft((current) =>
-                            current ? { ...current, argumentHint: event.target.value } : current)}
-                        />
-                      </label>
+                      {customizationDraft.argumentHint !== undefined && (
+                        <label>
+                          Suggested prompt
+                          <input
+                            value={customizationDraft.argumentHint ?? ''}
+                            placeholder="Describe what a user should ask this capability to do"
+                            onChange={(event) => setCustomizationDraft((current) =>
+                              current ? { ...current, argumentHint: event.target.value } : current)}
+                          />
+                        </label>
+                      )}
+                      {customizationDraft.applyTo !== undefined && (
+                        <label>
+                          Applies to
+                          <input
+                            value={customizationDraft.applyTo}
+                            placeholder="Leave empty for every request, or a glob such as security-package/**/*.md"
+                            onChange={(event) => setCustomizationDraft((current) =>
+                              current ? { ...current, applyTo: event.target.value } : current)}
+                          />
+                          <small>Stored as <code>applyTo</code> in the instruction file, the same format VS Code uses.</small>
+                        </label>
+                      )}
                       {customizationDraft.kind === 'agent' && (
                         <label>
-                          Allowed tools
+                          Declared tools
                           <input
                             value={customizationDraft.tools ?? ''}
                             placeholder="read, search, edit, mcp-publisher/*"
                             onChange={(event) => setCustomizationDraft((current) =>
                               current ? { ...current, tools: event.target.value } : current)}
                           />
-                          <small>Comma-separated tool names or patterns available to this agent.</small>
+                          <small>Kept in the agent file for VS Code compatibility. AAA gives every agent all enabled tools; use the Tools and MCP Servers toggles to control availability.</small>
                         </label>
                       )}
                       <label>
@@ -2367,17 +2490,23 @@ function App() {
                       </fieldset>
                       {customizationDraft.transport === 'http'
                         ? (
-                          <label>
-                            Server URL
-                            <input
-                              required
-                              type="url"
-                              placeholder="http://127.0.0.1:3000/mcp"
-                              value={customizationDraft.url ?? ''}
-                              onChange={(event) => setCustomizationDraft((current) =>
-                                current ? { ...current, url: event.target.value } : current)}
+                          <>
+                            <label>
+                              Server URL
+                              <input
+                                required
+                                type="url"
+                                placeholder="http://127.0.0.1:3000/mcp"
+                                value={customizationDraft.url ?? ''}
+                                onChange={(event) => setCustomizationDraft((current) =>
+                                  current ? { ...current, url: event.target.value } : current)}
+                              />
+                            </label>
+                            <McpAuthFields
+                              auth={customizationDraft.auth ?? { type: 'none' }}
+                              onChange={(auth) => setCustomizationDraft((current) => current ? { ...current, auth } : current)}
                             />
-                          </label>
+                          </>
                         )
                         : (
                           <>
@@ -2461,12 +2590,19 @@ function App() {
                   ? 'Create text file'
                   : fileDialog.kind === 'rename'
                     ? 'Rename file'
-                    : 'Delete file'}
+                    : fileDialog.target === 'directory' ? 'Delete folder' : 'Delete file'}
               </strong>
               <button type="button" className="icon-button small" onClick={() => setFileDialog(null)} aria-label="Close file dialog">×</button>
             </div>
             {fileDialog.kind === 'delete'
-              ? <p>Delete <code>{fileDialog.value}</code>? This cannot be undone.</p>
+              ? (
+                <p>
+                  Delete <code>{fileDialog.value}</code>
+                  {fileDialog.target === 'directory'
+                    ? ` and everything in it (${fileDialog.fileCount ?? 0} file${fileDialog.fileCount === 1 ? '' : 's'})`
+                    : ''}? This cannot be undone.
+                </p>
+              )
               : (
                 <label>
                   Project-relative path

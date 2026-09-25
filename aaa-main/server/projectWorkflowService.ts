@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { CapabilityTestResult, CapabilityTestToolParameter, ProjectWorkflowSummary } from '../src/types/api.js';
+import type { CapabilityTestResult, CapabilityTestToolParameter, McpAuthSettings, ProjectWorkflowSummary } from '../src/types/api.js';
+import { resolveMcpAuth } from './mcpAuth.js';
 import { parseMarkdown, ProjectCustomizationService, toolNames } from './projectCustomizationService.js';
 import { markMcpServerHealthy, McpHttpClient, type McpServerConfig, type McpTool } from './services/mcpHttpClient.js';
 import { builtInToolItemId, builtInToolNameFromItemId, builtInToolNames, type BuiltInToolName } from './builtInTools.js';
@@ -40,6 +41,15 @@ export interface WorkflowPrompt {
   sourcePath: string;
 }
 
+export interface WorkflowInstruction {
+  id: string;
+  name: string;
+  /** Glob of files the instructions apply to; undefined means every request. */
+  applyTo?: string;
+  body: string;
+  sourcePath: string;
+}
+
 export interface WorkflowMcpServer extends McpServerConfig {
   available: boolean;
   reason?: string;
@@ -49,6 +59,7 @@ export interface ProjectWorkflow {
   agents: WorkflowAgent[];
   skills: WorkflowSkill[];
   prompts: WorkflowPrompt[];
+  instructions: WorkflowInstruction[];
   mcpServers: WorkflowMcpServer[];
   enabledTools: Set<BuiltInToolName>;
 }
@@ -92,6 +103,7 @@ export class ProjectWorkflowService {
     const agents: WorkflowAgent[] = [];
     const skills: WorkflowSkill[] = [];
     const prompts: WorkflowPrompt[] = [];
+    const instructions: WorkflowInstruction[] = [];
     for (const item of items) {
       if (!item.sourcePath) continue;
       if (item.kind === 'agent' && item.enabled) {
@@ -115,7 +127,7 @@ export class ProjectWorkflowService {
           sourcePath: item.sourcePath,
           directory: path.posix.dirname(item.sourcePath)
         });
-      } else if (item.kind === 'instruction' && item.sourcePath.toLowerCase().endsWith('.prompt.md')) {
+      } else if (item.kind === 'instruction' && item.enabled && item.sourcePath.toLowerCase().endsWith('.prompt.md')) {
         const parsed = parseMarkdown(await this.read(item.sourcePath));
         prompts.push({
           id: path.posix.basename(item.sourcePath).replace(/\.prompt\.md$/i, ''),
@@ -126,6 +138,18 @@ export class ProjectWorkflowService {
           body: parsed.body,
           sourcePath: item.sourcePath
         });
+      } else if (item.kind === 'instruction' && item.enabled) {
+        const parsed = parseMarkdown(await this.read(item.sourcePath));
+        const applyTo = parsed.metadata.applyTo?.trim();
+        if (parsed.body) {
+          instructions.push({
+            id: item.id,
+            name: item.name,
+            ...(applyTo && applyTo !== '**' ? { applyTo } : {}),
+            body: parsed.body,
+            sourcePath: item.sourcePath
+          });
+        }
       }
     }
 
@@ -134,7 +158,7 @@ export class ProjectWorkflowService {
     // Tools are on unless the user explicitly turned them off.
     const enabledTools = new Set(builtInToolNames.filter((name) =>
       items.find((item) => item.id === builtInToolItemId(name))?.enabled ?? true));
-    return { agents, skills, prompts, mcpServers, enabledTools };
+    return { agents, skills, prompts, instructions, mcpServers, enabledTools };
   }
 
   async summary(): Promise<ProjectWorkflowSummary> {
@@ -200,12 +224,22 @@ export class ProjectWorkflowService {
     try {
       tools = await new McpHttpClient(server, fetchImpl, 10_000, 10_000).listTools();
       markMcpServerHealthy(server);
-    } catch {
+    } catch (error) {
+      const secrets = [
+        ...Object.values(server.headers ?? {}),
+        server.auth?.token,
+        server.auth?.value,
+        server.auth?.clientSecret
+      ].filter((value): value is string => typeof value === 'string' && value.length >= 4);
+      let detail = error instanceof Error ? error.message : '';
+      for (const secret of secrets) detail = detail.split(secret).join('[redacted]');
+      detail = detail.replace(/Bearer\s+\S+/gi, '[redacted]').slice(0, 400);
       return {
         itemId,
         ok: false,
         testedAt,
-        summary: `MCP server ${serverName} connection test failed. Check its endpoint, authentication, and server logs.`
+        summary: `MCP server ${serverName} connection test failed${detail ? `: ${detail}` : '.'} `
+          + 'Check its endpoint, authentication, and server logs.'
       };
     }
     return {
@@ -290,8 +324,9 @@ export class ProjectWorkflowService {
     agent?: WorkflowAgent;
     skills: WorkflowSkill[];
     tools: WorkflowToolSelection;
+    instructions?: WorkflowInstruction[];
   }): string {
-    const { projectName, agent, skills, tools } = options;
+    const { projectName, agent, skills, tools, instructions = [] } = options;
     const sections = [
       [
         `You are running inside AAA, the A&A authorization workbench, for project "${projectName}".`,
@@ -304,6 +339,20 @@ export class ProjectWorkflowService {
         'There is no command or script execution in this workbench; use file tools instead.'
       ].join('\n')
     ];
+    if (instructions.length > 0) {
+      const limit = 12_000;
+      sections.push([
+        '# Project instructions',
+        'The project owner wrote these standing instructions. Follow them; scoped instructions apply when you read, create, or edit matching files.',
+        ...instructions.map((instruction) => [
+          '',
+          `## ${instruction.name}${instruction.applyTo ? ` (applies to files matching ${instruction.applyTo})` : ''}`,
+          instruction.body.length > limit
+            ? `${instruction.body.slice(0, limit)}\n[… truncated; read ${instruction.sourcePath} for the rest]`
+            : instruction.body
+        ].join('\n'))
+      ].join('\n'));
+    }
     if (agent) {
       sections.push(`# Active agent: ${agent.name}\n\n${agent.instructions}`);
     }
@@ -320,7 +369,8 @@ export class ProjectWorkflowService {
       sections.push([
         '# MCP servers',
         `Connected MCP servers: ${tools.mcpServers.map((server) => server.name).join(', ')}. Their tools are prefixed with mcp_<server>_.`,
-        'To send project files to an MCP tool, do not read and re-type them: pass the string "aaa-file:<project-relative-path>" as the content value and AAA substitutes the file text before calling the server. Read a file only when you need to inspect it.'
+        'To send project files to an MCP tool, do not read and re-type them: pass the string "aaa-file:<project-relative-path>" as the content value and AAA substitutes the file text before calling the server. Read a file only when you need to inspect it.',
+        'Files embedded in MCP results are saved under downloads/<server>/ and their paths are reported to you. To fetch a resource link, or a file or JSON URL on an MCP server\'s host, call download_file; JSON results are pretty-printed and previewed.'
       ].join('\n'));
     }
     return sections.join('\n\n');
@@ -331,7 +381,9 @@ export class ProjectWorkflowService {
   }
 
   private async mcpServers(): Promise<WorkflowMcpServer[]> {
-    let config: { servers?: Record<string, { type?: string; url?: string; headers?: Record<string, string> }> };
+    let config: {
+      servers?: Record<string, { type?: string; url?: string; headers?: Record<string, string>; auth?: McpAuthSettings }>;
+    };
     try {
       config = JSON.parse(await this.read('.vscode/mcp.json')) as typeof config;
     } catch (error) {
@@ -351,7 +403,16 @@ export class ProjectWorkflowService {
         }
         headers[header] = resolved;
       }
-      return { name, url: server.url, headers, available: true };
+      const { auth, missing } = resolveMcpAuth(server.auth, this.environment);
+      if (missing.length > 0) {
+        return {
+          name,
+          url: server.url,
+          available: false,
+          reason: `Authentication needs environment variable${missing.length === 1 ? '' : 's'} ${missing.join(', ')}.`
+        };
+      }
+      return { name, url: server.url, headers, ...(auth ? { auth } : {}), available: true };
     });
   }
 }

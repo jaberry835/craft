@@ -80,11 +80,13 @@ AAA runs a project's GitHub Copilot-style customizations the same way VS Code ag
 | `.github/agents/*.agent.md` | Selectable in the composer's agent picker. The body becomes the agent's instructions. The `tools` frontmatter is kept for VS Code compatibility but never removes tools: every enabled tool is available to every agent. |
 | `.github/skills/<id>/SKILL.md` | Listed to the model by id and description. The model calls `load_skill` to read the full procedure and its bundled file list when a request matches. |
 | `.github/prompts/*.prompt.md` | Runs as a slash command, for example `/build-security-package AU-2`. A prompt's `agent` frontmatter selects the agent. |
+| `.github/copilot-instructions.md` | Standing instructions added to the system prompt of every run. |
+| `.github/instructions/*.instructions.md` | Additional instructions; `applyTo` (a glob such as `security-package/**/*.md`) scopes them to matching files, and no `applyTo` means every request. |
 | `.vscode/mcp.json` | HTTP (Streamable HTTP) MCP servers are connected per run; their tools appear as `mcp_<server>_<tool>`. |
 
 Type `/` in the composer (or use **Skills**) to pick a prompt or skill. `/skill-id args` asks the agent to load and follow that skill.
 
-Built-in tools are `list_files`, `read_file`, `search_files`, `write_file`, `edit_file`, `copy_path`, `browser_capture`, and `load_skill`, all registered in `server/builtInTools.ts`; a tool added there is listed in **Project customizations**, enabled by default, and exposed to every agent. Tool availability has one control: the enable toggles in **Project customizations**. If a tool, skill, or MCP server is on, every agent gets it, including ones created after the agent; only an explicit disable removes it from the next run. Agent `tools` frontmatter does not narrow anything. An enabled MCP server whose configuration cannot be used (for example `stdio`) is reported as an agent step instead of being dropped silently. `execute` is ignored: AAA never runs commands or scripts, so skills should copy bundled template files with `copy_path` rather than calling a script. `write_file` creates missing parent folders, and `copy_path` never overwrites existing files.
+Built-in tools are `list_files`, `read_file`, `search_files`, `write_file`, `edit_file`, `copy_path`, `delete_path`, `browser_capture`, `download_file`, and `load_skill`, all registered in `server/builtInTools.ts`; a tool added there is listed in **Project customizations**, enabled by default, and exposed to every agent. Tool availability has one control: the enable toggles in **Project customizations**. If a tool, skill, or MCP server is on, every agent gets it, including ones created after the agent; only an explicit disable removes it from the next run. Agent `tools` frontmatter does not narrow anything. An enabled MCP server whose configuration cannot be used (for example `stdio`) is reported as an agent step instead of being dropped silently. `execute` is ignored: AAA never runs commands or scripts, so skills should copy bundled template files with `copy_path` rather than calling a script. `write_file` creates missing parent folders, and `copy_path` never overwrites existing files. `delete_path` deletes a project file or folder (a non-empty folder requires `recursive: true`) and refuses the project root and the `.aaa`, `.git`, `.github`, and `.vscode` folders.
 
 The composer Agent picker is the primary agent-selection surface and links to advanced project settings. **Project customizations** shows every built-in tool, provides safe availability tests, and can test HTTP MCP connections while listing the tools they expose without returning endpoint credentials. The composer’s **Add evidence** menu attaches project-file references as explicitly untrusted context. When the selected agent inspects a reference through its project tools, that file content may be sent to the configured model provider.
 
@@ -92,9 +94,84 @@ MCP tool calls may pass `aaa-file:<project-relative-path>` as any string argumen
 
 A down MCP server never blocks the chat. Servers are contacted in parallel with a short connect timeout (`AAA_MCP_CONNECT_TIMEOUT_MS`, default 8 s); one that fails is shown as an "MCP server unavailable" step, logged to the server console, and the run continues with the remaining tools. A failed server is skipped without waiting for `AAA_MCP_RETRY_AFTER_MS` (default 60 s), and a successful **Test connection** in Project customizations clears that immediately. Tool calls use a longer timeout (`AAA_MCP_TOOL_TIMEOUT_MS`, default 120 s); a failed call is returned to the model as an error so it can continue.
 
+### MCP files, JSON, and downloads
+
+Non-text MCP tool results are handled for the agent: embedded files (`resource` blobs, images, audio) are saved as new project files under `downloads/<server>/` and their paths are reported back to the model; `resource_link` results are listed with the exact `download_file` call to fetch them. The `download_file` built-in tool saves a file or JSON into the project from either an MCP resource URI (read through the server with `resources/read`) or an `http(s)` URL on an enabled MCP server's origin, in which case that server's headers and authentication are applied. Other hosts are refused unless listed in `AAA_DOWNLOAD_ALLOWED_HOSTS` (comma-separated; `*.example.gov` wildcards allowed); those downloads never receive MCP credentials. JSON is pretty-printed, text results include a preview for the model, files are limited to 10 MB and to the project's supported file types, and existing files are never overwritten (a numbered name such as `report-2.json` is used).
+
+### MCP authentication
+
+Each HTTP server in `.vscode/mcp.json` can carry an `auth` object, edited under **Project customizations → MCP Servers → Authentication**. Store secrets as `${env:NAME}` references so they stay in `.env`; a literal secret is masked when shown in the editor and kept when saved back unchanged. A referenced variable that is missing marks the server unavailable with the variable name instead of sending an empty credential. Other keys in the server entry, such as `headers`, are preserved when you edit it.
+
+| `type` | Fields | Behavior |
+| --- | --- | --- |
+| `none` | — | No credentials (static `headers` still apply). |
+| `bearer` | `token` | Sends `Authorization: Bearer <token>`. |
+| `header` | `headerName`, `value` | Sends a custom header such as `x-api-key`. |
+| `oauth` | `tokenUrl`, `clientId`, `clientSecret`, optional `scope`, `audience` | Client-credentials grant; the token is cached until shortly before it expires. |
+| `entra` | `scope`, optional `managedIdentityClientId`, `tenantId`, `authorityHost` | Uses `DefaultAzureCredential` (managed identity, environment credentials, or Azure CLI sign-in); set `authorityHost` for sovereign clouds such as `https://login.microsoftonline.us`. |
+
+For `oauth` and `entra`, a `401` from the server discards the cached token and retries once with a new one. **Test connection** reports the failure reason (with configured secrets redacted) and lists each tool's parameters.
+
+```json
+{
+  "servers": {
+    "evidence": {
+      "type": "http",
+      "url": "https://mcp.example/mcp",
+      "auth": { "type": "entra", "scope": "api://evidence-mcp/.default" }
+    }
+  }
+}
+```
+
 Each run is bounded by `AAA_AGENT_MAX_ROUNDS` (default 30 model rounds), `AAA_AGENT_MAX_TOOL_CALLS` (default 120), and `AAA_AGENT_TIMEOUT_MS` (default 15 minutes). **Stop** is checked before every tool call, so queued file edits do not run after you stop a response. Some models double-escape tool arguments so a whole file arrives as one line full of literal `\n`; for Markdown, text, CSV, and YAML files AAA converts those escapes back into real line breaks before writing.
 
 An approval gate for higher-impact actions remains on the punch list.
+
+## Optional Microsoft Entra sign-in
+
+App sign-in is off by default (`AAA_AUTH_MODE=none`), and AAA then listens only on `127.0.0.1`. Set `AAA_AUTH_MODE=entra` to require a Microsoft Entra account; turn it back off by removing the variable or setting it to `none`.
+
+| Variable | Required | Meaning |
+| --- | --- | --- |
+| `AAA_AUTH_MODE` | — | `none` (default) or `entra`. |
+| `AAA_ENTRA_TENANT_ID` | with `entra` | Directory (tenant) ID. |
+| `AAA_ENTRA_CLIENT_ID` | with `entra` | Application (client) ID of the AAA app registration. |
+| `AAA_ENTRA_AUTHORITY_HOST` | no | Defaults to `https://login.microsoftonline.com`; use `https://login.microsoftonline.us` for Azure Government. |
+| `AAA_ENTRA_API_AUDIENCE` | no | Accepted token audience; defaults to `api://<client-id>`. |
+| `AAA_ENTRA_SCOPES` | no | Delegated scopes the browser requests; defaults to `api://<client-id>/access_as_user`. |
+| `AAA_ENTRA_ALLOWED_ROLES` | no | Comma-separated app roles; when set, users need one of them (otherwise any account in the tenant). |
+| `AAA_ENTRA_ISSUERS` | no | Override accepted token issuers (defaults accept v2 `<authority>/<tenant>/v2.0` and v1 `https://sts.windows.net/<tenant>/`). |
+| `AAA_ENTRA_REDIRECT_URI` | no | Redirect URI registered for the SPA; defaults to the page origin. |
+| `AAA_HOST` | no | Listen address (default `127.0.0.1`). A non-loopback address is refused unless `AAA_AUTH_MODE=entra`. |
+
+App registration: add a **Single-page application** platform with the AAA URL as a redirect URI (for example `http://localhost:5173` and the deployed origin), **Expose an API** with the Application ID URI `api://<client-id>` and a delegated scope `access_as_user`, and optionally define app roles (for example `AAA.User`) and list them in `AAA_ENTRA_ALLOWED_ROLES`.
+
+How it works: the browser signs in with MSAL (loaded only when sign-in is on) and sends a bearer token with every API call; the server validates the signature against the tenant's published keys, the issuer, audience, expiry, and roles. Images, the published Web preview, and "open in new tab" cannot send headers, so the browser exchanges its token for an HttpOnly, `SameSite=Strict` session cookie scoped to `/api` that is accepted **only for GET/HEAD** requests; every state-changing request still requires the bearer token. Each run records who started it (`requestedBy`), and failed runs are logged with the user. Per-project authorization is not implemented yet: any allowed user can open every configured project.
+
+## Logging and troubleshooting
+
+The server writes one line per event to the console, for example:
+
+```text
+2026-09-25T15:15:22.508Z ERROR [agent-run] Run failed. run=… session=… agent="Security Package Builder" command=/initialize-security-package error="Azure OpenAI request failed with status 400 …"
+```
+
+`AAA_LOG_LEVEL` selects `error`, `warn` (default), `info`, or `debug` (adds stack traces). `AAA_LOG_FORMAT=json` writes one JSON object per line for a log collector. Values of environment variables whose names contain `KEY`, `SECRET`, `TOKEN`, `PASSWORD`, or `CONNECTION_STRING`, and bearer tokens, are always redacted.
+
+| Area | Logged |
+| --- | --- |
+| `startup` | Configuration errors (AAA exits with a clear message), model and storage readiness, port conflicts. |
+| `agent-run` | Every failed run with run, session, project, agent, slash command, step and request counts, and the error; stopped runs at `info`. |
+| `model` | Failed model requests with status, Azure error code/message, and each attempt's request shape; compatibility retries and throttling back-off; diagnostics results. |
+| `mcp` | Unreachable or timed-out servers, skipped servers, and failed tool calls. |
+| `tool` | Built-in tool calls that failed (the error is also returned to the model). |
+| `compaction` | Manual and automatic compaction failures. |
+| `storage` | Cosmos DB failures with endpoint, database, container, auth mode, and status codes. |
+| `api` | Unexpected route failures with method and path; handled 4xx responses at `info`. |
+| `process` | Unhandled promise rejections and uncaught exceptions. |
+
+The browser DevTools console also shows `[aaa] <method> <url> failed: …` for failed API calls, agent-run errors, and streams that end early.
 
 ## Session storage
 
@@ -104,15 +181,15 @@ Local JSON session storage is the default when no Cosmos variables are set. Sett
 
 ## Local document preview
 
-Selecting a Markdown file renders its current draft in Preview. Saved Markdown starts in **Draft** state and must be marked **Reviewed** before the Web tab or published-preview route will render it. AAA stores a SHA-256 hash of the reviewed content in the project's local `.aaa\publication.json`; any subsequent saved edit automatically returns the document to Draft. The generated Web document runs in a sandboxed frame, uses a restrictive content security policy, and does not load external resources.
+Selecting a Markdown file renders its current draft in Preview. Saved Markdown starts in **Draft** state and must be marked **Reviewed** before the Web tab or published-preview route will render it. AAA stores a SHA-256 hash of the reviewed content in the project's local `.aaa\publication.json`; any subsequent saved edit automatically returns the document to Draft. The published route reads the file once and renders exactly the bytes whose hash matched, review updates are serialized and written atomically, and the agent cannot write inside `.aaa\` or `.git\`, so it cannot mark its own drafts reviewed. The generated Web document runs in a sandboxed frame, uses a restrictive content security policy, and does not load external resources.
 
 Supported BMP, GIF, JPEG, PNG, SVG, and WebP files open directly in Preview through a project-boundary-checked image route. SVG preview rejects scripts, event handlers, embedded HTML, stylesheets, external links/resources, entity declarations, and CSS URLs; the response is also sandboxed with a deny-by-default content security policy. JSON files open as formatted, readable Preview content, and malformed JSON produces an explicit parse error instead of a misleading raw preview.
 
-The Source tab is an editor for supported text files. It tracks unsaved changes, supports `Ctrl+S` / `Cmd+S`, uses the file timestamp for optimistic concurrency, and provides create, rename, and delete controls through in-app dialogs. Saves issued by AAA for the same file are serialized and committed by atomic same-directory replacement; a concurrent stale AAA save is rejected, and the timestamp is rechecked immediately before replacement to detect external edits.
+The Source tab is an editor for supported text files. It tracks unsaved changes, supports `Ctrl+S` / `Cmd+S`, uses the file timestamp for optimistic concurrency, and provides create, rename, and delete controls through in-app dialogs. Files and folders can also be deleted from the Files tree with the trash action that appears on hover; deleting a folder confirms how many files it contains. Saves issued by AAA for the same file are serialized and committed by atomic same-directory replacement; a concurrent stale AAA save is rejected, and the timestamp is rechecked immediately before replacement to detect external edits.
 
 Dotfiles and dot-folders such as `.github`, `.vscode`, and `.aaa` are hidden in the Files tree by default. Use the eye button in the Files toolbar to show or hide them; the choice is remembered in the browser.
 
-The Files tab also accepts local uploads. Select a folder to make it the Upload-button destination, drop files on a folder to import them there, or drop files on the Files pane to import them at the project root. Uploads are limited to supported document, image, and text formats up to 10 MB per file. Existing paths are never overwritten, and the backend applies the same project-root, excluded-directory, and symbolic-link protections used by the editor.
+The Files tab also accepts local uploads. Select a folder to make it the Upload-button destination, drop files on a folder to import them there, or drop files on the Files pane to import them at the project root. Root-level image uploads default to `evidence/screenshots/`; an explicitly selected or drop-target folder is always respected. New managed projects include the evidence folder and provenance guidance. Uploads are limited to supported document, image, and text formats up to 10 MB per file, and their content must match the extension: images, PDFs, and legacy Office files are checked by signature, `.docx`/`.xlsx`/`.pptx` and OpenDocument files by their package structure, and text formats (including SVG) must be valid UTF-8, so a renamed executable is rejected. The same check applies to downloads, files saved from MCP results, and browser captures. Existing paths are never overwritten, and the backend applies the same project-root, excluded-directory, and symbolic-link protections used by the editor.
 
 ## Projects and customizations
 
@@ -143,13 +220,24 @@ Open `http://127.0.0.1:8787`. The single local server hosts both the built clien
 
 ## Air-gapped installation
 
-Dependencies are pinned by `package-lock.json`. On a connected staging machine with the same Node.js and npm versions, run `npm ci` and preserve either the resulting `node_modules` directory or npm's populated cache with the source bundle. `playwright-core` is included without a bundled Chromium download; install or stage the approved Microsoft Edge build separately. In the air-gapped environment, use the transferred `node_modules` directly or run:
+AAA requires Node.js 22.12 or later (below 25) and npm 10 or later; `.nvmrc` records the validated version (24.15.0), and `.npmrc` sets `engine-strict=true` so an unsupported Node fails the install with a clear message. Use the same Node.js and npm versions on the staging and target machines.
+
+Dependencies are pinned by `package-lock.json`. On a connected staging machine, run `npm ci` and preserve either the resulting `node_modules` directory or npm's populated cache with the source bundle. `playwright-core` is included without a bundled Chromium download; install or stage the approved Microsoft Edge build separately. In the air-gapped environment, use the transferred `node_modules` directly or run:
 
 ```powershell
 npm ci --offline
 npm run build
 npm start
 ```
+
+Build tooling (`vite`, `@vitejs/plugin-react`, TypeScript, `tsx`, ESLint) is in `devDependencies`. To run a prebuilt copy without build tools, build on the staging machine, transfer `dist\`, `config\`, `templates\`, `package.json`, `package-lock.json`, and `.npmrc`, then install only runtime packages and start:
+
+```powershell
+npm ci --omit=dev --offline
+npm start
+```
+
+`npm run dev` (hot reload) and `npm run build` need the full install.
 
 `npm ci --offline` succeeds only when every package tarball referenced by the lock file is already present in the transferred npm cache. Build the cache or `node_modules` on the same OS and CPU architecture as the target, because native build tools such as `esbuild` install a platform-specific binary. The MCP client is implemented in this repository and adds no packages. Normal browser startup has been audited to request only the local AAA origin; configured model and Cosmos connections are made by the backend and remain optional for local JSON operation.
 

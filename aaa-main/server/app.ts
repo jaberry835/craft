@@ -1,6 +1,7 @@
 import express from 'express';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
+import { rm } from 'node:fs/promises';
 import path from 'node:path';
 import type {
   AppendMessageRequest,
@@ -37,6 +38,8 @@ import { BrowserCaptureService } from './services/browserCaptureService.js';
 import type { ModelConnectionConfig } from './services/modelConnectionConfig.js';
 import type { ChatSessionStoreFactory } from './chatSessionStore.js';
 import { compactSession, summaryPromptSection, uncompactedMessages } from './sessionCompaction.js';
+import { log } from './logger.js';
+import { createEntraTokenVerifier, installAppAuth, loadAppAuthConfig, type AppAuthConfig, type TokenVerifier } from './appAuth.js';
 import { describeShape } from './services/azureOpenAiChatClient.js';
 import { probeModelConnection } from './services/modelProbe.js';
 import { createSessionPersistence } from './sessionStoreFactory.js';
@@ -54,6 +57,8 @@ export interface AaaAppDependencies {
   mcpFetch?: typeof globalThis.fetch;
   /** Fetch implementation for model diagnostics; injectable for tests. */
   modelFetch?: typeof globalThis.fetch;
+  /** Optional Microsoft Entra sign-in; off unless `config.mode` is `entra`. */
+  auth?: { config: AppAuthConfig; verifier?: TokenVerifier };
 }
 
 const writeJsonLine = (response: express.Response, event: ChatStreamEvent): boolean =>
@@ -68,10 +73,17 @@ export function createAaaApp({
   sessionStoreFactory,
   storageStatus,
   mcpFetch = globalThis.fetch,
-  modelFetch
+  modelFetch,
+  auth
 }: AaaAppDependencies): express.Express {
   const app = express();
   app.use(express.json({ limit: '15mb' }));
+  const authConfig = auth?.config ?? loadAppAuthConfig({});
+  installAppAuth(
+    app,
+    authConfig,
+    auth?.verifier ?? (authConfig.mode === 'entra' ? createEntraTokenVerifier(authConfig) : undefined)
+  );
   const localPersistence = sessionStoreFactory && storageStatus
     ? undefined
     : createSessionPersistence(dataRoot, { environment: {} });
@@ -94,6 +106,14 @@ export function createAaaApp({
   });
   app.put('/api/projects/active', async (request, response) => {
     response.json(await registry.select(String((request.body as { projectId?: string } | undefined)?.projectId ?? '')));
+  });
+  app.delete('/api/projects/:projectId', async (request, response) => {
+    const id = projectId(request);
+    await browserCapture.close(id);
+    const projects = await registry.delete(id);
+    await rm(path.join(dataRoot, 'projects', id), { recursive: true, force: true });
+    await rm(path.join(dataRoot, 'browser-profiles', id), { recursive: true, force: true });
+    response.json(projects);
   });
   app.get('/api/storage/status', (_request, response) => response.json(effectiveStorageStatus));
   app.get('/api/model/status', (_request, response) => {
@@ -139,7 +159,11 @@ export function createAaaApp({
       const failures = report.results.flatMap((result) => result.checks
         .filter((check) => !check.ok)
         .map((check) => `${result.api}/${check.scenario}: ${check.detail}`));
-      if (failures.length > 0) console.error(`[model] Diagnostics failures for ${status.endpointHost}: ${failures.join(' | ')}`);
+      if (failures.length > 0) {
+        log.error('model', 'Diagnostics found failing checks.', { endpointHost: status.endpointHost, failures: failures.join(' | ') });
+      } else {
+        log.info('model', 'Diagnostics passed.', { endpointHost: status.endpointHost, recommended: report.recommended?.api });
+      }
       const body: ModelDiagnosticsReport = {
         testedAt: new Date().toISOString(),
         status,
@@ -296,9 +320,7 @@ export function createAaaApp({
       });
     } catch (error) {
       if (error instanceof HttpError) throw error;
-      if (!(error instanceof AgentRunError)) {
-        console.error(`[compaction] Session ${session.id} failed: ${error instanceof Error ? error.message : String(error)}`);
-      }
+      log.error('compaction', 'Manual compaction failed; the conversation was not changed.', { session: session.id, error });
       response.status(502).json({
         error: error instanceof AgentRunError ? error.message : 'Compaction failed because the model request did not complete.',
         code: 'compaction_failed'
@@ -342,14 +364,16 @@ export function createAaaApp({
       modelConnectionId: connection.definition.id,
       reasoning: '',
       toolEvents: [],
-      changedFiles: []
+      changedFiles: [],
+      ...(request.identity ? { requestedBy: { userId: request.identity.userId, displayName: request.identity.displayName } } : {})
     };
     await store.saveRun(session.id, run);
     const systemPrompt = ProjectWorkflowService.systemPrompt({
       projectName: project.name,
       agent,
       skills: workflow.skills,
-      tools: toolSelection
+      tools: toolSelection,
+      instructions: workflow.instructions
     });
     const modelMessages = (state: ChatSession): ModelChatMessage[] => [
       { role: 'system', content: systemPrompt + summaryPromptSection(state) },
@@ -417,8 +441,10 @@ export function createAaaApp({
               const detail = error instanceof AgentRunError || error instanceof HttpError
                 ? error.message
                 : 'the model request did not complete';
-              console.error(`[compaction] Automatic compaction for session ${session.id} failed: ${
-                error instanceof Error ? error.message : String(error)}`);
+              log.error('compaction', 'Automatic compaction failed; continuing with the full conversation.', {
+                session: session.id,
+                error
+              });
               writeJsonLine(response, { type: 'status', message: `Automatic compaction skipped: ${detail}` });
               return undefined;
             }
@@ -488,8 +514,20 @@ export function createAaaApp({
         : error instanceof AgentRunError
           ? error.message
           : 'Model response failed.';
-      if (!aborted && !(error instanceof AgentRunError)) {
-        console.error(`[agent-run] Run ${run.id} failed: ${error instanceof Error ? error.message : String(error)}`);
+      if (aborted) {
+        log.info('agent-run', 'Run stopped.', { run: run.id, session: session.id, project: project.id });
+      } else {
+        log.error('agent-run', 'Run failed.', {
+          run: run.id,
+          session: session.id,
+          project: project.id,
+          user: request.identity?.username ?? request.identity?.userId,
+          agent: agent?.name ?? 'default',
+          command: expanded.command ? `/${expanded.command.id}` : undefined,
+          toolSteps: streamedToolEvents.length,
+          requests: streamedUsage?.requests,
+          error: error instanceof AgentRunError ? error.message : error
+        });
       }
       try {
         await store.saveRun(session.id, {
@@ -507,9 +545,11 @@ export function createAaaApp({
           error: safeError
         });
       } catch (persistenceError) {
-        console.error(`[agent-run] Could not persist ${aborted ? 'aborted' : 'failed'} run ${run.id}: ${
-          persistenceError instanceof Error ? persistenceError.message : String(persistenceError)
-        }`);
+        log.error('agent-run', `Could not persist the ${aborted ? 'aborted' : 'failed'} run.`, {
+          run: run.id,
+          session: session.id,
+          error: persistenceError
+        });
       }
       if (!response.destroyed && !response.writableEnded) {
         writeJsonLine(response, {
@@ -532,19 +572,21 @@ export function createAaaApp({
     app.get(/^(?!\/api(?:\/|$)).*/, (_request, response) => response.type('html').send(clientIndex));
   }
 
-  app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => {
+  app.use((error: unknown, request: express.Request, response: express.Response, _next: express.NextFunction) => {
     void _next;
     if (error instanceof HttpError) {
+      const level = error.statusCode >= 500 ? 'error' : 'info';
+      log[level]('api', `${request.method} ${request.path} returned ${error.statusCode}.`, { code: error.code, error: error.message });
       response.status(error.statusCode).json({ error: error.message, code: error.code });
       return;
     }
     const nodeError = error as NodeJS.ErrnoException;
     if (nodeError?.code === 'ENOENT') {
+      log.info('api', `${request.method} ${request.path} returned 404.`, { error: nodeError.message });
       response.status(404).json({ error: 'The requested resource was not found.', code: 'not_found' });
       return;
     }
-    const message = error instanceof Error ? error.message : 'Unknown server error.';
-    console.error(`[api] ${message}`);
+    log.error('api', `${request.method} ${request.path} failed with an unexpected error.`, { error });
     response.status(500).json({ error: 'Internal server error.', code: 'internal_error' });
   });
   return app;

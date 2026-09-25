@@ -44,6 +44,66 @@ interface PublicationState {
   reviewed: Record<string, { hash: string; reviewedAt: string }>;
 }
 
+const bytes = (...values: number[]) => Buffer.from(values);
+const binarySignatures: Record<string, Array<{ at: number; signature: Buffer }>> = {
+  '.png': [{ at: 0, signature: bytes(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a) }],
+  '.jpg': [{ at: 0, signature: bytes(0xff, 0xd8, 0xff) }],
+  '.jpeg': [{ at: 0, signature: bytes(0xff, 0xd8, 0xff) }],
+  '.gif': [{ at: 0, signature: Buffer.from('GIF87a') }, { at: 0, signature: Buffer.from('GIF89a') }],
+  '.bmp': [{ at: 0, signature: Buffer.from('BM') }],
+  '.tif': [{ at: 0, signature: bytes(0x49, 0x49, 0x2a, 0x00) }, { at: 0, signature: bytes(0x4d, 0x4d, 0x00, 0x2a) }],
+  '.tiff': [{ at: 0, signature: bytes(0x49, 0x49, 0x2a, 0x00) }, { at: 0, signature: bytes(0x4d, 0x4d, 0x00, 0x2a) }],
+  '.pdf': [{ at: 0, signature: Buffer.from('%PDF-') }],
+  '.doc': [{ at: 0, signature: bytes(0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1) }],
+  '.xls': [{ at: 0, signature: bytes(0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1) }],
+  '.ppt': [{ at: 0, signature: bytes(0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1) }]
+};
+const zipSignature = bytes(0x50, 0x4b, 0x03, 0x04);
+const officeOpenXml = new Set(['.docx', '.xlsx', '.pptx']);
+const openDocument = new Set(['.odt', '.ods', '.odp']);
+
+/**
+ * Rejects content whose bytes do not match its extension (for example an executable
+ * renamed to .pdf), so previews and evidence handling only see the declared format.
+ */
+export function assertContentMatchesExtension(relativePath: string, content: Buffer): void {
+  const extension = path.posix.extname(relativePath).toLowerCase();
+  const mismatch = (expected: string) => new UnsupportedFileError(
+    `${path.posix.basename(relativePath)} does not contain valid ${expected} data; its content does not match the ${extension} extension.`,
+    'file_signature_mismatch'
+  );
+  const signatures = binarySignatures[extension];
+  if (signatures) {
+    if (!signatures.some(({ at, signature }) => content.subarray(at, at + signature.length).equals(signature))) {
+      throw mismatch(extension.slice(1).toUpperCase());
+    }
+    return;
+  }
+  if (extension === '.webp') {
+    if (!(content.subarray(0, 4).toString('latin1') === 'RIFF' && content.subarray(8, 12).toString('latin1') === 'WEBP')) {
+      throw mismatch('WebP');
+    }
+    return;
+  }
+  if (officeOpenXml.has(extension) || openDocument.has(extension)) {
+    const text = content.toString('latin1');
+    const valid = content.subarray(0, 4).equals(zipSignature) && (officeOpenXml.has(extension)
+      ? text.includes('[Content_Types].xml')
+      : text.includes('mimetypeapplication/vnd.oasis.opendocument'));
+    if (!valid) throw mismatch(officeOpenXml.has(extension) ? 'Office Open XML' : 'OpenDocument');
+    return;
+  }
+  // Text formats, including SVG: must be UTF-8 without NUL bytes.
+  if (content.includes(0)) throw mismatch('text');
+  let text: string;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(content);
+  } catch {
+    throw mismatch('UTF-8 text');
+  }
+  if (extension === '.svg' && !/<svg(?:\s|>)/i.test(text)) throw mismatch('SVG');
+}
+
 function assertSafeSvg(content: string): void {
   if (!/<svg(?:\s|>)/i.test(content)) {
     throw new UnsupportedFileError('The file is not a valid SVG document.', 'invalid_svg');
@@ -316,6 +376,7 @@ export class ProjectFileService {
       await this.ensureDirectory(parent);
     }
     const absolutePath = await this.resolveNewPath(normalizedPath);
+    assertContentMatchesExtension(normalizedPath, content);
     try {
       await writeFile(absolutePath, content, { flag: 'wx' });
     } catch (error) {
@@ -325,6 +386,39 @@ export class ProjectFileService {
       throw error;
     }
     return { path: normalizedPath, type: 'file', size: content.length };
+  }
+
+  /**
+   * Saves downloaded or tool-produced content as a new project file. Never overwrites:
+   * if the path exists, a numbered name such as `report-2.json` is used instead.
+   */
+  async saveNewFile(relativePath: string, content: Buffer): Promise<UploadedProjectFile> {
+    const normalizedPath = this.normalizeRelativePath(relativePath);
+    this.assertUploadExtension(normalizedPath);
+    assertContentMatchesExtension(normalizedPath, content);
+    if (content.length > maximumUploadBytes) {
+      throw new UnsupportedFileError('Saved files must be 10 MB or smaller.', 'file_too_large');
+    }
+    const parent = path.posix.dirname(normalizedPath);
+    if (parent !== '.') await this.ensureDirectory(parent);
+    const extension = path.posix.extname(normalizedPath);
+    const stem = normalizedPath.slice(0, normalizedPath.length - extension.length);
+    for (let attempt = 1; attempt <= 200; attempt += 1) {
+      const candidate = attempt === 1 ? normalizedPath : `${stem}-${attempt}${extension}`;
+      try {
+        const absolutePath = await this.resolveNewPath(candidate);
+        await writeFile(absolutePath, content, { flag: 'wx' });
+        return { path: candidate, type: 'file', size: content.length };
+      } catch (error) {
+        if (!(error instanceof ConflictError) && (error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      }
+    }
+    throw new ConflictError(`Could not find a free file name for ${normalizedPath}.`, 'path_already_exists');
+  }
+
+  /** Whether a path's extension can be stored as a project file. */
+  static canStore(relativePath: string): boolean {
+    return uploadExtensions.has(path.posix.extname(relativePath).toLowerCase());
   }
 
   async renamePath(relativePath: string, newRelativePath: string): Promise<ProjectPathResult> {
@@ -398,26 +492,27 @@ export class ProjectFileService {
     const normalizedPath = this.normalizeRelativePath(relativePath);
     this.assertMarkdown(normalizedPath);
     const file = await this.readTextFile(normalizedPath);
-    const state = await this.readPublicationState();
-    state.reviewed[normalizedPath] = {
-      hash: contentHash(file.content),
-      reviewedAt: new Date().toISOString()
-    };
-    await this.writePublicationState(state);
-    return this.publicationStatus(normalizedPath);
+    const reviewedAt = new Date().toISOString();
+    await this.updatePublicationState((state) => {
+      state.reviewed[normalizedPath] = { hash: contentHash(file.content), reviewedAt };
+      return true;
+    });
+    return { path: normalizedPath, reviewed: true, reviewedAt };
   }
 
   async renderPublishedMarkdown(relativePath: string): Promise<string> {
     const normalizedPath = this.normalizeRelativePath(relativePath);
     this.assertMarkdown(normalizedPath);
-    const status = await this.publicationStatus(normalizedPath);
-    if (!status.reviewed) {
+    // Read once and render exactly the bytes whose hash was verified, so an edit made
+    // between the review check and rendering can never be published unreviewed.
+    const file = await this.readTextFile(normalizedPath);
+    const review = (await this.readPublicationState()).reviewed[normalizedPath];
+    if (review?.hash !== contentHash(file.content)) {
       throw new ConflictError(
         'This Markdown version must be reviewed before it can be published.',
         'review_required'
       );
     }
-    const file = await this.readTextFile(normalizedPath);
     const title = path.posix.basename(normalizedPath, path.posix.extname(normalizedPath));
     return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -594,35 +689,54 @@ export class ProjectFileService {
   }
 
   private async writePublicationState(state: PublicationState): Promise<void> {
-    const statePath = path.join(this.rootPath, '.aaa', 'publication.json');
+    const statePath = this.publicationStatePath();
     await mkdir(path.dirname(statePath), { recursive: true });
-    await writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+    const temporaryPath = `${statePath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+    await writeFile(temporaryPath, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+    await renameWithRetry(temporaryPath, statePath);
+  }
+
+  private publicationStatePath(): string {
+    return path.resolve(this.rootPath, '.aaa', 'publication.json');
+  }
+
+  /**
+   * Read-modify-write of `.aaa/publication.json`, serialized per project so concurrent
+   * reviews, renames, and deletes never overwrite each other's changes.
+   */
+  private async updatePublicationState(update: (state: PublicationState) => boolean): Promise<void> {
+    await withFileWriteLock(this.publicationStatePath(), async () => {
+      const state = await this.readPublicationState();
+      if (update(state)) await this.writePublicationState(state);
+    });
   }
 
   private async movePublicationReviews(sourcePath: string, destinationPath: string): Promise<void> {
-    const state = await this.readPublicationState();
-    let changed = false;
-    for (const [reviewedPath, review] of Object.entries(state.reviewed)) {
-      if (reviewedPath === sourcePath || reviewedPath.startsWith(`${sourcePath}/`)) {
-        const suffix = reviewedPath.slice(sourcePath.length);
-        state.reviewed[`${destinationPath}${suffix}`] = review;
-        delete state.reviewed[reviewedPath];
-        changed = true;
+    await this.updatePublicationState((state) => {
+      let changed = false;
+      for (const [reviewedPath, review] of Object.entries(state.reviewed)) {
+        if (reviewedPath === sourcePath || reviewedPath.startsWith(`${sourcePath}/`)) {
+          const suffix = reviewedPath.slice(sourcePath.length);
+          state.reviewed[`${destinationPath}${suffix}`] = review;
+          delete state.reviewed[reviewedPath];
+          changed = true;
+        }
       }
-    }
-    if (changed) await this.writePublicationState(state);
+      return changed;
+    });
   }
 
   private async removePublicationReviews(deletedPath: string): Promise<void> {
-    const state = await this.readPublicationState();
-    let changed = false;
-    for (const reviewedPath of Object.keys(state.reviewed)) {
-      if (reviewedPath === deletedPath || reviewedPath.startsWith(`${deletedPath}/`)) {
-        delete state.reviewed[reviewedPath];
-        changed = true;
+    await this.updatePublicationState((state) => {
+      let changed = false;
+      for (const reviewedPath of Object.keys(state.reviewed)) {
+        if (reviewedPath === deletedPath || reviewedPath.startsWith(`${deletedPath}/`)) {
+          delete state.reviewed[reviewedPath];
+          changed = true;
+        }
       }
-    }
-    if (changed) await this.writePublicationState(state);
+      return changed;
+    });
   }
 
   private validateContent(content: string): void {

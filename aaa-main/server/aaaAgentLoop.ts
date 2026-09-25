@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import path from 'node:path';
 import { AgentRunError, NotFoundError } from './httpErrors.js';
+import { log } from './logger.js';
 import type {
   ModelChatClient,
   ModelChatMessage,
@@ -11,7 +13,7 @@ import type {
 import { ProjectFileService } from './projectFileService.js';
 import { builtInToolNames, type BuiltInToolName, type WorkflowSkill } from './projectWorkflowService.js';
 import type { BrowserCaptureService } from './services/browserCaptureService.js';
-import type { McpToolbox } from './services/mcpHttpClient.js';
+import { httpDownload, type McpToolbox } from './services/mcpHttpClient.js';
 import type { FileTreeNode, RunUsage, ToolEvent } from '../src/types/api.js';
 import {
   addRequestUsage,
@@ -116,6 +118,23 @@ const builtInDefinitions: Record<BuiltInToolName, ModelToolDefinition> = {
       }
     }
   },
+  delete_path: {
+    type: 'function',
+    function: {
+      name: 'delete_path',
+      description: 'Delete a project file or folder. Deleting a non-empty folder requires recursive: true. '
+        + 'The project root and the .aaa, .git, .github, and .vscode folders cannot be deleted. This cannot be undone, '
+        + 'so only delete when the user asked for it or it is clearly part of the requested change.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Project-relative file or folder path.' },
+          recursive: { type: 'boolean', description: 'Required to delete a folder that is not empty.' }
+        },
+        required: ['path']
+      }
+    }
+  },
   browser_capture: {
     type: 'function',
     function: {
@@ -130,6 +149,25 @@ const builtInDefinitions: Record<BuiltInToolName, ModelToolDefinition> = {
           outputPath: { type: 'string', description: 'Optional project-relative PNG path.' }
         },
         required: ['action']
+      }
+    }
+  },
+  download_file: {
+    type: 'function',
+    function: {
+      name: 'download_file',
+      description: 'Download a file or JSON into the project. url is either an http(s) URL on an enabled MCP server\'s host '
+        + '(the server\'s authentication is applied) or an MCP resource URI such as one from a resource_link, which is read '
+        + 'through the MCP server. JSON is pretty-printed and text results include a preview. Existing files are never '
+        + 'overwritten; a numbered name is used instead.',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'Absolute http(s) URL or MCP resource URI.' },
+          path: { type: 'string', description: 'Optional project-relative destination file, or a folder ending in /. Defaults to downloads/<source>/<name>.' },
+          server: { type: 'string', description: 'MCP server name; required for resource URIs when more than one server is connected.' }
+        },
+        required: ['url']
       }
     }
   },
@@ -176,6 +214,10 @@ export interface AaaAgentLoopOptions {
   timeoutMs?: number;
   /** Warnings shown as agent steps at the start of the run, e.g. unusable MCP servers. */
   notices?: Array<{ type: ToolEvent['type']; label: string; detail?: string }>;
+  /** Hosts download_file may fetch from without an MCP server (defaults to AAA_DOWNLOAD_ALLOWED_HOSTS). */
+  downloadAllowedHosts?: string[];
+  /** Fetch used for allow-listed, non-MCP downloads; injectable for tests. */
+  httpFetch?: typeof globalThis.fetch;
   /**
    * Called once before the first request when the estimated prompt (messages plus tool
    * definitions) exceeds `contextWindow * threshold`. May return replacement messages,
@@ -429,7 +471,7 @@ export class AaaAgentLoop {
 
     try {
       if (this.options.mcp?.has(toolName)) {
-        return await this.executeMcpTool(toolName, args, signal);
+        return await this.executeMcpTool(toolName, args, changedFiles, signal);
       }
       if (!this.builtIns.has(toolName as BuiltInToolName)) {
         return this.failedToolEvent(toolName, 'The requested tool is not available.');
@@ -465,7 +507,7 @@ export class AaaAgentLoop {
           };
         }
         case 'write_file': {
-          const path = requiredString(args, 'path');
+          const path = assertAgentWritable(requiredString(args, 'path'));
           const nextContent = repairEscapedNewlines(path, stringValue(args, 'content'));
           let operation: 'create' | 'edit' = 'edit';
           try {
@@ -490,7 +532,7 @@ export class AaaAgentLoop {
           };
         }
         case 'edit_file': {
-          const path = requiredString(args, 'path');
+          const path = assertAgentWritable(requiredString(args, 'path'));
           const current = await this.fileService.readTextFile(path);
           let oldString = requiredString(args, 'oldString');
           let newString = stringValue(args, 'newString');
@@ -520,7 +562,7 @@ export class AaaAgentLoop {
         }
         case 'copy_path': {
           const source = requiredString(args, 'source');
-          const destination = requiredString(args, 'destination');
+          const destination = assertAgentWritable(requiredString(args, 'destination'));
           const result = await this.fileService.copyPath(source, destination);
           result.created.forEach((file) => changedFiles.add(file));
           return {
@@ -610,12 +652,35 @@ export class AaaAgentLoop {
             event: createToolEvent('skill', 'Loaded skill', skill.name, skill.sourcePath)
           };
         }
+        case 'download_file':
+          return await this.downloadFile(args, changedFiles, signal);
+        case 'delete_path': {
+          const target = path.posix.normalize(requiredString(args, 'path').replace(/\\/g, '/')).replace(/^\.\/+/, '').replace(/\/+$/, '');
+          const topLevel = target.split('/')[0]!.toLowerCase();
+          if (!target || target === '.' || target.startsWith('..') || protectedTopLevel.has(topLevel)) {
+            throw new Error(`${target || 'The project root'} is protected and cannot be deleted by the agent. Ask the user to delete it from the Files panel if needed.`);
+          }
+          const parent = target.includes('/') ? target.slice(0, target.lastIndexOf('/')) : '';
+          const listing = await this.fileService.listTree({ ...(parent ? { path: parent } : {}), includeHidden: true });
+          const node = findNode(listing, target);
+          if (!node) throw new NotFoundError(`Project path was not found: ${target}`);
+          const contained = node.type === 'directory' ? flattenTree(node.children ?? []).filter((entry) => entry.startsWith('file ')).length : 0;
+          if (node.type === 'directory' && (node.children?.length ?? 0) > 0 && optionalBoolean(args, 'recursive') !== true) {
+            throw new Error(`${target} is a folder with ${contained} file${contained === 1 ? '' : 's'}; pass recursive: true to delete it and its contents.`);
+          }
+          await this.fileService.deletePath(target);
+          changedFiles.add(target);
+          const summary = node.type === 'directory'
+            ? `Deleted folder ${target} (${contained} file${contained === 1 ? '' : 's'}).`
+            : `Deleted ${target}.`;
+          return { output: summary, event: createToolEvent('edit', 'Deleted project path', summary, target) };
+        }
       }
     } catch (error) {
       if (signal.aborted) throw error;
       const message = error instanceof Error ? error.message : 'Tool execution failed.';
       if (this.options.mcp?.has(toolName)) {
-        console.error(`[mcp] Tool ${toolName} failed: ${message}`);
+        log.error('mcp', 'MCP tool call failed.', { tool: toolName, error: message });
         return {
           output: `Tool ${toolName} failed: ${message} Continue without it or try another approach.`,
           event: createToolEvent('mcp', `MCP tool failed: ${toolName}`, message)
@@ -628,20 +693,144 @@ export class AaaAgentLoop {
   private async executeMcpTool(
     toolName: string,
     args: Record<string, unknown>,
+    changedFiles: Set<string>,
     signal: AbortSignal
   ): Promise<{ output: string; event: ToolEvent }> {
     const route = this.options.mcp!.describe(toolName)!;
     const referencedFiles: string[] = [];
     const resolvedArgs = await this.resolveFileReferences(args, referencedFiles) as Record<string, unknown>;
     const result = await this.options.mcp!.call(toolName, resolvedArgs, signal);
+
+    const saved: string[] = [];
+    const notes: string[] = [];
+    for (const [index, file] of (result.files ?? []).entries()) {
+      try {
+        const name = downloadFileName(file.name ?? file.uri, file.mimeType, `${route.tool}-result${index ? `-${index + 1}` : ''}`);
+        const stored = await this.saveContent(`downloads/${safeSegment(route.server)}/${name}`, file.data, file.mimeType);
+        changedFiles.add(stored.path);
+        saved.push(stored.path);
+        notes.push(`Saved ${stored.path} (${formatBytes(stored.size)}) from the MCP result.${stored.preview ? `\n${stored.preview}` : ''}`);
+      } catch (error) {
+        notes.push(`Could not save an embedded ${file.mimeType ?? 'file'} from the MCP result: ${error instanceof Error ? error.message : 'unknown error'}`);
+      }
+    }
+    for (const link of result.links ?? []) {
+      notes.push(`Resource link: ${link.uri}${link.name ? ` (${link.name})` : ''}${link.mimeType ? ` [${link.mimeType}]` : ''}. `
+        + `Call download_file with {"url": ${JSON.stringify(link.uri)}, "server": ${JSON.stringify(route.server)}} to save it.`);
+    }
+
     const detail = [
       `${route.server} · ${route.tool}`,
       ...(referencedFiles.length ? [`${referencedFiles.length} project file${referencedFiles.length === 1 ? '' : 's'} sent`] : []),
+      ...(saved.length ? [`${saved.length} file${saved.length === 1 ? '' : 's'} saved`] : []),
+      ...(result.links?.length ? [`${result.links.length} resource link${result.links.length === 1 ? '' : 's'}`] : []),
       ...(result.isError ? ['returned an error'] : [])
     ].join(' · ');
+    const body = [result.text, ...notes].filter(Boolean).join('\n\n');
     return {
-      output: result.isError ? `MCP tool ${route.tool} returned an error:\n${result.text}` : result.text || 'OK',
-      event: createToolEvent('mcp', result.isError ? `MCP tool failed: ${route.tool}` : 'Called MCP tool', detail)
+      output: result.isError ? `MCP tool ${route.tool} returned an error:\n${body}` : body || 'OK',
+      event: createToolEvent('mcp', result.isError ? `MCP tool failed: ${route.tool}` : 'Called MCP tool', detail, saved[0])
+    };
+  }
+
+  /** Implements download_file for MCP-host HTTP URLs, allow-listed hosts, and MCP resource URIs. */
+  private async downloadFile(
+    args: Record<string, unknown>,
+    changedFiles: Set<string>,
+    signal: AbortSignal
+  ): Promise<{ output: string; event: ToolEvent }> {
+    const raw = requiredString(args, 'url');
+    let url: URL;
+    try {
+      url = new URL(raw);
+    } catch {
+      throw new Error('url must be an absolute http(s) URL or an MCP resource URI.');
+    }
+    const mcp = this.options.mcp;
+    const serverName = optionalString(args, 'server');
+    const named = serverName ? mcp?.client(serverName) : undefined;
+    if (serverName && !named) {
+      throw new Error(`Unknown MCP server "${serverName}". Connected servers: ${mcp?.serverNames().join(', ') || 'none'}.`);
+    }
+    const destination = optionalString(args, 'path');
+
+    const saved: Array<{ path: string; size: number; preview?: string }> = [];
+    let source: string;
+    if (url.protocol === 'http:' || url.protocol === 'https:') {
+      const client = named?.sharesOrigin(url) ? named : mcp?.clientForUrl(url);
+      let download;
+      if (client) {
+        source = client.name;
+        download = await client.download(url, signal);
+      } else if (hostAllowed(url.hostname, this.options.downloadAllowedHosts ?? envList('AAA_DOWNLOAD_ALLOWED_HOSTS'))) {
+        source = url.hostname;
+        download = await httpDownload(url, this.options.httpFetch ?? globalThis.fetch, {}, 120_000, signal);
+      } else {
+        const hosts = (mcp?.serverNames() ?? []).map((name) => mcp!.client(name)!.config.url)
+          .map((value) => { try { return new URL(value).host; } catch { return value; } });
+        throw new Error(`download_file only fetches from enabled MCP server hosts (${hosts.join(', ') || 'none connected'}) `
+          + 'or hosts listed in AAA_DOWNLOAD_ALLOWED_HOSTS.');
+      }
+      const lastSegment = decodeURIComponent(url.pathname.split('/').filter(Boolean).at(-1) ?? '');
+      const name = downloadFileName(download.fileName ?? lastSegment, download.contentType, 'download');
+      saved.push(await this.saveContent(destinationPath(destination, `downloads/${safeSegment(source)}`, name), download.data, download.contentType));
+    } else {
+      const names = mcp?.serverNames() ?? [];
+      const client = named ?? (names.length === 1 ? mcp!.client(names[0]!) : undefined);
+      if (!client) {
+        throw new Error(names.length === 0
+          ? 'No MCP server is connected to read this resource URI.'
+          : `Specify server for MCP resource URIs. Connected servers: ${names.join(', ')}.`);
+      }
+      source = client.name;
+      const contents = await client.readResource(raw, signal);
+      if (contents.length === 0) throw new Error(`MCP server ${client.name} returned no content for ${raw}.`);
+      for (const [index, content] of contents.entries()) {
+        const name = downloadFileName(content.uri, content.mimeType, `resource${index ? `-${index + 1}` : ''}`);
+        const data = content.data ?? Buffer.from(content.text ?? '', 'utf8');
+        const target = contents.length === 1 ? destinationPath(destination, `downloads/${safeSegment(source)}`, name)
+          : `${destination?.replace(/\/+$/, '') || `downloads/${safeSegment(source)}`}/${name}`;
+        saved.push(await this.saveContent(target, data, content.mimeType));
+      }
+    }
+
+    saved.forEach((file) => changedFiles.add(file.path));
+    return {
+      output: saved.map((file) => `Saved ${file.path} (${formatBytes(file.size)}) from ${source}.${file.preview ? `\n${file.preview}` : ''}`).join('\n\n'),
+      event: createToolEvent('create', 'Downloaded file', saved.map((file) => `${file.path} (${formatBytes(file.size)})`).join(', '), saved[0]?.path)
+    };
+  }
+
+  /** Saves bytes as a new project file; JSON is pretty-printed and text gets a preview for the model. */
+  private async saveContent(
+    targetPath: string,
+    data: Buffer,
+    mimeType?: string
+  ): Promise<{ path: string; size: number; preview?: string }> {
+    let content = data;
+    assertAgentWritable(targetPath);
+    const isJson = /json/i.test(mimeType ?? '') || /\.json$/i.test(targetPath);
+    const isText = isJson || /^text\/|xml|yaml|csv|markdown/i.test(mimeType ?? '') || /\.(txt|md|csv|xml|ya?ml|html?|log)$/i.test(targetPath);
+    let text: string | undefined;
+    if (isText) {
+      text = data.toString('utf8');
+      if (isJson) {
+        try {
+          text = `${JSON.stringify(JSON.parse(text), null, 2)}\n`;
+          content = Buffer.from(text, 'utf8');
+        } catch {
+          // Keep the original bytes when the payload is not valid JSON.
+        }
+      }
+    }
+    const stored = await this.fileService.saveNewFile(targetPath, content);
+    const previewLimit = 4_000;
+    return {
+      path: stored.path,
+      size: stored.size,
+      ...(text !== undefined
+        ? { preview: `Preview:\n${text.length > previewLimit ? `${text.slice(0, previewLimit)}\n[… ${text.length - previewLimit} more characters in ${stored.path}]` : text}` }
+        : {})
     };
   }
 
@@ -663,6 +852,7 @@ export class AaaAgentLoop {
   }
 
   private failedToolEvent(toolName: string, message: string): { output: string; event: ToolEvent } {
+    log.warn('tool', 'Tool call failed; the error was returned to the model.', { tool: toolName, error: message });
     return {
       output: `Tool ${toolName} failed: ${message}`,
       event: createToolEvent('read', `Tool failed: ${toolName}`, message)
@@ -706,6 +896,36 @@ function flattenTree(nodes: FileTreeNode[]): string[] {
   ]);
 }
 
+/** Top-level folders holding AAA state, VCS data, or project customizations. */
+const protectedTopLevel = new Set(['.aaa', '.git', '.github', '.vscode']);
+/** Folders the agent may never write: review hashes, enable toggles, and VCS data. */
+const readOnlyTopLevel = new Set(['.aaa', '.git']);
+
+/**
+ * Rejects agent writes into AAA's own state. `.aaa` holds publication review hashes and
+ * customization toggles; letting the agent write there would let it mark its own drafts
+ * reviewed or re-enable capabilities the user turned off.
+ */
+function assertAgentWritable(target: string): string {
+  const normalized = path.posix.normalize(target.replace(/\\/g, '/')).replace(/^\.\/+/, '');
+  const topLevel = normalized.split('/')[0]!.toLowerCase();
+  if (readOnlyTopLevel.has(topLevel)) {
+    throw new Error(`${target} is inside ${topLevel}/, which holds AAA review and customization state (or version control data) and cannot be changed by the agent.`);
+  }
+  return target;
+}
+
+function findNode(nodes: FileTreeNode[], target: string): FileTreeNode | undefined {
+  for (const node of nodes) {
+    if (node.path === target) return node;
+    if (node.children && target.startsWith(`${node.path}/`)) {
+      const found = findNode(node.children, target);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
+
 function truncate(value: string): string {
   return value.length > maximumToolOutputCharacters
     ? `${value.slice(0, maximumToolOutputCharacters)}\n\n[Output truncated at ${maximumToolOutputCharacters} characters.]`
@@ -715,6 +935,80 @@ function truncate(value: string): string {
 function envNumber(name: string, fallback: number): number {
   const value = Number(process.env[name]);
   return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function envList(name: string): string[] {
+  return (process.env[name] ?? '').split(',').map((item) => item.trim().toLowerCase()).filter(Boolean);
+}
+
+/** Matches a hostname against entries such as `files.example.gov` or `*.example.gov`. */
+function hostAllowed(hostname: string, allowed: string[]): boolean {
+  const host = hostname.toLowerCase();
+  return allowed.some((entry) => {
+    const rule = entry.toLowerCase();
+    return rule.startsWith('*.') ? host.endsWith(rule.slice(1)) && host.length > rule.length - 1 : host === rule;
+  });
+}
+
+const mimeExtensions: Record<string, string> = {
+  'application/json': '.json',
+  'text/json': '.json',
+  'text/plain': '.txt',
+  'text/markdown': '.md',
+  'text/csv': '.csv',
+  'text/html': '.html',
+  'text/xml': '.xml',
+  'application/xml': '.xml',
+  'application/yaml': '.yaml',
+  'text/yaml': '.yaml',
+  'application/pdf': '.pdf',
+  'image/png': '.png',
+  'image/jpeg': '.jpg',
+  'image/gif': '.gif',
+  'image/webp': '.webp',
+  'image/svg+xml': '.svg',
+  'application/msword': '.doc',
+  'application/vnd.ms-excel': '.xls',
+  'application/vnd.ms-powerpoint': '.ppt',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx'
+};
+
+/** A safe single path segment. */
+function safeSegment(value: string): string {
+  return value.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[-.]+|-+$/g, '').slice(0, 100) || 'download';
+}
+
+/** Chooses a storable file name from a URI/name hint and a MIME type. */
+function downloadFileName(hint: string | undefined, mimeType: string | undefined, fallback: string): string {
+  let base = hint ?? '';
+  try {
+    base = decodeURIComponent(base.split(/[?#]/)[0]!.split(/[/\\]/).filter(Boolean).at(-1) ?? '');
+  } catch {
+    base = base.split(/[/\\]/).at(-1) ?? '';
+  }
+  let name = safeSegment(base || fallback);
+  if (!ProjectFileService.canStore(name)) {
+    const extension = mimeExtensions[(mimeType ?? '').split(';')[0]!.trim().toLowerCase()];
+    if (!extension) {
+      throw new Error(`Files of type ${mimeType ?? 'unknown'} (${name}) cannot be saved in the project.`);
+    }
+    name = `${name.replace(/\.[A-Za-z0-9]{1,8}$/, '')}${extension}`;
+  }
+  return name;
+}
+
+/** Resolves an optional destination (file path, folder ending in /, or default folder). */
+function destinationPath(destination: string | undefined, defaultFolder: string, name: string): string {
+  if (!destination) return `${defaultFolder}/${name}`;
+  return destination.endsWith('/') ? `${destination.replace(/\/+$/, '')}/${name}` : destination;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function requiredString(args: Record<string, unknown>, name: string): string {

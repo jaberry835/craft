@@ -36,6 +36,25 @@ import type {
   WriteTextFileRequest
 } from '../types/api.js';
 
+/** Supplies auth headers when app sign-in is on; registered by the browser auth module. */
+export interface ApiAuthProvider {
+  enabled(): boolean;
+  headers(forceRefresh: boolean): Promise<Record<string, string>>;
+  onAuthRequired(): void;
+}
+
+let authProvider: ApiAuthProvider = {
+  enabled: () => false,
+  headers: async () => ({}),
+  onAuthRequired: () => undefined
+};
+
+export function setApiAuthProvider(provider: ApiAuthProvider): void {
+  authProvider = provider;
+}
+
+const isSignInRequired = (error: unknown) => error instanceof Error && error.name === 'SignInRequiredError';
+
 export class ApiRequestError extends Error {
   constructor(
     public readonly status: number,
@@ -56,17 +75,40 @@ export class ApiUnavailableError extends Error {
 
 const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+/** Logs failed API calls to the browser console so problems can be diagnosed from DevTools. */
+function logApiFailure(method: string, url: string, detail: string): void {
+  console.error(`[aaa] ${method} ${url} failed: ${detail}`);
+}
+
+/**
+ * Fetch with the signed-in user's token (when sign-in is on). A 401 is retried once with a
+ * freshly acquired token; if it still fails, the app is told to show the sign-in screen.
+ */
+async function authorizedFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  const send = async (forceRefresh: boolean) => fetch(url, {
+    ...init,
+    headers: { 'Content-Type': 'application/json', ...await authProvider.headers(forceRefresh), ...init.headers }
+  });
+  let response = await send(false);
+  if (response.status === 401 && authProvider.enabled()) {
+    response = await send(true);
+    if (response.status === 401) authProvider.onAuthRequired();
+  }
+  return response;
+}
+
 async function requestJson<T>(url: string, init?: RequestInit, unavailableRetries = 0): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(url, {
-      ...init,
-      headers: { 'Content-Type': 'application/json', ...init?.headers }
-    });
+    response = await authorizedFetch(url, init);
   } catch (error) {
+    if (isSignInRequired(error)) throw error;
     if (unavailableRetries > 0) {
       await wait(350);
       return requestJson<T>(url, init, unavailableRetries - 1);
+    }
+    if (!init?.signal?.aborted) {
+      logApiFailure(init?.method ?? 'GET', url, error instanceof Error ? error.message : 'network error');
     }
     throw new ApiUnavailableError(error instanceof Error
       ? `Could not connect to the local AAA API. Start the full workbench with npm run dev. (${error.message})`
@@ -77,6 +119,7 @@ async function requestJson<T>(url: string, init?: RequestInit, unavailableRetrie
       error?: string;
       code?: string;
     };
+    logApiFailure(init?.method ?? 'GET', url, `HTTP ${response.status} ${payload.code ?? ''} ${payload.error ?? response.statusText}`.trim());
     throw new ApiRequestError(response.status, payload.code ?? 'request_failed', payload.error ?? response.statusText);
   }
   return response.json() as Promise<T>;
@@ -118,14 +161,12 @@ async function requestStream(
 ): Promise<void> {
   let response: Response;
   try {
-    response = await fetch(url, {
-      ...init,
-      headers: { 'Content-Type': 'application/json', ...init.headers }
-    });
+    response = await authorizedFetch(url, init);
   } catch (error) {
-    if (init.signal?.aborted) {
+    if (init.signal?.aborted || isSignInRequired(error)) {
       throw error;
     }
+    logApiFailure(init.method ?? 'POST', url, error instanceof Error ? error.message : 'network error');
     throw new ApiUnavailableError(error instanceof Error ? error.message : undefined);
   }
   if (!response.ok) {
@@ -133,6 +174,7 @@ async function requestStream(
       error: response.statusText,
       code: 'request_failed'
     })) as { error?: string; code?: string };
+    logApiFailure(init.method ?? 'POST', url, `HTTP ${response.status} ${payload.code ?? ''} ${payload.error ?? response.statusText}`.trim());
     throw new ApiRequestError(
       response.status,
       payload.code ?? 'request_failed',
@@ -145,9 +187,11 @@ async function requestStream(
   let terminal = false;
   await parseNdjsonStream(response.body, (event) => {
     if (event.type === 'completed' || event.type === 'error') terminal = true;
+    if (event.type === 'error') logApiFailure(init.method ?? 'POST', url, `agent run error: ${event.message}`);
     return onEvent(event);
   });
   if (!terminal && !init.signal?.aborted) {
+    logApiFailure(init.method ?? 'POST', url, 'stream ended without a completed or error event');
     throw new Error('The response stream ended before the agent finished. Reload the session to see any saved progress.');
   }
 }
@@ -163,6 +207,8 @@ export const aaaApi = {
       method: 'POST',
       body: JSON.stringify(request)
     }),
+  deleteProject: (projectId: string) =>
+    requestJson<ProjectsResponse>(projectPath(projectId), { method: 'DELETE' }),
   selectProject: (projectId: string) =>
     requestJson<ProjectSummary>('/api/projects/active', {
       method: 'PUT',

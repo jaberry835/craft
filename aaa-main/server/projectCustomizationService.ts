@@ -4,11 +4,13 @@ import type {
   CustomizationEditor,
   CustomizationItem,
   EditableCustomizationKind,
+  McpAuthSettings,
   ProjectCustomizations,
   SaveCustomizationRequest
 } from '../src/types/api.js';
 import { BadRequestError, ConflictError, NotFoundError } from './httpErrors.js';
 import { builtInToolCatalog, builtInToolItemId } from './builtInTools.js';
+import { describeMcpAuth, maskMcpAuth, mergeMcpAuth, validateMcpAuth } from './mcpAuth.js';
 
 interface CapabilityState {
   enabled: Record<string, boolean>;
@@ -20,6 +22,9 @@ interface McpServer {
   url?: string;
   command?: string;
   args?: string[];
+  headers?: Record<string, string>;
+  auth?: McpAuthSettings;
+  [key: string]: unknown;
 }
 
 interface McpConfig {
@@ -27,7 +32,8 @@ interface McpConfig {
   inputs?: unknown[];
 }
 
-const editableKinds = new Set<EditableCustomizationKind>(['agent', 'skill', 'mcp-server', 'tool']);
+const editableKinds = new Set<EditableCustomizationKind>(['agent', 'skill', 'mcp-server', 'tool', 'instruction']);
+const repositoryInstructionsPath = '.github/copilot-instructions.md';
 
 export class ProjectCustomizationService {
   private readonly statePath: string;
@@ -42,13 +48,14 @@ export class ProjectCustomizationService {
       ...await this.markdownItems('.github/agents', 'agent', '.agent.md'),
       ...await this.skillItems(),
       ...await this.mcpItems(),
-      ...await this.markdownItems('.github/prompts', 'instruction', '.prompt.md'),
+      ...await this.instructionItems(),
+      ...(await this.markdownItems('.github/prompts', 'instruction', '.prompt.md')).map((item) => ({
+        ...item,
+        detail: `Prompt file · run as /${item.sourcePath!.split('/').at(-1)!.replace(/\.prompt\.md$/i, '')}`
+      })),
       ...this.toolItems()
     ].map((item) => {
       const metadata = state.metadata[item.id];
-      if (item.kind === 'instruction') {
-        return { ...item, enabled: false, status: 'unavailable' as const, detail: 'Coming soon' };
-      }
       return {
         ...item,
         ...(metadata ? { name: metadata.name, description: metadata.description } : {}),
@@ -56,6 +63,44 @@ export class ProjectCustomizationService {
       };
     });
     return { projectId: this.projectId, items };
+  }
+
+  /** `.github/copilot-instructions.md` and `.github/instructions/*.instructions.md` (VS Code format). */
+  private async instructionItems(): Promise<CustomizationItem[]> {
+    const items: CustomizationItem[] = [];
+    try {
+      const content = await readFile(path.join(this.rootPath, ...repositoryInstructionsPath.split('/')), 'utf8');
+      const firstLine = parseMarkdown(content).body.split(/\r?\n/).find((line) => line.trim())?.replace(/^#+\s*/, '').trim();
+      items.push({
+        id: 'instruction:copilot-instructions.md',
+        name: 'Repository instructions',
+        description: firstLine?.slice(0, 200) || 'Always-on instructions for every request in this project.',
+        kind: 'instruction',
+        enabled: true,
+        status: 'ready',
+        detail: 'Applies to every request',
+        sourcePath: repositoryInstructionsPath
+      });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    const directory = path.join(this.rootPath, '.github', 'instructions');
+    for (const entry of (await safeReadDirectory(directory)).filter((candidate) =>
+      candidate.isFile() && candidate.name.toLowerCase().endsWith('.instructions.md'))) {
+      const metadata = parseMarkdown(await readFile(path.join(directory, entry.name), 'utf8')).metadata;
+      const applyTo = metadata.applyTo?.trim();
+      items.push({
+        id: `instruction:instructions/${entry.name}`,
+        name: metadata.name || friendlyName(entry.name.replace(/\.instructions\.md$/i, '')),
+        description: metadata.description || 'Project instructions',
+        kind: 'instruction',
+        enabled: true,
+        status: 'ready',
+        detail: applyTo && applyTo !== '**' ? `Applies to ${applyTo}` : 'Applies to every request',
+        sourcePath: `.github/instructions/${entry.name}`
+      });
+    }
+    return items;
   }
 
   async getEditor(itemId: string): Promise<CustomizationEditor> {
@@ -88,12 +133,28 @@ export class ProjectCustomizationService {
         transport: server.url ? 'http' : 'stdio',
         url: server.url ?? '',
         command: server.command ?? '',
-        args: server.args?.join('\n') ?? ''
+        args: server.args?.join('\n') ?? '',
+        auth: maskMcpAuth(server.auth) ?? { type: 'none' }
       };
     }
 
     const content = await readFile(path.join(this.rootPath, ...item.sourcePath!.split('/')), 'utf8');
     const parsed = parseMarkdown(content);
+    if (item.kind === 'instruction') {
+      const repository = item.sourcePath === repositoryInstructionsPath;
+      const prompt = item.sourcePath!.toLowerCase().endsWith('.prompt.md');
+      return {
+        id: item.id,
+        kind: 'instruction',
+        name: repository ? item.name : parsed.metadata.name || item.name,
+        description: repository ? item.description : parsed.metadata.description || item.description,
+        enabled: item.enabled,
+        sourcePath: item.sourcePath,
+        instructions: parsed.body,
+        ...(prompt ? { argumentHint: parsed.metadata['argument-hint'] ?? '' } : {}),
+        ...(!repository && !prompt ? { applyTo: parsed.metadata.applyTo ?? '' } : {})
+      };
+    }
     const kind = item.kind as 'agent' | 'skill';
     return {
       id: item.id,
@@ -130,7 +191,9 @@ export class ProjectCustomizationService {
     const key = slug(input.name);
     const relativePath = input.kind === 'agent'
       ? `.github/agents/${key}.agent.md`
-      : `.github/skills/${key}/SKILL.md`;
+      : input.kind === 'instruction'
+        ? `.github/instructions/${key}.instructions.md`
+        : `.github/skills/${key}/SKILL.md`;
     const target = path.join(this.rootPath, ...relativePath.split('/'));
     try {
       await readFile(target, 'utf8');
@@ -140,7 +203,9 @@ export class ProjectCustomizationService {
     }
     await mkdir(path.dirname(target), { recursive: true });
     await writeFile(target, createMarkdown(input), 'utf8');
-    const id = input.kind === 'agent' ? `agent:${key}.agent.md` : `skill:${key}`;
+    const id = input.kind === 'agent'
+      ? `agent:${key}.agent.md`
+      : input.kind === 'instruction' ? `instruction:instructions/${key}.instructions.md` : `skill:${key}`;
     await this.setEnabled(id, input.enabled);
     return this.getEditor(id);
   }
@@ -158,13 +223,15 @@ export class ProjectCustomizationService {
     if (current.kind === 'mcp-server') {
       const key = itemId.slice('mcp-server:'.length);
       const config = await this.readMcpConfig();
-      config.servers = { ...config.servers, [key]: mcpServer(input) };
+      config.servers = { ...config.servers, [key]: mcpServer(input, config.servers?.[key]) };
       await this.writeMcpConfig(config);
       await this.setMetadata(itemId, input.name, input.description);
     } else {
       const target = path.join(this.rootPath, ...current.sourcePath!.split('/'));
       const content = await readFile(target, 'utf8');
-      await writeFile(target, updateMarkdown(content, input), 'utf8');
+      await writeFile(target, current.sourcePath === repositoryInstructionsPath
+        ? updateRepositoryInstructions(content, input)
+        : updateMarkdown(content, input, current.sourcePath!), 'utf8');
     }
     await this.setEnabled(itemId, input.enabled);
     return this.getEditor(itemId);
@@ -248,7 +315,8 @@ export class ProjectCustomizationService {
       kind: 'mcp-server',
       enabled: true,
       status: 'configured',
-      detail: server.type ? `${server.type.toUpperCase()} transport` : undefined,
+      detail: [server.type ? `${server.type.toUpperCase()} transport` : '', server.url ? describeMcpAuth(server.auth) : '']
+        .filter(Boolean).join(' · ') || undefined,
       sourcePath: '.vscode/mcp.json'
     }));
   }
@@ -333,7 +401,7 @@ export function parseMarkdown(content: string): { metadata: Record<string, strin
   return { metadata, body: content.slice(end + 4).trim() };
 }
 
-function updateMarkdown(content: string, input: SaveCustomizationRequest): string {
+function updateMarkdown(content: string, input: SaveCustomizationRequest, sourcePath = ''): string {
   const parsed = parseMarkdown(content);
   const metadata: Record<string, string> = {
     ...parsed.metadata,
@@ -342,7 +410,17 @@ function updateMarkdown(content: string, input: SaveCustomizationRequest): strin
     'argument-hint': input.argumentHint ?? ''
   };
   if (input.kind === 'agent') metadata.tools = toolList(input.tools);
+  if (input.kind === 'instruction' && sourcePath.toLowerCase().endsWith('.instructions.md')) {
+    metadata.applyTo = input.applyTo ?? '';
+  }
   return markdownDocument(metadata, input.instructions ?? parsed.body);
+}
+
+/** copilot-instructions.md is plain Markdown; only its body is edited and any front matter is kept. */
+function updateRepositoryInstructions(content: string, input: SaveCustomizationRequest): string {
+  const parsed = parseMarkdown(content);
+  const body = input.instructions ?? parsed.body;
+  return Object.keys(parsed.metadata).length > 0 ? markdownDocument(parsed.metadata, body) : `${body.trim()}\n`;
 }
 
 function createMarkdown(input: SaveCustomizationRequest): string {
@@ -356,6 +434,7 @@ function createMarkdown(input: SaveCustomizationRequest): string {
     metadata.agents = '[]';
     metadata['user-invocable'] = 'true';
   }
+  if (input.kind === 'instruction') metadata.applyTo = input.applyTo ?? '';
   return markdownDocument(metadata, input.instructions ?? '');
 }
 
@@ -430,20 +509,31 @@ function validateRequest(request: SaveCustomizationRequest): SaveCustomizationRe
     instructions: request.instructions?.trim(),
     argumentHint: request.argumentHint?.trim().slice(0, 500),
     tools: request.tools?.trim().slice(0, 1000),
+    applyTo: request.applyTo?.trim().slice(0, 500),
     url: request.url?.trim().slice(0, 2000),
     command: request.command?.trim().slice(0, 1000),
-    args: request.args?.trim().slice(0, 4000)
+    args: request.args?.trim().slice(0, 4000),
+    auth: request.kind === 'mcp-server' && request.transport === 'http' ? validateMcpAuth(request.auth) : undefined
   };
 }
 
-function mcpServer(input: SaveCustomizationRequest): McpServer {
-  return input.transport === 'http'
-    ? { type: 'http', url: input.url }
-    : {
-        type: 'stdio',
-        command: input.command,
-        args: input.args?.split(/\r?\n/).map((argument) => argument.trim()).filter(Boolean) ?? []
-      };
+/**
+ * Builds the `.vscode/mcp.json` entry. Keys AAA does not edit (such as `headers`) are
+ * preserved from the existing entry, and masked secrets keep their stored value.
+ */
+function mcpServer(input: SaveCustomizationRequest, existing?: McpServer): McpServer {
+  const { type: _type, url: _url, command: _command, args: _args, auth: _auth, ...preserved } = existing ?? {};
+  void _type; void _url; void _command; void _args; void _auth;
+  if (input.transport === 'http') {
+    const auth = mergeMcpAuth(existing?.auth, input.auth);
+    return { ...preserved, type: 'http', url: input.url, ...(auth ? { auth } : {}) };
+  }
+  return {
+    ...preserved,
+    type: 'stdio',
+    command: input.command,
+    args: input.args?.split(/\r?\n/).map((argument) => argument.trim()).filter(Boolean) ?? []
+  };
 }
 
 function slug(value: string): string {

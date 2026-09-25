@@ -5,6 +5,7 @@ import {
 } from '@azure/cosmos';
 import { DefaultAzureCredential } from '@azure/identity';
 import type { CosmosSessionConfig } from './storageConfig.js';
+import { log } from './logger.js';
 
 export interface CosmosContainerSettings {
   endpointHost: string;
@@ -80,13 +81,18 @@ export function logCosmosError(
         substatus: 'substatus' in error ? String(error.substatus) : 'unknown'
       }
     : { code: 'unknown', substatus: 'unknown' };
-  console.error(
-    `[chat-session-store] Cosmos DB ${operation} failed: `
-    + `endpointHost=${settings.endpointHost}, database=${settings.database}, `
-    + `container=${settings.container}, authMode=${settings.authMode}, `
-    + `schemaMode=${settings.schemaMode}, autoCreate=${settings.autoCreate}, `
-    + `keyConfigured=${settings.keyConfigured}, code=${details.code}, substatus=${details.substatus}.`
-  );
+  log.error('storage', `Cosmos DB ${operation} failed.`, {
+    endpointHost: settings.endpointHost,
+    database: settings.database,
+    container: settings.container,
+    authMode: settings.authMode,
+    schemaMode: settings.schemaMode,
+    autoCreate: settings.autoCreate,
+    keyConfigured: settings.keyConfigured,
+    code: details.code,
+    substatus: details.substatus,
+    error: error instanceof Error ? error.message.split('\n')[0] : undefined
+  });
 }
 
 export class CosmosSchemaMismatchError extends Error {

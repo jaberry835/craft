@@ -43,7 +43,7 @@ test('Edge capture session navigates and writes PNG evidence with provenance', a
     evaluate: async () => 5400,
     screenshot: async (options) => {
       screenshotClip = options.clip;
-      return Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+      return Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     }
   };
   const context: BrowserContextLike = {
@@ -70,7 +70,7 @@ test('Edge capture session navigates and writes PNG evidence with provenance', a
   assert.deepEqual(screenshotClip, { x: 0, y: 0, width: 1440, height: 2000 });
   assert.deepEqual(
     await readFile(path.join(projectRoot, 'evidence', 'screenshots', 'portal.png')),
-    Buffer.from([0x89, 0x50, 0x4e, 0x47])
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
   );
   const metadata = JSON.parse(await readFile(
     path.join(projectRoot, 'evidence', 'screenshots', 'portal.json'),

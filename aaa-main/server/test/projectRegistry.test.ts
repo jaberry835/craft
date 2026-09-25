@@ -26,12 +26,14 @@ test('managed projects are seeded, selected, collision-safe, and restored', asyn
   await mkdir(templatePackage, { recursive: true });
   await mkdir(path.join(templateRoot, '.github', 'agents'), { recursive: true });
   await mkdir(path.join(templateRoot, '.vscode'), { recursive: true });
+  await mkdir(path.join(templateRoot, 'evidence', 'screenshots'), { recursive: true });
   await writeFile(path.join(templatePackage, 'package-config.json'), JSON.stringify({
     packageName: 'Template',
     systemName: 'Template system'
   }), 'utf8');
   await writeFile(path.join(templateRoot, '.github', 'agents', 'builder.agent.md'), '# Builder\n', 'utf8');
   await writeFile(path.join(templateRoot, '.vscode', 'mcp.json'), '{"servers":{}}\n', 'utf8');
+  await writeFile(path.join(templateRoot, 'evidence', 'screenshots', 'README.md'), '# Screenshots\n', 'utf8');
   await mkdir(path.dirname(configPath), { recursive: true });
   await writeFile(configPath, JSON.stringify({
     activeProjectId: 'template',
@@ -60,16 +62,26 @@ test('managed projects are seeded, selected, collision-safe, and restored', asyn
     path.join(created.rootPath, '.github', 'agents', 'builder.agent.md'),
     'utf8'
   ), '# Builder\n');
+  assert.equal(
+    await readFile(path.join(created.rootPath, 'evidence', 'screenshots', 'README.md'), 'utf8'),
+    '# Screenshots\n'
+  );
 
   const collision = await registry.create({ name: 'FedRAMP Package' });
   assert.equal(collision.id, 'fedramp-package-2');
+  assert.equal(collision.managed, true);
   await registry.select('fedramp-package');
+  const afterDelete = await registry.delete('fedramp-package');
+  assert.equal(afterDelete.activeProjectId, 'fedramp-package-2');
+  assert.deepEqual(afterDelete.projects.map((project) => project.id), ['template', 'fedramp-package-2']);
+  await assert.rejects(() => readFile(path.join(created.rootPath, 'README.md'), 'utf8'), { code: 'ENOENT' });
+  await assert.rejects(() => registry.delete('template'), /Only projects created and managed by AAA/);
 
   const restored = await ProjectRegistry.load(configPath, { statePath, managedRoot });
-  assert.equal(restored.list().activeProjectId, 'fedramp-package');
+  assert.equal(restored.list().activeProjectId, 'fedramp-package-2');
   assert.deepEqual(
     restored.list().projects.map((project) => project.id),
-    ['template', 'fedramp-package', 'fedramp-package-2']
+    ['template', 'fedramp-package-2']
   );
 });
 

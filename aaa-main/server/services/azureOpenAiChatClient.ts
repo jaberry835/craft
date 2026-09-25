@@ -12,6 +12,7 @@ import type {
   ResolvedModelConnection
 } from '../modelTypes.js';
 import { AgentRunError } from '../httpErrors.js';
+import { log as logger } from '../logger.js';
 
 type Fetch = typeof globalThis.fetch;
 type JsonObject = Record<string, unknown>;
@@ -73,8 +74,8 @@ export class AzureOpenAiChatClient implements ModelChatClient {
   constructor(
     private readonly fetchImpl: Fetch = globalThis.fetch,
     private readonly credential: TokenCredentialLike = new DefaultAzureCredential(),
-    private readonly log: (message: string) => void = (message) => console.warn(message),
-    private readonly logError: (message: string) => void = (message) => console.error(message)
+    private readonly log: (message: string) => void = (message) => logger.warn('model', message.replace(/^\[model\]\s*/, '')),
+    private readonly logError: (message: string) => void = (message) => logger.error('model', message.replace(/^\[model\]\s*/, ''))
   ) {}
 
   /** The shape learned through adaptation for this connection, if any. */

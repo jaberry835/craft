@@ -4,6 +4,7 @@ export interface ProjectSummary {
   description?: string;
   rootPath: string;
   active: boolean;
+  managed: boolean;
 }
 
 export interface ProjectsResponse {
@@ -33,7 +34,36 @@ export interface ProjectCustomizations {
   items: CustomizationItem[];
 }
 
-export type EditableCustomizationKind = 'agent' | 'skill' | 'mcp-server' | 'tool';
+export type EditableCustomizationKind = 'agent' | 'skill' | 'mcp-server' | 'tool' | 'instruction';
+
+export type McpAuthType = 'none' | 'bearer' | 'header' | 'oauth' | 'entra';
+
+/** Placeholder returned instead of a literal secret; saving it back keeps the stored value. */
+export const maskedSecretValue = '********';
+
+/**
+ * Authentication for an HTTP MCP server, stored as `auth` in `.vscode/mcp.json`.
+ * Secret values should be `${env:NAME}` references; literal secrets are masked when read back.
+ */
+export interface McpAuthSettings {
+  type: McpAuthType;
+  /** bearer: the token sent as `Authorization: Bearer <token>`. */
+  token?: string;
+  /** header: header name (for example `x-api-key`) and value. */
+  headerName?: string;
+  value?: string;
+  /** oauth: client-credentials grant. */
+  tokenUrl?: string;
+  clientId?: string;
+  clientSecret?: string;
+  /** oauth or entra: requested scope, for example `api://my-mcp/.default`. */
+  scope?: string;
+  audience?: string;
+  /** entra: optional user-assigned managed identity, tenant, and sovereign-cloud authority host. */
+  managedIdentityClientId?: string;
+  tenantId?: string;
+  authorityHost?: string;
+}
 
 export interface CustomizationEditor {
   id?: string;
@@ -49,6 +79,9 @@ export interface CustomizationEditor {
   url?: string;
   command?: string;
   args?: string;
+  auth?: McpAuthSettings;
+  /** Instruction files: glob of project files the instructions apply to (empty = always). */
+  applyTo?: string;
   readOnly?: boolean;
 }
 
@@ -64,6 +97,8 @@ export interface SaveCustomizationRequest {
   url?: string;
   command?: string;
   args?: string;
+  auth?: McpAuthSettings;
+  applyTo?: string;
 }
 
 export interface SetCustomizationEnabledRequest {
@@ -261,6 +296,18 @@ export interface SessionCompaction {
   usage?: TokenUsage;
 }
 
+export interface AuthIdentity {
+  userId: string;
+  displayName: string;
+  username?: string;
+  tenantId?: string;
+  roles: string[];
+}
+
+export type AuthConfigResponse =
+  | { mode: 'none' }
+  | { mode: 'entra'; clientId: string; authority: string; scopes: string[]; redirectUri?: string };
+
 export interface AgentRun {
   id: string;
   status: AgentRunStatus;
@@ -275,6 +322,8 @@ export interface AgentRun {
   assistantText?: string;
   error?: string;
   usage?: RunUsage;
+  /** Signed-in user who started the run, when app sign-in is enabled. */
+  requestedBy?: { userId: string; displayName: string };
 }
 
 export interface ChatSessionSummary {

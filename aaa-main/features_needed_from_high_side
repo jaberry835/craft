@@ -1,5 +1,8 @@
 I wwas trying to pull from an mcp service over http, the tool itself needs to understand how to pull down 'files' or 'json' from an http endpoint.   It needs to understand over mcp in the loop that it can do this, reach out and grab things 
 
+Need to be able to delete files 
+
+
 The most often problem we are seeing is between how we interact with foundry/openai and differing endpoints.  If we had a screen like the config screen or even within the config screen to help debug these type of issues, basically bring up the connections,test. 
 
 I'd like mcp to expose the list of tools and parameters for each in the mcp config so we can see details.  
@@ -8,8 +11,34 @@ Add auth options to mcp --- auth should include none, oauth/token, bearer, entra
 
 Add auth to the application via entra, but for now make it optional.  You can use the C:\dev\junior-web as an example of how this works, but again, do not require it via an env variable so we turn auth for the app on and off.  
 
-tool selection when we add new tools, skills and agents, seems to want to filter out things, make sure when adding via either code or the ui, we are not filtering out tools or skills
+tool selection when we add new tools, skills and agents, seems to want to filter out things, make sure when adding via either code or the ui, we are not filtering out tools or skills.  This one keeps biting me in the butt, I added a tool, but the main loop code filters it out, this makes no sense from a workflow, we have limited tools and agents, if they are on they are on they should never be filtered.   
 
 I notice on the high side when I do the initial prompt, it waits for a response before displaying the chat interface, this is a bug that needs to be fixed, after you enter first prompt you must immediately show the output (reasoning, chat prompt etc).  for successive this seems to work
 
 Make sure if an mcp server is down it doesn't block the entire chat (just warn, and continue working) 
+
+Continue to add test for all these things 
+
+Lets add logging for key failures, especially in console for only error thing so we can help debug ourselves 
+
+I will also add a new feature that connects to the knowledbase you built, and launches another browser window side by side with chat that is connected to the project controls that we have created --- this other site we are targeting will have a series of input forms, we will use playwright to connect to this , and use our knowledgebase to help us input the proper answers in to the text boxes that are available on the screen, or upload files as needed for the artifacts.  
+
+We need to build in document handling , there will be word and excel files that are standard templates, and we will need to autaomate their creation, make sure these things exist in seperate (possible this could be an mcp server instead?).   If anyhting lets make sure we think through and keep this tight, and make sure it's really a seperate thing and less tightly integrated with some of the other pieces
+
+another VERY important feature is if I present an agent that works through a workflow, ie, asks the user to first do a cloud scan, then provide architecture documents are other backing, then ask about building a conops first, then buildout control set.  The agent loop should understand how to handle this type of agent that will help guide them through the process
+
+when hitting the go gbutton for capture feature, it should open edge by default and navigate to the site.   
+
+when there is an http link in the documentation we should be able to right click or bput a button next to it that will take you to grab a screen shot evidence using the tool we built in the app 
+
+
+I will need an option to delete a project 
+
+Once identiy is integrated the app lication will need to only show those that have access to the plans that they are working on.   
+
+We also need to template up add evidence as a directory --- once added we need to 
+
+We should add in the ability to connect to foundry agents from the agent setup, we have foundry agents high side.   
+
+when collecting images, they should always default to go in to an evidence directory.  
+

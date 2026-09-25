@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, readFile, rm } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { AaaAgentLoop } from '../aaaAgentLoop.js';
@@ -206,4 +206,114 @@ test('agent loop asks for context relief before the first request and counts it 
   assert.equal(result.usage.inputTokens, 5300);
   assert.equal(result.usage.promptTokens, 300);
   assert.equal(result.usage.peakInputTokens, 300);
+});
+
+test('delete_path deletes files and folders but protects AAA state and customizations', async () => {
+  await rm(root, { recursive: true, force: true });
+  await mkdir(path.join(root, 'drafts', 'old'), { recursive: true });
+  await mkdir(path.join(root, '.aaa'), { recursive: true });
+  await mkdir(path.join(root, '.github', 'agents'), { recursive: true });
+  await writeFile(path.join(root, 'notes.md'), '# Notes\n');
+  await writeFile(path.join(root, 'drafts', 'a.md'), 'a');
+  await writeFile(path.join(root, 'drafts', 'old', 'b.md'), 'b');
+  await writeFile(path.join(root, '.aaa', 'publication.json'), '{}');
+  await writeFile(path.join(root, '.github', 'agents', 'x.agent.md'), '---\nname: x\n---\n');
+  const outputs: string[] = [];
+  const calls = [
+    ['notes.md', undefined],
+    ['drafts', undefined],
+    ['drafts', true],
+    ['.aaa/publication.json', undefined],
+    ['.github', true],
+    ['drafts/../.aaa', true],
+    ['', true],
+    ['missing.md', undefined]
+  ] as const;
+  let round = 0;
+  const client: ModelChatClient = {
+    async *stream(_connection, messages) {
+      if (round > 0) outputs.push(messages.at(-1)?.content ?? '');
+      const next = calls[round];
+      round += 1;
+      if (next) {
+        yield {
+          type: 'tool_calls',
+          calls: [{ id: `d${round}`, type: 'function', function: { name: 'delete_path', arguments: JSON.stringify({ path: next[0], ...(next[1] ? { recursive: true } : {}) }) } }]
+        };
+      } else {
+        yield { type: 'assistant_text', text: 'Cleaned up.' };
+      }
+      yield { type: 'completed' };
+    }
+  };
+  try {
+    const result = await new AaaAgentLoop(client, new ProjectFileService(root)).run(
+      connection,
+      [{ role: 'user', content: 'Clean up drafts.' }],
+      new AbortController().signal
+    );
+    assert.equal(outputs[0], 'Deleted notes.md.');
+    assert.match(outputs[1]!, /drafts is a folder with 2 files; pass recursive: true/);
+    assert.equal(outputs[2], 'Deleted folder drafts (2 files).');
+    assert.match(outputs[3]!, /\.aaa\/publication\.json is protected/);
+    assert.match(outputs[4]!, /\.github is protected/);
+    assert.match(outputs[5]!, /\.aaa is protected/);
+    assert.match(outputs[6]!, /path is required/);
+    assert.match(outputs[7]!, /not found: missing\.md/);
+    await assert.rejects(() => readFile(path.join(root, 'notes.md')), /ENOENT/);
+    await assert.rejects(() => readFile(path.join(root, 'drafts', 'a.md')), /ENOENT/);
+    assert.equal(await readFile(path.join(root, '.aaa', 'publication.json'), 'utf8'), '{}');
+    assert.match(await readFile(path.join(root, '.github', 'agents', 'x.agent.md'), 'utf8'), /name: x/);
+    assert.deepEqual(result.changedFiles.sort(), ['drafts', 'notes.md']);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('agent writes into .aaa and .git are refused so review state cannot be forged', async () => {
+  await rm(root, { recursive: true, force: true });
+  await mkdir(path.join(root, '.aaa'), { recursive: true });
+  await mkdir(path.join(root, 'templates'), { recursive: true });
+  await writeFile(path.join(root, '.aaa', 'publication.json'), '{"reviewed":{}}\n');
+  await writeFile(path.join(root, 'templates', 'seed.md'), '# Seed\n');
+  const attempts = [
+    ['write_file', { path: '.aaa/publication.json', content: '{"reviewed":{"ssp.md":{"hash":"forged"}}}' }],
+    ['edit_file', { path: '.aaa/publication.json', oldString: '{}', newString: '{"x":1}' }],
+    ['write_file', { path: 'docs/../.aaa/customizations.json', content: '{}' }],
+    ['copy_path', { source: 'templates', destination: '.aaa/templates' }],
+    ['write_file', { path: '.git/config', content: '[core]' }],
+    ['write_file', { path: 'notes/allowed.md', content: '# Allowed\n' }]
+  ] as const;
+  const outputs: string[] = [];
+  let round = 0;
+  const client: ModelChatClient = {
+    async *stream(_connection, messages) {
+      if (round > 0) outputs.push(messages.at(-1)?.content ?? '');
+      const next = attempts[round];
+      round += 1;
+      if (next) {
+        yield { type: 'tool_calls', calls: [{ id: `w${round}`, type: 'function', function: { name: next[0], arguments: JSON.stringify(next[1]) } }] };
+      } else {
+        yield { type: 'assistant_text', text: 'Done.' };
+      }
+      yield { type: 'completed' };
+    }
+  };
+  try {
+    const result = await new AaaAgentLoop(client, new ProjectFileService(root)).run(
+      connection,
+      [{ role: 'user', content: 'Mark everything reviewed.' }],
+      new AbortController().signal
+    );
+    for (const output of outputs.slice(0, 5)) {
+      assert.match(output, /holds AAA review and customization state \(or version control data\) and cannot be changed by the agent/);
+    }
+    assert.equal(outputs[5], 'Created notes/allowed.md.');
+    assert.equal(await readFile(path.join(root, '.aaa', 'publication.json'), 'utf8'), '{"reviewed":{}}\n');
+    await assert.rejects(() => readFile(path.join(root, '.aaa', 'customizations.json')), /ENOENT/);
+    await assert.rejects(() => readFile(path.join(root, '.aaa', 'templates', 'seed.md')), /ENOENT/);
+    assert.deepEqual(result.changedFiles, ['notes/allowed.md']);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

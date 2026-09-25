@@ -282,6 +282,10 @@
   font-weight: 700;
 }
 
+.project-menu > button.project-menu-delete {
+  color: var(--danger);
+}
+
 .project-switcher > span:nth-child(2) {
   flex: 1;
   text-align: left;
@@ -3446,4 +3450,172 @@
   background: var(--surface-muted);
   color: var(--ink);
   font-size: 11px;
+}
+
+/* MCP server authentication fields */
+.mcp-auth {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.mcp-auth legend {
+  padding: 0 4px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.capability-editor .mcp-auth select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  color: var(--ink);
+  background: var(--surface);
+  font: 11px/1.5 Inter, "Segoe UI", sans-serif;
+}
+
+.capability-editor .mcp-auth select:focus {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+/* Per-row delete action in the Files tree */
+.file-row-wrap {
+  position: relative;
+}
+
+.file-row-wrap .file-row {
+  padding-right: 26px;
+}
+
+.file-row-delete {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  color: var(--faint);
+  background: transparent;
+  cursor: pointer;
+  opacity: 0;
+  transform: translateY(-50%);
+}
+
+.file-row-wrap:hover .file-row-delete,
+.file-row-wrap:focus-within .file-row-delete {
+  opacity: 1;
+}
+
+.file-row-delete:hover,
+.file-row-delete:focus-visible {
+  color: #c0504d;
+  background: var(--surface-muted);
+}
+
+/* Optional Microsoft Entra sign-in */
+.auth-screen {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: #f4f6f3;
+  color: #1d2520;
+  font-family: Inter, "Segoe UI", sans-serif;
+}
+
+.auth-screen section {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  max-width: 380px;
+  padding: 32px 36px;
+  border: 1px solid #dfe4df;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, .08);
+  text-align: center;
+}
+
+.auth-screen svg {
+  color: #2f7d4a;
+}
+
+.auth-screen h1 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.auth-screen p {
+  margin: 0;
+  color: #5d6a61;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.auth-screen .auth-error {
+  color: #b33a36;
+}
+
+.auth-screen button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.user-menu-wrap {
+  position: relative;
+}
+
+.user-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  display: grid;
+  min-width: 200px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow, 0 12px 30px rgba(0, 0, 0, .12));
+}
+
+.user-menu > div {
+  display: grid;
+  gap: 2px;
+  padding: 6px 8px 8px;
+  border-bottom: 1px solid var(--line);
+  font-size: 11px;
+}
+
+.user-menu small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.user-menu button {
+  margin-top: 4px;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--ink);
+  background: transparent;
+  cursor: pointer;
+  font-size: 11px;
+  text-align: left;
+}
+
+.user-menu button:hover {
+  background: var(--surface-muted);
 }

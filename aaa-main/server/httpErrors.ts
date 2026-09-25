@@ -51,3 +51,15 @@ export class AgentRunError extends Error {
     this.name = 'AgentRunError';
   }
 }
+
+export class AuthenticationError extends HttpError {
+  constructor(message = 'Sign in with Microsoft Entra to use AAA.', code = 'auth_required') {
+    super(message, 401, code);
+  }
+}
+
+export class AuthorizationError extends HttpError {
+  constructor(message = 'Your account does not have access to AAA.', code = 'forbidden') {
+    super(message, 403, code);
+  }
+}

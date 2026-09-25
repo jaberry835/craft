@@ -10,7 +10,9 @@ export const builtInToolCatalog = [
   { name: 'write_file', label: 'Write file', description: 'Create or replace supported project text files.', capability: 'edit' },
   { name: 'edit_file', label: 'Edit file', description: 'Apply a targeted exact-text replacement.', capability: 'edit' },
   { name: 'copy_path', label: 'Copy path', description: 'Copy template files or folders without overwriting existing files.', capability: 'edit' },
+  { name: 'delete_path', label: 'Delete path', description: 'Delete a project file or folder (folders need recursive; AAA state and customization folders are protected).', capability: 'edit' },
   { name: 'browser_capture', label: 'Browser capture', description: 'Launch Microsoft Edge, navigate to web pages, and save screenshot evidence.', capability: 'browser' },
+  { name: 'download_file', label: 'Download file', description: 'Save files or JSON from MCP servers (HTTP URLs on their hosts or MCP resource URIs) into the project.', capability: 'download' },
   { name: 'load_skill', label: 'Load skill', description: 'Load a project skill procedure when a request matches it.', capability: 'skills' }
 ] as const;
 

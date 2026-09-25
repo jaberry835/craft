@@ -123,9 +123,9 @@ test('files can be uploaded into project folders without overwriting existing co
   await mkdir(path.join(root, 'evidence'), { recursive: true });
   const service = new ProjectFileService(root);
   try {
-    const imageBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff]);
+    const imageBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff]);
     const uploaded = await service.uploadFile('evidence/screenshot.png', imageBytes.toString('base64'));
-    assert.deepEqual(uploaded, { path: 'evidence/screenshot.png', type: 'file', size: 6 });
+    assert.deepEqual(uploaded, { path: 'evidence/screenshot.png', type: 'file', size: 10 });
     assert.deepEqual(await readFile(path.join(root, 'evidence', 'screenshot.png')), imageBytes);
 
     const empty = await service.uploadFile('evidence/empty.txt', '');
@@ -275,6 +275,78 @@ test('supported images use fixed content types and unsafe SVG is rejected', asyn
     await assert.rejects(
       () => service.readImage('unsafe.svg'),
       (error: unknown) => error instanceof UnsupportedFileError && error.code === 'unsafe_svg'
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('concurrent review marking keeps every review and publishes only reviewed bytes', async () => {
+  const root = `${fixtureRoot}-review-race`;
+  await rm(root, { recursive: true, force: true });
+  await mkdir(root, { recursive: true });
+  const names = Array.from({ length: 12 }, (_value, index) => `control-${index}.md`);
+  await Promise.all(names.map((name) => writeFile(path.join(root, name), `# ${name}\n`, 'utf8')));
+  try {
+    // Separate service instances model concurrent requests.
+    await Promise.all(names.map((name) => new ProjectFileService(root).markReviewed(name)));
+    const state = JSON.parse(await readFile(path.join(root, '.aaa', 'publication.json'), 'utf8')) as {
+      reviewed: Record<string, unknown>;
+    };
+    assert.deepEqual(Object.keys(state.reviewed).sort(), [...names].sort());
+
+    const service = new ProjectFileService(root);
+    const opened = await service.readTextFile('control-0.md');
+    const [rendered] = await Promise.allSettled([
+      service.renderPublishedMarkdown('control-0.md'),
+      service.writeTextFile('control-0.md', '# Unreviewed edit\n', opened.updatedAt)
+    ]);
+    if (rendered.status === 'fulfilled') {
+      assert.match(rendered.value, /<h1>control-0\.md<\/h1>/);
+      assert.doesNotMatch(rendered.value, /Unreviewed edit/);
+    } else {
+      assert.ok(rendered.reason instanceof ConflictError && rendered.reason.code === 'review_required');
+    }
+    await assert.rejects(
+      () => service.renderPublishedMarkdown('control-0.md'),
+      (error: unknown) => error instanceof ConflictError && error.code === 'review_required'
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('uploads and saved files must match their extension, so disguised files are rejected', async () => {
+  const root = `${fixtureRoot}-signatures`;
+  await rm(root, { recursive: true, force: true });
+  await mkdir(root, { recursive: true });
+  const service = new ProjectFileService(root);
+  const upload = (name: string, content: Buffer) => service.uploadFile(name, content.toString('base64'));
+  const mismatch = (error: unknown) => error instanceof UnsupportedFileError && error.code === 'file_signature_mismatch';
+  const executable = Buffer.from('MZ\x90\x00\x03\x00 This program cannot be run in DOS mode', 'latin1');
+  const zip = (entry: string) => Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), Buffer.from(`....${entry}....`, 'latin1')]);
+  try {
+    await upload('ok.pdf', Buffer.from('%PDF-1.7\n'));
+    await upload('ok.jpg', Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00]));
+    await upload('ok.gif', Buffer.from('GIF89a....'));
+    await upload('ok.webp', Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WEBPVP8 ')]));
+    await upload('ok.docx', zip('[Content_Types].xml'));
+    await upload('ok.odt', zip('mimetypeapplication/vnd.oasis.opendocument.text'));
+    await upload('ok.xls', Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1, 0x00]));
+    await upload('ok.svg', Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>'));
+    await upload('ok.csv', Buffer.from('control,status\nAC-2,implemented\n'));
+
+    await assert.rejects(() => upload('invoice.pdf', executable), mismatch);
+    await assert.rejects(() => upload('photo.png', executable), mismatch);
+    await assert.rejects(() => upload('report.docx', zip('payload.exe')), mismatch);
+    await assert.rejects(() => upload('empty.png', Buffer.alloc(0)), mismatch);
+    await assert.rejects(() => upload('notes.md', Buffer.from([0x23, 0x00, 0x41])), mismatch);
+    await assert.rejects(() => upload('latin.txt', Buffer.from([0xff, 0xfe, 0x41])), mismatch);
+    await assert.rejects(() => upload('drawing.svg', Buffer.from('<html>not svg</html>')), mismatch);
+    await assert.rejects(() => service.saveNewFile('downloads/data.json', executable), mismatch);
+    await assert.rejects(
+      () => upload('invoice.pdf', executable),
+      /invoice\.pdf does not contain valid PDF data; its content does not match the \.pdf extension/
     );
   } finally {
     await rm(root, { recursive: true, force: true });

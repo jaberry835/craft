@@ -1,6 +1,7 @@
-import { cp, mkdir, readdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
+import { cp, mkdir, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { BadRequestError, ConflictError, NotFoundError } from './httpErrors.js';
+import { log } from './logger.js';
 import type { CreateProjectRequest, ProjectSummary, ProjectsResponse } from '../src/types/api.js';
 
 interface ProjectConfig {
@@ -70,7 +71,7 @@ export class ProjectRegistry {
         projectStats = await stat(project.rootPath);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-          console.warn(`[projects] Skipping project "${project.id}": root not found at ${project.rootPath}`);
+          log.warn('projects', 'Skipping configured project because its root folder was not found.', { project: project.id, rootPath: project.rootPath });
           continue;
         }
         throw error;
@@ -167,6 +168,30 @@ export class ProjectRegistry {
     return this.summary(project);
   }
 
+  async delete(projectId: string): Promise<ProjectsResponse> {
+    this.assertProjectId(projectId);
+    const index = this.projects.findIndex((candidate) => candidate.id === projectId);
+    if (index < 0) throw new NotFoundError(`Unknown project: ${projectId}`);
+    if (this.projects.length === 1) {
+      throw new ConflictError('The final project cannot be deleted.', 'last_project');
+    }
+    const project = this.projects[index]!;
+    if (!this.isManaged(project)) {
+      throw new BadRequestError(
+        'Only projects created and managed by AAA can be deleted.',
+        'project_deletion_not_allowed'
+      );
+    }
+
+    await rm(project.rootPath, { recursive: true, force: false });
+    this.projects.splice(index, 1);
+    if (this.activeProjectId === projectId) {
+      this.activeProjectId = this.projects[Math.min(index, this.projects.length - 1)]!.id;
+    }
+    await this.persist();
+    return this.list();
+  }
+
   /**
    * Copies the whole template root into the new project. When the template has no
    * `security-package/` folder, the package skeleton bundled with the
@@ -215,11 +240,7 @@ export class ProjectRegistry {
   private async persist(): Promise<void> {
     if (!this.statePath || !this.managedRoot) return;
     await mkdir(path.dirname(this.statePath), { recursive: true });
-    const managedRoot = path.resolve(this.managedRoot);
-    const managedProjects = this.projects.filter((project) => {
-      const relative = path.relative(managedRoot, project.rootPath);
-      return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
-    });
+    const managedProjects = this.projects.filter((project) => this.isManaged(project));
     await writeFile(this.statePath, `${JSON.stringify({
       activeProjectId: this.activeProjectId,
       projects: managedProjects
@@ -227,6 +248,17 @@ export class ProjectRegistry {
   }
 
   private summary(project: ProjectConfig): ProjectSummary {
-    return { ...project, active: project.id === this.activeProjectId };
+    return {
+      ...project,
+      active: project.id === this.activeProjectId,
+      managed: this.isManaged(project)
+    };
+  }
+
+  private isManaged(project: ProjectConfig): boolean {
+    if (!this.managedRoot) return false;
+    const managedRoot = path.resolve(this.managedRoot);
+    return path.dirname(path.resolve(project.rootPath)) === managedRoot
+      && path.basename(project.rootPath) === project.id;
   }
 }

@@ -85,9 +85,7 @@ test('workflow exposes agent instructions, skills, prompts, and agent-scoped too
   const agent = ProjectWorkflowService.resolveAgent(workflow);
   assert.equal(agent?.name, 'Security Package Builder');
   const tools = ProjectWorkflowService.selectTools(workflow, agent);
-  assert.deepEqual([...tools.builtIns].sort(), [
-    'browser_capture', 'copy_path', 'edit_file', 'list_files', 'load_skill', 'read_file', 'search_files', 'write_file'
-  ]);
+  assert.deepEqual([...tools.builtIns].sort(), builtInToolCatalog.map((tool) => tool.name).sort());
   assert.deepEqual(tools.mcpServers.map((server) => server.name), ['mcp-publisher']);
 
   const system = ProjectWorkflowService.systemPrompt({ projectName: 'Demo', agent, skills: workflow.skills, tools });
@@ -191,7 +189,7 @@ test('capability tests report built-in availability and list MCP tools without e
     async () => { throw new Error('connection refused with secret'); }
   );
   assert.equal(unavailable.ok, false);
-  assert.match(unavailable.summary, /connection test failed/);
+  assert.match(unavailable.summary, /connection test failed: MCP server evidence could not be reached at example\.test\./);
   assert.doesNotMatch(unavailable.summary, /secret/);
 
   const rejected = await service.testCapability('mcp-server:evidence', async (_input, init) => {

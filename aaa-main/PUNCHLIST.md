@@ -2,6 +2,8 @@
 
 This list tracks the path from the visual prototype to a working local A&A demo. Work is ordered around the core user loop first. Agent, skill, and MCP configuration popovers intentionally come later.
 
+High-side requirements are mapped to implementation commits and remaining work in [`HIGH_SIDE_FEATURE_STATUS.md`](./HIGH_SIDE_FEATURE_STATUS.md).
+
 ## Status key
 
 - `[x]` Complete
@@ -29,6 +31,7 @@ This list tracks the path from the visual prototype to a working local A&A demo.
 - [x] Bundle the reference project template in the repository (`templates/default-project`), replaceable with high-side agents, skills, and MCP configuration.
 - [x] Skip configured project roots that do not exist on this machine and create a starter project when none remain.
 - [x] Switch projects from the top bar and persist the active selection across restarts.
+- [x] Delete AAA-managed projects with confirmation while protecting configured roots and the final project.
 - [x] Keep runtime-created projects under ignored local data without rewriting tracked seed configuration.
 - [x] Enforce project-root path boundaries for every file operation.
 - [x] Persist local application data outside the assessed project files; per-project review and customization state lives in the project's `.aaa/` folder.
@@ -91,6 +94,7 @@ This list tracks the path from the visual prototype to a working local A&A demo.
 - [x] Show selected text files in Source.
 - [x] Add safe file create, rename, save, and delete operations.
 - [x] Upload one or more local files into the project root or a selected folder.
+- [x] Include an evidence directory in managed projects and default root-level image uploads to `evidence/screenshots/`.
 - [x] Drag local files onto the Files pane or a folder while preserving project boundaries.
 - [x] Reject duplicate names, excluded paths, unsupported types, and files larger than 10 MB.
 - [x] Add an editable Source view with `Ctrl S` / `Cmd S` save and optimistic concurrency.
@@ -143,7 +147,7 @@ This list tracks the path from the visual prototype to a working local A&A demo.
 - [x] Add friendly create/edit forms for agents, skills, MCP servers, and built-in tool availability.
 - [x] Store agent and skill changes in project Markdown and MCP changes in `.vscode/mcp.json`.
 - [x] Mark Instructions and Hooks as disabled coming-soon capabilities.
-- [ ] Add friendly create/edit forms for Instructions and Hooks.
+- [~] Add friendly create/edit forms for Instructions and Hooks (Instructions done: `copilot-instructions.md` and `*.instructions.md` with `applyTo` are discovered, toggleable, editable, and injected into runs; prompt files are toggleable and editable; Hooks remain coming soon).
 - [x] Test MCP server connections without exposing endpoint credentials.
 - [x] Replace permanent capability navigation with a compact Agent picker.
 - [x] Add Skills as a searchable composer popover (`/` prompts and skills).
@@ -164,7 +168,7 @@ This list tracks the path from the visual prototype to a working local A&A demo.
 - [x] Surface configured Cosmos failures without silently falling back to local session files.
 - [x] Add a credential-safe storage readiness endpoint for session and workspace-file backends.
 - [x] Report Junior-compatible blob settings as configured/ready but inactive until project-file storage is abstracted.
-- [~] Add browser tests for the core project/session/chat/file flow (Edge-driven first-prompt streaming test in `server/test/e2eChat.test.ts`; skipped without a client build or Edge).
+- [x] Add browser tests for the core project/session/chat/file flow (Edge-driven tests for first-prompt streaming, Files-tree deletion, the sign-in gate, and the full create → initialize → build → publish workflow; skipped without a client build or Edge).
 - [x] Verify light and dark visual contrast for the project and customization milestone.
 - [x] Verify a normal browser reload makes no unintended external runtime requests.
 - [x] Produce pinned dependency and offline installation guidance.
@@ -200,26 +204,31 @@ Findings from the air-gap code review that are intentionally postponed. Items al
 
 Security
 
-- [ ] Add authentication, per-project authorization, and CSRF/origin checks before binding beyond `127.0.0.1`.
-- [ ] Protect `.aaa/` review and customization state from agent writes (the agent can read and write dotfiles by design).
+- [~] Add authentication, per-project authorization, and CSRF/origin checks before binding beyond `127.0.0.1` (optional Entra sign-in, GET-only SameSite=Strict session cookie, and a refusal to bind non-loopback without sign-in are done; per-project authorization is not).
+- [x] Protect `.aaa/` review and customization state from agent writes (write, edit, copy, download, and delete tools refuse `.aaa/` and `.git/`).
 - [ ] Add an approval gate for consequential agent edits and treat tool results as untrusted in policy, not only in the prompt.
-- [ ] Validate uploaded file signatures, not just extensions, before preview or evidence use.
-- [ ] Render the published Web preview from the exact bytes that were hash-verified (currently read twice).
+- [x] Validate uploaded file signatures, not just extensions, before preview or evidence use (uploads, downloads, MCP files, and captures must match their extension's magic bytes or be valid UTF-8 text).
+- [x] Render the published Web preview from the exact bytes that were hash-verified (read once, then verified and rendered).
 
 Correctness
 
 - [x] Make Source-editor saves atomic for concurrent AAA requests (same-file saves are serialized, stale versions are rejected, and commits replace through a same-directory temporary file).
-- [ ] Add concurrency tests for simultaneous saves and review marking.
+- [x] Add concurrency tests for simultaneous saves and review marking (concurrent reviews previously lost updates; publication state is now serialized and written atomically).
 
 Packaging and offline install
 
-- [ ] Pin Node.js and npm versions (`engines`, `.nvmrc`); the locked Azure packages need Node 22 or later.
-- [ ] Move `vite` and `@vitejs/plugin-react` to `devDependencies` and document staging versus runtime installs.
-- [ ] Rehearse an offline install on the target OS/architecture, including `esbuild`'s platform binary.
+- [x] Pin Node.js and npm versions (`engines` `>=22.12.0 <25` / npm `>=10`, `.nvmrc` 24.15.0, and `.npmrc` `engine-strict=true`).
+- [x] Move `vite` and `@vitejs/plugin-react` to `devDependencies` and document staging versus runtime installs (`npm ci --omit=dev` runtime install verified to serve the API and built client).
+- [~] Rehearse an offline install on the target OS/architecture, including `esbuild`'s platform binary (rehearsed on Windows x64 with `npm ci --offline` from the local cache; repeat on the target machine).
 - [ ] Review tracked screenshots and stray files (`image.png`, `aaa-desktop.png`, `aaa-desktop-snapshot.yml`, `aaa-logo-update.png`, `background`) before transfer.
 
 MCP and harness
 
-- [ ] Support `stdio` MCP servers and `${input:...}` values, or keep them clearly marked unsupported.
+- [x] Support `stdio` MCP servers and `${input:...}` values, or keep them clearly marked unsupported (kept unsupported because AAA never launches processes; enabled servers that use them are reported as an agent step with the reason instead of being dropped).
 - [x] Add an MCP connection test in Project customizations.
-- [ ] Add a browser end-to-end test for create project → `/initialize-security-package` → `/build-security-package` → publish.
+- [x] Add MCP authentication (none, bearer, API key header, OAuth client credentials, Microsoft Entra) with env-referenced secrets, masking, token caching, and 401 refresh.
+- [x] Save files embedded in MCP results, surface resource links, and add a `download_file` tool for MCP resource URIs and MCP-host (or allow-listed) HTTP files and JSON.
+- [x] Delete files and folders from the Files tree, and add a `delete_path` agent tool that protects AAA state and customization folders.
+- [x] Add structured, redacted console logging for key failures (startup, runs, model, MCP, tools, compaction, storage, API routes, process) with `AAA_LOG_LEVEL`/`AAA_LOG_FORMAT`, plus browser-console API failure logging.
+- [x] Add optional Microsoft Entra sign-in for the web app (`AAA_AUTH_MODE=entra`, off by default) with token validation, app-role checks, sovereign-cloud authority, and run attribution.
+- [x] Add a browser end-to-end test for create project → `/initialize-security-package` → `/build-security-package` → publish (`server/test/e2eWorkflow.test.ts`, scripted model and fake MCP publisher).
