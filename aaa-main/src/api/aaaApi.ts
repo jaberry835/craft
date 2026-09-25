@@ -9,6 +9,7 @@ import type {
   ChatStreamRequest,
   ChatSession,
   ChatSessionSummary,
+  CapabilityTestResult,
   CustomizationItem,
   CustomizationEditor,
   CreateProjectRequest,
@@ -198,6 +199,11 @@ export const aaaApi = {
         method: 'PUT',
         body: JSON.stringify(request)
       }
+    ),
+  testCapability: (projectId: string, itemId: string) =>
+    requestJson<CapabilityTestResult>(
+      `${projectPath(projectId)}/customizations/${encodeURIComponent(itemId)}/test`,
+      { method: 'POST' }
     ),
   getWorkflow: (projectId: string) => requestJson<ProjectWorkflowSummary>(`${projectPath(projectId)}/workflow`),
   getFileTree: (projectId: string, includeHidden = false) =>

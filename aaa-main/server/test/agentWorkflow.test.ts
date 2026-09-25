@@ -136,6 +136,68 @@ test('new enabled MCP servers are exposed without editing existing agent tools',
   assert.equal(tools.allowMcpTool('dynamic-evidence', 'collect_evidence'), true);
 });
 
+test('capability tests report built-in availability and list MCP tools without exposing configuration', async (t) => {
+  await freshProject();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(path.join(root, '.vscode', 'mcp.json'), JSON.stringify({
+    servers: {
+      evidence: {
+        type: 'http',
+        url: 'https://example.test/mcp',
+        headers: { Authorization: 'Bearer ${env:MCP_TEST_TOKEN}' }
+      }
+    }
+  }), 'utf8');
+
+  const requests: string[] = [];
+  const fetchImpl: typeof fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as { id?: number; method: string };
+    requests.push(body.method);
+    if (body.method === 'notifications/initialized') return new Response(null, { status: 202 });
+    if (body.method === 'initialize') {
+      return Response.json({ jsonrpc: '2.0', id: body.id, result: { protocolVersion: '2025-06-18' } });
+    }
+    return Response.json({
+      jsonrpc: '2.0',
+      id: body.id,
+      result: { tools: [{ name: 'collect_evidence', description: 'Collect approved evidence.' }] }
+    });
+  };
+  const service = new ProjectWorkflowService('demo', root, { MCP_TEST_TOKEN: 'secret' });
+
+  const builtIn = await service.testCapability('tool:read-file', fetchImpl);
+  assert.equal(builtIn.ok, true);
+  assert.match(builtIn.summary, /registered and available/);
+
+  const mcp = await service.testCapability('mcp-server:evidence', fetchImpl);
+  assert.equal(mcp.ok, true);
+  assert.deepEqual(mcp.tools, [{ name: 'collect_evidence', description: 'Collect approved evidence.' }]);
+  assert.deepEqual(requests, ['initialize', 'notifications/initialized', 'tools/list']);
+  assert.doesNotMatch(JSON.stringify(mcp), /secret|example\.test/);
+
+  const unavailable = await service.testCapability(
+    'mcp-server:evidence',
+    async () => { throw new Error('connection refused with secret'); }
+  );
+  assert.equal(unavailable.ok, false);
+  assert.match(unavailable.summary, /connection test failed/);
+  assert.doesNotMatch(unavailable.summary, /secret/);
+
+  const rejected = await service.testCapability('mcp-server:evidence', async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as { id?: number; method: string };
+    if (body.method === 'initialize') {
+      return Response.json({
+        jsonrpc: '2.0',
+        id: body.id,
+        error: { code: -32000, message: 'Rejected Bearer secret-token' }
+      });
+    }
+    return new Response(null, { status: 202 });
+  });
+  assert.equal(rejected.ok, false);
+  assert.doesNotMatch(rejected.summary, /secret-token|Bearer/);
+});
+
 test('new enabled agents and skills are exposed without editing existing customizations', async (t) => {
   await freshProject();
   t.after(() => rm(root, { recursive: true, force: true }));

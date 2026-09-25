@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { BadRequestError, ConflictError, PathBoundaryError, UnsupportedFileError } from '../httpErrors.js';
@@ -83,6 +83,34 @@ test('text files can be created, conflict-protected, renamed, and deleted', asyn
     assert.deepEqual(
       await service.deletePath('renamed-directory'),
       { path: 'renamed-directory', type: 'directory' }
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('simultaneous source saves atomically accept one version and reject the stale version', async () => {
+  const root = `${fixtureRoot}-concurrent-save`;
+  await rm(root, { recursive: true, force: true });
+  await mkdir(root, { recursive: true });
+  try {
+    const firstService = new ProjectFileService(root);
+    const secondService = new ProjectFileService(root);
+    const opened = await firstService.createTextFile('source.md', '# Original\n');
+    const results = await Promise.allSettled([
+      firstService.writeTextFile(opened.path, '# First\n', opened.updatedAt),
+      secondService.writeTextFile(opened.path, '# Second\n', opened.updatedAt)
+    ]);
+
+    assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
+    const rejected = results.find((result) => result.status === 'rejected');
+    assert.ok(rejected?.status === 'rejected');
+    assert.ok(rejected.reason instanceof ConflictError);
+    assert.equal(rejected.reason.code, 'file_update_conflict');
+    assert.match(await readFile(path.join(root, 'source.md'), 'utf8'), /^# (First|Second)\n$/);
+    assert.deepEqual(
+      (await readdir(root)).filter((name) => name.endsWith('.tmp')),
+      []
     );
   } finally {
     await rm(root, { recursive: true, force: true });

@@ -127,6 +127,11 @@ export function createAaaApp({
     response.json(await new ProjectCustomizationService(id, registry.root(id))
       .setEnabled(String(request.params.itemId), body.enabled));
   });
+  app.post('/api/projects/:projectId/customizations/:itemId/test', async (request, response) => {
+    const id = projectId(request);
+    response.json(await new ProjectWorkflowService(id, registry.root(id))
+      .testCapability(String(request.params.itemId), mcpFetch));
+  });
   app.get('/api/projects/:projectId/workflow', async (request, response) => {
     const id = projectId(request);
     response.json(await new ProjectWorkflowService(id, registry.root(id)).summary());

@@ -70,6 +70,19 @@ export interface SetCustomizationEnabledRequest {
   enabled: boolean;
 }
 
+export interface CapabilityTestTool {
+  name: string;
+  description?: string;
+}
+
+export interface CapabilityTestResult {
+  itemId: string;
+  ok: boolean;
+  testedAt: string;
+  summary: string;
+  tools?: CapabilityTestTool[];
+}
+
 export type FileTreeNodeType = 'file' | 'directory';
 
 export interface FileTreeNode {

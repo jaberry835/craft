@@ -132,12 +132,12 @@ This list tracks the path from the visual prototype to a working local A&A demo.
 - [x] Store agent and skill changes in project Markdown and MCP changes in `.vscode/mcp.json`.
 - [x] Mark Instructions and Hooks as disabled coming-soon capabilities.
 - [ ] Add friendly create/edit forms for Instructions and Hooks.
-- [ ] Test MCP server connections without exposing endpoint credentials.
-- [~] Replace permanent capability navigation with a compact Agent picker (composer agent picker added; sidebar navigation remains).
+- [x] Test MCP server connections without exposing endpoint credentials.
+- [x] Replace permanent capability navigation with a compact Agent picker.
 - [x] Add Skills as a searchable composer popover (`/` prompts and skills).
-- [ ] Add MCP servers and tools as status/configuration popovers.
-- [ ] Add an evidence/context attachment popover.
-- [ ] Keep advanced editing behind secondary configuration views.
+- [x] Add MCP servers and tools as status/configuration popovers.
+- [x] Add an evidence/context attachment popover.
+- [x] Keep advanced editing behind secondary configuration views.
 
 **Acceptance criteria:** Agents, skills, MCP servers, tools, and evidence can be selected without navigating away from the conversation.
 
@@ -196,7 +196,7 @@ Security
 
 Correctness
 
-- [ ] Make Source-editor saves atomic compare-and-replace (the timestamp check and write are separate steps today).
+- [x] Make Source-editor saves atomic for concurrent AAA requests (same-file saves are serialized, stale versions are rejected, and commits replace through a same-directory temporary file).
 - [ ] Add concurrency tests for simultaneous saves and review marking.
 
 Packaging and offline install
@@ -209,5 +209,5 @@ Packaging and offline install
 MCP and harness
 
 - [ ] Support `stdio` MCP servers and `${input:...}` values, or keep them clearly marked unsupported.
-- [ ] Add an MCP connection test in Project customizations.
+- [x] Add an MCP connection test in Project customizations.
 - [ ] Add a browser end-to-end test for create project → `/initialize-security-package` → `/build-security-package` → publish.

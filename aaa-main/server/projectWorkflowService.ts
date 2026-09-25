@@ -1,8 +1,8 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { ProjectWorkflowSummary } from '../src/types/api.js';
+import type { CapabilityTestResult, ProjectWorkflowSummary } from '../src/types/api.js';
 import { parseMarkdown, ProjectCustomizationService, toolNames } from './projectCustomizationService.js';
-import type { McpServerConfig } from './services/mcpHttpClient.js';
+import { McpHttpClient, type McpServerConfig, type McpTool } from './services/mcpHttpClient.js';
 
 export const builtInToolNames = [
   'list_files',
@@ -174,6 +174,63 @@ export class ProjectWorkflowService {
         }))
       ],
       mcpServers: workflow.mcpServers.map(({ name, available, reason }) => ({ name, available, reason }))
+    };
+  }
+
+  async testCapability(
+    itemId: string,
+    fetchImpl: typeof globalThis.fetch = globalThis.fetch
+  ): Promise<CapabilityTestResult> {
+    const item = (await this.customizations.list()).items.find((candidate) => candidate.id === itemId);
+    if (!item || !['mcp-server', 'tool'].includes(item.kind)) {
+      throw new Error(`Capability testing is not supported for ${itemId}.`);
+    }
+    const testedAt = new Date().toISOString();
+    if (!item.enabled) {
+      return { itemId, ok: false, testedAt, summary: `${item.name} is disabled for this project.` };
+    }
+    if (item.kind === 'tool') {
+      const toolName = itemId.slice('tool:'.length).replace(/-/g, '_');
+      const registered = (builtInToolNames as readonly string[]).includes(toolName);
+      return {
+        itemId,
+        ok: registered,
+        testedAt,
+        summary: registered
+          ? `${item.name} is registered and available to project agents.`
+          : `${item.name} is not registered in this AAA runtime.`
+      };
+    }
+
+    const serverName = itemId.slice('mcp-server:'.length);
+    const server = (await this.mcpServers()).find((candidate) => candidate.name === serverName);
+    if (!server?.available) {
+      return {
+        itemId,
+        ok: false,
+        testedAt,
+        summary: server?.reason ?? `MCP server ${serverName} is not configured.`
+      };
+    }
+    let tools: McpTool[];
+    try {
+      tools = await new McpHttpClient(server, fetchImpl, 10_000).listTools();
+    } catch {
+      return {
+        itemId,
+        ok: false,
+        testedAt,
+        summary: `MCP server ${serverName} connection test failed. Check its endpoint, authentication, and server logs.`
+      };
+    }
+    return {
+      itemId,
+      ok: true,
+      testedAt,
+      summary: tools.length === 1
+        ? `Connected successfully. 1 tool is available.`
+        : `Connected successfully. ${tools.length} tools are available.`,
+      tools: tools.map(({ name, description }) => ({ name, description }))
     };
   }
 

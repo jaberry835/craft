@@ -1,6 +1,6 @@
 import { constants as fsConstants } from 'node:fs';
-import { copyFile, cp, lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { createHash } from 'node:crypto';
+import { copyFile, cp, lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as wait } from 'node:timers/promises';
 import path from 'node:path';
 import { BadRequestError, ConflictError, NotFoundError, PathBoundaryError, UnsupportedFileError } from './httpErrors.js';
@@ -38,6 +38,7 @@ const imageContentTypes = new Map([
   ['.svg', 'image/svg+xml'],
   ['.webp', 'image/webp']
 ]);
+const fileWriteQueues = new Map<string, Promise<void>>();
 
 interface PublicationState {
   reviewed: Record<string, { hash: string; reviewedAt: string }>;
@@ -81,6 +82,37 @@ async function renameWithRetry(source: string, destination: string): Promise<voi
       }
       await wait(attempt * 50);
     }
+  }
+}
+
+async function replaceWithRetry(source: string, destination: string): Promise<void> {
+  const attempts = process.platform === 'win32' ? 4 : 1;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await rename(source, destination);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (!['EPERM', 'EBUSY'].includes(code ?? '') || attempt === attempts) throw error;
+      await wait(attempt * 50);
+    }
+  }
+}
+
+async function withFileWriteLock<T>(absolutePath: string, operation: () => Promise<T>): Promise<T> {
+  const previous = fileWriteQueues.get(absolutePath) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const queued = previous.then(() => current);
+  fileWriteQueues.set(absolutePath, queued);
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (fileWriteQueues.get(absolutePath) === queued) fileWriteQueues.delete(absolutePath);
   }
 }
 
@@ -206,15 +238,33 @@ export class ProjectFileService {
       throw new BadRequestError('A valid updatedAt value is required.', 'updated_at_required');
     }
     const absolutePath = await this.resolveExistingPath(normalizedPath);
-    const fileStats = await stat(absolutePath);
-    if (!fileStats.isFile()) {
-      throw new BadRequestError(`Project path is not a file: ${normalizedPath}`, 'path_not_file');
-    }
-    if (fileStats.mtime.toISOString() !== updatedAt) {
-      throw new ConflictError('The file changed since it was opened.', 'file_update_conflict');
-    }
-    await writeFile(absolutePath, content, 'utf8');
-    return this.readTextFile(normalizedPath);
+    return withFileWriteLock(absolutePath, async () => {
+      const fileStats = await stat(absolutePath);
+      if (!fileStats.isFile()) {
+        throw new BadRequestError(`Project path is not a file: ${normalizedPath}`, 'path_not_file');
+      }
+      if (fileStats.mtime.toISOString() !== updatedAt) {
+        throw new ConflictError('The file changed since it was opened.', 'file_update_conflict');
+      }
+
+      const temporaryPath = path.join(
+        path.dirname(absolutePath),
+        `.${path.basename(absolutePath)}.${randomUUID()}.tmp`
+      );
+      try {
+        await writeFile(temporaryPath, content, { encoding: 'utf8', flag: 'wx' });
+        const committedMtime = new Date(Math.max(Date.now(), fileStats.mtimeMs + 1));
+        await utimes(temporaryPath, committedMtime, committedMtime);
+        const currentStats = await stat(absolutePath);
+        if (!currentStats.isFile() || currentStats.mtime.toISOString() !== updatedAt) {
+          throw new ConflictError('The file changed since it was opened.', 'file_update_conflict');
+        }
+        await replaceWithRetry(temporaryPath, absolutePath);
+      } finally {
+        await rm(temporaryPath, { force: true });
+      }
+      return this.readTextFile(normalizedPath);
+    });
   }
 
   async createTextFile(
