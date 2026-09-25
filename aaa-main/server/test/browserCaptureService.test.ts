@@ -32,6 +32,14 @@ test('Edge capture session navigates and writes PNG evidence with provenance', a
   let closed = false;
   let closeListener = () => {};
   let screenshotClip: { x: number; y: number; width: number; height: number } | undefined;
+  let attachedFileName = '';
+  let filledSelector = '';
+  let filledValue = '';
+  let reverseFields = false;
+  const fields = [
+    { id: 'field-narrative1', label: 'Control narrative', name: 'narrative', type: 'textarea', required: true, disabled: false },
+    { id: 'field-artifact01', label: 'Supporting artifact', name: 'artifact', type: 'file', required: false, disabled: false }
+  ];
   const page: BrowserPageLike = {
     url: () => currentUrl,
     goto: async (url) => {
@@ -40,7 +48,26 @@ test('Edge capture session navigates and writes PNG evidence with provenance', a
       return { status: () => response.status };
     },
     viewportSize: () => ({ width: 1440, height: 1000 }),
-    evaluate: async () => 5400,
+    evaluate: async (expression) => {
+      if (expression.includes('return elements.map')) {
+        return reverseFields ? [...fields].reverse() : fields;
+      }
+      return 5400;
+    },
+    locator: (selector) => ({
+      count: async () => 1,
+      fill: async (value) => {
+        filledSelector = selector;
+        filledValue = value;
+      },
+      check: async () => {},
+      uncheck: async () => {},
+      selectOption: async () => [],
+      setInputFiles: async (file) => {
+        filledSelector = selector;
+        attachedFileName = file.name;
+      }
+    }),
     screenshot: async (options) => {
       screenshotClip = options.clip;
       return Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -101,5 +128,21 @@ test('Edge capture session navigates and writes PNG evidence with provenance', a
       maximumViewportHeights: 2
     }
   );
+  const form = await service.inspectForm('demo');
+  assert.equal(form.sourceUrl, target);
+  assert.deepEqual(form.fields.map((field) => field.type), ['textarea', 'file']);
+  reverseFields = true;
+  assert.equal((await service.fillForm('demo', {
+    values: { 'field-narrative1': 'Grounded response' }
+  })).fields.length, 2);
+  assert.equal(filledSelector, '[data-aaa-field-id="field-narrative1"]');
+  assert.equal(filledValue, 'Grounded response');
+  await new ProjectFileService(projectRoot).createTextFile('evidence/control.txt', 'Supporting evidence');
+  await service.uploadFormFile('demo', new ProjectFileService(projectRoot), {
+    fieldId: 'field-artifact01',
+    projectPath: 'evidence/control.txt'
+  });
+  assert.equal(filledSelector, '[data-aaa-field-id="field-artifact01"]');
+  assert.equal(attachedFileName, 'control.txt');
   assert.deepEqual(await service.close('demo'), { active: false });
 });

@@ -66,12 +66,14 @@ import { signOut } from './auth';
 import type { SignedInUser } from './authGate';
 import { contextEstimate, formatTokens, sessionUsage, sessionUsageTitle } from './usageMath';
 import { resolveUploadDestination } from './uploadDestination';
+import { evidenceCapturePath } from './evidenceLinks';
 import type {
   ChatMessage,
   ChatMessageDisplayPart,
   ChatSession,
   ChatSessionSummary,
   BrowserCaptureResult,
+  BrowserFormSnapshot,
   BrowserSessionStatus,
   CapabilityTestResult,
   CustomizationEditor,
@@ -289,6 +291,8 @@ function MessageDetails({
                         ? <Sparkles size={13} />
                         : event.type === 'mcp'
                           ? <Plug size={13} />
+                          : event.type === 'agent'
+                            ? <Bot size={13} />
                           : event.type === 'context'
                             ? <Layers size={13} />
                             : <FileCheck2 size={13} />}
@@ -335,6 +339,9 @@ function App({ user }: { user?: SignedInUser } = {}) {
   const [browserHeadless, setBrowserHeadless] = useState(false);
   const [browserOutputPath, setBrowserOutputPath] = useState('');
   const [browserCapture, setBrowserCapture] = useState<BrowserCaptureResult | null>(null);
+  const [browserForm, setBrowserForm] = useState<BrowserFormSnapshot | null>(null);
+  const [browserFormValues, setBrowserFormValues] = useState<Record<string, string | boolean>>({});
+  const [browserFormUploads, setBrowserFormUploads] = useState<Record<string, string>>({});
   const [browserBusy, setBrowserBusy] = useState(false);
   const [publicationStatus, setPublicationStatus] = useState<PublicationStatus | null>(null);
   const [isReviewingFile, setIsReviewingFile] = useState(false);
@@ -357,6 +364,7 @@ function App({ user }: { user?: SignedInUser } = {}) {
   const [customizationEditorOpen, setCustomizationEditorOpen] = useState(false);
   const [customizationEditorError, setCustomizationEditorError] = useState('');
   const [isSavingCustomization, setIsSavingCustomization] = useState(false);
+  const [updatingCustomizationIds, setUpdatingCustomizationIds] = useState<Set<string>>(() => new Set());
   const [capabilityTests, setCapabilityTests] = useState<Record<string, CapabilityTestResult>>({});
   const [testingCapabilityId, setTestingCapabilityId] = useState('');
   const [sessionSearch, setSessionSearch] = useState('');
@@ -393,6 +401,7 @@ function App({ user }: { user?: SignedInUser } = {}) {
   const streamAbortRef = useRef<AbortController | null>(null);
   const pendingFileActionRef = useRef<(() => void) | null>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
+  const customizationUpdatesRef = useRef(new Set<string>());
   const activeProject = projects.find((project) => project.id === activeProjectId);
   const messages = activeSession?.messages ?? [];
   const showConversation = messages.length > 0 || isThinking || pendingUserMessage !== null;
@@ -758,7 +767,17 @@ function App({ user }: { user?: SignedInUser } = {}) {
           ? { transport: 'http', url: '', auth: { type: 'none' } }
           : kind === 'instruction'
             ? { instructions: '', applyTo: '' }
-            : { instructions: '', argumentHint: '', ...(kind === 'agent' ? { tools: '' } : {}) })
+          : {
+            instructions: '',
+            argumentHint: '',
+            ...(kind === 'agent' ? {
+              tools: '',
+              foundryEndpointEnv: '',
+              foundryAuthMode: 'entra' as const,
+              foundryApiKeyEnv: '',
+              foundryCredentialScope: ''
+            } : {})
+          })
       });
       return;
     }
@@ -785,6 +804,10 @@ function App({ user }: { user?: SignedInUser } = {}) {
         instructions: customizationDraft.instructions,
         argumentHint: customizationDraft.argumentHint,
         tools: customizationDraft.tools,
+        foundryEndpointEnv: customizationDraft.foundryEndpointEnv,
+        foundryAuthMode: customizationDraft.foundryAuthMode,
+        foundryApiKeyEnv: customizationDraft.foundryApiKeyEnv,
+        foundryCredentialScope: customizationDraft.foundryCredentialScope,
         transport: customizationDraft.transport,
         url: customizationDraft.url,
         command: customizationDraft.command,
@@ -816,21 +839,24 @@ function App({ user }: { user?: SignedInUser } = {}) {
   ]);
 
   const toggleCustomization = useCallback(async (item: CustomizationItem) => {
-    if (!activeProjectId) return;
+    if (!activeProjectId || customizationUpdatesRef.current.has(item.id)) return;
+    customizationUpdatesRef.current.add(item.id);
+    setUpdatingCustomizationIds(new Set(customizationUpdatesRef.current));
     setCustomizationEditorError('');
     try {
-      const updated = await aaaApi.setCustomizationEnabled(activeProjectId, item.id, {
+      await aaaApi.setCustomizationEnabled(activeProjectId, item.id, {
         enabled: !item.enabled
       });
-      setCustomizationItems((current) => current.map((candidate) =>
-        candidate.id === item.id ? updated : candidate));
-      setWorkflow(await aaaApi.getWorkflow(activeProjectId));
+      await refreshCustomizations();
     } catch (toggleError) {
       setCustomizationEditorError(toggleError instanceof Error
         ? toggleError.message
         : 'Could not update this capability.');
+    } finally {
+      customizationUpdatesRef.current.delete(item.id);
+      setUpdatingCustomizationIds(new Set(customizationUpdatesRef.current));
     }
-  }, [activeProjectId]);
+  }, [activeProjectId, refreshCustomizations]);
 
   const testCapability = useCallback(async (item: CustomizationItem) => {
     if (!activeProjectId || testingCapabilityId) return;
@@ -937,12 +963,59 @@ function App({ user }: { user?: SignedInUser } = {}) {
     setError('');
     try {
       setBrowserStatus(await aaaApi.navigateBrowser(activeProjectId, { url: browserUrl }));
+      setBrowserForm(null);
+      setBrowserFormValues({});
     } catch (browserError) {
       setError(browserError instanceof Error ? browserError.message : 'Could not navigate Microsoft Edge.');
     } finally {
       setBrowserBusy(false);
     }
   }, [activeProjectId, browserBusy, browserUrl]);
+
+  const inspectBrowserForm = useCallback(async () => {
+    if (!activeProjectId || browserBusy) return;
+    setBrowserBusy(true);
+    setError('');
+    try {
+      const snapshot = await aaaApi.inspectBrowserForm(activeProjectId);
+      setBrowserForm(snapshot);
+      setBrowserFormValues({});
+      setBrowserFormUploads({});
+    } catch (browserError) {
+      setError(browserError instanceof Error ? browserError.message : 'Could not inspect the browser form.');
+    } finally {
+      setBrowserBusy(false);
+    }
+  }, [activeProjectId, browserBusy]);
+
+  const fillBrowserForm = useCallback(async () => {
+    if (!activeProjectId || browserBusy || Object.keys(browserFormValues).length === 0) return;
+    setBrowserBusy(true);
+    setError('');
+    try {
+      setBrowserForm(await aaaApi.fillBrowserForm(activeProjectId, { values: browserFormValues }));
+      setBrowserFormValues({});
+    } catch (browserError) {
+      setError(browserError instanceof Error ? browserError.message : 'Could not fill the browser form.');
+    } finally {
+      setBrowserBusy(false);
+    }
+  }, [activeProjectId, browserBusy, browserFormValues]);
+
+  const uploadBrowserFormFile = useCallback(async (fieldId: string) => {
+    const projectPath = browserFormUploads[fieldId]?.trim();
+    if (!activeProjectId || browserBusy || !projectPath) return;
+    setBrowserBusy(true);
+    setError('');
+    try {
+      setBrowserForm(await aaaApi.uploadBrowserFormFile(activeProjectId, { fieldId, projectPath }));
+      setBrowserFormUploads((current) => ({ ...current, [fieldId]: '' }));
+    } catch (browserError) {
+      setError(browserError instanceof Error ? browserError.message : 'Could not attach the project artifact.');
+    } finally {
+      setBrowserBusy(false);
+    }
+  }, [activeProjectId, browserBusy, browserFormUploads]);
 
   const captureBrowser = useCallback(async () => {
     if (!activeProjectId || browserBusy) return;
@@ -962,12 +1035,40 @@ function App({ user }: { user?: SignedInUser } = {}) {
     }
   }, [activeProjectId, browserBusy, browserOutputPath, refreshFiles]);
 
+  const prepareEvidenceCapture = useCallback(async (href: string) => {
+    const outputPath = evidenceCapturePath(href);
+    if (!activeProjectId || browserBusy || !outputPath) {
+      if (!outputPath) setError('Only absolute HTTP and HTTPS links can be captured as evidence.');
+      return;
+    }
+    setBrowserBusy(true);
+    setError('');
+    setArtifactTab('browser');
+    setRightOpen(true);
+    setBrowserUrl(href);
+    setBrowserOutputPath(outputPath);
+    setBrowserForm(null);
+    setBrowserFormValues({});
+    try {
+      const status = browserStatus.active
+        ? await aaaApi.navigateBrowser(activeProjectId, { url: href })
+        : await aaaApi.launchBrowser(activeProjectId, { headless: browserHeadless, url: href });
+      setBrowserStatus(status);
+    } catch (browserError) {
+      setError(browserError instanceof Error ? browserError.message : 'Could not open the evidence link in Microsoft Edge.');
+    } finally {
+      setBrowserBusy(false);
+    }
+  }, [activeProjectId, browserBusy, browserHeadless, browserStatus.active]);
+
   const closeBrowser = useCallback(async () => {
     if (!activeProjectId || browserBusy) return;
     setBrowserBusy(true);
     setError('');
     try {
       setBrowserStatus(await aaaApi.closeBrowser(activeProjectId));
+      setBrowserForm(null);
+      setBrowserFormValues({});
     } catch (browserError) {
       setError(browserError instanceof Error ? browserError.message : 'Could not close Microsoft Edge.');
     } finally {
@@ -1728,9 +1829,10 @@ function App({ user }: { user?: SignedInUser } = {}) {
                 <ContextMeter
                   context={currentContext}
                   contextWindow={modelStatus?.contextWindow}
+                  usage={totalUsage}
                   threshold={modelStatus?.compactThreshold ?? 0.8}
                   busy={isCompacting}
-                  disabled={!activeSession?.messages.length || isThinking || !modelStatus?.ready}
+                  compactDisabled={!activeSession?.messages.length || isThinking || !modelStatus?.ready}
                   onCompact={() => void compactConversation()}
                 />
                 <span title={modelStatus?.missing.join(', ')}>
@@ -1955,7 +2057,33 @@ function App({ user }: { user?: SignedInUser } = {}) {
                       : selectedFile
                       ? isJsonSelected
                         ? <JsonPreview content={editorContent} />
-                        : <ReactMarkdown remarkPlugins={[remarkGfm]}>{editorContent}</ReactMarkdown>
+                        : (
+                          <ReactMarkdown
+                            remarkPlugins={[remarkGfm]}
+                            components={{
+                              a: ({ href, children }) => {
+                                const capturable = Boolean(href && evidenceCapturePath(href));
+                                return (
+                                  <span className="evidence-link">
+                                    <a href={href} target="_blank" rel="noreferrer">{children}</a>
+                                    {capturable && (
+                                      <button
+                                        type="button"
+                                        title="Open in Edge for screenshot evidence"
+                                        aria-label={`Capture screenshot evidence from ${href}`}
+                                        onClick={() => void prepareEvidenceCapture(href!)}
+                                      >
+                                        <ImageIcon size={12} /> Capture
+                                      </button>
+                                    )}
+                                  </span>
+                                );
+                              }
+                            }}
+                          >
+                            {editorContent}
+                          </ReactMarkdown>
+                        )
                       : <p>Select a Markdown file from Files to preview it.</p>}
                   </div>
                 )}
@@ -2033,6 +2161,89 @@ function App({ user }: { user?: SignedInUser } = {}) {
                           : <button className="secondary-button" disabled={browserBusy} onClick={() => void closeBrowser()}><X size={14} /> Close Edge</button>}
                         <small>HTTP and HTTPS addresses are allowed. Credentials remain in the project-scoped Edge profile and are never stored in package artifacts.</small>
                       </div>
+                      {browserStatus.active && (
+                        <div className="browser-form-assistant">
+                          <div>
+                            <strong>Knowledge form assistant</strong>
+                            <button className="secondary-button" disabled={browserBusy} onClick={() => void inspectBrowserForm()}>
+                              <RefreshCw size={14} /> Inspect fields
+                            </button>
+                          </div>
+                          <small>Review and fill visible fields in Edge. AAA never submits the form; submission remains a user action in the browser.</small>
+                          {browserForm && (
+                            <>
+                              <div className="browser-form-fields">
+                                {browserForm.fields.length === 0 && <span>No visible form fields were found.</span>}
+                                {browserForm.fields.map((field) => (
+                                  <label key={field.id}>
+                                    <span>{field.label}{field.required ? ' *' : ''}</span>
+                                    {field.type === 'file' ? (
+                                      <div className="browser-form-upload">
+                                        <input
+                                          value={browserFormUploads[field.id] ?? ''}
+                                          disabled={field.disabled || browserBusy}
+                                          onChange={(event) => setBrowserFormUploads((current) => ({
+                                            ...current,
+                                            [field.id]: event.target.value
+                                          }))}
+                                          placeholder="Project-relative artifact path"
+                                        />
+                                        <button
+                                          className="secondary-button"
+                                          disabled={field.disabled || browserBusy || !(browserFormUploads[field.id]?.trim())}
+                                          onClick={() => void uploadBrowserFormFile(field.id)}
+                                        >
+                                          Attach
+                                        </button>
+                                      </div>
+                                    ) : field.type === 'checkbox' || field.type === 'radio' ? (
+                                      <input
+                                        type="checkbox"
+                                        checked={Boolean(browserFormValues[field.id])}
+                                        disabled={field.disabled || browserBusy}
+                                        onChange={(event) => setBrowserFormValues((current) => ({
+                                          ...current,
+                                          [field.id]: event.target.checked
+                                        }))}
+                                      />
+                                    ) : field.options ? (
+                                      <select
+                                        value={String(browserFormValues[field.id] ?? '')}
+                                        disabled={field.disabled || browserBusy}
+                                        onChange={(event) => setBrowserFormValues((current) => ({
+                                          ...current,
+                                          [field.id]: event.target.value
+                                        }))}
+                                      >
+                                        <option value="">Choose a value</option>
+                                        {field.options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                                      </select>
+                                    ) : (
+                                      <textarea
+                                        value={String(browserFormValues[field.id] ?? '')}
+                                        disabled={field.disabled || field.type === 'password' || browserBusy}
+                                        onChange={(event) => setBrowserFormValues((current) => ({
+                                          ...current,
+                                          [field.id]: event.target.value
+                                        }))}
+                                        placeholder={field.type === 'password' ? 'Password fields are not filled by AAA' : field.name}
+                                        rows={2}
+                                      />
+                                    )}
+                                  </label>
+                                ))}
+                              </div>
+                              <button
+                                className="dialog-primary"
+                                disabled={browserBusy || Object.keys(browserFormValues).length === 0}
+                                onClick={() => void fillBrowserForm()}
+                              >
+                                Fill reviewed values
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      )}
                       {browserCapture && (
                         <button
                           className="browser-capture-result"
@@ -2247,7 +2458,9 @@ function App({ user }: { user?: SignedInUser } = {}) {
                       <div className="customization-list">
                         {filteredCustomizations.map((item) => {
                           const testResult = capabilityTests[item.id];
-                          const testable = item.kind === 'mcp-server' || item.kind === 'tool';
+                          const testable = item.kind === 'mcp-server'
+                            || item.kind === 'tool'
+                            || (item.kind === 'agent' && item.detail?.startsWith('Foundry Responses endpoint:'));
                           return (
                           <article key={item.id} className={testResult ? 'has-diagnostic' : ''}>
                             <div>
@@ -2297,6 +2510,7 @@ function App({ user }: { user?: SignedInUser } = {}) {
                               <button
                                 className={`toggle ${item.enabled ? 'on' : ''}`}
                                 aria-label={`${item.enabled ? 'Disable' : 'Enable'} ${item.name}`}
+                                disabled={updatingCustomizationIds.has(item.id)}
                                 onClick={() => void toggleCustomization(item)}
                               >
                                 <span />
@@ -2441,16 +2655,93 @@ function App({ user }: { user?: SignedInUser } = {}) {
                         </label>
                       )}
                       {customizationDraft.kind === 'agent' && (
-                        <label>
-                          Declared tools
-                          <input
-                            value={customizationDraft.tools ?? ''}
-                            placeholder="read, search, edit, mcp-publisher/*"
-                            onChange={(event) => setCustomizationDraft((current) =>
-                              current ? { ...current, tools: event.target.value } : current)}
-                          />
-                          <small>Kept in the agent file for VS Code compatibility. AAA gives every agent all enabled tools; use the Tools and MCP Servers toggles to control availability.</small>
-                        </label>
+                        <>
+                          <label>
+                            Declared tools
+                            <input
+                              value={customizationDraft.tools ?? ''}
+                              placeholder="read, search, edit, mcp-publisher/*"
+                              onChange={(event) => setCustomizationDraft((current) =>
+                                current ? { ...current, tools: event.target.value } : current)}
+                            />
+                            <small>Kept in the agent file for VS Code compatibility. AAA gives every local agent all enabled tools.</small>
+                          </label>
+                          <fieldset className="transport-picker">
+                            <legend>Agent runtime</legend>
+                            <button
+                              type="button"
+                              className={!customizationDraft.foundryEndpointEnv ? 'active' : ''}
+                              onClick={() => setCustomizationDraft((current) => current ? {
+                                ...current,
+                                foundryEndpointEnv: '',
+                                foundryApiKeyEnv: '',
+                                foundryCredentialScope: ''
+                              } : current)}
+                            >
+                              <Bot size={16} /><span><strong>AAA local loop</strong><small>Use the configured model, project tools, skills, and MCP servers.</small></span>
+                            </button>
+                            <button
+                              type="button"
+                              className={customizationDraft.foundryEndpointEnv ? 'active' : ''}
+                              onClick={() => setCustomizationDraft((current) => current ? {
+                                ...current,
+                                foundryEndpointEnv: current.foundryEndpointEnv || 'FOUNDRY_AGENT_ENDPOINT',
+                                foundryAuthMode: current.foundryAuthMode || 'entra'
+                              } : current)}
+                            >
+                              <Cloud size={16} /><span><strong>Microsoft Foundry agent</strong><small>Delegate chat to a full Responses protocol endpoint.</small></span>
+                            </button>
+                          </fieldset>
+                          {customizationDraft.foundryEndpointEnv && (
+                            <>
+                              <label>
+                                Full Responses endpoint environment variable
+                                <input
+                                  value={customizationDraft.foundryEndpointEnv}
+                                  placeholder="FOUNDRY_AGENT_ENDPOINT"
+                                  onChange={(event) => setCustomizationDraft((current) =>
+                                    current ? { ...current, foundryEndpointEnv: event.target.value } : current)}
+                                />
+                                <small>The environment variable must contain the complete HTTPS invocation URL. Secrets and endpoint values are not stored in the agent file.</small>
+                              </label>
+                              <label>
+                                Authentication
+                                <select
+                                  value={customizationDraft.foundryAuthMode ?? 'entra'}
+                                  onChange={(event) => setCustomizationDraft((current) => current ? {
+                                    ...current,
+                                    foundryAuthMode: event.target.value as 'entra' | 'api-key'
+                                  } : current)}
+                                >
+                                  <option value="entra">Microsoft Entra / managed identity</option>
+                                  <option value="api-key">API key</option>
+                                </select>
+                              </label>
+                              {customizationDraft.foundryAuthMode === 'api-key' && (
+                                <label>
+                                  API-key environment variable
+                                  <input
+                                    value={customizationDraft.foundryApiKeyEnv ?? ''}
+                                    placeholder="FOUNDRY_AGENT_API_KEY"
+                                    onChange={(event) => setCustomizationDraft((current) =>
+                                      current ? { ...current, foundryApiKeyEnv: event.target.value } : current)}
+                                  />
+                                </label>
+                              )}
+                              {customizationDraft.foundryAuthMode !== 'api-key' && (
+                                <label>
+                                  Token scope
+                                  <input
+                                    value={customizationDraft.foundryCredentialScope ?? ''}
+                                    placeholder="https://ai.azure.com/.default"
+                                    onChange={(event) => setCustomizationDraft((current) =>
+                                      current ? { ...current, foundryCredentialScope: event.target.value } : current)}
+                                  />
+                                </label>
+                              )}
+                            </>
+                          )}
+                        </>
                       )}
                       <label>
                         Instructions

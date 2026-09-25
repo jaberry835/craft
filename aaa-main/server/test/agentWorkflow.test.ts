@@ -118,6 +118,30 @@ test('disabled customizations are removed from the tool surface', async (t) => {
   assert.equal(workflow.skills.some((skill) => skill.id === 'collect-artifact-links'), false);
 });
 
+test('MCP availability refreshes after each enable and disable toggle', async (t) => {
+  await freshProject();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const customizations = new ProjectCustomizationService('demo', root);
+  const workflowService = new ProjectWorkflowService('demo', root);
+
+  const initial = await workflowService.load();
+  assert.deepEqual(
+    ProjectWorkflowService.selectTools(initial).mcpServers.map((server) => server.name),
+    ['mcp-publisher']
+  );
+
+  await customizations.setEnabled('mcp-server:mcp-publisher', false);
+  const disabled = await workflowService.load();
+  assert.deepEqual(ProjectWorkflowService.selectTools(disabled).mcpServers, []);
+
+  await customizations.setEnabled('mcp-server:mcp-publisher', true);
+  const reenabled = await workflowService.load();
+  assert.deepEqual(
+    ProjectWorkflowService.selectTools(reenabled).mcpServers.map((server) => server.name),
+    ['mcp-publisher']
+  );
+});
+
 test('new enabled MCP servers are exposed without editing existing agent tools', async (t) => {
   await freshProject();
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -220,6 +244,7 @@ test('new enabled agents and skills are exposed without editing existing customi
     instructions: '# Dynamic Reviewer\n\nReview only grounded project evidence.',
     enabled: true
   });
+
   await customizations.create({
     kind: 'skill',
     name: 'Dynamic Evidence Review',
@@ -248,6 +273,35 @@ test('new enabled agents and skills are exposed without editing existing customi
     command.kind === 'skill' && command.name === 'dynamic-evidence-review'));
   assert.equal(tools.builtIns.has('load_skill'), true);
   assert.match(system, /- dynamic-evidence-review: Reviews evidence added after project creation\./);
+});
+
+test('Foundry agent settings round-trip through agent setup and workflow loading', async (t) => {
+  await freshProject();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const customizations = new ProjectCustomizationService('demo', root);
+  const editor = await customizations.create({
+    kind: 'agent',
+    name: 'Remote Assessor',
+    description: 'Runs the high-side Foundry assessor.',
+    enabled: true,
+    instructions: 'Delegate assessment requests to the configured remote agent.',
+    foundryEndpointEnv: 'FOUNDRY_AGENT_ENDPOINT',
+    foundryAuthMode: 'api-key',
+    foundryApiKeyEnv: 'FOUNDRY_AGENT_API_KEY'
+  });
+  assert.equal(editor.foundryEndpointEnv, 'FOUNDRY_AGENT_ENDPOINT');
+  assert.equal(editor.foundryApiKeyEnv, 'FOUNDRY_AGENT_API_KEY');
+
+  const workflow = await new ProjectWorkflowService('demo', root, {
+    FOUNDRY_AGENT_ENDPOINT: 'https://agents.example.test/responses',
+    FOUNDRY_AGENT_API_KEY: 'secret'
+  }).load();
+  const agent = workflow.agents.find((candidate) => candidate.id === 'remote-assessor');
+  assert.deepEqual(agent?.foundry, {
+    endpointEnv: 'FOUNDRY_AGENT_ENDPOINT',
+    authMode: 'api-key',
+    apiKeyEnv: 'FOUNDRY_AGENT_API_KEY'
+  });
 });
 
 test('initialize skill runs through load_skill and copy_path without scripts', async (t) => {

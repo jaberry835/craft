@@ -61,6 +61,7 @@ High-side requirements are mapped to implementation commits and remaining work i
 - [x] Run a bounded model-driven agent loop with safe project file list, read, create, replace, and targeted edit tools.
 - [x] Bound each run by rounds, tool calls, and wall-clock time with actionable limit errors.
 - [x] Load project agents, skills, prompts, and HTTP MCP servers into the harness the same way VS Code agent mode does.
+- [x] Refresh the workflow and serialize capability toggles so MCP servers are added to or removed from the next agent run immediately.
 - [x] Add search, template copy, and load-skill tools; create missing parent folders on agent writes.
 - [x] Connect HTTP MCP servers from `.vscode/mcp.json` with `aaa-file:` references for sending project files.
 - [x] Repair double-escaped newlines in model-written Markdown and report output-token truncation instead of saving partial files.
@@ -72,7 +73,7 @@ High-side requirements are mapped to implementation commits and remaining work i
 - [x] Add `npm run model:probe` to verify plain chat, tool definitions, and tool-result replay per API and recommend settings for a new environment.
 - [x] Add a Model connection diagnostics panel (resolved settings, per-API URLs, check timings, errors, adaptation, copyable recommendation) and list MCP tool parameters in connection tests.
 - [x] Retry 429, 408, transient 5xx, and network failures with `Retry-After`-aware, abortable backoff.
-- [x] Track input, cached-input, output, and reasoning tokens per request, run, and session, with live usage in the chat, a context meter, and status-bar totals.
+- [x] Track input, cached-input, output, and reasoning tokens per request, run, and session, with live usage in the chat, status-bar totals, and a compact session-info/context popover with a manual compaction action.
 - [x] Add `/compact [focus]` and automatic threshold-based compaction that keeps the visible transcript and stores structured summaries per session.
 - [x] Trim the oldest already-seen tool outputs inside long runs before they overflow the configured context window.
 - [ ] Add optional per-deployment pricing (per 1M input, cached-input, and output tokens) to show estimated run and session cost.
@@ -117,6 +118,8 @@ High-side requirements are mapped to implementation commits and remaining work i
 - [x] Add project-scoped persistent Playwright sessions that launch installed Microsoft Edge visibly by default.
 - [x] Add optional headless mode and explicit Edge channel/executable configuration.
 - [x] Add Web-tab launch, navigation, capture, close, status, and recent-capture controls.
+- [x] Add an action beside HTTP(S) links in rendered Markdown that opens Edge, navigates to the target, and prefills a screenshot-evidence path without auto-capturing.
+- [x] Inspect visible fields in the active Edge page, fill user-reviewed values, and attach validated project artifacts without auto-submitting forms.
 - [x] Restrict navigation to user-entered absolute HTTP and HTTPS addresses.
 - [x] Save top-of-page PNG captures capped at two viewport heights, with adjacent JSON source URL, timestamp, browser-mode, viewport, and capture metadata.
 - [x] Expose deterministic browser operations to agents through `browser_capture` and a reference capture skill.
@@ -145,8 +148,9 @@ High-side requirements are mapped to implementation commits and remaining work i
 - [x] Add friendly category navigation, counts, search, status, and enable toggles.
 - [x] Persist enabled/disabled customization choices per project and apply them to the agent's tool surface.
 - [x] Add friendly create/edit forms for agents, skills, MCP servers, and built-in tool availability.
+- [x] Configure project agents to delegate chat to environment-referenced Microsoft Foundry Responses endpoints with Entra or API-key authentication.
 - [x] Store agent and skill changes in project Markdown and MCP changes in `.vscode/mcp.json`.
-- [x] Mark Instructions and Hooks as disabled coming-soon capabilities.
+- [x] Keep Hooks visibly disabled as a coming-soon capability until execution and approval policy is implemented.
 - [~] Add friendly create/edit forms for Instructions and Hooks (Instructions done: `copilot-instructions.md` and `*.instructions.md` with `applyTo` are discovered, toggleable, editable, and injected into runs; prompt files are toggleable and editable; Hooks remain coming soon).
 - [x] Test MCP server connections without exposing endpoint credentials.
 - [x] Replace permanent capability navigation with a compact Agent picker.
@@ -204,7 +208,7 @@ Findings from the air-gap code review that are intentionally postponed. Items al
 
 Security
 
-- [~] Add authentication, per-project authorization, and CSRF/origin checks before binding beyond `127.0.0.1` (optional Entra sign-in, GET-only SameSite=Strict session cookie, and a refusal to bind non-loopback without sign-in are done; per-project authorization is not).
+- [x] Add authentication, per-project authorization, and CSRF/origin protections before binding beyond `127.0.0.1` (optional Entra sign-in, GET-only SameSite=Strict session cookie, non-loopback protection, external ACL state, filtered project listings, and project-route enforcement).
 - [x] Protect `.aaa/` review and customization state from agent writes (write, edit, copy, download, and delete tools refuse `.aaa/` and `.git/`).
 - [ ] Add an approval gate for consequential agent edits and treat tool results as untrusted in policy, not only in the prompt.
 - [x] Validate uploaded file signatures, not just extensions, before preview or evidence use (uploads, downloads, MCP files, and captures must match their extension's magic bytes or be valid UTF-8 text).

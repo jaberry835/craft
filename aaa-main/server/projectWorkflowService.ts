@@ -5,6 +5,7 @@ import { resolveMcpAuth } from './mcpAuth.js';
 import { parseMarkdown, ProjectCustomizationService, toolNames } from './projectCustomizationService.js';
 import { markMcpServerHealthy, McpHttpClient, type McpServerConfig, type McpTool } from './services/mcpHttpClient.js';
 import { builtInToolItemId, builtInToolNameFromItemId, builtInToolNames, type BuiltInToolName } from './builtInTools.js';
+import { FoundryAgentClient, type FoundryAgentConnection } from './services/foundryAgentClient.js';
 
 export { builtInToolNames, type BuiltInToolName } from './builtInTools.js';
 
@@ -19,6 +20,7 @@ export interface WorkflowAgent {
    * They never narrow the tool surface: every enabled tool is available to every agent.
    */
   tools?: string[];
+  foundry?: FoundryAgentConnection;
   sourcePath: string;
 }
 
@@ -115,6 +117,14 @@ export class ProjectWorkflowService {
           argumentHint: parsed.metadata['argument-hint'] || undefined,
           instructions: parsed.body,
           tools: parsed.metadata.tools !== undefined ? toolNames(parsed.metadata.tools) : undefined,
+          ...(parsed.metadata['foundry-endpoint-env'] ? {
+            foundry: {
+              endpointEnv: parsed.metadata['foundry-endpoint-env'],
+              authMode: parsed.metadata['foundry-auth'] === 'api-key' ? 'api-key' : 'entra',
+              ...(parsed.metadata['foundry-api-key-env'] ? { apiKeyEnv: parsed.metadata['foundry-api-key-env'] } : {}),
+              ...(parsed.metadata['foundry-credential-scope'] ? { credentialScope: parsed.metadata['foundry-credential-scope'] } : {})
+            }
+          } : {}),
           sourcePath: item.sourcePath
         });
       } else if (item.kind === 'skill' && item.enabled) {
@@ -164,7 +174,13 @@ export class ProjectWorkflowService {
   async summary(): Promise<ProjectWorkflowSummary> {
     const workflow = await this.load();
     return {
-      agents: workflow.agents.map(({ id, name, description, argumentHint }) => ({ id, name, description, argumentHint })),
+      agents: workflow.agents.map(({ id, name, description, argumentHint, foundry }) => ({
+        id,
+        name,
+        description,
+        argumentHint,
+        ...(foundry ? { remote: 'foundry' as const } : {})
+      })),
       commands: [
         ...workflow.prompts.map((prompt) => ({
           name: prompt.id,
@@ -190,7 +206,7 @@ export class ProjectWorkflowService {
     fetchImpl: typeof globalThis.fetch = globalThis.fetch
   ): Promise<CapabilityTestResult> {
     const item = (await this.customizations.list()).items.find((candidate) => candidate.id === itemId);
-    if (!item || !['mcp-server', 'tool'].includes(item.kind)) {
+    if (!item || !['mcp-server', 'tool', 'agent'].includes(item.kind)) {
       throw new Error(`Capability testing is not supported for ${itemId}.`);
     }
     const testedAt = new Date().toISOString();
@@ -208,6 +224,31 @@ export class ProjectWorkflowService {
           ? `${item.name} is registered and available to project agents.`
           : `${item.name} is not registered in this AAA runtime.`
       };
+    }
+    if (item.kind === 'agent') {
+      const workflow = await this.load();
+      const agent = workflow.agents.find((candidate) => candidate.sourcePath === item.sourcePath);
+      if (!agent?.foundry) {
+        throw new Error(`Capability testing is not supported for local agent ${item.name}.`);
+      }
+      try {
+        const status = new FoundryAgentClient(this.environment, fetchImpl).status(agent.foundry);
+        return {
+          itemId,
+          ok: status.ready,
+          testedAt,
+          summary: status.ready
+            ? `Foundry Responses endpoint and ${agent.foundry.authMode} authentication settings are resolved. Test chat invocation to verify remote access.`
+            : `Foundry connection is missing: ${status.missing.join(', ')}.`
+        };
+      } catch (error) {
+        return {
+          itemId,
+          ok: false,
+          testedAt,
+          summary: error instanceof Error ? error.message : 'Foundry connection is invalid.'
+        };
+      }
     }
 
     const serverName = itemId.slice('mcp-server:'.length);

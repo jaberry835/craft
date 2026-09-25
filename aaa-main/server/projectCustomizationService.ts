@@ -165,7 +165,13 @@ export class ProjectCustomizationService {
       sourcePath: item.sourcePath,
       instructions: parsed.body,
       argumentHint: parsed.metadata['argument-hint'] ?? '',
-      ...(kind === 'agent' ? { tools: toolNames(parsed.metadata.tools).join(', ') } : {})
+      ...(kind === 'agent' ? {
+        tools: toolNames(parsed.metadata.tools).join(', '),
+        foundryEndpointEnv: parsed.metadata['foundry-endpoint-env'] ?? '',
+        foundryAuthMode: parsed.metadata['foundry-auth'] === 'api-key' ? 'api-key' : 'entra',
+        foundryApiKeyEnv: parsed.metadata['foundry-api-key-env'] ?? '',
+        foundryCredentialScope: parsed.metadata['foundry-credential-scope'] ?? ''
+      } : {})
     };
   }
 
@@ -297,7 +303,9 @@ export class ProjectCustomizationService {
           enabled: true,
           status: 'ready',
           sourcePath: relativePath,
-          ...(metadata.tools ? { detail: `Tools: ${metadata.tools}` } : {})
+          ...(metadata['foundry-endpoint-env']
+            ? { detail: `Foundry Responses endpoint: \${env:${metadata['foundry-endpoint-env']}}` }
+            : metadata.tools ? { detail: `Tools: ${metadata.tools}` } : {})
         } satisfies CustomizationItem;
       }));
   }
@@ -409,7 +417,13 @@ function updateMarkdown(content: string, input: SaveCustomizationRequest, source
     description: input.description,
     'argument-hint': input.argumentHint ?? ''
   };
-  if (input.kind === 'agent') metadata.tools = toolList(input.tools);
+  if (input.kind === 'agent') {
+    metadata.tools = toolList(input.tools);
+    metadata['foundry-endpoint-env'] = input.foundryEndpointEnv ?? '';
+    metadata['foundry-auth'] = input.foundryEndpointEnv ? input.foundryAuthMode ?? 'entra' : '';
+    metadata['foundry-api-key-env'] = input.foundryAuthMode === 'api-key' ? input.foundryApiKeyEnv ?? '' : '';
+    metadata['foundry-credential-scope'] = input.foundryCredentialScope ?? '';
+  }
   if (input.kind === 'instruction' && sourcePath.toLowerCase().endsWith('.instructions.md')) {
     metadata.applyTo = input.applyTo ?? '';
   }
@@ -431,6 +445,10 @@ function createMarkdown(input: SaveCustomizationRequest): string {
   };
   if (input.kind === 'agent') {
     metadata.tools = toolList(input.tools);
+    metadata['foundry-endpoint-env'] = input.foundryEndpointEnv ?? '';
+    metadata['foundry-auth'] = input.foundryEndpointEnv ? input.foundryAuthMode ?? 'entra' : '';
+    metadata['foundry-api-key-env'] = input.foundryAuthMode === 'api-key' ? input.foundryApiKeyEnv ?? '' : '';
+    metadata['foundry-credential-scope'] = input.foundryCredentialScope ?? '';
     metadata.agents = '[]';
     metadata['user-invocable'] = 'true';
   }
@@ -502,6 +520,17 @@ function validateRequest(request: SaveCustomizationRequest): SaveCustomizationRe
   } else if (request.kind !== 'tool' && !request.instructions?.trim()) {
     throw new BadRequestError('Capability instructions are required.', 'customization_instructions_required');
   }
+  if (request.kind === 'agent' && request.foundryEndpointEnv) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(request.foundryEndpointEnv.trim())) {
+      throw new BadRequestError('Foundry endpoint must reference an environment variable name.', 'invalid_foundry_endpoint_env');
+    }
+    if (request.foundryAuthMode !== 'entra' && request.foundryAuthMode !== 'api-key') {
+      throw new BadRequestError('Choose Entra or API-key authentication for the Foundry agent.', 'invalid_foundry_auth');
+    }
+    if (request.foundryAuthMode === 'api-key' && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(request.foundryApiKeyEnv?.trim() ?? '')) {
+      throw new BadRequestError('API-key Foundry agents require an API-key environment variable name.', 'invalid_foundry_api_key_env');
+    }
+  }
   return {
     ...request,
     name,
@@ -509,6 +538,10 @@ function validateRequest(request: SaveCustomizationRequest): SaveCustomizationRe
     instructions: request.instructions?.trim(),
     argumentHint: request.argumentHint?.trim().slice(0, 500),
     tools: request.tools?.trim().slice(0, 1000),
+    foundryEndpointEnv: request.foundryEndpointEnv?.trim().slice(0, 200),
+    foundryAuthMode: request.foundryEndpointEnv ? request.foundryAuthMode : undefined,
+    foundryApiKeyEnv: request.foundryApiKeyEnv?.trim().slice(0, 200),
+    foundryCredentialScope: request.foundryCredentialScope?.trim().slice(0, 500),
     applyTo: request.applyTo?.trim().slice(0, 500),
     url: request.url?.trim().slice(0, 2000),
     command: request.command?.trim().slice(0, 1000),

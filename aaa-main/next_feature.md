@@ -1,3 +1,15 @@
+# Archived Feature Request
+
+Status: implemented. This file preserves the original request; current status and remaining work are tracked in [`HIGH_SIDE_FEATURE_STATUS.md`](./HIGH_SIDE_FEATURE_STATUS.md) and [`PUNCHLIST.md`](./PUNCHLIST.md).
+
+- Visible Microsoft Edge capture, persistent project profiles, provenance, and the `browser_capture` tool: complete.
+- Safe SVG/image preview and the architecture/CONOPS generation skill: complete.
+- Dark-mode and JSON preview fixes: complete.
+- Pinned capability/project-customization controls: complete.
+- Dynamic interactive architecture diagrams from cloud-scan output: still deferred in the punch list.
+
+## Original request
+
 I've got the next set of features... .  I verified that I can use playwright in node, and would like to build a skill or tool (whatever is right) that lanunches edge (in a non-headless state, because I will need to auth), and be able to capture images from specific web addresses .  I need it to be configurable to know that it must use edge and be headless with playright --- so this is playwright embeded in this app so that it can launch (or show the web in our web tab) and capture images for use as artifacts.  
 
 
@@ -10,4 +22,3 @@ We must fix dark mode, as many of the text preview boxes don't show correctly an
 So far things seem to be working well locally with mcp, so I have hope that this will work once moved... 
 
 I'd like to make a ui fix, to always pin the capabilities to the bottom of the first column next to the project customizations.   
-

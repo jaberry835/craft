@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { ChevronDown, Gauge, Layers } from 'lucide-react';
@@ -23,44 +24,106 @@ export function UsageLine({ usage, live = false }: { usage: RunUsage; live?: boo
 export function ContextMeter({
   context,
   contextWindow,
+  usage,
   threshold,
   busy,
-  disabled,
+  compactDisabled,
   onCompact
 }: {
   context?: { tokens: number; approximate: boolean };
   contextWindow?: number;
+  usage?: RunUsage;
   threshold: number;
   busy: boolean;
-  disabled: boolean;
+  compactDisabled: boolean;
   onCompact: () => void;
 }) {
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
   const share = context && contextWindow ? Math.min(1, context.tokens / contextWindow) : undefined;
   const level = share === undefined ? '' : share >= threshold ? 'high' : share >= threshold * 0.75 ? 'medium' : '';
   const label = context
     ? `${context.approximate ? '~' : ''}${formatTokens(context.tokens)}${contextWindow ? ` / ${formatTokens(contextWindow)}` : ''}`
     : 'No usage yet';
-  const title = [
-    context ? `Context used by the latest request: ${context.approximate ? 'about ' : ''}${context.tokens.toLocaleString()} tokens.` : 'No measured request yet.',
-    contextWindow
-      ? `Configured window ${contextWindow.toLocaleString()} tokens; auto-compaction at ${Math.round(threshold * 100)}%.`
-      : 'Set contextWindow in config/agent-connections.json to enable the meter and auto-compaction.',
-    'Click to compact the conversation now (or type /compact).'
-  ].join('\n');
+  const percentage = share === undefined ? undefined : Math.round(share * 100);
+  const cachedShare = usage && usage.inputTokens > 0
+    ? Math.round((usage.cachedInputTokens / usage.inputTokens) * 100)
+    : 0;
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const closeOutside = (event: PointerEvent) => {
+      if (!containerRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('pointerdown', closeOutside);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeOutside);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [open]);
+
   return (
-    <button
-      className={`context-meter ${level}`}
-      onClick={onCompact}
-      disabled={disabled || busy}
-      title={title}
-      aria-label={`Context ${label}. Compact conversation`}
-    >
-      <Layers size={12} />
-      {share !== undefined && (
-        <span className="context-meter-bar" aria-hidden="true"><i style={{ width: `${Math.max(3, share * 100)}%` }} /></span>
+    <div className="context-meter-shell" ref={containerRef}>
+      <button
+        className={`context-meter ${level}`}
+        onClick={() => setOpen((current) => !current)}
+        title="View session token and context details"
+        aria-label={`Context ${label}. View session info`}
+        aria-expanded={open}
+        aria-haspopup="dialog"
+      >
+        <Layers size={12} />
+        {share !== undefined && (
+          <span className="context-meter-bar" aria-hidden="true"><i style={{ width: `${Math.max(3, share * 100)}%` }} /></span>
+        )}
+        <span>{label}</span>
+        <ChevronDown size={11} className={open ? 'context-meter-chevron open' : 'context-meter-chevron'} />
+      </button>
+      {open && (
+        <div className="session-info-popover" role="dialog" aria-label="Session token information">
+          <h3>Session Info</h3>
+          <section>
+            <div className="session-info-heading">
+              <span>Session Tokens</span>
+              <strong>{usage ? `${usage.estimated ? '~' : ''}${formatTokens(usage.totalTokens)}` : '—'}</strong>
+            </div>
+            <dl className="session-token-grid">
+              <div><dt>Input</dt><dd>{usage ? formatTokens(usage.inputTokens) : '—'}</dd></div>
+              <div><dt>Cached input</dt><dd>{usage ? `${formatTokens(usage.cachedInputTokens)}${cachedShare ? ` (${cachedShare}%)` : ''}` : '—'}</dd></div>
+              <div><dt>Output</dt><dd>{usage ? formatTokens(usage.outputTokens) : '—'}</dd></div>
+              <div><dt>Reasoning</dt><dd>{usage ? formatTokens(usage.reasoningTokens) : '—'}</dd></div>
+              <div><dt>Model requests</dt><dd>{usage?.requests ?? '—'}</dd></div>
+            </dl>
+          </section>
+          <section>
+            <div className="session-info-heading">
+              <span>Context Window</span>
+              <strong>{percentage === undefined ? 'Not configured' : `${percentage}%`}</strong>
+            </div>
+            <div className="session-context-value">{label} tokens</div>
+            <div className={`session-context-bar ${level}`} aria-hidden="true">
+              <i style={{ width: `${Math.max(share === undefined ? 0 : 3, (share ?? 0) * 100)}%` }} />
+            </div>
+            <small>
+              {contextWindow
+                ? `Automatic compaction at ${Math.round(threshold * 100)}% of the configured window.`
+                : 'Set contextWindow in the model connection to enable context limits and automatic compaction.'}
+            </small>
+          </section>
+          <button
+            className="session-compact-button"
+            onClick={onCompact}
+            disabled={compactDisabled || busy}
+          >
+            {busy ? 'Compacting Conversation…' : 'Compact Conversation'}
+          </button>
+        </div>
       )}
-      <span>{busy ? 'Compacting…' : label}</span>
-    </button>
+    </div>
   );
 }
 

@@ -90,6 +90,8 @@ Built-in tools are `list_files`, `read_file`, `search_files`, `write_file`, `edi
 
 The composer Agent picker is the primary agent-selection surface and links to advanced project settings. **Project customizations** shows every built-in tool, provides safe availability tests, and can test HTTP MCP connections while listing the tools they expose without returning endpoint credentials. The composer’s **Add evidence** menu attaches project-file references as explicitly untrusted context. When the selected agent inspects a reference through its project tools, that file content may be sent to the configured model provider.
 
+The compact context indicator beside the composer opens **Session Info** with session input, cached-input, output, and reasoning tokens; model-request count; current context-window use; and the automatic-compaction threshold. **Compact Conversation** is available inside that popover and performs the same reviewed summary operation as `/compact`.
+
 MCP tool calls may pass `aaa-file:<project-relative-path>` as any string argument; AAA substitutes that file's text before calling the server, so the model can publish many Markdown files without re-typing them. Only `http` MCP servers are supported (not `stdio`); header values may use `${env:NAME}`, but `${input:...}` prompts are not supported.
 
 A down MCP server never blocks the chat. Servers are contacted in parallel with a short connect timeout (`AAA_MCP_CONNECT_TIMEOUT_MS`, default 8 s); one that fails is shown as an "MCP server unavailable" step, logged to the server console, and the run continues with the remaining tools. A failed server is skipped without waiting for `AAA_MCP_RETRY_AFTER_MS` (default 60 s), and a successful **Test connection** in Project customizations clears that immediately. Tool calls use a longer timeout (`AAA_MCP_TOOL_TIMEOUT_MS`, default 120 s); a failed call is returned to the model as an error so it can continue.
@@ -141,13 +143,16 @@ App sign-in is off by default (`AAA_AUTH_MODE=none`), and AAA then listens only 
 | `AAA_ENTRA_API_AUDIENCE` | no | Accepted token audience; defaults to `api://<client-id>`. |
 | `AAA_ENTRA_SCOPES` | no | Delegated scopes the browser requests; defaults to `api://<client-id>/access_as_user`. |
 | `AAA_ENTRA_ALLOWED_ROLES` | no | Comma-separated app roles; when set, users need one of them (otherwise any account in the tenant). |
+| `AAA_PROJECT_ADMIN_ROLES` | no | Comma-separated app roles allowed to view and administer every project ACL. |
 | `AAA_ENTRA_ISSUERS` | no | Override accepted token issuers (defaults accept v2 `<authority>/<tenant>/v2.0` and v1 `https://sts.windows.net/<tenant>/`). |
 | `AAA_ENTRA_REDIRECT_URI` | no | Redirect URI registered for the SPA; defaults to the page origin. |
 | `AAA_HOST` | no | Listen address (default `127.0.0.1`). A non-loopback address is refused unless `AAA_AUTH_MODE=entra`. |
 
 App registration: add a **Single-page application** platform with the AAA URL as a redirect URI (for example `http://localhost:5173` and the deployed origin), **Expose an API** with the Application ID URI `api://<client-id>` and a delegated scope `access_as_user`, and optionally define app roles (for example `AAA.User`) and list them in `AAA_ENTRA_ALLOWED_ROLES`.
 
-How it works: the browser signs in with MSAL (loaded only when sign-in is on) and sends a bearer token with every API call; the server validates the signature against the tenant's published keys, the issuer, audience, expiry, and roles. Images, the published Web preview, and "open in new tab" cannot send headers, so the browser exchanges its token for an HttpOnly, `SameSite=Strict` session cookie scoped to `/api` that is accepted **only for GET/HEAD** requests; every state-changing request still requires the bearer token. Each run records who started it (`requestedBy`), and failed runs are logged with the user. Per-project authorization is not implemented yet: any allowed user can open every configured project.
+How it works: the browser signs in with MSAL (loaded only when sign-in is on) and sends a bearer token with every API call; the server validates the signature against the tenant's published keys, the issuer, audience, expiry, and roles. Images, the published Web preview, and "open in new tab" cannot send headers, so the browser exchanges its token for an HttpOnly, `SameSite=Strict` session cookie scoped to `/api` that is accepted **only for GET/HEAD** requests; every state-changing request still requires the bearer token. Each run records who started it (`requestedBy`), and failed runs are logged with the user.
+
+In Entra mode, project ACLs are stored outside agent-writable project content in `data/project-access.json`. New managed projects are restricted to their creator. Existing projects without an ACL remain readable to authenticated users during migration, but only an identity holding a role from `AAA_PROJECT_ADMIN_ROLES` can establish the first ACL or delete the project. Administrators initialize an ACL with `PUT /api/projects/:projectId/access` using `{ "userIds": [...], "roles": [...] }`; the administrator becomes its initial owner. Once restricted, unauthorized projects are omitted from `GET /api/projects` and every project-scoped route returns HTTP 403. The owner and configured project administrators can read or update the ACL. Local mode remains unrestricted.
 
 ## Logging and troubleshooting
 
@@ -199,13 +204,17 @@ The bundled template is a reference example. To use your own tuned agents, skill
 
 `config\projects.json` can also register existing project folders by absolute path. A configured folder that does not exist on this machine is skipped with a warning. If no project is available at all, AAA creates a starter **Demo Project** from the template on first start.
 
-Open **Project customizations** from the left pane to inspect and configure the selected project's Agents, Skills, MCP Servers, and built-in Tools. Agent and Skill editors update their project Markdown files, MCP editors preserve the project's `.vscode\mcp.json` configuration, and capability availability is persisted in the project's hidden `.aaa\customizations.json` file. Built-in Tool definitions remain protected while their project availability can be changed. Instructions and Hooks are visible as disabled **Coming soon** surfaces.
+Open **Project customizations** from the left pane to inspect and configure the selected project's Agents, Skills, MCP Servers, Instructions, prompt files, and built-in Tools. Agent, Skill, Instruction, and prompt editors update their project Markdown files, MCP editors preserve the project's `.vscode\mcp.json` configuration, and capability availability is persisted in the project's hidden `.aaa\customizations.json` file. Built-in Tool definitions remain protected while their project availability can be changed. Hooks remain a disabled **Coming soon** surface until their execution and approval policy is defined.
+
+An Agent can use the AAA local loop or delegate chat directly to a Microsoft Foundry Agent. Choose **Microsoft Foundry agent** in Agent setup and provide environment-variable names for the full OpenAI-compatible Responses invocation endpoint and its API key, or use Microsoft Entra authentication (default scope `https://ai.azure.com/.default`). Endpoint URLs and secrets are never written to project Markdown. A remote agent receives the persisted conversation, and its response, usage, run attribution, and remote-invocation step are stored in the normal AAA session. Only the Responses protocol is supported; custom hosted-agent `invocations` payloads are not guessed. Use their separately documented contract or expose a Responses endpoint.
 
 ## Microsoft Edge evidence capture
 
 The Web tab can launch an installed Microsoft Edge through `playwright-core`. Edge is visible by default so the user can complete interactive authentication; **Headless** is optional. Each project gets a persistent browser profile under `data\browser-profiles\<project-id>\`, outside the assessed package. The Web tab shows session state, navigation and capture controls, and the most recent capture rather than embedding authenticated external sites.
 
 Navigation accepts user-entered absolute HTTP and HTTPS addresses and rejects other schemes. Captures are PNG files under `evidence\screenshots\` by default. To avoid unwieldy long-page images, a capture always starts at the top of the page and is capped at two viewport heights. Every PNG has an adjacent JSON provenance record containing the source URL, capture time, Edge mode, viewport dimensions, captured height, and screenshot path. The `capture-web-evidence` skill guides the model, while the deterministic `browser_capture` tool owns launch, navigation, capture, and close behavior.
+
+Rendered project Markdown adds a **Capture** action beside absolute HTTP(S) links. It opens or navigates the project Edge session and prefills a timestamped evidence path; it never captures without the separate **Capture** click. The Web tab also includes a **Knowledge form assistant**: inspect the active page's visible form fields, review values, fill them, and attach a validated project artifact to a file input. Password fields are never filled, project files retain the 10 MB/type/signature protections, and AAA never submits the external form.
 
 AAA uses Edge channel `msedge` by default. Set `AAA_EDGE_CHANNEL` to another installed Playwright channel, or set `AAA_EDGE_EXECUTABLE_PATH` to the approved Edge executable. The latter takes precedence. Browser profiles can contain authenticated session state and must be protected and handled according to the target environment's data policy.
 
@@ -248,6 +257,8 @@ npm run test:server
 npm run lint
 npm run build
 ```
+
+Current checkpoint: 137 server tests, 136 passing and one intentionally skipped live-MCP publisher test when `AAA_MCP_LIVE_URL` is not configured. Foundry-agent unit and chat-route tests use a deterministic fake Responses endpoint; a real high-side endpoint still needs a target-environment smoke test.
 
 To check a running MCP publisher end to end, which sends every Markdown file in the bundled package template and publishes a site:
 

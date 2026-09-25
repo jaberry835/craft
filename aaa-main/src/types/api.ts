@@ -18,6 +18,19 @@ export interface CreateProjectRequest {
   systemName?: string;
 }
 
+export interface ProjectAccessPolicy {
+  projectId: string;
+  ownerId: string;
+  userIds: string[];
+  roles: string[];
+  unrestricted: boolean;
+}
+
+export interface ProjectAccessPolicyRequest {
+  userIds: string[];
+  roles: string[];
+}
+
 export interface CustomizationItem {
   id: string;
   name: string;
@@ -75,6 +88,10 @@ export interface CustomizationEditor {
   instructions?: string;
   argumentHint?: string;
   tools?: string;
+  foundryEndpointEnv?: string;
+  foundryAuthMode?: 'entra' | 'api-key';
+  foundryApiKeyEnv?: string;
+  foundryCredentialScope?: string;
   transport?: 'http' | 'stdio';
   url?: string;
   command?: string;
@@ -93,6 +110,10 @@ export interface SaveCustomizationRequest {
   instructions?: string;
   argumentHint?: string;
   tools?: string;
+  foundryEndpointEnv?: string;
+  foundryAuthMode?: 'entra' | 'api-key';
+  foundryApiKeyEnv?: string;
+  foundryCredentialScope?: string;
   transport?: 'http' | 'stdio';
   url?: string;
   command?: string;
@@ -217,6 +238,30 @@ export interface BrowserCaptureResult {
   capturedAt: string;
 }
 
+export interface BrowserFormField {
+  id: string;
+  label: string;
+  name?: string;
+  type: string;
+  required: boolean;
+  disabled: boolean;
+  options?: Array<{ value: string; label: string }>;
+}
+
+export interface BrowserFormSnapshot {
+  sourceUrl: string;
+  fields: BrowserFormField[];
+}
+
+export interface BrowserFormFillRequest {
+  values: Record<string, string | boolean>;
+}
+
+export interface BrowserFormUploadRequest {
+  fieldId: string;
+  projectPath: string;
+}
+
 export interface PublicationStatus {
   path: string;
   reviewed: boolean;
@@ -235,7 +280,7 @@ export interface ProjectPathResult {
 
 export type ChatRole = 'user' | 'assistant' | 'system';
 
-export type ToolEventType = 'read' | 'search' | 'create' | 'edit' | 'skill' | 'mcp' | 'browser' | 'context';
+export type ToolEventType = 'read' | 'search' | 'create' | 'edit' | 'skill' | 'mcp' | 'agent' | 'browser' | 'context';
 
 export interface ToolEvent {
   id: string;
@@ -405,6 +450,7 @@ export interface WorkflowAgentSummary {
   name: string;
   description: string;
   argumentHint?: string;
+  remote?: 'foundry';
 }
 
 export interface WorkflowCommandSummary {

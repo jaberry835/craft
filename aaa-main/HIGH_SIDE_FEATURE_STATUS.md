@@ -1,7 +1,7 @@
 # High-Side Feature Status
 
 Last updated: 2026-09-25  
-Status baseline: `77feeca`
+Status baseline: `9ce5ec9`
 
 This document maps the requests in [`features_needed_from_high_side`](./features_needed_from_high_side) to implemented behavior and Git history. [`PUNCHLIST.md`](./PUNCHLIST.md) remains the broader engineering backlog.
 
@@ -9,9 +9,9 @@ This document maps the requests in [`features_needed_from_high_side`](./features
 
 | Status | Count |
 | --- | ---: |
-| Complete | 15 |
+| Complete | 19 |
 | Partial | 1 |
-| Not started | 4 |
+| Not started | 0 |
 | Deferred to a separate MCP server | 1 |
 | **Total requirements** | **21** |
 
@@ -32,52 +32,37 @@ Status meanings:
 | 4 | Show MCP tools and their parameters in configuration diagnostics | **Complete** | `6119cf3`; connection tests expose discovered tool schemas without exposing credentials. |
 | 5 | Add MCP authentication options | **Complete** | `5d1ee5b`; none, bearer, API-key header, OAuth client credentials, and Microsoft Entra with environment-referenced secrets. |
 | 6 | Add optional Microsoft Entra authentication to AAA | **Complete** | `f4a29b0`; optional sign-in, sovereign-cloud authority support, app roles, token verification, safe browser sessions, and run attribution. |
-| 7 | Never silently filter enabled tools, skills, prompts, or MCP servers | **Complete** | `06cb2ca`; enabled capabilities remain available and unsupported MCP transports are reported explicitly. |
+| 7 | Never silently filter enabled tools, skills, prompts, or MCP servers | **Complete** | `06cb2ca`, `139b636`; enabled capabilities remain available, unsupported MCP transports are reported explicitly, and serialized toggles refresh the workflow used by the next agent run. |
 | 8 | Show the initial prompt and live response immediately | **Complete** | `5a7ebb9`; first-turn chat transitions immediately and streams prompt, reasoning, and steps. |
 | 9 | Continue chat when an MCP server is unavailable | **Complete** | `1fbd01a`; unavailable servers produce warnings/agent steps without blocking unrelated chat. |
-| 10 | Continue adding regression and workflow tests | **Complete / ongoing practice** | `a6d55bf`, `db68670`, and focused tests across auth, MCP, files, compaction, publication, and browser capture. The latest completed full-suite checkpoint was 126 server tests: 125 pass and one live-MCP test skipped without a real publisher; `77feeca` adds two separately passing upload-destination tests. |
+| 10 | Continue adding regression and workflow tests | **Complete / ongoing practice** | `a6d55bf`, `db68670`, and focused tests across auth, project ACLs, MCP, Foundry agents, files, compaction, publication, browser capture, evidence links, and capability refresh. Current full-suite checkpoint: 137 server tests, 136 passing and one live-MCP test skipped without a real publisher. |
 | 11 | Add useful, error-focused logging | **Complete** | `29b4a1f`; structured redacted server and browser API failure logging with configurable level and format. |
-| 12 | Open a target knowledge-base site beside chat and fill forms/upload artifacts through Playwright | **Not started** | Browser sessions and file handling are reusable foundations, but target-site discovery, field mapping, review, and submission behavior are not implemented. |
+| 12 | Open a target knowledge-base site beside chat and fill forms/upload artifacts through Playwright | **Complete** | `e96c2ee`; the project-scoped visible Edge session can inspect visible form fields, fill explicitly reviewed values, and attach validated project artifacts. AAA never auto-submits the target form, so final submission remains a user action in Edge. |
 | 13 | Automate Word and Excel templates | **Deferred to a separate MCP server** | Intentionally excluded from AAA so Office automation remains independently deployable and replaceable. |
 | 14 | Support an agent-led, multi-stage workflow that asks for scans and architecture inputs before CONOPS and control work | **Partial** | Persistent multi-turn sessions, project agents, instructions, skills, prompts, reasoning steps, and tool use exist. Explicit workflow state, stage gates, required-input tracking, resume semantics, and a dedicated progress view do not. |
 | 15 | Make browser capture launch visible Microsoft Edge by default and navigate to the requested site | **Complete** | `11ad28d` and browser-capture tests; visible Edge is the default, with URL launch/navigation controls and optional headless mode. |
-| 16 | Offer screenshot-evidence capture from HTTP links in project documentation | **Not started** | Markdown links render, and browser capture exists, but there is no link action/context menu that transfers the URL into the evidence-capture workflow. |
+| 16 | Offer screenshot-evidence capture from HTTP links in project documentation | **Complete** | `b74ff13`; rendered project Markdown places a Capture action beside absolute HTTP(S) links. The action launches or navigates the project Edge session and prefills a safe timestamped path under `evidence/screenshots/`; capture remains a separate user-confirmed action. |
 | 17 | Delete a project | **Complete** | `31764b2`; confirmed deletion for AAA-managed projects, configured-root protection, final-project protection, active-project fallback, and local session/profile cleanup. |
-| 18 | Show projects only to identities authorized for them | **Not started** | App-level Entra identity is complete, but projects have no membership/role ACL and project APIs do not enforce per-project authorization. |
+| 18 | Show projects only to identities authorized for them | **Complete** | `bcb9ac0`; Entra mode stores project ACLs outside agent-writable content, restricts new projects to their creator, filters project listings, enforces every project-scoped route, and supports owner/admin-managed user and role grants. Local mode remains unrestricted; ACL-less legacy projects remain readable during migration, but only administrators can establish their first ACL or delete them. |
 | 19 | Include an evidence directory in new project templates | **Complete** | `77feeca`; managed projects contain `evidence/` and `evidence/screenshots/` with provenance guidance. |
-| 20 | Connect to Microsoft Foundry agents from agent setup | **Not started** | AAA can call Azure OpenAI model deployments and HTTP MCP servers, but it has no Foundry-agent connection type, invocation adapter, diagnostics, or setup UI. |
+| 20 | Connect to Microsoft Foundry agents from agent setup | **Complete** | `9ce5ec9`; Agent setup can select a Microsoft Foundry runtime, reference a full Responses endpoint and credentials through environment-variable names, validate readiness, and invoke the remote agent with Entra or API-key authentication. Remote text, usage, steps, and errors flow through normal AAA run persistence. Custom `invocations` contracts are not guessed. |
 | 21 | Default collected images to an evidence directory | **Complete** | `77feeca`; root image uploads and browser captures default to `evidence/screenshots/`, while explicit destination folders are respected. |
 
 ## Remaining high-side work
 
 ### Priority 0: authorization and safe autonomy
 
-1. **Per-project authorization**
-   - Define project membership and administrator roles.
-   - Store ACLs outside agent-writable project content.
-   - Filter project listings and enforce authorization on every project-scoped API route.
-   - Define behavior for local mode, Entra users, managed projects, and configured roots.
-2. **Approval gates for consequential agent actions**
+1. **Approval gates for consequential agent actions**
    - Classify read-only, reversible, and consequential tools.
    - Require explicit approval before destructive changes, publication, browser submission, or future external-system writes.
    - Treat model and tool output as untrusted data in policy enforcement.
 
 ### Priority 1: requested workflows
 
-3. **Guided multi-stage agent workflows**
+2. **Guided multi-stage agent workflows**
    - Add persisted workflow state, stages, prerequisites, checkpoints, and resume behavior.
    - Surface missing inputs and progress independently from free-form chat.
-4. **Documentation-link evidence capture**
-   - Add a safe action to HTTP(S) links in rendered Markdown.
-   - Launch/navigate the project browser and prefill an evidence path without auto-capturing or bypassing user review.
-5. **Knowledge-base form filling**
-   - Define the target site, supported forms, field mappings, artifact rules, authentication handoff, and approval-before-submit behavior.
-   - Keep browser writes gated and auditable.
-6. **Foundry-agent connections**
-   - Add a connection model and credential-safe diagnostics.
-   - Define supported Foundry agent API/version and sovereign-cloud endpoint behavior.
-   - Adapt remote agent messages, tool calls, files, errors, and usage into AAA run events.
-7. **Security-package dashboard**
+3. **Security-package dashboard**
    - Detect package structure and show control families, responses, evidence coverage, validation state, and review/publication readiness.
 
 ### Priority 2: broader punch-list items

@@ -2,6 +2,9 @@ import type {
   AppendMessageRequest,
   BrowserCaptureRequest,
   BrowserCaptureResult,
+  BrowserFormFillRequest,
+  BrowserFormSnapshot,
+  BrowserFormUploadRequest,
   BrowserLaunchRequest,
   BrowserNavigateRequest,
   BrowserSessionStatus,
@@ -311,6 +314,18 @@ export const aaaApi = {
     }),
   captureBrowser: (projectId: string, request: BrowserCaptureRequest) =>
     requestJson<BrowserCaptureResult>(`${projectPath(projectId)}/browser/capture`, {
+      method: 'POST',
+      body: JSON.stringify(request)
+    }),
+  inspectBrowserForm: (projectId: string) =>
+    requestJson<BrowserFormSnapshot>(`${projectPath(projectId)}/browser/form`),
+  fillBrowserForm: (projectId: string, request: BrowserFormFillRequest) =>
+    requestJson<BrowserFormSnapshot>(`${projectPath(projectId)}/browser/form/fill`, {
+      method: 'POST',
+      body: JSON.stringify(request)
+    }),
+  uploadBrowserFormFile: (projectId: string, request: BrowserFormUploadRequest) =>
+    requestJson<BrowserFormSnapshot>(`${projectPath(projectId)}/browser/form/upload`, {
       method: 'POST',
       body: JSON.stringify(request)
     }),

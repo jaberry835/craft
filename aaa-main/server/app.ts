@@ -7,6 +7,8 @@ import type {
   AppendMessageRequest,
   AgentRun,
   BrowserCaptureRequest,
+  BrowserFormFillRequest,
+  BrowserFormUploadRequest,
   BrowserLaunchRequest,
   BrowserNavigateRequest,
   ChatMessageDisplayPart,
@@ -18,6 +20,7 @@ import type {
   CreateProjectRequest,
   CreateTextFileRequest,
   ModelDiagnosticsReport,
+  ProjectAccessPolicyRequest,
   RenameProjectPathRequest,
   RenameSessionRequest,
   RunUsage,
@@ -44,6 +47,8 @@ import { describeShape } from './services/azureOpenAiChatClient.js';
 import { probeModelConnection } from './services/modelProbe.js';
 import { createSessionPersistence } from './sessionStoreFactory.js';
 import type { StorageStatus } from './storageConfig.js';
+import { ProjectAccessService } from './projectAccessService.js';
+import { FoundryAgentClient } from './services/foundryAgentClient.js';
 
 export interface AaaAppDependencies {
   registry: ProjectRegistry;
@@ -57,8 +62,11 @@ export interface AaaAppDependencies {
   mcpFetch?: typeof globalThis.fetch;
   /** Fetch implementation for model diagnostics; injectable for tests. */
   modelFetch?: typeof globalThis.fetch;
+  /** Fetch implementation for remote Foundry agent endpoints; injectable for tests. */
+  foundryFetch?: typeof globalThis.fetch;
   /** Optional Microsoft Entra sign-in; off unless `config.mode` is `entra`. */
   auth?: { config: AppAuthConfig; verifier?: TokenVerifier };
+  projectAccess?: ProjectAccessService;
 }
 
 const writeJsonLine = (response: express.Response, event: ChatStreamEvent): boolean =>
@@ -74,11 +82,18 @@ export function createAaaApp({
   storageStatus,
   mcpFetch = globalThis.fetch,
   modelFetch,
-  auth
+  foundryFetch = globalThis.fetch,
+  auth,
+  projectAccess
 }: AaaAppDependencies): express.Express {
   const app = express();
   app.use(express.json({ limit: '15mb' }));
   const authConfig = auth?.config ?? loadAppAuthConfig({});
+  const access = projectAccess ?? new ProjectAccessService(
+    authConfig.mode,
+    path.join(dataRoot, 'project-access.json'),
+    (process.env.AAA_PROJECT_ADMIN_ROLES ?? '').split(',').map((role) => role.trim()).filter(Boolean)
+  );
   installAppAuth(
     app,
     authConfig,
@@ -95,25 +110,62 @@ export function createAaaApp({
     const id = String(request.params.projectId);
     registry.assertProjectId(id);
     registry.get(id);
+    access.assertAccess(id, request.identity);
     return id;
   };
   const sessionStore = (request: express.Request) => createSessionStore(projectId(request));
   const fileService = (request: express.Request) => new ProjectFileService(registry.root(projectId(request)));
 
-  app.get('/api/projects', (_request, response) => response.json(registry.list()));
+  app.get('/api/projects', (request, response) => {
+    const listed = registry.list();
+    const projects = listed.projects.filter((project) => access.canAccess(project.id, request.identity));
+    response.json({
+      projects,
+      activeProjectId: projects.some((project) => project.id === listed.activeProjectId)
+        ? listed.activeProjectId
+        : projects[0]?.id ?? ''
+    });
+  });
   app.post('/api/projects', async (request, response) => {
-    response.status(201).json(await registry.create((request.body ?? {}) as CreateProjectRequest));
+    const project = await registry.create((request.body ?? {}) as CreateProjectRequest);
+    await access.assignOwner(project.id, request.identity);
+    response.status(201).json(project);
   });
   app.put('/api/projects/active', async (request, response) => {
-    response.json(await registry.select(String((request.body as { projectId?: string } | undefined)?.projectId ?? '')));
+    const id = String((request.body as { projectId?: string } | undefined)?.projectId ?? '');
+    registry.assertProjectId(id);
+    registry.get(id);
+    access.assertAccess(id, request.identity);
+    response.json(await registry.select(id));
   });
   app.delete('/api/projects/:projectId', async (request, response) => {
     const id = projectId(request);
+    access.get(id, request.identity);
     await browserCapture.close(id);
-    const projects = await registry.delete(id);
+    await registry.delete(id);
+    await access.remove(id);
     await rm(path.join(dataRoot, 'projects', id), { recursive: true, force: true });
     await rm(path.join(dataRoot, 'browser-profiles', id), { recursive: true, force: true });
-    response.json(projects);
+    const listed = registry.list();
+    const projects = listed.projects.filter((project) => access.canAccess(project.id, request.identity));
+    response.json({
+      projects,
+      activeProjectId: projects.some((project) => project.id === listed.activeProjectId)
+        ? listed.activeProjectId
+        : projects[0]?.id ?? ''
+    });
+  });
+  app.get('/api/projects/:projectId/access', (request, response) => {
+    const id = projectId(request);
+    response.json(access.get(id, request.identity));
+  });
+  app.put('/api/projects/:projectId/access', async (request, response) => {
+    const id = projectId(request);
+    response.json(await access.update(
+      id,
+      request.identity,
+      (request.body ?? {}) as ProjectAccessPolicyRequest
+    ));
   });
   app.get('/api/storage/status', (_request, response) => response.json(effectiveStorageStatus));
   app.get('/api/model/status', (_request, response) => {
@@ -275,6 +327,21 @@ export function createAaaApp({
       (request.body ?? {}) as BrowserCaptureRequest
     ));
   });
+  app.get('/api/projects/:projectId/browser/form', async (request, response) =>
+    response.json(await browserCapture.inspectForm(projectId(request))));
+  app.post('/api/projects/:projectId/browser/form/fill', async (request, response) =>
+    response.json(await browserCapture.fillForm(
+      projectId(request),
+      (request.body ?? {}) as BrowserFormFillRequest
+    )));
+  app.post('/api/projects/:projectId/browser/form/upload', async (request, response) => {
+    const id = projectId(request);
+    response.json(await browserCapture.uploadFormFile(
+      id,
+      new ProjectFileService(registry.root(id)),
+      (request.body ?? {}) as BrowserFormUploadRequest
+    ));
+  });
   app.delete('/api/projects/:projectId/browser', async (request, response) =>
     response.json(await browserCapture.close(projectId(request))));
 
@@ -336,20 +403,20 @@ export function createAaaApp({
       response.status(400).json({ error: 'A non-empty message is required.', code: 'content_required' });
       return;
     }
-    if (!modelConfig || !modelClient) {
-      response.status(503).json({ error: 'The model connection is not configured.', code: 'model_unavailable' });
-      return;
-    }
-
     const store = sessionStore(request);
     const project = registry.get(projectId(request));
-    const connection = modelConfig.resolve();
     const workflow = await new ProjectWorkflowService(project.id, project.rootPath).load();
     const expanded = ProjectWorkflowService.expandCommand(workflow, content);
     const agent = ProjectWorkflowService.resolveAgent(
       workflow,
       expanded.agentId ?? (typeof body.agentId === 'string' ? body.agentId : undefined)
     );
+    const foundryConnection = agent?.foundry;
+    if (!foundryConnection && (!modelConfig || !modelClient)) {
+      response.status(503).json({ error: 'The model connection is not configured.', code: 'model_unavailable' });
+      return;
+    }
+    const connection = foundryConnection ? undefined : modelConfig!.resolve();
     const toolSelection = ProjectWorkflowService.selectTools(workflow, agent);
     const session = await store.append(String(request.params.sessionId), { role: 'user', content });
     const userMessage = session.messages.at(-1);
@@ -361,7 +428,7 @@ export function createAaaApp({
       status: 'running',
       startedAt: new Date().toISOString(),
       userMessageId: userMessage.id,
-      modelConnectionId: connection.definition.id,
+      modelConnectionId: foundryConnection ? `foundry:${agent!.id}` : connection!.definition.id,
       reasoning: '',
       toolEvents: [],
       changedFiles: [],
@@ -403,9 +470,34 @@ export function createAaaApp({
     let streamedReasoning = '';
     let streamedUsage: RunUsage | undefined;
     const streamedToolEvents: AgentRun['toolEvents'] = [];
-    const autoCompact = modelConfig.status().autoCompact;
+    const autoCompact = !foundryConnection && modelConfig!.status().autoCompact;
+    const progressHandlers = {
+      onAssistantText: (text: string) => {
+        streamedText += text;
+        writeJsonLine(response, { type: 'assistant_text' as const, text });
+      },
+      onReasoning: (text: string) => {
+        streamedReasoning += text;
+        writeJsonLine(response, { type: 'reasoning' as const, text });
+      },
+      onToolEvent: (event: AgentRun['toolEvents'][number]) => {
+        streamedToolEvents.push(event);
+        writeJsonLine(response, { type: 'tool_event' as const, event });
+      },
+      onUsage: (usage: RunUsage) => {
+        streamedUsage = usage;
+        writeJsonLine(response, { type: 'usage' as const, usage });
+      }
+    };
     try {
-      const result = await new AaaAgentLoop(modelClient, fileService(request), {
+      const result = foundryConnection
+        ? await new FoundryAgentClient(process.env, foundryFetch).invoke(
+          foundryConnection,
+          messages,
+          abortController.signal,
+          progressHandlers
+        )
+        : await new AaaAgentLoop(modelClient!, fileService(request), {
         tools: toolSelection.builtIns,
         skills: workflow.skills,
         mcp: toolSelection.mcpServers.length > 0
@@ -427,8 +519,8 @@ export function createAaaApp({
             try {
               const compaction = await compactSession({
                 session,
-                connection,
-                modelClient,
+                connection: connection!,
+                modelClient: modelClient!,
                 trigger: 'auto',
                 throughMessageId: earlier.id,
                 signal: abortController.signal
@@ -450,28 +542,11 @@ export function createAaaApp({
             }
           }
           : undefined
-      }).run(
-        connection,
+        }).run(
+        connection!,
         messages,
         abortController.signal,
-        {
-          onAssistantText: (text) => {
-            streamedText += text;
-            writeJsonLine(response, { type: 'assistant_text', text });
-          },
-          onReasoning: (text) => {
-            streamedReasoning += text;
-            writeJsonLine(response, { type: 'reasoning', text });
-          },
-          onToolEvent: (event) => {
-            streamedToolEvents.push(event);
-            writeJsonLine(response, { type: 'tool_event', event });
-          },
-          onUsage: (usage) => {
-            streamedUsage = usage;
-            writeJsonLine(response, { type: 'usage', usage });
-          }
-        }
+        progressHandlers
       );
       const display: ChatMessageDisplayPart[] = [
         ...(result.reasoning ? [{ kind: 'reasoning' as const, text: result.reasoning }] : []),

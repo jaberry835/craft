@@ -399,6 +399,7 @@ export class ProjectFileService {
     if (content.length > maximumUploadBytes) {
       throw new UnsupportedFileError('Saved files must be 10 MB or smaller.', 'file_too_large');
     }
+
     const parent = path.posix.dirname(normalizedPath);
     if (parent !== '.') await this.ensureDirectory(parent);
     const extension = path.posix.extname(normalizedPath);
@@ -414,6 +415,20 @@ export class ProjectFileService {
       }
     }
     throw new ConflictError(`Could not find a free file name for ${normalizedPath}.`, 'path_already_exists');
+  }
+
+  async readUploadFile(relativePath: string): Promise<{ name: string; content: Buffer }> {
+    const normalized = this.normalizeRelativePath(relativePath);
+    this.assertUploadExtension(normalized);
+    const absolutePath = await this.resolveExistingPath(normalized);
+    const fileStats = await stat(absolutePath);
+    if (!fileStats.isFile()) throw new BadRequestError('The selected artifact is not a file.', 'file_required');
+    if (fileStats.size > maximumUploadBytes) {
+      throw new BadRequestError('The selected artifact is larger than 10 MB.', 'upload_too_large');
+    }
+    const content = await readFile(absolutePath);
+    assertContentMatchesExtension(normalized, content);
+    return { name: path.posix.basename(normalized), content };
   }
 
   /** Whether a path's extension can be stored as a project file. */
