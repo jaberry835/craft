@@ -60,6 +60,7 @@ import {
 } from 'lucide-react';
 import { aaaApi, ApiRequestError } from './api/aaaApi';
 import { CompactionDivider, ContextMeter, UsageLine } from './usageViews';
+import { ModelDiagnosticsPanel } from './modelDiagnostics';
 import { contextEstimate, formatTokens, sessionUsage, sessionUsageTitle } from './usageMath';
 import type {
   ChatMessage,
@@ -88,7 +89,7 @@ import './App.css';
 type PreviewMode = 'preview' | 'source' | 'browser';
 type ArtifactTab = 'files' | PreviewMode;
 type Theme = 'light' | 'dark';
-type CustomizationSection = 'overview' | CustomizationItem['kind'];
+type CustomizationSection = 'overview' | 'model' | CustomizationItem['kind'];
 type FileDialogState =
   | { kind: 'create'; value: string }
   | { kind: 'rename'; value: string }
@@ -2048,6 +2049,7 @@ function App() {
               <nav aria-label="Customization sections">
                 {([
                   ['overview', Home, 'Overview'],
+                  ['model', Link2, 'Model connection'],
                   ['mcp-server', Plug, 'MCP Servers'],
                   ['skill', Lightbulb, 'Skills'],
                   ['instruction', BookOpen, 'Instructions'],
@@ -2064,7 +2066,7 @@ function App() {
                   >
                     <Icon size={16} />
                     <span>{label}</span>
-                    {id !== 'overview' && (
+                    {id !== 'overview' && id !== 'model' && (
                       <small>{id === 'instruction' || id === 'hook' ? 'Soon' : customizationCount(id)}</small>
                     )}
                   </button>
@@ -2076,18 +2078,22 @@ function App() {
                     <p className="eyebrow">Selected project</p>
                     <h2>{customizationSection === 'overview'
                       ? 'Customize your AAA workspace'
-                      : customizationSection === 'mcp-server'
+                      : customizationSection === 'model'
+                        ? 'Model connection'
+                        : customizationSection === 'mcp-server'
                         ? 'MCP Servers'
                         : `${customizationSection[0].toUpperCase()}${customizationSection.slice(1)}s`}</h2>
                     <p>
                       {customizationSection === 'overview'
                         ? 'Configure the AI capabilities available to this authorization project.'
-                        : customizationSection === 'tool'
+                        : customizationSection === 'model'
+                          ? 'Inspect the resolved model connection and test both OpenAI APIs end to end.'
+                          : customizationSection === 'tool'
                           ? 'Control which built-in workspace capabilities are available to this project.'
                           : 'Create and edit friendly project-level capability settings.'}
                     </p>
                   </div>
-                  {customizationSection !== 'overview' && customizationSection !== 'tool' && (
+                  {customizationSection !== 'overview' && customizationSection !== 'tool' && customizationSection !== 'model' && (
                     <button className="customization-add" onClick={() => void openCustomizationEditor()}>
                       <Plus size={14} /> Add {customizationSection === 'mcp-server' ? 'server' : customizationSection}
                     </button>
@@ -2097,6 +2103,7 @@ function App() {
                   ? (
                     <div className="customization-overview-grid">
                       {([
+                        ['model', Link2, 'Model connection', 'Inspect the endpoint and run connection diagnostics.'],
                         ['agent', Bot, 'Agents', 'Choose the assistants that orchestrate your A&A workflow.'],
                         ['skill', Sparkles, 'Skills', 'Reusable procedures for package initialization, analysis, and validation.'],
                         ['mcp-server', Server, 'MCP Servers', 'Connect approved local and remote tools and services.'],
@@ -2114,13 +2121,15 @@ function App() {
                         >
                           <span><Icon size={19} /></span>
                           <strong>{label}</strong>
-                          <small>{comingSoon ? 'Coming soon' : `${customizationCount(kind)} configured`}</small>
+                          <small>{comingSoon ? 'Coming soon' : kind === 'model' ? (modelStatus?.ready ? 'Ready' : 'Setup needed') : `${customizationCount(kind)} configured`}</small>
                           <p>{description}</p>
                         </button>
                         );
                       })}
                     </div>
                   )
+                  : customizationSection === 'model'
+                    ? <ModelDiagnosticsPanel status={modelStatus} />
                   : (
                     <>
                       <label className="customization-search">
@@ -2146,7 +2155,22 @@ function App() {
                                   {testResult.tools && testResult.tools.length > 0 && (
                                     <ul>
                                       {testResult.tools.map((tool) => (
-                                        <li key={tool.name}><code>{tool.name}</code>{tool.description && ` — ${tool.description}`}</li>
+                                        <li key={tool.name}>
+                                          <code>{tool.name}</code>{tool.description && ` — ${tool.description}`}
+                                          {tool.parameters && tool.parameters.length > 0 && (
+                                            <table className="tool-parameters">
+                                              <tbody>
+                                                {tool.parameters.map((parameter) => (
+                                                  <tr key={parameter.name}>
+                                                    <td><code>{parameter.name}</code>{parameter.required && <em title="Required">*</em>}</td>
+                                                    <td>{parameter.type}</td>
+                                                    <td>{parameter.description}</td>
+                                                  </tr>
+                                                ))}
+                                              </tbody>
+                                            </table>
+                                          )}
+                                        </li>
                                       ))}
                                     </ul>
                                   )}

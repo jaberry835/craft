@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { CapabilityTestResult, ProjectWorkflowSummary } from '../src/types/api.js';
+import type { CapabilityTestResult, CapabilityTestToolParameter, ProjectWorkflowSummary } from '../src/types/api.js';
 import { parseMarkdown, ProjectCustomizationService, toolNames } from './projectCustomizationService.js';
 import { markMcpServerHealthy, McpHttpClient, type McpServerConfig, type McpTool } from './services/mcpHttpClient.js';
 import { builtInToolItemId, builtInToolNameFromItemId, builtInToolNames, type BuiltInToolName } from './builtInTools.js';
@@ -215,7 +215,11 @@ export class ProjectWorkflowService {
       summary: tools.length === 1
         ? `Connected successfully. 1 tool is available.`
         : `Connected successfully. ${tools.length} tools are available.`,
-      tools: tools.map(({ name, description }) => ({ name, description }))
+      tools: tools.map(({ name, description, inputSchema }) => ({
+        name,
+        description,
+        parameters: schemaParameters(inputSchema)
+      }))
     };
   }
 
@@ -354,4 +358,29 @@ export class ProjectWorkflowService {
 
 function slug(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+}
+
+/** Summarizes a JSON Schema object's top-level properties for display. */
+export function schemaParameters(schema: Record<string, unknown> | undefined): CapabilityTestToolParameter[] {
+  const properties = schema && typeof schema.properties === 'object' && schema.properties !== null
+    ? schema.properties as Record<string, Record<string, unknown> | undefined>
+    : {};
+  const required = new Set(Array.isArray(schema?.required) ? schema.required.filter((name) => typeof name === 'string') : []);
+  return Object.entries(properties).map(([name, property]) => {
+    const type = Array.isArray(property?.type)
+      ? property.type.join(' | ')
+      : typeof property?.type === 'string'
+        ? property.type === 'array' && typeof (property.items as { type?: unknown } | undefined)?.type === 'string'
+          ? `${(property.items as { type: string }).type}[]`
+          : property.type
+        : Array.isArray(property?.enum) ? 'enum' : property?.anyOf || property?.oneOf ? 'union' : 'any';
+    const enumValues = Array.isArray(property?.enum) ? ` (one of: ${property.enum.map(String).join(', ')})` : '';
+    const description = typeof property?.description === 'string' ? property.description.slice(0, 300) : '';
+    return {
+      name,
+      type,
+      required: required.has(name),
+      ...(description || enumValues ? { description: `${description}${enumValues}`.trim() } : {})
+    };
+  });
 }

@@ -67,6 +67,7 @@ This list tracks the path from the visual prototype to a working local A&A demo.
 - [x] Show actionable errors rather than success-shaped fallback responses.
 - [x] Support explicit `api`, `tokenParameter`, temperature, reasoning, and streaming settings with bounded, logged compatibility adaptation across Chat Completions and Responses.
 - [x] Add `npm run model:probe` to verify plain chat, tool definitions, and tool-result replay per API and recommend settings for a new environment.
+- [x] Add a Model connection diagnostics panel (resolved settings, per-API URLs, check timings, errors, adaptation, copyable recommendation) and list MCP tool parameters in connection tests.
 - [x] Retry 429, 408, transient 5xx, and network failures with `Retry-After`-aware, abortable backoff.
 - [x] Track input, cached-input, output, and reasoning tokens per request, run, and session, with live usage in the chat, a context meter, and status-bar totals.
 - [x] Add `/compact [focus]` and automatic threshold-based compaction that keeps the visible transcript and stores structured summaries per session.

@@ -73,12 +73,20 @@ export class AzureOpenAiChatClient implements ModelChatClient {
   constructor(
     private readonly fetchImpl: Fetch = globalThis.fetch,
     private readonly credential: TokenCredentialLike = new DefaultAzureCredential(),
-    private readonly log: (message: string) => void = (message) => console.warn(message)
+    private readonly log: (message: string) => void = (message) => console.warn(message),
+    private readonly logError: (message: string) => void = (message) => console.error(message)
   ) {}
 
   /** The shape learned through adaptation for this connection, if any. */
   learnedShape(connection: ResolvedModelConnection): ModelRequestShape | undefined {
     return this.learned.get(this.cacheKey(connection));
+  }
+
+  /** The request URL the current (configured or learned) shape uses; contains no credentials. */
+  requestUrl(connection: ResolvedModelConnection): string {
+    const endpointKind = this.resolveEndpointKind(connection);
+    const shape = this.learned.get(this.cacheKey(connection)) ?? this.configuredShape(connection, endpointKind);
+    return this.buildRequest(connection, [], endpointKind, shape).url;
   }
 
   async *stream(
@@ -618,7 +626,7 @@ export class AzureOpenAiChatClient implements ModelChatClient {
   ): AgentRunError {
     const { failure } = attempts.at(-1)!;
     const toolResults = messages.filter((message) => message.role === 'tool').length;
-    console.error(
+    this.logError(
       `[model] ${this.safeHost(connection.endpoint)} request failed; messages=${messages.length}, `
       + `toolResults=${toolResults}, tools=${tools?.length ?? 0}; attempts: `
       + attempts.map(({ shape, failure: f }) => `${describeShape(shape)} -> ${f.status} ${f.raw || '(empty body)'}`).join(' | ')

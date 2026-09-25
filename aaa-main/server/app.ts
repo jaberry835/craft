@@ -16,6 +16,7 @@ import type {
   CreateSessionRequest,
   CreateProjectRequest,
   CreateTextFileRequest,
+  ModelDiagnosticsReport,
   RenameProjectPathRequest,
   RenameSessionRequest,
   RunUsage,
@@ -36,6 +37,8 @@ import { BrowserCaptureService } from './services/browserCaptureService.js';
 import type { ModelConnectionConfig } from './services/modelConnectionConfig.js';
 import type { ChatSessionStoreFactory } from './chatSessionStore.js';
 import { compactSession, summaryPromptSection, uncompactedMessages } from './sessionCompaction.js';
+import { describeShape } from './services/azureOpenAiChatClient.js';
+import { probeModelConnection } from './services/modelProbe.js';
 import { createSessionPersistence } from './sessionStoreFactory.js';
 import type { StorageStatus } from './storageConfig.js';
 
@@ -49,6 +52,8 @@ export interface AaaAppDependencies {
   storageStatus?: StorageStatus;
   /** Fetch implementation for project MCP servers; injectable for tests. */
   mcpFetch?: typeof globalThis.fetch;
+  /** Fetch implementation for model diagnostics; injectable for tests. */
+  modelFetch?: typeof globalThis.fetch;
 }
 
 const writeJsonLine = (response: express.Response, event: ChatStreamEvent): boolean =>
@@ -62,7 +67,8 @@ export function createAaaApp({
   modelClient,
   sessionStoreFactory,
   storageStatus,
-  mcpFetch = globalThis.fetch
+  mcpFetch = globalThis.fetch,
+  modelFetch
 }: AaaAppDependencies): express.Express {
   const app = express();
   app.use(express.json({ limit: '15mb' }));
@@ -108,6 +114,49 @@ export function createAaaApp({
       return;
     }
     response.json(modelConfig.status());
+  });
+  app.post('/api/model/diagnostics', async (_request, response) => {
+    if (!modelConfig) {
+      response.status(503).json({ error: 'The model connection is not configured.', code: 'model_unavailable' });
+      return;
+    }
+    const status = modelConfig.status();
+    if (!status.ready) {
+      response.status(409).json({
+        error: `The model connection is not ready. Missing: ${status.missing.join(', ')}.`,
+        code: 'model_not_ready'
+      });
+      return;
+    }
+    const abortController = new AbortController();
+    const abort = () => abortController.abort(new DOMException('Client disconnected.', 'AbortError'));
+    response.once('close', abort);
+    try {
+      const report = await probeModelConnection(modelConfig.resolve(), {
+        fetchImpl: modelFetch,
+        signal: abortController.signal
+      });
+      const failures = report.results.flatMap((result) => result.checks
+        .filter((check) => !check.ok)
+        .map((check) => `${result.api}/${check.scenario}: ${check.detail}`));
+      if (failures.length > 0) console.error(`[model] Diagnostics failures for ${status.endpointHost}: ${failures.join(' | ')}`);
+      const body: ModelDiagnosticsReport = {
+        testedAt: new Date().toISOString(),
+        status,
+        results: report.results.map((result) => ({
+          api: result.api,
+          url: result.url,
+          ok: result.ok,
+          checks: result.checks,
+          ...(result.learned ? { adaptedTo: describeShape(result.learned) } : {}),
+          notes: result.notes
+        })),
+        ...(report.recommended ? { recommended: report.recommended } : {})
+      };
+      response.json(body);
+    } finally {
+      response.off('close', abort);
+    }
   });
   app.get('/api/projects/:projectId', (request, response) => response.json(registry.get(projectId(request))));
   app.get('/api/projects/:projectId/customizations', async (request, response) => {

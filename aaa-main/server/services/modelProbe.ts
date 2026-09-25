@@ -12,10 +12,13 @@ export interface ModelProbeCheck {
   scenario: 'text' | 'tools' | 'tool-history';
   ok: boolean;
   detail: string;
+  durationMs: number;
 }
 
 export interface ModelProbeApiResult {
   api: ModelApi;
+  /** Request URL for this API (no credentials). */
+  url: string;
   ok: boolean;
   checks: ModelProbeCheck[];
   learned?: ModelRequestShape;
@@ -69,12 +72,12 @@ const scenarios: Array<{ id: ModelProbeCheck['scenario']; messages: ModelChatMes
  */
 export async function probeModelConnection(
   base: ResolvedModelConnection,
-  options: { fetchImpl?: Fetch; apis?: ModelApi[] } = {}
+  options: { fetchImpl?: Fetch; apis?: ModelApi[]; signal?: AbortSignal } = {}
 ): Promise<ModelProbeReport> {
   const results: ModelProbeApiResult[] = [];
   for (const api of options.apis ?? ['chat-completions', 'responses']) {
     const notes: string[] = [];
-    const client = new AzureOpenAiChatClient(options.fetchImpl, undefined, (message) => notes.push(message));
+    const client = new AzureOpenAiChatClient(options.fetchImpl, undefined, (message) => notes.push(message), () => {});
     const connection: ResolvedModelConnection = {
       ...base,
       definition: {
@@ -85,28 +88,35 @@ export async function probeModelConnection(
       }
     };
     const checks: ModelProbeCheck[] = [];
-    const quietError = console.error;
-    console.error = () => {};
-    try {
-      for (const scenario of scenarios) {
-        try {
-          let text = '';
-          for await (const chunk of client.stream(connection, scenario.messages, AbortSignal.timeout(120_000), scenario.tools)) {
-            if (chunk.type === 'assistant_text') text += chunk.text;
-          }
-          checks.push({ scenario: scenario.id, ok: true, detail: text.trim().slice(0, 60) || '(no text)' });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          // Reaching the output limit still proves the request shape was accepted.
-          const accepted = /token output limit/.test(message);
-          checks.push({ scenario: scenario.id, ok: accepted, detail: accepted ? 'accepted (hit output limit)' : message });
+    for (const scenario of scenarios) {
+      const started = Date.now();
+      try {
+        let text = '';
+        for await (const chunk of client.stream(
+          connection,
+          scenario.messages,
+          AbortSignal.any([AbortSignal.timeout(120_000), ...(options.signal ? [options.signal] : [])]),
+          scenario.tools
+        )) {
+          if (chunk.type === 'assistant_text') text += chunk.text;
         }
+        checks.push({ scenario: scenario.id, ok: true, detail: text.trim().slice(0, 60) || '(no text)', durationMs: Date.now() - started });
+      } catch (error) {
+        if (options.signal?.aborted) throw error;
+        const message = error instanceof Error ? error.message : String(error);
+        // Reaching the output limit still proves the request shape was accepted.
+        const accepted = /token output limit/.test(message);
+        checks.push({
+          scenario: scenario.id,
+          ok: accepted,
+          detail: accepted ? 'accepted (hit output limit)' : message,
+          durationMs: Date.now() - started
+        });
       }
-    } finally {
-      console.error = quietError;
     }
     results.push({
       api,
+      url: client.requestUrl(connection),
       ok: checks.every((check) => check.ok),
       checks,
       learned: client.learnedShape(connection),
@@ -137,9 +147,9 @@ export function formatProbeReport(report: ModelProbeReport): string {
   };
   const lines: string[] = [];
   for (const result of report.results) {
-    lines.push(`${result.ok ? 'PASS' : 'FAIL'}  ${result.api}`);
+    lines.push(`${result.ok ? 'PASS' : 'FAIL'}  ${result.api}  ${result.url}`);
     for (const check of result.checks) {
-      lines.push(`  ${check.ok ? 'ok  ' : 'FAIL'}  ${labels[check.scenario]}: ${check.detail}`);
+      lines.push(`  ${check.ok ? 'ok  ' : 'FAIL'}  ${labels[check.scenario]} (${check.durationMs} ms): ${check.detail}`);
     }
     if (result.learned) lines.push(`  adapted to: ${describeShape(result.learned)}`);
     for (const note of result.notes) lines.push(`  note: ${note}`);

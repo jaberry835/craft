@@ -42,13 +42,13 @@ Deployments differ in URL style, wire protocol, and accepted parameters, so the 
 
 An explicit `api` or `tokenParameter` is never overridden. With `auto` values and `adaptive` enabled, AAA retries up to three times, only for recognized compatibility failures: a 404 route switches API; a rejected `max_tokens`, `max_completion_tokens`, `temperature`, `tool_choice`, or reasoning parameter is swapped or omitted; and a 400 on a request that replays tool results (the second round of every skill, prompt, or file-editing run) tries the other API. Each retry is logged and the working shape is remembered until restart. Content-filter, context-length, authentication, and quota errors are never retried; their Azure error code, message, and filtered categories are shown with the API key redacted.
 
-When moving to a new environment, run the probe after configuring `.env`:
+When moving to a new environment, open **Project customizations → Model connection** and click **Run diagnostics**, or run the same probe from a terminal after configuring `.env`:
 
 ```powershell
 npm run model:probe
 ```
 
-It sends three small requests for each API (plain chat, tool definitions, and a replayed tool result, which is what skills need) and prints the `api` / `tokenParameter` / `temperature` settings to pin in `config\agent-connections.json`.
+Both send three small requests for each API (plain chat, tool definitions, and a replayed tool result, which is what skills need). They report the exact request URL per API (never credentials), per-check timing, Azure's error code and message for failures, any adaptation AAA applied, and the `api` / `tokenParameter` / `temperature` settings to pin in `config\agent-connections.json`. The Model connection panel also shows the resolved connection settings and any missing environment values. **Test connection** on an MCP server lists each tool with its parameters (name, type, required, description).
 
 Throttling (`429`), request timeouts (`408`), transient `5xx` responses, and network failures are retried up to `maxRetries` times (default `3`, maximum `10`), honoring `retry-after-ms`, `x-ms-retry-after-ms`, or `Retry-After` and otherwise backing off exponentially. Waiting stops immediately when you press **Stop**.
 

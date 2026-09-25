@@ -23,6 +23,7 @@ import type {
   ProjectPathResult,
   PublicationStatus,
   ModelConnectionStatus,
+  ModelDiagnosticsReport,
   ProjectCustomizations,
   ProjectWorkflowSummary,
   SaveCustomizationRequest,
@@ -168,6 +169,8 @@ export const aaaApi = {
       body: JSON.stringify({ projectId })
     }),
   getModelStatus: () => requestJson<ModelConnectionStatus>('/api/model/status'),
+  runModelDiagnostics: (signal?: AbortSignal) =>
+    requestJson<ModelDiagnosticsReport>('/api/model/diagnostics', { method: 'POST', signal }),
   getStorageStatus: () => requestJson<StorageStatus>('/api/storage/status'),
   getProject: (projectId: string) => requestJson<ProjectSummary>(projectPath(projectId)),
   getCustomizations: (projectId: string) =>

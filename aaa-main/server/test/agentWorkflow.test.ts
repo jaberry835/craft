@@ -161,7 +161,13 @@ test('capability tests report built-in availability and list MCP tools without e
     return Response.json({
       jsonrpc: '2.0',
       id: body.id,
-      result: { tools: [{ name: 'collect_evidence', description: 'Collect approved evidence.' }] }
+      result: {
+        tools: [{
+          name: 'collect_evidence',
+          description: 'Collect approved evidence.',
+          inputSchema: { type: 'object', properties: { control: { type: 'string', description: 'Control id.' } }, required: ['control'] }
+        }]
+      }
     });
   };
   const service = new ProjectWorkflowService('demo', root, { MCP_TEST_TOKEN: 'secret' });
@@ -172,7 +178,11 @@ test('capability tests report built-in availability and list MCP tools without e
 
   const mcp = await service.testCapability('mcp-server:evidence', fetchImpl);
   assert.equal(mcp.ok, true);
-  assert.deepEqual(mcp.tools, [{ name: 'collect_evidence', description: 'Collect approved evidence.' }]);
+  assert.deepEqual(mcp.tools, [{
+    name: 'collect_evidence',
+    description: 'Collect approved evidence.',
+    parameters: [{ name: 'control', type: 'string', required: true, description: 'Control id.' }]
+  }]);
   assert.deepEqual(requests, ['initialize', 'notifications/initialized', 'tools/list']);
   assert.doesNotMatch(JSON.stringify(mcp), /secret|example\.test/);
 

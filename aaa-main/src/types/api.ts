@@ -70,9 +70,17 @@ export interface SetCustomizationEnabledRequest {
   enabled: boolean;
 }
 
+export interface CapabilityTestToolParameter {
+  name: string;
+  type: string;
+  required: boolean;
+  description?: string;
+}
+
 export interface CapabilityTestTool {
   name: string;
   description?: string;
+  parameters?: CapabilityTestToolParameter[];
 }
 
 export interface CapabilityTestResult {
@@ -81,6 +89,32 @@ export interface CapabilityTestResult {
   testedAt: string;
   summary: string;
   tools?: CapabilityTestTool[];
+}
+
+export interface ModelDiagnosticsCheck {
+  scenario: 'text' | 'tools' | 'tool-history';
+  ok: boolean;
+  detail: string;
+  durationMs: number;
+}
+
+export interface ModelDiagnosticsApiResult {
+  api: 'chat-completions' | 'responses';
+  /** Request URL used for this API; never includes credentials. */
+  url: string;
+  ok: boolean;
+  checks: ModelDiagnosticsCheck[];
+  /** Request shape AAA adapted to, when it differed from the configuration. */
+  adaptedTo?: string;
+  notes: string[];
+}
+
+export interface ModelDiagnosticsReport {
+  testedAt: string;
+  status: ModelConnectionStatus;
+  results: ModelDiagnosticsApiResult[];
+  /** Settings to pin in config/agent-connections.json when an API passed every check. */
+  recommended?: { api: string; tokenParameter: string; temperature?: number | null };
 }
 
 export type FileTreeNodeType = 'file' | 'directory';
