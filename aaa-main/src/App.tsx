@@ -962,15 +962,18 @@ function App({ user }: { user?: SignedInUser } = {}) {
     setBrowserBusy(true);
     setError('');
     try {
-      setBrowserStatus(await aaaApi.navigateBrowser(activeProjectId, { url: browserUrl }));
+      const status = browserStatus.active
+        ? await aaaApi.navigateBrowser(activeProjectId, { url: browserUrl })
+        : await aaaApi.launchBrowser(activeProjectId, { headless: browserHeadless, url: browserUrl });
+      setBrowserStatus(status);
       setBrowserForm(null);
       setBrowserFormValues({});
     } catch (browserError) {
-      setError(browserError instanceof Error ? browserError.message : 'Could not navigate Microsoft Edge.');
+      setError(browserError instanceof Error ? browserError.message : 'Could not open the address in Microsoft Edge.');
     } finally {
       setBrowserBusy(false);
     }
-  }, [activeProjectId, browserBusy, browserUrl]);
+  }, [activeProjectId, browserBusy, browserHeadless, browserStatus.active, browserUrl]);
 
   const inspectBrowserForm = useCallback(async () => {
     if (!activeProjectId || browserBusy) return;
@@ -2140,7 +2143,7 @@ function App({ user }: { user?: SignedInUser } = {}) {
                           onChange={(event) => setBrowserUrl(event.target.value)}
                           placeholder="https://portal.example"
                         />
-                        <button className="secondary-button" disabled={!browserStatus.active || browserBusy} onClick={() => void navigateBrowser()}>
+                        <button className="secondary-button" disabled={browserBusy || !browserUrl.trim()} onClick={() => void navigateBrowser()}>
                           <Globe2 size={14} /> Go
                         </button>
                       </div>
