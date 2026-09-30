@@ -42,6 +42,41 @@ describe('TokenTracker.record', () => {
         t.dispose();
     });
 
+    it('tracks detailed usage as subsets and distinguishes provenance', () => {
+        const t = new TokenTracker();
+        t.record('chat', {
+            prompt_tokens: 100,
+            completion_tokens: 20,
+            total_tokens: 120,
+            uncached_prompt_tokens: 40,
+            cached_prompt_tokens: 60,
+            cache_write_tokens: 10,
+            reasoning_tokens: 8,
+            source: 'provider',
+        });
+        t.record('chat', {
+            prompt_tokens: 30,
+            completion_tokens: 5,
+            total_tokens: 35,
+            source: 'estimated',
+        });
+
+        const sent: ExtensionMessage[] = [];
+        t.setWebviewSender(message => sent.push(message));
+        const last = sent[sent.length - 1];
+        expect(last.type).toBe('tokenUsage');
+        if (last.type === 'tokenUsage') {
+            expect(last.totalTokens).toBe('155');
+            expect(last.uncachedPrompt).toBe('70');
+            expect(last.cachedPrompt).toBe('60');
+            expect(last.cacheWrite).toBe('10');
+            expect(last.reasoning).toBe('8');
+            expect(last.providerRequests).toBe(1);
+            expect(last.estimatedRequests).toBe(1);
+        }
+        t.dispose();
+    });
+
     it('keeps chat and inline counters separate', () => {
         const t = new TokenTracker();
         t.record('chat', { prompt_tokens: 1500, completion_tokens: 0, total_tokens: 1500 });

@@ -25,11 +25,14 @@ import type {
     ChatOptions,
     ChatResponse,
     ChatStreamChunk,
+    OpaqueCompactionItem,
+    TokenUsage,
     ToolCall,
     ToolDefinition,
 } from './framework/types';
 import { getSetting } from './config';
 import { getConfiguredTlsOptions, withCaRefreshRetry } from './network';
+import { normalizeProviderTokenUsage } from './tokenUsage';
 
 // ── Request shaping ────────────────────────────────────────────────────────
 
@@ -51,13 +54,18 @@ export interface ResponsesRequestBody {
     max_output_tokens?: number;
     temperature?: number;
     include?: string[];
+    context_management?: Array<{
+        type: 'compaction';
+        compact_threshold: number;
+    }>;
 }
 
 /** /v1/responses input item — a turn or tool result. */
 export type ResponsesInputItem =
     | { type: 'message'; role: 'system' | 'developer' | 'user' | 'assistant'; content: ResponsesContentPart[] }
     | { type: 'function_call'; call_id: string; name: string; arguments: string }
-    | { type: 'function_call_output'; call_id: string; output: string };
+    | { type: 'function_call_output'; call_id: string; output: string }
+    | OpaqueCompactionItem;
 
 export type ResponsesContentPart =
     | { type: 'input_text'; text: string }
@@ -94,10 +102,15 @@ export function buildResponsesRequest(
         maxTokens?: number;
         temperature?: number;
         reasoningMode?: boolean;
+        nativeCompaction?: ChatOptions['nativeCompaction'];
     }
 ): ResponsesRequestBody {
     const instructionsParts: string[] = [];
     const input: ResponsesInputItem[] = [];
+
+    if (opts.nativeCompaction?.item) {
+        input.push(opts.nativeCompaction.item);
+    }
 
     for (const m of messages) {
         if (m.role === 'system' || m.role === 'developer') {
@@ -173,6 +186,12 @@ export function buildResponsesRequest(
         }
     }
     if (opts.maxTokens !== undefined) { body.max_output_tokens = opts.maxTokens; }
+    if (opts.nativeCompaction) {
+        body.context_management = [{
+            type: 'compaction',
+            compact_threshold: opts.nativeCompaction.compactThreshold,
+        }];
+    }
     // Responses API rejects `temperature` for reasoning models; only send when not in reasoning mode.
     if (!opts.reasoningMode && opts.temperature !== undefined) { body.temperature = opts.temperature; }
     return body;
@@ -213,9 +232,10 @@ export type ResponsesEvent =
     | { kind: 'reasoning_summary_delta'; text: string }
     | { kind: 'function_call_arguments_delta'; itemId: string; delta: string }
     | { kind: 'function_call_started'; itemId: string; callId: string; name: string }
-    | { kind: 'response_completed'; responseId?: string; usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number } }
+    | { kind: 'response_completed'; responseId?: string; usage?: TokenUsage }
     | { kind: 'response_failed'; message: string }
-    | { kind: 'response_id'; id: string };
+    | { kind: 'response_id'; id: string }
+    | { kind: 'compaction'; item: OpaqueCompactionItem };
 
 export function parseResponsesEvent(rawJson: string): ResponsesEvent | null {
     if (!rawJson || rawJson === '[DONE]') { return null; }
@@ -263,17 +283,26 @@ export function parseResponsesEvent(rawJson: string): ResponsesEvent | null {
                 delta: typeof evt.delta === 'string' ? evt.delta : '',
             };
         }
+        case 'response.output_item.done': {
+            const item = evt?.item;
+            if (item?.type !== 'compaction' || typeof item.encrypted_content !== 'string' || !item.encrypted_content) {
+                return null;
+            }
+            return {
+                kind: 'compaction',
+                item: {
+                    type: 'compaction',
+                    encrypted_content: item.encrypted_content,
+                    ...(typeof item.id === 'string' ? { id: item.id } : {}),
+                },
+            };
+        }
         case 'response.completed': {
             const r = evt?.response ?? {};
-            const u = r.usage;
             return {
                 kind: 'response_completed',
                 responseId: r.id,
-                usage: u ? {
-                    prompt_tokens: u.input_tokens ?? u.prompt_tokens ?? 0,
-                    completion_tokens: u.output_tokens ?? u.completion_tokens ?? 0,
-                    total_tokens: u.total_tokens ?? ((u.input_tokens ?? 0) + (u.output_tokens ?? 0)),
-                } : undefined,
+                usage: normalizeProviderTokenUsage(r.usage),
             };
         }
         case 'response.failed':
@@ -355,6 +384,7 @@ export class AoaiResponsesClient implements IChatClient {
             maxTokens: options?.maxTokens ?? config.maxTokens,
             temperature: options?.temperature ?? config.temperature,
             reasoningMode: options?.reasoningMode,
+            nativeCompaction: options?.nativeCompaction,
         });
 
         const stream = await postSseRequest(
@@ -387,6 +417,9 @@ export class AoaiResponsesClient implements IChatClient {
                 switch (parsed.kind) {
                     case 'response_id':
                         yield { type: 'responseId', id: parsed.id };
+                        break;
+                    case 'compaction':
+                        yield { type: 'compaction', item: parsed.item };
                         break;
                     case 'output_text_delta':
                         yield { type: 'text', text: parsed.text };

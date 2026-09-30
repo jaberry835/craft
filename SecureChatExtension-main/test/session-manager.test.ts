@@ -164,6 +164,18 @@ describe('SessionManager — multiple sessions', () => {
         expect(sm.getCurrentSession().id).not.toBe(id);
         expect(sm.getCurrentSession().messages).toEqual([]);
     });
+
+    it('deleteSession removes the durable raw transcript artifact', () => {
+        const sm = new SessionManager(tmpDir);
+        const id = sm.getCurrentSession().id;
+        sm.recordRawTranscriptEvent('tool-result', { result: 'evidence' });
+        expect(sm.readCurrentTranscript().records).toHaveLength(1);
+        expect(fs.readdirSync(path.join(tmpDir, 'transcripts'))).toHaveLength(1);
+
+        sm.deleteSession(id);
+
+        expect(fs.readdirSync(path.join(tmpDir, 'transcripts'))).toHaveLength(0);
+    });
 });
 
 describe('SessionManager — hydration of legacy values', () => {
@@ -189,5 +201,34 @@ describe('SessionManager — hydration of legacy values', () => {
 
         const sm = new SessionManager(tmpDir);
         expect(sm.getCurrentSession().activePermissionLevel).toBe('bypass');
+    });
+
+    it('hydrates legacy history with stable turn and round metadata', () => {
+        const filePath = path.join(tmpDir, 'sessions.json');
+        const id = 'session_legacy_history';
+        fs.writeFileSync(filePath, JSON.stringify({
+            activeId: id,
+            sessions: {
+                [id]: {
+                    id,
+                    title: 'old history',
+                    messages: [
+                        { role: 'user', content: 'Inspect it' },
+                        {
+                            role: 'assistant', content: null,
+                            tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'read_file', arguments: '{}' } }],
+                        },
+                        { role: 'tool', content: 'result', tool_call_id: 'call-1' },
+                    ],
+                    createdAt: 1,
+                    updatedAt: 1,
+                },
+            },
+        }), 'utf-8');
+
+        const messages = new SessionManager(tmpDir).getCurrentSession().messages;
+        expect(messages[0].turnId).toBe('turn_session_legacy_history_1');
+        expect(messages[1].roundId).toBe('round_session_legacy_history_1_1');
+        expect(messages[2].roundId).toBe(messages[1].roundId);
     });
 });

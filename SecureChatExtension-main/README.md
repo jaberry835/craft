@@ -322,6 +322,18 @@ If your APIM route does NOT expose `/openai/v1/responses` (older Azure OpenAI te
 | `junior.azureOpenAI.reasoningEffort` | `"high"` | `none`, `low`, `medium`, `high`, or `xhigh`. Honored only when `wireApi=responses` and the deployment is reasoning-capable. Lower = faster + cheaper. |
 | `junior.azureOpenAI.reasoningSummary` | `"auto"` | `auto`, `detailed`, or `none`. Controls the streamed reasoning summary that powers the **Thinking** panel in the chat view. |
 | `junior.azureOpenAI.useServerSideState` | `false` | When `true` and `wireApi=responses`, threads `previous_response_id` across iterations so the model doesn't re-derive prior reasoning. Once a response id is held, only incremental conversation items (new tool results / turns) are sent instead of the full transcript, keeping requests small. |
+| `junior.azureOpenAI.useNativeCompaction` | `false` | Enables native `context_management` compaction at 80% of the model context window on supported Responses endpoints. Falls back to local checkpoints when unsupported. |
+| `junior.agent.useModelCheckpoints` | `true` | Generates structured background checkpoints near the context limit. Set to `false` to roll back to deterministic foreground trimming. |
+
+Large textual tool results are bounded by `junior.agent.maxToolResultFraction` (default `0.12`) before they are added to the model prompt. The complete result is written to the session raw transcript first and remains recoverable with `read_session_transcript`.
+
+For opt-in rollout measurements, `summarize_session_telemetry` returns aggregate current-session token usage, cache-hit rate, provider request outcomes, durations, and compaction counts. It also reports the latest and largest single-request input plus peak native-compaction threshold utilization. Cumulative input can exceed the context window without triggering compaction; the trigger is based on one logical request reaching 80% of the configured window. The tool reads the entire durable transcript but returns no message or tool-result content.
+
+### Conversation data and retention
+
+Junior stores session history and a redacted raw transcript in VS Code's workspace-scoped extension storage. Raw transcripts include full tool results and provider usage/request diagnostics, are accessible only through Junior's current-session transcript tool, and are deleted with the corresponding session. They are not exposed as general workspace files or to arbitrary MCP tools.
+
+Provider retention depends on the selected wire mode and upstream deployment policy. Chat Completions and Responses requests use provider storage disabled by default. Enabling `junior.azureOpenAI.useServerSideState` opts Responses sessions into `store: true` so `previous_response_id` can be reused; native compaction may also carry opaque provider-generated state in memory. Disable server-side state and native compaction to keep continuation entirely local. Consult the retention policy configured for your Azure OpenAI, APIM, or compatible endpoint because Junior cannot override upstream logging and abuse-monitoring policy.
 
 See [docs/APIM-FOUNDRY-KEY-SETUP.md](docs/APIM-FOUNDRY-KEY-SETUP.md) or [docs/APIM-FOUNDRY-BEARER-SETUP.md](docs/APIM-FOUNDRY-BEARER-SETUP.md) for the matching APIM configuration.
 

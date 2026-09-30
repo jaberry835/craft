@@ -52,6 +52,7 @@ export class RecoveryMiddleware implements ChatMiddleware {
             try {
                 return await next();
             } catch (err: unknown) {
+                if (context.options.nativeCompaction && this.isNativeCompactionRejection(err)) { throw err; }
                 if (!this.isContextOverflowError(err)) { throw err; }
                 lastError = err;
 
@@ -69,7 +70,7 @@ export class RecoveryMiddleware implements ChatMiddleware {
         switch (attempt) {
             case 1: {
                 // Emergency trim — aggressively reduce context
-                context.messages = this.contextManager.emergencyTrim(context.messages);
+                context.messages = this.contextManager.emergencyTrim(context.messages, context.client.modelId);
                 return 'emergency-trim';
             }
             case 2: {
@@ -133,6 +134,7 @@ export class RecoveryMiddleware implements ChatMiddleware {
                 yield* next();
                 return;
             } catch (err: unknown) {
+                if (context.options.nativeCompaction && this.isNativeCompactionRejection(err)) { throw err; }
                 if (this.isStreamStall(err) && stallRetries < this.maxStallRetries) {
                     stallRetries++;
                     this.onRecoveryAttempt?.(stallRetries, 'stream-stall-retry');
@@ -157,7 +159,7 @@ export class RecoveryMiddleware implements ChatMiddleware {
     private applyStreamRecoveryStrategy(attempt: number, context: ChatContext): string {
         switch (attempt) {
             case 1: {
-                context.messages = this.contextManager.emergencyTrim(context.messages);
+                context.messages = this.contextManager.emergencyTrim(context.messages, context.client.modelId);
                 return 'emergency-trim';
             }
             case 2: {
@@ -173,7 +175,7 @@ export class RecoveryMiddleware implements ChatMiddleware {
                 if (fallback) {
                     this.applyFallbackDeployment?.(fallback);
                 }
-                context.messages = this.contextManager.emergencyTrim(context.messages);
+                context.messages = this.contextManager.emergencyTrim(context.messages, context.client.modelId);
                 return 'fallback-deployment';
             }
             default:
@@ -194,5 +196,17 @@ export class RecoveryMiddleware implements ChatMiddleware {
      */
     private isRecoverableStreamingError(err: unknown): boolean {
         return this.isContextOverflowError(err);
+    }
+
+    private isNativeCompactionRejection(err: unknown): boolean {
+        if (typeof err !== 'object' || err === null) { return false; }
+        const record = err as Record<string, unknown>;
+        const status = record.statusCode ?? record.status;
+        if (status !== 400) { return false; }
+        const message = String(record.message ?? '').toLowerCase();
+        return message.includes('context_management')
+            || message.includes('compact_threshold')
+            || message.includes('encrypted_content')
+            || message.includes('compaction');
     }
 }

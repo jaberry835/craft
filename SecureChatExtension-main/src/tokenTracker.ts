@@ -12,14 +12,34 @@ type UsageSource = 'chat' | 'inline';
 interface SourceUsage {
     promptTokens: number;
     completionTokens: number;
+    uncachedPromptTokens: number;
+    cachedPromptTokens: number;
+    cacheWriteTokens: number;
+    reasoningTokens: number;
+    providerRequests: number;
+    estimatedRequests: number;
     requests: number;
+}
+
+function emptySourceUsage(): SourceUsage {
+    return {
+        promptTokens: 0,
+        completionTokens: 0,
+        uncachedPromptTokens: 0,
+        cachedPromptTokens: 0,
+        cacheWriteTokens: 0,
+        reasoningTokens: 0,
+        providerRequests: 0,
+        estimatedRequests: 0,
+        requests: 0,
+    };
 }
 
 export class TokenTracker {
     private readonly statusBar: vscode.StatusBarItem;
     private readonly usage: Record<UsageSource, SourceUsage> = {
-        chat: { promptTokens: 0, completionTokens: 0, requests: 0 },
-        inline: { promptTokens: 0, completionTokens: 0, requests: 0 }
+        chat: emptySourceUsage(),
+        inline: emptySourceUsage(),
     };
     /** Current context size in tokens (set by the agent loop after each API call). */
     private currentContextTokens = 0;
@@ -48,8 +68,15 @@ export class TokenTracker {
         const s = this.usage[source];
         s.promptTokens += usage.prompt_tokens;
         s.completionTokens += usage.completion_tokens;
+        s.cachedPromptTokens += usage.cached_prompt_tokens ?? 0;
+        s.uncachedPromptTokens += usage.uncached_prompt_tokens
+            ?? Math.max(0, usage.prompt_tokens - (usage.cached_prompt_tokens ?? 0));
+        s.cacheWriteTokens += usage.cache_write_tokens ?? 0;
+        s.reasoningTokens += usage.reasoning_tokens ?? 0;
+        if (usage.source === 'estimated') { s.estimatedRequests += 1; }
+        else { s.providerRequests += 1; }
         s.requests += 1;
-        this.log(`TokenTracker: ${source} +${usage.prompt_tokens}p/${usage.completion_tokens}c — total ${this.totalTokens()}`);
+        this.log(`TokenTracker: ${source} +${usage.prompt_tokens}p/${usage.completion_tokens}c (${usage.cached_prompt_tokens ?? 0} cached, ${usage.cache_write_tokens ?? 0} cache-write, ${usage.reasoning_tokens ?? 0} reasoning, ${usage.source ?? 'provider'}) — total ${this.totalTokens()}`);
         this.updateStatusBar();
         this.pushToWebview();
     }
@@ -57,7 +84,7 @@ export class TokenTracker {
     /** Reset all counters. */
     reset() {
         for (const key of Object.keys(this.usage) as UsageSource[]) {
-            this.usage[key] = { promptTokens: 0, completionTokens: 0, requests: 0 };
+            this.usage[key] = emptySourceUsage();
         }
         this.currentContextTokens = 0;
         this.currentContextWindowOverride = undefined;
@@ -88,12 +115,21 @@ export class TokenTracker {
             ``,
             `── Chat ──`,
             `  Prompt:     ${this.formatTokens(chat.promptTokens)}`,
+            `    Uncached: ${this.formatTokens(chat.uncachedPromptTokens)}`,
+            `    Cached:   ${this.formatTokens(chat.cachedPromptTokens)}`,
+            `    Written:  ${this.formatTokens(chat.cacheWriteTokens)}`,
             `  Completion: ${this.formatTokens(chat.completionTokens)}`,
+            `    Reasoning: ${this.formatTokens(chat.reasoningTokens)}`,
+            `  Reported:   ${chat.providerRequests} provider, ${chat.estimatedRequests} estimated`,
             `  Requests:   ${chat.requests}`,
             ``,
             `── Inline Completions ──`,
             `  Prompt:     ${this.formatTokens(inline.promptTokens)}`,
+            `    Uncached: ${this.formatTokens(inline.uncachedPromptTokens)}`,
+            `    Cached:   ${this.formatTokens(inline.cachedPromptTokens)}`,
             `  Completion: ${this.formatTokens(inline.completionTokens)}`,
+            `    Reasoning: ${this.formatTokens(inline.reasoningTokens)}`,
+            `  Reported:   ${inline.providerRequests} provider, ${inline.estimatedRequests} estimated`,
             `  Requests:   ${inline.requests}`,
         ];
 
@@ -143,7 +179,11 @@ export class TokenTracker {
         md.appendMarkdown(`| | Tokens | % |\n`);
         md.appendMarkdown(`|:--|--:|--:|\n`);
         md.appendMarkdown(`| $(arrow-up) Prompt | ${this.formatTokens(chat.promptTokens)} | ${pct(chat.promptTokens)} |\n`);
+        md.appendMarkdown(`| &nbsp;&nbsp; Uncached | ${this.formatTokens(chat.uncachedPromptTokens)} | |\n`);
+        md.appendMarkdown(`| &nbsp;&nbsp; Cached | ${this.formatTokens(chat.cachedPromptTokens)} | |\n`);
+        md.appendMarkdown(`| &nbsp;&nbsp; Cache writes | ${this.formatTokens(chat.cacheWriteTokens)} | |\n`);
         md.appendMarkdown(`| $(arrow-down) Completion | ${this.formatTokens(chat.completionTokens)} | ${pct(chat.completionTokens)} |\n`);
+        md.appendMarkdown(`| &nbsp;&nbsp; Reasoning | ${this.formatTokens(chat.reasoningTokens)} | |\n`);
         md.appendMarkdown(`| $(symbol-number) Requests | ${chat.requests} | |\n\n`);
 
         // Inline section
@@ -190,6 +230,12 @@ export class TokenTracker {
             inlineCompletionPct: pct(inline.completionTokens),
             chatRequests: chat.requests,
             inlineRequests: inline.requests,
+            uncachedPrompt: this.formatTokens(chat.uncachedPromptTokens + inline.uncachedPromptTokens),
+            cachedPrompt: this.formatTokens(chat.cachedPromptTokens + inline.cachedPromptTokens),
+            cacheWrite: this.formatTokens(chat.cacheWriteTokens + inline.cacheWriteTokens),
+            reasoning: this.formatTokens(chat.reasoningTokens + inline.reasoningTokens),
+            providerRequests: chat.providerRequests + inline.providerRequests,
+            estimatedRequests: chat.estimatedRequests + inline.estimatedRequests,
             windowPct: Math.min(100, Math.round((this.currentContextTokens || total) / contextWindow * 100)),
             contextWindow: this.formatTokens(contextWindow)
         });

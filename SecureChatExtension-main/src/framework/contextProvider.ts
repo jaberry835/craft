@@ -19,6 +19,9 @@ export interface IContextProvider {
     /** Unique name for debugging/logging. */
     readonly name: string;
 
+    /** Clear session-scoped cached context when history is replaced. */
+    reset?(): void;
+
     /**
      * Called before the agent starts processing.
      * Use this to inject system messages, add tools, or prepare context.

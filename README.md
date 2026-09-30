@@ -28,3 +28,4 @@ Curated Demo Code
 | 2026-09-25 22:10 UTC | aaa | main | +7, ~18 |
 | 2026-09-28 12:16 UTC | aaa | main | ~1 |
 | 2026-09-30 19:09 UTC | aaa | main | +11, ~20 |
+| 2026-09-30 19:09 UTC | SecureChatExtension | main | +15, ~25 |

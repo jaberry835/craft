@@ -3,7 +3,7 @@
  */
 import * as vscode from 'vscode';
 import * as cp from 'child_process';
-import { ToolDefinition, ToolHandler, AskUserQuestion, AskUserAnswers } from '../types';
+import { ToolDefinition, ToolHandler, ToolResult, AskUserQuestion, AskUserAnswers } from '../types';
 import { WorkspaceIndexer } from '../workspaceIndexer';
 import { SymbolIndexer } from '../symbolIndexer';
 import { SemanticIndexer } from '../semanticIndexer';
@@ -26,6 +26,8 @@ export interface ToolCallbacks {
     onTerminalOutput?: (line: string) => void;
     onSetPlan?: (steps: { id: string; title: string }[]) => void;
     onUpdatePlanStep?: (stepId: string, status: string) => void;
+    readTranscript?: (startRecord: number, maxRecords: number) => ToolResult;
+    summarizeTelemetry?: () => ToolResult;
 }
 
 /**

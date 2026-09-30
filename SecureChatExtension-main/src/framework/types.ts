@@ -37,8 +37,22 @@ export interface ChatOptions {
     /** Server-side conversation state id (responses wire API only). When set, the
      *  client sends only the new turn(s) plus this previous_response_id. */
     previousResponseId?: string;
+    /** Override the local context-compaction threshold for this request. */
+    contextThreshold?: number;
+    /** Native Responses API compaction settings. */
+    nativeCompaction?: {
+        compactThreshold: number;
+        item?: OpaqueCompactionItem;
+    };
     /** AbortSignal for cancellation. */
     signal?: AbortSignal;
+}
+
+/** Opaque provider compaction state. Its encrypted content must not be inspected or logged. */
+export interface OpaqueCompactionItem {
+    type: 'compaction';
+    encrypted_content: string;
+    id?: string;
 }
 
 // ── Chat Response ──
@@ -73,6 +87,7 @@ export type ChatStreamChunk =
     | { type: 'toolCalls'; calls: ToolCall[] }
     | { type: 'usage'; usage: TokenUsage }
     | { type: 'responseId'; id: string }
+    | { type: 'compaction'; item: OpaqueCompactionItem }
     | { type: 'done' }
     | { type: 'retry'; reason: string };
 

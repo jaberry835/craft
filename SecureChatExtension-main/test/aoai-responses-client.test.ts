@@ -78,18 +78,50 @@ describe('parseResponsesEvent', () => {
         });
     });
 
-    it('decodes response.completed and normalizes usage fields', () => {
+    it('decodes a completed opaque compaction item without changing its content', () => {
+        const evt = parseResponsesEvent(JSON.stringify({
+            type: 'response.output_item.done',
+            item: { type: 'compaction', id: 'cmp_1', encrypted_content: 'opaque.ciphertext==' },
+        }));
+        expect(evt).toEqual({
+            kind: 'compaction',
+            item: { type: 'compaction', id: 'cmp_1', encrypted_content: 'opaque.ciphertext==' },
+        });
+    });
+
+    it('rejects malformed compaction output items', () => {
+        expect(parseResponsesEvent(JSON.stringify({
+            type: 'response.output_item.done', item: { type: 'compaction' },
+        }))).toBeNull();
+    });
+
+    it('decodes response.completed and normalizes detailed usage fields', () => {
         const evt = parseResponsesEvent(JSON.stringify({
             type: 'response.completed',
             response: {
                 id: 'resp_done',
-                usage: { input_tokens: 12, output_tokens: 7, total_tokens: 19 },
+                usage: {
+                    input_tokens: 12,
+                    output_tokens: 7,
+                    total_tokens: 19,
+                    input_tokens_details: { cached_tokens: 5, cache_creation_tokens: 2 },
+                    output_tokens_details: { reasoning_tokens: 3 },
+                },
             },
         }));
         expect(evt).toEqual({
             kind: 'response_completed',
             responseId: 'resp_done',
-            usage: { prompt_tokens: 12, completion_tokens: 7, total_tokens: 19 },
+            usage: {
+                prompt_tokens: 12,
+                completion_tokens: 7,
+                total_tokens: 19,
+                uncached_prompt_tokens: 7,
+                cached_prompt_tokens: 5,
+                cache_write_tokens: 2,
+                reasoning_tokens: 3,
+                source: 'provider',
+            },
         });
     });
 
@@ -205,6 +237,23 @@ describe('buildResponsesRequest', () => {
         });
         expect(body.previous_response_id).toBe('resp_prev');
         expect(body.store).toBe(true);
+    });
+
+    it('adds native context management and round-trips an opaque compaction item', () => {
+        const item = { type: 'compaction' as const, id: 'cmp_1', encrypted_content: 'opaque.ciphertext==' };
+        const body = buildResponsesRequest('m', [{ role: 'user', content: 'continue' }], [], {
+            stream: true,
+            store: false,
+            nativeCompaction: { compactThreshold: 100_000, item },
+        });
+
+        expect(body.context_management).toEqual([{
+            type: 'compaction', compact_threshold: 100_000,
+        }]);
+        expect(body.input[0]).toEqual(item);
+        expect(body.input[1]).toEqual({
+            type: 'message', role: 'user', content: [{ type: 'input_text', text: 'continue' }],
+        });
     });
 
     it('emits an incremental tool-result payload when threading previous_response_id', () => {

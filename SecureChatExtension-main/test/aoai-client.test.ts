@@ -1,9 +1,23 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import * as vscode from 'vscode';
-import { AzureOpenAIClient } from '../src/aoaiClient';
+import { AzureOpenAIClient, serializeChatMessages } from '../src/aoaiClient';
+import { normalizeProviderTokenUsage } from '../src/tokenUsage';
 
 const getConfigurationMock = vi.mocked(vscode.workspace.getConfiguration);
 const getSessionMock = vi.mocked(vscode.authentication.getSession);
+
+describe('Chat Completions message serialization', () => {
+    it('does not send local history and display metadata to the provider', () => {
+        expect(serializeChatMessages([{
+            role: 'user',
+            content: 'hello',
+            turnId: 'turn-1',
+            roundId: 'round-1',
+            displayText: '/ask hello',
+            mode: 'ask',
+        }])).toEqual([{ role: 'user', content: 'hello' }]);
+    });
+});
 
 function setConfiguration(values: Record<string, unknown>) {
     getConfigurationMock.mockImplementation(() => ({
@@ -152,5 +166,26 @@ describe('AzureOpenAIClient retry budget', () => {
         const client = new AzureOpenAIClient();
 
         await expect(client.validate()).resolves.toMatch(/bearer token/i);
+    });
+});
+
+describe('Chat Completions usage normalization', () => {
+    it('tracks cached, uncached, cache-write, and reasoning tokens', () => {
+        expect(normalizeProviderTokenUsage({
+            prompt_tokens: 100,
+            completion_tokens: 25,
+            total_tokens: 125,
+            prompt_tokens_details: { cached_tokens: 60, cache_creation_tokens: 10 },
+            completion_tokens_details: { reasoning_tokens: 8 },
+        })).toEqual({
+            prompt_tokens: 100,
+            completion_tokens: 25,
+            total_tokens: 125,
+            uncached_prompt_tokens: 40,
+            cached_prompt_tokens: 60,
+            cache_write_tokens: 10,
+            reasoning_tokens: 8,
+            source: 'provider',
+        });
     });
 });

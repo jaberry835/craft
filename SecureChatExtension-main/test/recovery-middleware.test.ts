@@ -106,6 +106,18 @@ describe('RecoveryMiddleware', () => {
                 expect(next).toHaveBeenCalledTimes(2);
             }
         });
+
+        it('leaves native compaction rejection to the caller fallback', async () => {
+            const mw = new RecoveryMiddleware();
+            const next = vi.fn().mockRejectedValue(
+                contextOverflowError('unknown parameter: context_management')
+            );
+            const ctx = makeChatContext();
+            ctx.options.nativeCompaction = { compactThreshold: 100_000 };
+
+            await expect(mw.process(ctx, next)).rejects.toThrow('context_management');
+            expect(next).toHaveBeenCalledOnce();
+        });
     });
 
     describe('processStream() — streaming', () => {
@@ -195,6 +207,20 @@ describe('RecoveryMiddleware', () => {
             expect(mw.activeReasoningMode).toBe(false);
             await collectChunks(mw.processStream(ctx, fakeStream));
             expect(mw.activeReasoningMode).toBe(true);
+        });
+
+        it('does not retry native compaction rejection in the stream middleware', async () => {
+            const mw = new RecoveryMiddleware();
+            const ctx = makeChatContext();
+            ctx.options.nativeCompaction = { compactThreshold: 100_000 };
+            let calls = 0;
+            async function* fakeStream(): AsyncGenerator<ChatStreamChunk> {
+                calls++;
+                throw contextOverflowError('unsupported parameter: compact_threshold');
+            }
+
+            await expect(collectChunks(mw.processStream(ctx, fakeStream))).rejects.toThrow('compact_threshold');
+            expect(calls).toBe(1);
         });
 
         it('calls applyFallbackDeployment on tier-3 recovery', async () => {

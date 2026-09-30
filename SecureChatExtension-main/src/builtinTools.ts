@@ -12,7 +12,7 @@ import { SemanticIndexer } from './semanticIndexer';
 import { countLineChanges } from './diffUtils';
 import { DEFAULT_PERMISSION_LEVEL, shouldConfirmLocalCategory } from './permissions';
 import { ToolContext, ToolCallbacks, BackgroundProcessEntry } from './tools/types';
-import { createFileTools, createSearchTools, createTerminalTools, createCodeActionTools, createPlanTools, createAskUserTools, createBrowserTools } from './tools';
+import { createFileTools, createSearchTools, createTerminalTools, createCodeActionTools, createPlanTools, createAskUserTools, createBrowserTools, createTranscriptTools } from './tools';
 
 export class BuiltinTools {
     private handlers: Map<string, ToolHandler> = new Map();
@@ -74,6 +74,14 @@ export class BuiltinTools {
 
     setTerminalOutputCallback(cb: (line: string) => void) {
         this.toolCallbacks.onTerminalOutput = cb;
+    }
+
+    setTranscriptReadCallback(cb: (startRecord: number, maxRecords: number) => ToolResult) {
+        this.toolCallbacks.readTranscript = cb;
+    }
+
+    setTelemetrySummaryCallback(cb: () => ToolResult) {
+        this.toolCallbacks.summarizeTelemetry = cb;
     }
 
     setPermissionLevel(level: AgentPermissionLevel) {
@@ -577,6 +585,7 @@ export class BuiltinTools {
             ...createCodeActionTools(ctx),
             ...createPlanTools(ctx),
             ...createAskUserTools(ctx),
+            ...createTranscriptTools(ctx),
             ...browserTools.entries,
         ]) {
             this.register(entry.definition, entry.handler);

@@ -20,13 +20,16 @@ import { AzureOpenAIClient } from './aoaiClient';
 import { BuiltinTools } from './builtinTools';
 import { McpClient } from './mcpClient';
 import { ContextManager } from './contextManager';
+import { createHistoryId, hydrateHistoryMetadata } from './conversationHistory';
 
 import { getSetting } from './config';
 import {
     ChatMessage, ContentPart, ToolCall, ToolDefinition, ToolResult,
     ExtensionMessage, AgentPlanStep, ChatMode, WorkingActionType, WorkingBlock,
     WorkingBlockActionEntry, WorkingBlockProgressEntry, ToolProgressUpdate,
+    TranscriptReference,
 } from './types';
+import type { RawTranscriptEventKind } from './rawTranscript';
 import { TokenTracker } from './tokenTracker';
 import { getSystemPrompt } from './agentPrompt';
 import { AgentTaskMemory } from './taskMemory';
@@ -34,6 +37,7 @@ import { RetrievalRanker } from './retrievalRanker';
 import { RepoPatternStore } from './repoPatternStore';
 import { formatLocalAgentError } from './errorFormatting';
 import { wrapUntrusted } from './security';
+import { BackgroundCheckpointManager, buildCheckpointPrompt } from './backgroundCheckpoint';
 
 // ── Framework imports ──
 import { AoaiChatClientAdapter } from './framework/aoaiAdapter';
@@ -43,7 +47,7 @@ import { buildToolRegistryFromBuiltins, addMcpToolsToRegistry } from './framewor
 import { FunctionTool, ToolExecutor, ToolRegistry } from './framework/tools';
 import type { ToolEntry } from './tools/types';
 import { type AgentContext, MiddlewarePipeline } from './framework/middleware';
-import type { AgentResponse } from './framework/types';
+import type { AgentResponse, OpaqueCompactionItem } from './framework/types';
 import type { IContextProvider } from './framework/contextProvider';
 
 // ── Middleware imports ──
@@ -61,6 +65,8 @@ import {
 
 export interface AgentCallbacks {
     sendToWebview(msg: ExtensionMessage): void;
+    recordTranscriptEvent?(kind: RawTranscriptEventKind, payload: unknown): void;
+    getTranscriptReference?(): TranscriptReference | undefined;
 }
 
 /** Tools that modify files — tracked for auto-fix diagnostics */
@@ -90,8 +96,48 @@ interface ToolProgressDescriptor {
     progressText?: string;
 }
 
+export function buildNativeCompactionTail(
+    requestMessages: ChatMessage[],
+    historyMessages: ChatMessage[],
+    boundary: number
+): ChatMessage[] {
+    const instructions = requestMessages.filter(
+        message => message.role === 'system' || message.role === 'developer'
+    );
+    return [...instructions, ...historyMessages.slice(boundary)];
+}
+
+export function insertProviderMessages(history: ChatMessage[], additions: ChatMessage[]): void {
+    const systemMessages = additions.filter(message => message.role === 'system');
+    const otherMessages = additions.filter(message => message.role !== 'system');
+    if (systemMessages.length > 0) {
+        let insertAt = 0;
+        while (insertAt < history.length && history[insertAt].role === 'system') { insertAt++; }
+        history.splice(insertAt, 0, ...systemMessages);
+    }
+    history.push(...otherMessages);
+}
+
+export function classifyProviderRequestFailure(error: unknown, cancelled: boolean): {
+    status: 'canceled' | 'stalled' | 'failed';
+    reason: 'canceled' | 'stream-stall' | 'provider-error';
+} {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const aborted = cancelled
+        || (typeof error === 'object' && error !== null && (error as { name?: string }).name === 'AbortError')
+        || /\baborted\b/i.test(errorMessage);
+    if (aborted) { return { status: 'canceled', reason: 'canceled' }; }
+    if (/stream stalled|no data received/i.test(errorMessage)) {
+        return { status: 'stalled', reason: 'stream-stall' };
+    }
+    return { status: 'failed', reason: 'provider-error' };
+}
+
 export class AgentLoop {
     private messages: ChatMessage[] = [];
+    private activeTurnId: string | undefined;
+    private activeRoundId: string | undefined;
+    private providerRequestSequence = 0;
     private abortController: AbortController | null = null;
     private running = false;
     private cancelled = false;
@@ -105,11 +151,20 @@ export class AgentLoop {
     private taskMemory = new AgentTaskMemory();
     private lastInjectedTaskMemoryVersion = -1;
     private lastInjectedRepoMemoryVersion = -1;
+    /** Latest authoritative logical prompt size reported by the provider. */
+    private lastServerPromptTokens: number | undefined;
     /** Reference to the active agent context so cancel() can update its `cancelled` flag. */
     private activeAgentContext: AgentContext | null = null;
 
     // ── Framework components ──
     private chatClient: IChatClient;
+    private baseChatClient: IChatClient;
+    private backgroundCheckpoints = new BackgroundCheckpointManager();
+    private backgroundCheckpointStartedAt: number | undefined;
+    private nativeCompactionItem: OpaqueCompactionItem | undefined;
+    private nativeCompactionBoundary = 0;
+    private nativeCompactionStateKey: string | undefined;
+    private nativeCompactionDisabled = false;
     private toolExecutor: ToolExecutor;
     private toolRegistry: ToolRegistry;
     /** Optional persona overlay (custom agent). When set, replaces the system prompt and adds extra tools. */
@@ -146,6 +201,7 @@ export class AgentLoop {
         const chatAdapter: IChatClient = wireApi === 'responses'
             ? new AoaiResponsesClient(aoaiClient)
             : new AoaiChatClientAdapter(aoaiClient);
+        this.baseChatClient = chatAdapter;
         this.log?.(`[agent] Chat client wireApi=${wireApi}`);
 
         // Build tool registry from existing tools
@@ -167,6 +223,12 @@ export class AgentLoop {
             applyFallbackDeployment: (id) => this.aoaiClient.setDeploymentOverride(id),
             onRecoveryAttempt: (attempt, strategy) => {
                 this.log?.(`[WARN] Recovery attempt ${attempt}: ${strategy}`);
+                this.callbacks.recordTranscriptEvent?.('provider-request', {
+                    status: strategy === 'stream-stall-retry' ? 'stalled' : 'retried',
+                    attempt,
+                    reason: strategy,
+                    modelId: this.chatClient.modelId,
+                });
                 const statusMap: Record<string, string> = {
                     'emergency-trim': 'Prompt too large for model \u2014 trimming context...',
                     'reasoning-mode': 'Retrying with reasoning-compatible parameters...',
@@ -215,20 +277,35 @@ export class AgentLoop {
     getMessages(): ChatMessage[] { return [...this.messages]; }
 
     setMessages(messages: ChatMessage[]) {
-        this.messages = this.contextManager.normalizeMessageSequence(messages);
+        this.messages = hydrateHistoryMetadata(
+            this.contextManager.normalizeMessageSequence(messages),
+            'runtime'
+        );
+        this.activeTurnId = undefined;
+        this.activeRoundId = undefined;
+        this.backgroundCheckpoints.invalidate();
+        this.resetNativeCompaction(true);
+        this.lastServerPromptTokens = undefined;
         this.taskMemory.reset();
         this.lastInjectedTaskMemoryVersion = -1;
         this.lastInjectedRepoMemoryVersion = -1;
         this.memoryMiddleware.reset();
+        for (const provider of this.contextProviders) { provider.reset?.(); }
     }
 
     clearMessages() {
         this.messages = [];
+        this.activeTurnId = undefined;
+        this.activeRoundId = undefined;
+        this.backgroundCheckpoints.invalidate();
+        this.resetNativeCompaction(true);
+        this.lastServerPromptTokens = undefined;
         this.planSteps = [];
         this.taskMemory.reset();
         this.lastInjectedTaskMemoryVersion = -1;
         this.lastInjectedRepoMemoryVersion = -1;
         this.memoryMiddleware.reset();
+        for (const provider of this.contextProviders) { provider.reset?.(); }
     }
 
     setPlan(steps: { id: string; title: string }[], autoStart: boolean = this.currentMode === 'agent') {
@@ -254,6 +331,7 @@ export class AgentLoop {
 
     cancel() {
         this.cancelled = true;
+        this.backgroundCheckpoints.invalidate();
         for (const child of this.childAgentLoops) {
             child.cancel();
         }
@@ -308,6 +386,7 @@ export class AgentLoop {
 
         // ── Step 3: Gather tools ──
         const tools = this.getAllToolDefinitions(mode);
+        this.log?.(`Tool schema cost: approximately ${this.contextManager.estimateToolTokens(tools, this.chatClient.modelId)} tokens across ${tools.length} tool(s).`);
 
         // ── Step 4: Run context providers (beforeRun) ──
         const agentContext: AgentContext = {
@@ -327,14 +406,29 @@ export class AgentLoop {
             if (provider.beforeRun) {
                 const extraMessages = await provider.beforeRun(agentContext);
                 if (extraMessages && extraMessages.length > 0) {
-                    this.messages.push(...extraMessages);
+                    insertProviderMessages(this.messages, extraMessages.map(message => ({
+                        ...message,
+                        turnId: message.turnId ?? this.activeTurnId,
+                    })));
                 }
             }
         }
 
         // ── Step 5: Run iteration kernel through AgentMiddleware pipeline ──
         try {
+            const recordedRateLimitAttempts = new Set<string>();
             this.aoaiClient.setRetryCallback((remainingSec, attempt, maxRetries) => {
+                const retryKey = `${agentContext.iteration}:${attempt}`;
+                if (!recordedRateLimitAttempts.has(retryKey)) {
+                    recordedRateLimitAttempts.add(retryKey);
+                    this.callbacks.recordTranscriptEvent?.('provider-request', {
+                        status: 'retried',
+                        attempt,
+                        maxRetries,
+                        reason: 'rate-limit',
+                        modelId: this.chatClient.modelId,
+                    });
+                }
                 this.callbacks.sendToWebview({
                     type: 'setStatus',
                     status: remainingSec > 0
@@ -523,6 +617,23 @@ export class AgentLoop {
         // the most recent response id into the next iteration's request so
         // the upstream can skip re-deriving reasoning for prior turns.
         const useServerSideState = !!getSetting<boolean>('azureOpenAI.useServerSideState');
+        const useNativeCompaction = !!getSetting<boolean>('azureOpenAI.useNativeCompaction')
+            && (getSetting<string>('azureOpenAI.wireApi') || 'chat-completions').toLowerCase() === 'responses';
+        const useModelCheckpoints = getSetting<boolean>('agent.useModelCheckpoints') !== false;
+        const providerConfig = await this.aoaiClient.getConfigAsync();
+        let nativeStateKey = [
+            providerConfig.provider,
+            providerConfig.provider === 'apim' ? providerConfig.apimBaseUrl : providerConfig.endpoint,
+            this.chatClient.modelId,
+        ].join('|');
+        if (this.nativeCompactionStateKey && this.nativeCompactionStateKey !== nativeStateKey) {
+            this.resetNativeCompaction();
+        }
+        this.nativeCompactionStateKey = nativeStateKey;
+        let nativeCompactionEnabled = useNativeCompaction && !this.nativeCompactionDisabled;
+        if (nativeCompactionEnabled) {
+            this.backgroundCheckpoints.invalidate();
+        }
         let lastResponseId: string | undefined;
         // Number of `this.messages` entries already reflected in upstream
         // server-side state (everything up to and including the assistant
@@ -532,6 +643,7 @@ export class AgentLoop {
         // which otherwise grows unbounded and trips "please check your inputs
         // and try again" stream errors once the payload gets too large.
         let serverStateCommittedCount = 0;
+        let checkpointEligible = false;
 
         try {
             // Website-reading requests should not depend on the model first promising
@@ -552,6 +664,7 @@ export class AgentLoop {
 
                 this.messages.push({
                     role: 'developer',
+                    turnId: this.activeTurnId,
                     content: result.success
                         ? 'The requested web page has already been opened with browser_open. Answer the user from the page snapshot in the next message; follow relevant links with browser_click only if more context is required.'
                         : 'The browser_open attempt failed or was declined. Explain that outcome accurately instead of claiming the page was inspected.',
@@ -559,6 +672,7 @@ export class AgentLoop {
                 if (result.success) {
                     this.messages.push({
                         role: 'user',
+                        turnId: this.activeTurnId,
                         content: `Web page snapshot for ${websiteRequest.url}:\n\n${wrapUntrusted('browser_open', result.result)}`,
                     });
                 }
@@ -577,12 +691,120 @@ export class AgentLoop {
                     this.log?.('Repaired invalid assistant/tool message ordering before sending the request.');
                 }
 
-                // Trim context via ContextManager
+                const contextWindow = this.contextManager.getContextWindow();
+                if (this.nativeCompactionStateKey && !this.nativeCompactionStateKey.endsWith(`|${this.chatClient.modelId}`)) {
+                    this.resetNativeCompaction();
+                    lastResponseId = undefined;
+                    serverStateCommittedCount = 0;
+                    nativeCompactionEnabled = useNativeCompaction && !this.nativeCompactionDisabled;
+                    nativeStateKey = `${providerConfig.provider}|${providerConfig.provider === 'apim' ? providerConfig.apimBaseUrl : providerConfig.endpoint}|${this.chatClient.modelId}`;
+                    this.nativeCompactionStateKey = nativeStateKey;
+                }
+                if (useModelCheckpoints) {
+                    this.backgroundCheckpoints.synchronizeContext(this.chatClient.modelId, contextWindow);
+                } else {
+                    this.backgroundCheckpoints.invalidate();
+                    this.backgroundCheckpointStartedAt = undefined;
+                }
+                const readyCheckpoint = useModelCheckpoints
+                    ? this.backgroundCheckpoints.applyReady(
+                        this.messages,
+                        this.chatClient.modelId,
+                        contextWindow
+                    )
+                    : undefined;
+                if (readyCheckpoint) {
+                    this.messages = this.contextManager.normalizeMessageSequence(readyCheckpoint);
+                    const checkpointMetadata = this.messages.find(message => message.checkpoint)?.checkpoint;
+                    this.callbacks.recordTranscriptEvent?.('status', {
+                        operation: 'conversation-compaction',
+                        source: 'local-background-checkpoint',
+                        boundary: checkpointMetadata?.throughRoundId,
+                        durationMs: this.backgroundCheckpointStartedAt === undefined
+                            ? undefined
+                            : Date.now() - this.backgroundCheckpointStartedAt,
+                        modelId: this.chatClient.modelId,
+                    });
+                    this.backgroundCheckpointStartedAt = undefined;
+                    this.resetNativeCompaction();
+                    this.lastServerPromptTokens = undefined;
+                    lastResponseId = undefined;
+                    serverStateCommittedCount = 0;
+                    this.callbacks.sendToWebview({ type: 'setStatus', status: 'Applied conversation checkpoint.' });
+                    this.log?.('Applied validated background conversation checkpoint.');
+                }
+
+                // Account for the complete prompt. Background checkpointing starts
+                // after complete tool rounds at 80%; deterministic trimming is the
+                // foreground safety path at 90%.
+                const contextBudget = {
+                    tools,
+                    minimumPromptTokens: this.lastServerPromptTokens,
+                    reservedOutputTokens: getSetting<number>('maxTokens') || 16384,
+                    modelId: this.chatClient.modelId,
+                    transcriptReference: this.callbacks.getTranscriptReference?.(),
+                };
+                const promptTokens = this.contextManager.estimatePromptTokens(this.messages, contextBudget);
+                if (checkpointEligible && useModelCheckpoints && !nativeCompactionEnabled) {
+                    const started = this.backgroundCheckpoints.maybeStart({
+                        messages: this.messages,
+                        promptTokens,
+                        contextWindow,
+                        modelId: this.chatClient.modelId,
+                        transcriptReference: contextBudget.transcriptReference,
+                        generate: async (source, signal) => {
+                            const response = await this.baseChatClient.getResponse(
+                                buildCheckpointPrompt(source),
+                                { maxTokens: 2_048, temperature: 0, signal }
+                            );
+                            if (response.usage) {
+                                this.callbacks.recordTranscriptEvent?.('provider-usage', {
+                                    modelId: response.modelId || this.baseChatClient.modelId,
+                                    operation: 'background-checkpoint',
+                                    usage: response.usage,
+                                });
+                            }
+                            return response.messages.map(message =>
+                                typeof message.content === 'string'
+                                    ? message.content
+                                    : Array.isArray(message.content)
+                                        ? message.content.filter(part => part.type === 'text').map(part => part.text).join('\n')
+                                        : ''
+                            ).join('\n');
+                        },
+                    });
+                    if (started) {
+                        this.backgroundCheckpointStartedAt = Date.now();
+                        this.log?.(`Started background checkpoint at ${Math.round(promptTokens / contextWindow * 100)}% context use.`);
+                    }
+                    checkpointEligible = false;
+                }
+
                 const preTriMessages = this.messages;
-                this.messages = this.contextManager.trimIfNeeded(this.messages);
+                const foregroundCompactionStartedAt = Date.now();
+                if (!nativeCompactionEnabled || !this.nativeCompactionItem) {
+                    this.messages = this.contextManager.trimIfNeeded(this.messages, {
+                        ...contextBudget,
+                        reservedOutputTokens: 0,
+                        threshold: 0.90,
+                    });
+                }
                 if (this.messages !== preTriMessages) {
+                    const checkpointMetadata = this.messages.find(message => message.checkpoint)?.checkpoint;
+                    this.callbacks.recordTranscriptEvent?.('status', {
+                        operation: 'conversation-compaction',
+                        source: 'local-foreground-trim',
+                        boundary: checkpointMetadata?.throughRoundId,
+                        durationMs: Date.now() - foregroundCompactionStartedAt,
+                        fallbackReason: 'context-threshold',
+                        modelId: this.chatClient.modelId,
+                    });
+                    this.backgroundCheckpoints.invalidate();
+                    this.backgroundCheckpointStartedAt = undefined;
+                    this.resetNativeCompaction();
                     this.callbacks.sendToWebview({ type: 'setStatus', status: 'Compacting conversation...' });
                     this.log?.('Context compacted: trimmed conversation to fit context window.');
+                    this.lastServerPromptTokens = undefined;
                     if (lastResponseId) {
                         this.log?.('Server-side state reset because local context compaction rewrote the transcript.');
                         lastResponseId = undefined;
@@ -594,7 +816,10 @@ export class AgentLoop {
                 const requestMessages = this.buildRequestMessages(iteration);
 
                 if (this.tokenTracker) {
-                    this.tokenTracker.setContextSize(this.contextManager.estimateTotalTokens(requestMessages));
+                    this.tokenTracker.setContextSize(this.contextManager.estimatePromptTokens(requestMessages, {
+                        ...contextBudget,
+                        minimumPromptTokens: this.lastServerPromptTokens,
+                    }));
                 }
 
                 // When server-side state is active and we already hold a
@@ -617,9 +842,25 @@ export class AgentLoop {
                         `(instead of ${this.messages.length} transcript message(s)).`
                     );
                 }
+                const threadNativeCompaction = nativeCompactionEnabled
+                    && !threadServerState
+                    && !!this.nativeCompactionItem;
+                if (threadNativeCompaction) {
+                    outboundMessages = buildNativeCompactionTail(
+                        requestMessages,
+                        this.messages,
+                        this.nativeCompactionBoundary
+                    );
+                    this.log?.(`Native compaction: sending ${this.messages.length - this.nativeCompactionBoundary} exact message(s) after the opaque checkpoint.`);
+                }
 
                 // Validate client
                 const validation = await this.aoaiClient.validate();
+                this.callbacks.recordTranscriptEvent?.('validation', {
+                    modelId: this.chatClient.modelId,
+                    success: !validation,
+                    error: validation || undefined,
+                });
                 if (validation) {
                     this.callbacks.sendToWebview({ type: 'error', message: `Configuration error: ${validation}` });
                     break;
@@ -640,16 +881,32 @@ export class AgentLoop {
 
                 try {
                     let retriedWithoutServerState = false;
+                    let retriedWithoutNativeCompaction = false;
                     while (true) {
+                    const useNativeForAttempt = nativeCompactionEnabled && !retriedWithoutNativeCompaction;
+                    const providerRequestId = `${this.activeTurnId ?? 'turn'}:${iteration}:${++this.providerRequestSequence}`;
+                    const providerRequestStartedAt = Date.now();
+                    const requestStartBoundary = this.messages.length;
                     try {
                         const usePreviousResponseId = threadServerState && !retriedWithoutServerState;
                         const stream = this.chatClient.getResponseStream(
-                            usePreviousResponseId ? outboundMessages : requestMessages,
+                            (usePreviousResponseId || (threadNativeCompaction && useNativeForAttempt))
+                                ? outboundMessages
+                                : requestMessages,
                             {
                                 tools,
                                 signal: this.abortController!.signal,
                                 reasoningMode: this.recoveryMiddleware.activeReasoningMode,
                                 ...(usePreviousResponseId ? { previousResponseId: lastResponseId } : {}),
+                                ...(useNativeForAttempt ? {
+                                    nativeCompaction: {
+                                        compactThreshold: Math.max(1, Math.floor(contextWindow * 0.80)),
+                                        ...(threadNativeCompaction && !usePreviousResponseId && this.nativeCompactionItem
+                                            ? { item: this.nativeCompactionItem }
+                                            : {}),
+                                    },
+                                } : {}),
+                                contextThreshold: 0.90,
                             }
                         );
 
@@ -680,19 +937,57 @@ export class AgentLoop {
                                 this.callbacks.sendToWebview({ type: 'reasoningAppend', text: chunk.text });
                             } else if (chunk.type === 'responseId') {
                                 lastResponseId = chunk.id;
+                            } else if (chunk.type === 'compaction') {
+                                this.nativeCompactionItem = chunk.item;
+                                this.nativeCompactionBoundary = requestStartBoundary;
+                                this.nativeCompactionStateKey = nativeStateKey;
+                                this.callbacks.recordTranscriptEvent?.('status', {
+                                    modelId: this.chatClient.modelId,
+                                    iteration,
+                                    operation: 'conversation-compaction',
+                                    source: 'provider-native',
+                                    boundary: requestStartBoundary,
+                                    durationMs: Date.now() - providerRequestStartedAt,
+                                });
                             } else if (chunk.type === 'toolCallStarted') {
                                 streamBuffer.onToolCallDetected();
                             } else if (chunk.type === 'toolCalls') {
                                 toolCalls = chunk.calls;
                             } else if (chunk.type === 'usage') {
+                                this.lastServerPromptTokens = Math.max(this.lastServerPromptTokens ?? 0, chunk.usage.prompt_tokens);
+                                this.callbacks.recordTranscriptEvent?.('provider-usage', {
+                                    modelId: this.chatClient.modelId,
+                                    iteration,
+                                    contextWindow,
+                                    nativeCompactionEnabled: useNativeForAttempt,
+                                    ...(useNativeForAttempt ? {
+                                        compactThreshold: Math.max(1, Math.floor(contextWindow * 0.80)),
+                                    } : {}),
+                                    usage: chunk.usage,
+                                });
                                 if (this.tokenTracker) {
                                     this.tokenTracker.record('chat', chunk.usage);
                                 }
                             }
                         }
+                        this.callbacks.recordTranscriptEvent?.('provider-request', {
+                            requestId: providerRequestId,
+                            status: this.running ? 'successful' : 'canceled',
+                            durationMs: Date.now() - providerRequestStartedAt,
+                            modelId: this.chatClient.modelId,
+                            iteration,
+                        });
                         break;
                     } catch (streamErr: any) {
                         if (threadServerState && !retriedWithoutServerState && AgentLoop.isPreviousResponseNotFoundError(streamErr)) {
+                            this.callbacks.recordTranscriptEvent?.('provider-request', {
+                                requestId: providerRequestId,
+                                status: 'retried',
+                                reason: 'stale-server-state',
+                                durationMs: Date.now() - providerRequestStartedAt,
+                                modelId: this.chatClient.modelId,
+                                iteration,
+                            });
                             if (reasoningStreamOpen) {
                                 this.callbacks.sendToWebview({ type: 'reasoningEnd' });
                                 reasoningStreamOpen = false;
@@ -706,6 +1001,45 @@ export class AgentLoop {
                             retriedWithoutServerState = true;
                             continue;
                         }
+                        if (useNativeForAttempt && !retriedWithoutNativeCompaction && AgentLoop.isNativeCompactionRejectedError(streamErr)) {
+                            this.callbacks.recordTranscriptEvent?.('provider-request', {
+                                requestId: providerRequestId,
+                                status: 'retried',
+                                reason: 'native-compaction-rejected',
+                                durationMs: Date.now() - providerRequestStartedAt,
+                                modelId: this.chatClient.modelId,
+                                iteration,
+                            });
+                            if (reasoningStreamOpen) {
+                                this.callbacks.sendToWebview({ type: 'reasoningEnd' });
+                                reasoningStreamOpen = false;
+                            }
+                            streamBuffer.reset();
+                            toolCalls = [];
+                            this.nativeCompactionDisabled = true;
+                            nativeCompactionEnabled = false;
+                            this.resetNativeCompaction();
+                            this.callbacks.recordTranscriptEvent?.('status', {
+                                operation: 'conversation-compaction',
+                                source: 'provider-native',
+                                boundary: requestStartBoundary,
+                                durationMs: Date.now() - providerRequestStartedAt,
+                                fallbackReason: 'unsupported-provider-field',
+                                fallbackSource: useModelCheckpoints ? 'local-checkpoint' : 'local-foreground-trim',
+                                modelId: this.chatClient.modelId,
+                            });
+                            retriedWithoutNativeCompaction = true;
+                            this.log?.('Native compaction rejected upstream; retrying with the full transcript and local checkpoint fallback.');
+                            continue;
+                        }
+                        const failure = classifyProviderRequestFailure(streamErr, this.cancelled);
+                        this.callbacks.recordTranscriptEvent?.('provider-request', {
+                            requestId: providerRequestId,
+                            ...failure,
+                            durationMs: Date.now() - providerRequestStartedAt,
+                            modelId: this.chatClient.modelId,
+                            iteration,
+                        });
                         throw streamErr;
                     }
                     }
@@ -727,7 +1061,13 @@ export class AgentLoop {
                 // ── Process stream results ──
                 const { narrationText, assistantText, bubbleOpen, textAlreadyRendered } = streamBuffer.finalize();
 
-                const assistantMsg: ChatMessage = { role: 'assistant', content: assistantText || null };
+                this.activeRoundId = createHistoryId('round');
+                const assistantMsg: ChatMessage = {
+                    role: 'assistant',
+                    content: assistantText || null,
+                    turnId: this.activeTurnId,
+                    roundId: this.activeRoundId,
+                };
                 if (toolCalls.length > 0) {
                     assistantMsg.tool_calls = toolCalls;
                     lastToolAssistantMsg = assistantMsg;
@@ -807,8 +1147,15 @@ export class AgentLoop {
                         updateWorkingAction(actionEntries.get(tc.id) || null, desc, result.success ? 'done' : 'error', result.result);
                         // Tag tool output as untrusted data before re-injecting into the LLM stream.
                         // See src/security.ts and the "Untrusted Tool Output" rule in the system prompt.
-                        const wrapped = wrapUntrusted(tc.function.name, result.result);
-                        this.messages.push({ role: 'tool', content: wrapped, tool_call_id: tc.id, name: tc.function.name });
+                        const promptResult = this.contextManager.limitToolResult(result.result, {
+                            modelId: this.chatClient.modelId,
+                            transcriptReference: this.callbacks.getTranscriptReference?.(),
+                        });
+                        const wrapped = wrapUntrusted(tc.function.name, promptResult);
+                        this.messages.push({
+                            role: 'tool', content: wrapped, tool_call_id: tc.id, name: tc.function.name,
+                            turnId: this.activeTurnId, roundId: this.activeRoundId,
+                        });
                     }
                 } else {
                     // ── Sequential execution ──
@@ -837,10 +1184,19 @@ export class AgentLoop {
                         this.callbacks.sendToWebview({ type: 'toolResult', id: tc.id, result: result.result, success: result.success });
                         updateWorkingAction(actionEntry, desc, result.success ? 'done' : 'error', result.result);
                         this.recordMemoryFromToolResult(tc.function.name, args, result.result, result.success);
-                        const wrapped = wrapUntrusted(tc.function.name, result.result);
-                        this.messages.push({ role: 'tool', content: wrapped, tool_call_id: tc.id, name: tc.function.name });
+                        const promptResult = this.contextManager.limitToolResult(result.result, {
+                            modelId: this.chatClient.modelId,
+                            transcriptReference: this.callbacks.getTranscriptReference?.(),
+                        });
+                        const wrapped = wrapUntrusted(tc.function.name, promptResult);
+                        this.messages.push({
+                            role: 'tool', content: wrapped, tool_call_id: tc.id, name: tc.function.name,
+                            turnId: this.activeTurnId, roundId: this.activeRoundId,
+                        });
                     }
                 }
+
+                checkpointEligible = true;
 
                 // ── Iteration limit check ──
                 if (iteration >= this.maxIterations && this.running) {
@@ -855,7 +1211,10 @@ export class AgentLoop {
                         iteration = 0;
                         this.callbacks.sendToWebview({ type: 'setStatus', status: 'Continuing...' });
                     } else {
-                        this.messages.push({ role: 'assistant', content: `Paused after ${this.maxIterations} iterations.` });
+                        this.messages.push({
+                            role: 'assistant', content: `Paused after ${this.maxIterations} iterations.`,
+                            turnId: this.activeTurnId, roundId: createHistoryId('round'),
+                        });
                         this.callbacks.sendToWebview({ type: 'startAssistantMessage' });
                         this.callbacks.sendToWebview({ type: 'appendAssistantText', text: `Paused after ${this.maxIterations} iterations.` });
                         this.callbacks.sendToWebview({ type: 'endAssistantMessage' });
@@ -879,6 +1238,8 @@ export class AgentLoop {
     // ── Private helpers (preserved from original) ──
 
     private addUserMessage(userMessage: string, images?: string[], files?: { name: string; content: string }[], displayText?: string, mode: ChatMode = this.currentMode): void {
+        this.activeTurnId = createHistoryId('turn');
+        this.activeRoundId = undefined;
         const hasImages = images && images.length > 0;
         const hasFiles = files && files.length > 0;
 
@@ -897,11 +1258,11 @@ export class AgentLoop {
                     parts.push({ type: 'image_url', image_url: { url: dataUri } });
                 }
             }
-            const userMsg: ChatMessage = { role: 'user', content: parts, mode };
+            const userMsg: ChatMessage = { role: 'user', content: parts, mode, turnId: this.activeTurnId };
             if (displayText) { userMsg.displayText = displayText; }
             this.messages.push(userMsg);
         } else {
-            const userMsg: ChatMessage = { role: 'user', content: userMessage, mode };
+            const userMsg: ChatMessage = { role: 'user', content: userMessage, mode, turnId: this.activeTurnId };
             if (displayText) { userMsg.displayText = displayText; }
             this.messages.push(userMsg);
         }
@@ -1066,7 +1427,12 @@ export class AgentLoop {
                         case 'setStatus':
                         case 'continueIteration':
                         case 'toolCall':
+                            return;
                         case 'toolResult':
+                            this.callbacks.recordTranscriptEvent?.('tool-result', {
+                                ...msg,
+                                subagent: agentName,
+                            });
                             return;
                         case 'startAssistantMessage':
                             assistantOpen = true;
@@ -1092,6 +1458,10 @@ export class AgentLoop {
                             this.callbacks.sendToWebview(msg);
                     }
                 },
+                recordTranscriptEvent: (kind, payload) => {
+                    this.callbacks.recordTranscriptEvent?.(kind, payload);
+                },
+                getTranscriptReference: () => this.callbacks.getTranscriptReference?.(),
             },
             undefined,
             (msg) => this.log?.(`[subagent:${agentName}] ${msg}`),
@@ -1216,7 +1586,7 @@ export class AgentLoop {
 
         if (taskPrompt) {
             const msg: ChatMessage = { role: 'system', content: taskPrompt };
-            const tokens = this.contextManager.estimateMessageTokens(msg);
+            const tokens = this.contextManager.estimateMessageTokens(msg, this.chatClient.modelId);
             if (tokens <= maxExtraTokens) {
                 extraSystemMsgs.push(msg);
                 extraTokens += tokens;
@@ -1226,7 +1596,7 @@ export class AgentLoop {
 
         if (repoPrompt) {
             const msg: ChatMessage = { role: 'system', content: repoPrompt };
-            const tokens = this.contextManager.estimateMessageTokens(msg);
+            const tokens = this.contextManager.estimateMessageTokens(msg, this.chatClient.modelId);
             if (extraTokens + tokens <= maxExtraTokens) {
                 extraSystemMsgs.push(msg);
                 this.lastInjectedRepoMemoryVersion = this.repoPatternStore.getVersion();
@@ -1383,6 +1753,29 @@ export class AgentLoop {
         if (status !== 400) { return false; }
         const message = String(record.message ?? '').toLowerCase();
         return message.includes('previous_response_id')
-            && (message.includes('previous_response_not_found') || message.includes('previous response'));
+            && (message.includes('previous_response_not_found')
+                || message.includes('previous response')
+                || message.includes('expired')
+                || message.includes('invalid')
+                || message.includes('missing'));
+    }
+
+    static isNativeCompactionRejectedError(err: unknown): boolean {
+        if (typeof err !== 'object' || err === null) { return false; }
+        const record = err as Record<string, unknown>;
+        const status = record.statusCode ?? record.status;
+        if (status !== 400) { return false; }
+        const message = String(record.message ?? '').toLowerCase();
+        return message.includes('context_management')
+            || message.includes('compact_threshold')
+            || message.includes('encrypted_content')
+            || message.includes('compaction');
+    }
+
+    private resetNativeCompaction(resetCapability = false): void {
+        this.nativeCompactionItem = undefined;
+        this.nativeCompactionBoundary = 0;
+        this.nativeCompactionStateKey = undefined;
+        if (resetCapability) { this.nativeCompactionDisabled = false; }
     }
 }

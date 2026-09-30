@@ -26,10 +26,22 @@ import { getSetting } from '../config';
  */
 export class CustomInstructionsProvider implements IContextProvider {
     readonly name = 'custom-instructions';
+    private frozenContent: string | undefined;
+
+    reset(): void {
+        this.frozenContent = undefined;
+    }
 
     async beforeRun(context: AgentContext): Promise<ChatMessage[] | void> {
+        if (this.frozenContent !== undefined) {
+            this.appendToSystemPrompt(context, this.frozenContent);
+            return;
+        }
         const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        if (!root) { return; }
+        if (!root) {
+            this.frozenContent = '';
+            return;
+        }
 
         const candidates = [
             path.join(root, '.junior', 'instructions.md'),
@@ -44,15 +56,21 @@ export class CustomInstructionsProvider implements IContextProvider {
                         if (content.length > 4000) {
                             content = content.slice(0, 4000) + '\n... [instructions truncated]';
                         }
-                        // Find the system prompt and append
-                        const systemMsg = context.messages.find(m => m.role === 'system');
-                        if (systemMsg && typeof systemMsg.content === 'string') {
-                            systemMsg.content += '\n\n## Custom Project Instructions\n' + content;
-                        }
+                        this.frozenContent = content;
+                        this.appendToSystemPrompt(context, content);
                         return;
                     }
                 }
             } catch { /* ignore read errors */ }
+        }
+        this.frozenContent = '';
+    }
+
+    private appendToSystemPrompt(context: AgentContext, content: string): void {
+        if (!content) { return; }
+        const systemMsg = context.messages.find(m => m.role === 'system');
+        if (systemMsg && typeof systemMsg.content === 'string') {
+            systemMsg.content += '\n\n## Custom Project Instructions\n' + content;
         }
     }
 }
@@ -65,8 +83,21 @@ export class CustomInstructionsProvider implements IContextProvider {
  */
 export class WorkspaceContextProvider implements IContextProvider {
     readonly name = 'workspace-context';
+    private frozenMessage: ChatMessage | undefined;
+
+    reset(): void {
+        this.frozenMessage = undefined;
+    }
 
     async beforeRun(context: AgentContext): Promise<ChatMessage[] | void> {
+        if (this.frozenMessage) {
+            const alreadyPresent = context.messages.some(message =>
+                message.role === 'system'
+                && typeof message.content === 'string'
+                && message.content === this.frozenMessage?.content
+            );
+            return alreadyPresent ? undefined : [{ ...this.frozenMessage }];
+        }
         const sections: string[] = [];
 
         // 1. Open editors
@@ -121,7 +152,8 @@ export class WorkspaceContextProvider implements IContextProvider {
 
         if (sections.length === 0) { return; }
         const contextPack = '[Context Snapshot]\n' + sections.join('\n\n');
-        return [{ role: 'system', content: contextPack }];
+        this.frozenMessage = { role: 'system', content: contextPack };
+        return [{ ...this.frozenMessage }];
     }
 }
 

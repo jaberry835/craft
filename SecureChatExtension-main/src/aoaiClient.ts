@@ -8,6 +8,17 @@ import * as vscode from 'vscode';
 import { AoaiConfig, ChatMessage, ToolDefinition, AoaiStreamChunk, ToolCall, TokenUsage } from './types';
 import { getSetting } from './config';
 import { getConfiguredTlsOptions, withCaRefreshRetry } from './network';
+import { normalizeProviderTokenUsage } from './tokenUsage';
+
+export function serializeChatMessages(messages: ChatMessage[], reasoningMode = false): ChatMessage[] {
+    return messages.map(message => ({
+        role: reasoningMode && message.role === 'system' ? 'developer' : message.role,
+        content: message.content,
+        ...(message.tool_calls ? { tool_calls: message.tool_calls } : {}),
+        ...(message.tool_call_id ? { tool_call_id: message.tool_call_id } : {}),
+        ...(message.name ? { name: message.name } : {}),
+    }));
+}
 
 export interface AzureOpenAIBearerAuthSessionConfig {
     providerId: string;
@@ -199,9 +210,7 @@ export class AzureOpenAIClient {
 
         // In reasoning mode, convert system→developer role and drop temperature
         // to be compatible with reasoning models (o-series, some GPT-5.x variants)
-        const effectiveMessages = options?.reasoningMode
-            ? messages.map(m => m.role === 'system' ? { ...m, role: 'developer' as const } : m)
-            : messages;
+        const effectiveMessages = serializeChatMessages(messages, options?.reasoningMode);
 
         const effectiveMaxTokens = options?.maxTokens ?? config.maxTokens;
         const effectiveTemperature = options?.temperature ?? config.temperature;
@@ -263,7 +272,8 @@ export class AzureOpenAIClient {
 
                 // Usage arrives on the final chunk (choices may be empty)
                 if (parsed.usage) {
-                    yield { type: 'usage', usage: parsed.usage };
+                    const usage = normalizeProviderTokenUsage(parsed.usage);
+                    if (usage) { yield { type: 'usage', usage }; }
                 }
 
                 const choice = parsed.choices?.[0];

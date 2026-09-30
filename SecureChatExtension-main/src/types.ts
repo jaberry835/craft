@@ -24,9 +24,28 @@ export type ContentPart =
     | { type: 'text'; text: string }
     | { type: 'image_url'; image_url: { url: string; detail?: 'auto' | 'low' | 'high' } };
 
+export interface ConversationCheckpointMetadata {
+    version: 1;
+    throughTurnId: string;
+    throughRoundId: string;
+    transcript?: TranscriptReference;
+}
+
+export interface TranscriptReference {
+    version: 1;
+    sessionId: string;
+    throughRecord: number;
+}
+
 export interface ChatMessage {
     role: 'system' | 'developer' | 'user' | 'assistant' | 'tool';
     content: string | ContentPart[] | null;
+    /** Stable identifier for the user turn this message belongs to. */
+    turnId?: string;
+    /** Stable identifier for one assistant response and its matching tool results. */
+    roundId?: string;
+    /** Boundary covered by this compacted conversation checkpoint. */
+    checkpoint?: ConversationCheckpointMetadata;
     tool_calls?: ToolCall[];
     tool_call_id?: string;
     name?: string;
@@ -62,6 +81,11 @@ export interface TokenUsage {
     prompt_tokens: number;
     completion_tokens: number;
     total_tokens: number;
+    uncached_prompt_tokens?: number;
+    cached_prompt_tokens?: number;
+    cache_write_tokens?: number;
+    reasoning_tokens?: number;
+    source?: 'provider' | 'estimated';
 }
 
 export interface AoaiStreamChunk {
@@ -480,7 +504,7 @@ export type ExtensionMessage =
     | { type: 'reasoningAppend'; text: string }
     | { type: 'reasoningEnd' }
     | { type: 'terminalOutput'; line: string }
-    | { type: 'tokenUsage'; totalTokens: string; chatTokens: string; inlineTokens: string; chatPct: string; inlinePct: string; requests: number; chatPrompt: string; chatCompletion: string; inlinePrompt: string; inlineCompletion: string; chatPromptPct: string; chatCompletionPct: string; inlinePromptPct: string; inlineCompletionPct: string; chatRequests: number; inlineRequests: number; windowPct: number; contextWindow: string }
+    | { type: 'tokenUsage'; totalTokens: string; chatTokens: string; inlineTokens: string; chatPct: string; inlinePct: string; requests: number; chatPrompt: string; chatCompletion: string; inlinePrompt: string; inlineCompletion: string; chatPromptPct: string; chatCompletionPct: string; inlinePromptPct: string; inlineCompletionPct: string; chatRequests: number; inlineRequests: number; uncachedPrompt: string; cachedPrompt: string; cacheWrite: string; reasoning: string; providerRequests: number; estimatedRequests: number; windowPct: number; contextWindow: string }
     | { type: 'slashCommands'; commands: Array<{ name: string; description: string }> }
     | { type: 'showSplash'; showOnStartup: boolean };
 

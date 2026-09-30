@@ -14,9 +14,11 @@
  *  prior actions without blowing up the context window.
  */
 
-import { ChatMessage, ContentPart, ToolCall } from './types';
+import { ChatMessage, ContentPart, ConversationCheckpointMetadata, ToolCall, ToolDefinition, TranscriptReference } from './types';
 import { getSetting } from './config';
 import { getContextWindow } from './modelContextWindow';
+import { countModelTextTokens } from './tokenizer';
+import { hydrateHistoryMetadata } from './conversationHistory';
 
 /** Average characters per token — a conservative heuristic for English + code. */
 const CHARS_PER_TOKEN = 3.5;
@@ -24,23 +26,52 @@ const CHARS_PER_TOKEN = 3.5;
 /** Overhead tokens per message for role / framing (OpenAI charges ~4 per message). */
 const MSG_OVERHEAD = 4;
 
+/** Approximate framing overhead for each serialized function tool. */
+const TOOL_OVERHEAD = 8;
+
+export interface ContextManagerOptions {
+    contextWindow?: number;
+    contextThreshold?: number;
+}
+
+export interface ContextBudgetOptions {
+    /** Function schemas sent alongside the messages. */
+    tools?: readonly ToolDefinition[];
+    /** Authoritative prompt usage from the latest provider response. */
+    minimumPromptTokens?: number;
+    /** Output tokens that must remain available within the model window. */
+    reservedOutputTokens?: number;
+    /** Active model or deployment identifier used to select a tokenizer. */
+    modelId?: string;
+    /** Durable raw-transcript position captured by a newly created checkpoint. */
+    transcriptReference?: TranscriptReference;
+    /** Per-request compaction threshold override. */
+    threshold?: number;
+}
+
+export interface ToolResultBudgetOptions {
+    maxFraction?: number;
+    modelId?: string;
+    transcriptReference?: TranscriptReference;
+}
+
 export class ContextManager {
+    constructor(private readonly options: ContextManagerOptions = {}) {}
 
     /**
      * Estimate the number of tokens in a single message.
      */
-    estimateMessageTokens(msg: ChatMessage): number {
-        let chars = 0;
+    estimateMessageTokens(msg: ChatMessage, modelId?: string): number {
+        let tokens = 0;
 
         if (typeof msg.content === 'string') {
-            chars += msg.content.length;
+            tokens += this.estimateTextTokens(msg.content, modelId);
         } else if (Array.isArray(msg.content)) {
             for (const part of msg.content as ContentPart[]) {
                 if (part.type === 'text') {
-                    chars += part.text.length;
+                    tokens += this.estimateTextTokens(part.text, modelId);
                 } else if (part.type === 'image_url') {
-                    // Vision images cost a fixed budget; approximate as 1024 tokens.
-                    chars += 1024 * CHARS_PER_TOKEN;
+                    tokens += 1024;
                 }
             }
         }
@@ -48,24 +79,69 @@ export class ContextManager {
         // tool_calls JSON also counts toward context
         if (msg.tool_calls) {
             for (const tc of msg.tool_calls) {
-                chars += tc.function.name.length + tc.function.arguments.length;
+                tokens += this.estimateTextTokens(tc.function.name, modelId);
+                tokens += this.estimateTextTokens(tc.function.arguments, modelId);
             }
         }
 
-        if (msg.name) { chars += msg.name.length; }
+        if (msg.name) { tokens += this.estimateTextTokens(msg.name, modelId); }
 
-        return Math.ceil(chars / CHARS_PER_TOKEN) + MSG_OVERHEAD;
+        return tokens + MSG_OVERHEAD;
     }
 
     /**
      * Estimate total tokens across all messages.
      */
-    estimateTotalTokens(messages: ChatMessage[]): number {
+    estimateTotalTokens(messages: ChatMessage[], modelId?: string): number {
         let total = 0;
         for (const m of messages) {
-            total += this.estimateMessageTokens(m);
+            total += this.estimateMessageTokens(m, modelId);
         }
         return total;
+    }
+
+    /** Estimate the token cost of function schemas sent outside the message array. */
+    estimateToolTokens(tools: readonly ToolDefinition[] = [], modelId?: string): number {
+        let total = 0;
+        for (const tool of tools) {
+            total += this.estimateTextTokens(JSON.stringify(tool), modelId) + TOOL_OVERHEAD;
+        }
+        return total;
+    }
+
+    /**
+     * Estimate the complete logical prompt, including tool definitions, and
+     * never report less than the provider's latest authoritative count.
+     */
+    estimatePromptTokens(messages: ChatMessage[], options: ContextBudgetOptions = {}): number {
+        const localEstimate = this.estimateTotalTokens(messages, options.modelId) +
+            this.estimateToolTokens(options.tools, options.modelId);
+        return Math.max(localEstimate, options.minimumPromptTokens ?? 0);
+    }
+
+    /** Bound one model-visible tool result while preserving its full raw transcript record. */
+    limitToolResult(content: string, options: ToolResultBudgetOptions = {}): string {
+        const configuredFraction = options.maxFraction
+            ?? getSetting<number>('agent.maxToolResultFraction')
+            ?? 0.12;
+        const fraction = Math.min(0.5, Math.max(0.01, configuredFraction));
+        const maxTokens = Math.max(64, Math.floor(this.getContextWindow() * fraction));
+        const originalTokens = this.estimateTextTokens(content, options.modelId);
+        if (originalTokens <= maxTokens) { return content; }
+
+        const transcript = options.transcriptReference;
+        const recoveryHint = transcript
+            ? ` Full output: transcript session ${transcript.sessionId}, through record ${transcript.throughRecord}.`
+            : ' Full output remains in the session raw transcript.';
+        const header = `[Tool output truncated for prompt: approximately ${originalTokens} tokens; limit ${maxTokens}.${recoveryHint}]`;
+        const separator = '\n...[truncated]...\n';
+        const framingTokens = this.estimateTextTokens(header + separator, options.modelId);
+        const contentBudget = Math.max(0, maxTokens - framingTokens);
+        const headBudget = Math.floor(contentBudget * 0.7);
+        const tailBudget = contentBudget - headBudget;
+        const head = this.fitTextToTokenBudget(content, headBudget, options.modelId, false);
+        const tail = this.fitTextToTokenBudget(content, tailBudget, options.modelId, true);
+        return `${header}\n${head}${separator}${tail}`;
     }
 
     /**
@@ -73,7 +149,7 @@ export class ContextManager {
      * Explicit settings win; otherwise this is inferred from the active model.
      */
     getContextWindow(): number {
-        return getContextWindow();
+        return this.options.contextWindow ?? getContextWindow();
     }
 
     /**
@@ -82,7 +158,7 @@ export class ContextManager {
      * manager will start trimming.  Default: 0.70
      */
     getThreshold(): number {
-        return getSetting<number>('agent.contextThreshold') ?? 0.70;
+        return this.options.contextThreshold ?? getSetting<number>('agent.contextThreshold') ?? 0.70;
     }
 
     /**
@@ -92,15 +168,26 @@ export class ContextManager {
      * The caller should replace its message array with the result:
      *   `this.messages = contextManager.trimIfNeeded(this.messages);`
      */
-    trimIfNeeded(messages: ChatMessage[]): ChatMessage[] {
-        const maxTokens = Math.floor(this.getContextWindow() * this.getThreshold());
-        const currentTokens = this.estimateTotalTokens(messages);
+    trimIfNeeded(messages: ChatMessage[], options: ContextBudgetOptions = {}): ChatMessage[] {
+        const contextWindow = this.getContextWindow();
+        const threshold = Math.min(1, Math.max(0, options.threshold ?? this.getThreshold()));
+        const thresholdBudget = Math.floor(contextWindow * threshold);
+        // maxTokens is an upper bound, not expected output usage. Cap its
+        // reservation so small-window models always retain a useful input budget.
+        const outputReservation = Math.min(
+            Math.max(0, options.reservedOutputTokens ?? 0),
+            Math.floor(contextWindow * 0.25)
+        );
+        const outputAwareBudget = contextWindow - outputReservation;
+        const maxTokens = Math.max(1, Math.min(thresholdBudget, outputAwareBudget));
+        const currentTokens = this.estimatePromptTokens(messages, options);
 
         if (currentTokens <= maxTokens) {
             return messages;
         }
 
-        return this.trimMessages(messages, maxTokens);
+        const messageBudget = Math.max(1, maxTokens - this.estimateToolTokens(options.tools, options.modelId));
+        return this.trimMessages(messages, messageBudget, options.modelId, options.transcriptReference);
     }
 
     /**
@@ -200,8 +287,14 @@ export class ContextManager {
      *   - If still over budget after summarizing, the oldest trimmable messages
      *     are dropped entirely.
      */
-    private trimMessages(messages: ChatMessage[], budget: number): ChatMessage[] {
+    private trimMessages(
+        messages: ChatMessage[],
+        budget: number,
+        modelId?: string,
+        transcriptReference?: TranscriptReference
+    ): ChatMessage[] {
         if (messages.length <= 4) { return messages; }
+        messages = hydrateHistoryMetadata(messages, 'context');
 
         // Always keep the system prompt at index 0
         const systemMsg = messages[0].role === 'system' ? messages[0] : null;
@@ -214,48 +307,73 @@ export class ContextManager {
             ? messages.slice(1, tailStart)
             : messages.slice(0, tailStart);
 
+        const boundary = this.findCheckpointBoundary(middle);
+        if (!boundary) {
+            return this.normalizeMessageSequence(messages);
+        }
+        const checkpointSource = middle.slice(0, boundary.index + 1);
+        const exactAfterCheckpoint = middle.slice(boundary.index + 1);
+        const protectedTail = [...exactAfterCheckpoint, ...tail];
+        const checkpointMetadata: ConversationCheckpointMetadata = {
+            ...boundary.metadata,
+            ...(transcriptReference ? { transcript: transcriptReference } : {}),
+        };
+
         // Summarize the middle section
-        const summary = this.summarizeMiddle(middle);
+        const summary = this.summarizeMiddle(checkpointSource);
 
         // Build candidate message list
         const summaryMsg: ChatMessage = {
             role: 'system',
             content: summary,
+            checkpoint: checkpointMetadata,
         };
 
         const candidate = [
             ...(systemMsg ? [systemMsg] : []),
             summaryMsg,
-            ...tail,
+            ...protectedTail,
         ];
 
         // If the summary + tail still fits, we're done
-        if (this.estimateTotalTokens(candidate) <= budget) {
+        if (this.estimateTotalTokens(candidate, modelId) <= budget) {
             return this.normalizeMessageSequence(candidate);
         }
 
         // Still over budget — progressively truncate the summary
-        const truncated = this.truncateSummary(summary, budget, systemMsg, tail);
-        const truncMsg: ChatMessage = { role: 'system', content: truncated };
+        const truncated = this.truncateSummary(summary, budget, systemMsg, protectedTail, modelId);
+        const truncMsg: ChatMessage = {
+            role: 'system',
+            content: truncated,
+            checkpoint: checkpointMetadata,
+        };
 
         return this.normalizeMessageSequence([
             ...(systemMsg ? [systemMsg] : []),
             truncMsg,
-            ...tail,
+            ...protectedTail,
         ]);
     }
 
     /**
-     * Find where the "tail" starts — the most recent user message and everything
-     * after it.  We protect at least the last 6 messages to keep one full
-     * tool-call round-trip intact.
+     * Find where the exact recent tail starts. Metadata-aware histories retain
+     * the entire active turn; legacy histories fall back to the latest user or
+     * an aligned six-message tail.
      */
     private findTailStart(messages: ChatMessage[]): number {
+        const activeTurnId = [...messages].reverse().find(message => message.turnId)?.turnId;
+        if (activeTurnId) {
+            const turnStart = messages.findIndex(message => message.turnId === activeTurnId);
+            if (turnStart >= 0) {
+                return this.alignTailStart(messages, turnStart);
+            }
+        }
+
         const minTail = Math.min(6, messages.length);
         const earliest = messages.length - minTail;
 
         // Walk backwards to find the last user message
-        for (let i = messages.length - 1; i >= earliest; i--) {
+        for (let i = messages.length - 1; i >= 0; i--) {
             if (messages[i].role === 'user') {
                 return i;
             }
@@ -270,10 +388,59 @@ export class ContextManager {
      */
     private alignTailStart(messages: ChatMessage[], start: number): number {
         let aligned = start;
+        const roundId = messages[aligned]?.roundId;
+        if (roundId) {
+            while (aligned > 0 && messages[aligned - 1].roundId === roundId) {
+                aligned--;
+            }
+        }
         while (aligned > 0 && messages[aligned].role === 'tool') {
             aligned--;
         }
         return aligned;
+    }
+
+    private findCheckpointBoundary(messages: ChatMessage[]): {
+        metadata: ConversationCheckpointMetadata;
+        index: number;
+    } | undefined {
+        let boundary: { metadata: ConversationCheckpointMetadata; index: number } | undefined;
+
+        for (let i = 0; i < messages.length; i++) {
+            const message = messages[i];
+            if (message.checkpoint) {
+                boundary = { metadata: message.checkpoint, index: i };
+            }
+            if (message.role !== 'assistant' || !message.turnId || !message.roundId) {
+                continue;
+            }
+
+            const expectedToolIds = new Set((message.tool_calls ?? []).map(toolCall => toolCall.id));
+            let completedIndex = i;
+            if (expectedToolIds.size > 0) {
+                let resultIndex = i + 1;
+                while (resultIndex < messages.length && messages[resultIndex].role === 'tool') {
+                    const toolCallId = messages[resultIndex].tool_call_id;
+                    if (toolCallId) { expectedToolIds.delete(toolCallId); }
+                    resultIndex++;
+                }
+                if (expectedToolIds.size > 0) {
+                    continue;
+                }
+                completedIndex = resultIndex - 1;
+            }
+
+            boundary = {
+                metadata: {
+                    version: 1,
+                    throughTurnId: message.turnId,
+                    throughRoundId: message.roundId,
+                },
+                index: completedIndex,
+            };
+        }
+
+        return boundary;
     }
 
     /**
@@ -350,9 +517,13 @@ export class ContextManager {
             }
 
             if (msg.role === 'system' && i > 0) {
-                // Context-snapshot system messages — condense
                 const text = this.extractText(msg);
-                lines.push(`• [Context]: ${this.truncate(text, 100)}`);
+                if (msg.checkpoint) {
+                    lines.push(`• Prior checkpoint: ${text}`);
+                } else {
+                    // Context-snapshot system messages — condense
+                    lines.push(`• [Context]: ${this.truncate(text, 100)}`);
+                }
                 i++;
                 continue;
             }
@@ -371,14 +542,14 @@ export class ContextManager {
         summary: string,
         budget: number,
         systemMsg: ChatMessage | null,
-        tail: ChatMessage[]
+        tail: ChatMessage[],
+        modelId?: string
     ): string {
-        const fixedTokens = (systemMsg ? this.estimateMessageTokens(systemMsg) : 0) +
-            this.estimateTotalTokens(tail) + MSG_OVERHEAD;
+        const fixedTokens = (systemMsg ? this.estimateMessageTokens(systemMsg, modelId) : 0) +
+            this.estimateTotalTokens(tail, modelId) + MSG_OVERHEAD;
         const availableTokens = budget - fixedTokens;
-        const availableChars = Math.max(200, Math.floor(availableTokens * CHARS_PER_TOKEN));
 
-        if (summary.length <= availableChars) {
+        if (this.estimateTextTokens(summary, modelId) <= availableTokens) {
             return summary;
         }
 
@@ -386,8 +557,9 @@ export class ContextManager {
         const lines = summary.split('\n');
         let result = lines[0]; // header line
         for (let i = 1; i < lines.length; i++) {
-            if (result.length + lines[i].length + 1 > availableChars) { break; }
-            result += '\n' + lines[i];
+            const candidate = `${result}\n${lines[i]}`;
+            if (this.estimateTextTokens(candidate, modelId) > Math.max(50, availableTokens)) { break; }
+            result = candidate;
         }
 
         return result + '\n[... earlier context truncated to fit context window]';
@@ -422,26 +594,45 @@ export class ContextManager {
         }
     }
 
+    private estimateTextTokens(text: string, modelId?: string): number {
+        return countModelTextTokens(text, modelId) ?? Math.ceil(text.length / CHARS_PER_TOKEN);
+    }
+
     /**
      * Emergency trim — aggressively reduce conversation to fit a smaller-than-expected
      * context window. Called when the API rejects the prompt (e.g. invalid_prompt).
      * Halves the effective context window and re-trims, repeating until the
      * conversation is substantially smaller.
      */
-    emergencyTrim(messages: ChatMessage[]): ChatMessage[] {
+    emergencyTrim(messages: ChatMessage[], modelId?: string): ChatMessage[] {
         // Use half the configured window as the emergency budget
         const emergencyBudget = Math.floor(this.getContextWindow() * 0.35);
-        const currentTokens = this.estimateTotalTokens(messages);
+        const currentTokens = this.estimateTotalTokens(messages, modelId);
         if (currentTokens <= emergencyBudget) {
             // Already small — nothing more to trim
             return messages;
         }
-        return this.trimMessages(messages, emergencyBudget);
+        return this.trimMessages(messages, emergencyBudget, modelId);
     }
 
     /** Truncate a string to maxLen characters, appending "..." if cut. */
     private truncate(s: string, maxLen: number): string {
         if (s.length <= maxLen) { return s; }
         return s.slice(0, maxLen) + '...';
+    }
+
+    private fitTextToTokenBudget(text: string, budget: number, modelId: string | undefined, fromEnd: boolean): string {
+        let low = 0;
+        let high = text.length;
+        while (low < high) {
+            const mid = Math.ceil((low + high) / 2);
+            const candidate = fromEnd ? text.slice(-mid) : text.slice(0, mid);
+            if (this.estimateTextTokens(candidate, modelId) <= budget) {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        return fromEnd ? text.slice(-low) : text.slice(0, low);
     }
 }

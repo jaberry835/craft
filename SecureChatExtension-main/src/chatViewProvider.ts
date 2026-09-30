@@ -295,6 +295,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     private captureTranscriptMessage(msg: ExtensionMessage): void {
+        this.sessionManager.recordRawExtensionMessage(msg, this.activeProvider);
         if (!shouldPersistTranscriptMessage(msg)) {
             return;
         }
@@ -453,6 +454,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     cancelAgent() {
+        this.sessionManager.recordRawTranscriptEvent('cancellation', {
+            provider: this.activeProvider,
+            reason: 'user-requested',
+        });
         this.devTeamConsultAbortController?.abort();
         this.devTeamConsultAbortController = undefined;
         if (this.activeProvider === 'copilot-cli') {
@@ -1191,7 +1196,11 @@ ${personaSections.length ? `## Member Personas\n${personaSections.join('\n\n')}\
     private async handleUserMessageLocal(mode: ChatMode, text: string, displayText: string, images?: string[], files?: { name: string; content: string }[]) {
 
         const callbacks: AgentCallbacks = {
-            sendToWebview: (msg) => this.sendToWebview(msg)
+            sendToWebview: (msg) => this.sendToWebview(msg),
+            recordTranscriptEvent: (kind, payload) => {
+                this.sessionManager.recordRawTranscriptEvent(kind, payload);
+            },
+            getTranscriptReference: () => this.sessionManager.getTranscriptReference(),
         };
 
         if (!this.agentLoop) {
@@ -1233,6 +1242,20 @@ ${personaSections.length ? `## Member Personas\n${personaSections.join('\n\n')}\
         this.builtinTools.setTerminalOutputCallback((line) => {
             this.sendToWebview({ type: 'terminalOutput', line });
         });
+
+        this.builtinTools.setTranscriptReadCallback((startRecord, maxRecords) => {
+            const range = this.sessionManager.readCurrentTranscript(startRecord, maxRecords);
+            const records = range.records.map(record => JSON.stringify(record)).join('\n');
+            return {
+                success: true,
+                result: `Transcript records ${range.startRecord}-${range.endRecord} of ${range.totalRecords}` +
+                    (records ? `\n${records}` : '\n[No records in this range]'),
+            };
+        });
+        this.builtinTools.setTelemetrySummaryCallback(() => ({
+            success: true,
+            result: JSON.stringify(this.sessionManager.summarizeCurrentTelemetry(), null, 2),
+        }));
 
         // Plan callbacks — forward to agentLoop
         this.builtinTools.setPlanCallback((steps) => {

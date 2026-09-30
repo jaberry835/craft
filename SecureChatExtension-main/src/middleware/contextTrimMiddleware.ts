@@ -21,14 +21,18 @@ export class ContextTrimMiddleware implements ChatMiddleware {
     private contextManager: ContextManager;
 
     constructor(options?: ContextTrimMiddlewareOptions) {
-        this.contextManager = new ContextManager();
-        // The ContextManager reads from VS Code settings by default.
-        // Options here allow overriding for testing.
+        this.contextManager = new ContextManager(options);
     }
 
     async process(context: ChatContext, next: () => Promise<ChatResponse>): Promise<ChatResponse> {
-        // Trim messages in-place before passing to the next handler
-        context.messages = this.contextManager.trimIfNeeded(context.messages);
+        if (!context.options.previousResponseId) {
+            context.messages = this.contextManager.trimIfNeeded(context.messages, {
+                tools: context.options.tools,
+                reservedOutputTokens: context.options.maxTokens,
+                modelId: context.client.modelId,
+                threshold: context.options.contextThreshold,
+            });
+        }
         return next();
     }
 
@@ -36,12 +40,21 @@ export class ContextTrimMiddleware implements ChatMiddleware {
         context: ChatContext,
         next: () => AsyncGenerator<ChatStreamChunk>
     ): AsyncGenerator<ChatStreamChunk> {
-        context.messages = this.contextManager.trimIfNeeded(context.messages);
+        // Incremental Responses input is only the tail of a larger server-side
+        // conversation and must not be compacted independently.
+        if (!context.options.previousResponseId) {
+            context.messages = this.contextManager.trimIfNeeded(context.messages, {
+                tools: context.options.tools,
+                reservedOutputTokens: context.options.maxTokens,
+                modelId: context.client.modelId,
+                threshold: context.options.contextThreshold,
+            });
+        }
         yield* next();
     }
 
     /** Expose for emergency trim scenarios (used by RecoveryMiddleware). */
-    emergencyTrim(messages: ChatMessage[]): ChatMessage[] {
-        return this.contextManager.emergencyTrim(messages);
+    emergencyTrim(messages: ChatMessage[], modelId?: string): ChatMessage[] {
+        return this.contextManager.emergencyTrim(messages, modelId);
     }
 }

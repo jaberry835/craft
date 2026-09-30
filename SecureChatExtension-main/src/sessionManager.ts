@@ -17,9 +17,17 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { AgentPermissionLevel, AgentProvider, ChatSession, ChatMessage, ChatMode, ExtensionMessage, RuntimeSessionState } from './types';
+import { AgentPermissionLevel, AgentProvider, ChatSession, ChatMessage, ChatMode, ExtensionMessage, RuntimeSessionState, TranscriptReference } from './types';
+import { hydrateHistoryMetadata } from './conversationHistory';
 import { DEFAULT_PERMISSION_LEVEL } from './permissions';
 import { applyTranscriptMessage, createEmptyTranscript } from './chatTranscript';
+import {
+    extensionMessageToRawEvent,
+    RawTranscriptEventKind,
+    RawTranscriptStore,
+    SessionTelemetrySummary,
+    TranscriptReadResult,
+} from './rawTranscript';
 
 const MAX_SESSIONS = 20;
 const MAX_MESSAGE_LENGTH = 8000;
@@ -39,11 +47,13 @@ export class SessionManager {
     private sessions: Map<string, ChatSession> = new Map();
     private filePath: string;
     private pendingSaveTimer?: NodeJS.Timeout;
+    private rawTranscripts: RawTranscriptStore;
 
     constructor(private storageDir: string, legacyState?: vscode.Memento) {
         // Ensure the storage directory exists
         fs.mkdirSync(this.storageDir, { recursive: true });
         this.filePath = path.join(this.storageDir, SESSIONS_FILE);
+        this.rawTranscripts = new RawTranscriptStore(this.storageDir);
 
         // One-time migration: if no file on disk yet, pull from legacy Memento
         if (legacyState && !fs.existsSync(this.filePath)) {
@@ -115,6 +125,7 @@ export class SessionManager {
 
         return {
             ...session,
+            messages: hydrateHistoryMetadata(session.messages ?? [], session.id),
             transcript: session.transcript ?? createEmptyTranscript(),
             activePermissionLevel: permissionLevel,
         };
@@ -142,7 +153,10 @@ export class SessionManager {
         const sorted = [...this.sessions.entries()].sort((a, b) => b[1].updatedAt - a[1].updatedAt);
         const keep = new Set(sorted.slice(0, MAX_SESSIONS).map(e => e[0]));
         for (const id of [...this.sessions.keys()]) {
-            if (!keep.has(id)) { this.sessions.delete(id); }
+            if (!keep.has(id)) {
+                this.sessions.delete(id);
+                this.rawTranscripts.delete(id);
+            }
         }
     }
 
@@ -197,7 +211,9 @@ export class SessionManager {
         activeMode?: ChatMode,
         activePermissionLevel?: AgentPermissionLevel
     ) {
-        this.currentSession.messages = this.trimForStorage(messages);
+        this.currentSession.messages = this.trimForStorage(
+            hydrateHistoryMetadata(messages, this.currentSession.id)
+        );
         this.currentSession.updatedAt = Date.now();
         this.currentSession.runtimeState = runtimeState;
         this.currentSession.activeMode = activeMode ?? this.currentSession.activeMode ?? 'agent';
@@ -258,6 +274,27 @@ export class SessionManager {
         this.saveSessions();
     }
 
+    recordRawExtensionMessage(message: ExtensionMessage, provider?: AgentProvider): TranscriptReference | undefined {
+        const event = extensionMessageToRawEvent(message, provider);
+        return event ? this.recordRawTranscriptEvent(event.kind, event.payload) : undefined;
+    }
+
+    recordRawTranscriptEvent(kind: RawTranscriptEventKind, payload: unknown): TranscriptReference {
+        return this.rawTranscripts.append(this.currentSession.id, kind, payload);
+    }
+
+    getTranscriptReference(): TranscriptReference | undefined {
+        return this.rawTranscripts.getReference(this.currentSession.id);
+    }
+
+    readCurrentTranscript(startRecord = 1, maxRecords = 50): TranscriptReadResult {
+        return this.rawTranscripts.read(this.currentSession.id, startRecord, maxRecords);
+    }
+
+    summarizeCurrentTelemetry(): SessionTelemetrySummary {
+        return this.rawTranscripts.summarizeTelemetry(this.currentSession.id);
+    }
+
     flushPendingSave() {
         this.saveSessions();
     }
@@ -300,6 +337,7 @@ export class SessionManager {
 
     deleteSession(id: string) {
         this.sessions.delete(id);
+        this.rawTranscripts.delete(id);
         if (this.currentSession.id === id) {
             this.currentSession = this.createNewSession(this.currentSession.activeMode || 'agent');
         }
