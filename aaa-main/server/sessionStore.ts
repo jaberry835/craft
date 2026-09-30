@@ -18,6 +18,7 @@ const sessionIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-
 
 export class JsonSessionStore implements ChatSessionStore {
   private readonly sessionsRoot: string;
+  private readonly sessionWriteQueues = new Map<string, Promise<void>>();
 
   constructor(dataRoot: string, private readonly projectId: string) {
     this.sessionsRoot = path.join(dataRoot, 'projects', projectId, 'sessions');
@@ -70,15 +71,19 @@ export class JsonSessionStore implements ChatSessionStore {
     if (!cleanTitle) {
       throw new BadRequestError('A non-empty title is required.', 'title_required');
     }
-    const session = await this.get(sessionId);
-    const updated = { ...session, title: cleanTitle, updatedAt: new Date().toISOString() };
-    await this.save(updated);
-    return updated;
+    return this.withSessionLock(sessionId, async () => {
+      const session = await this.get(sessionId);
+      const updated = { ...session, title: cleanTitle, updatedAt: new Date().toISOString() };
+      await this.save(updated);
+      return updated;
+    });
   }
 
   async delete(sessionId: string): Promise<void> {
-    await this.get(sessionId);
-    await rm(this.filePath(sessionId));
+    await this.withSessionLock(sessionId, async () => {
+      await this.get(sessionId);
+      await rm(this.filePath(sessionId));
+    });
   }
 
   async append(sessionId: string, request: AppendMessageRequest): Promise<ChatSession> {
@@ -89,44 +94,50 @@ export class JsonSessionStore implements ChatSessionStore {
     if (!content) {
       throw new BadRequestError('A non-empty message is required.', 'content_required');
     }
-    const session = await this.get(sessionId);
-    const message: ChatMessage = {
-      id: randomUUID(),
-      role: request.role,
-      content,
-      createdAt: new Date().toISOString(),
-      ...(request.display?.length ? { display: request.display } : {})
-    };
-    const messages = [...session.messages, message];
-    const updated: ChatSession = {
-      ...session,
-      title: session.title === 'New session' && request.role === 'user'
-        ? this.titleFromMessage(content)
-        : session.title,
-      updatedAt: message.createdAt,
-      messageCount: messages.length,
-      messages
-    };
-    await this.save(updated);
-    return updated;
+    return this.withSessionLock(sessionId, async () => {
+      const session = await this.get(sessionId);
+      const message: ChatMessage = {
+        id: randomUUID(),
+        role: request.role,
+        content,
+        createdAt: new Date().toISOString(),
+        ...(request.display?.length ? { display: request.display } : {})
+      };
+      const messages = [...session.messages, message];
+      const updated: ChatSession = {
+        ...session,
+        title: session.title === 'New session' && request.role === 'user'
+          ? this.titleFromMessage(content)
+          : session.title,
+        updatedAt: message.createdAt,
+        messageCount: messages.length,
+        messages
+      };
+      await this.save(updated);
+      return updated;
+    });
   }
 
   async saveRun(sessionId: string, run: AgentRun): Promise<ChatSession> {
-    const session = await this.get(sessionId);
-    const runs = [...(session.runs ?? []).filter((candidate) => candidate.id !== run.id), run];
-    const updated = {
-      ...session,
-      runs,
-      updatedAt: run.completedAt ?? run.startedAt
-    };
-    await this.save(updated);
-    return updated;
+    return this.withSessionLock(sessionId, async () => {
+      const session = await this.get(sessionId);
+      const runs = [...(session.runs ?? []).filter((candidate) => candidate.id !== run.id), run];
+      const updated = {
+        ...session,
+        runs,
+        updatedAt: run.completedAt ?? run.startedAt
+      };
+      await this.save(updated);
+      return updated;
+    });
   }
 
   async saveCompaction(sessionId: string, compaction: SessionCompaction): Promise<ChatSession> {
-    const updated = withCompaction(await this.get(sessionId), compaction);
-    await this.save(updated);
-    return updated;
+    return this.withSessionLock(sessionId, async () => {
+      const updated = withCompaction(await this.get(sessionId), compaction);
+      await this.save(updated);
+      return updated;
+    });
   }
 
   private cleanTitle(value?: string): string {
@@ -163,5 +174,17 @@ export class JsonSessionStore implements ChatSessionStore {
 
   private async ensureStore(): Promise<void> {
     await mkdir(this.sessionsRoot, { recursive: true });
+  }
+
+  private withSessionLock<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.sessionWriteQueues.get(sessionId) ?? Promise.resolve();
+    const result = previous.then(operation);
+    const tail = result.then(() => undefined, () => undefined);
+    this.sessionWriteQueues.set(sessionId, tail);
+    return result.finally(() => {
+      if (this.sessionWriteQueues.get(sessionId) === tail) {
+        this.sessionWriteQueues.delete(sessionId);
+      }
+    });
   }
 }

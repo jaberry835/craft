@@ -18,6 +18,7 @@ const excludedDirectories = new Set([
   '.venv', 'venv', '__pycache__'
 ]);
 const maximumTextFileBytes = 2 * 1024 * 1024;
+const maximumFullTextPreviewBytes = 10 * 1024 * 1024;
 const maximumUploadBytes = 10 * 1024 * 1024;
 const textExtensions = new Set([
   '.c', '.cc', '.conf', '.cpp', '.cs', '.css', '.csv', '.go', '.h', '.hpp', '.html',
@@ -276,13 +277,31 @@ export class ProjectFileService {
   }
 
   async readTextFile(relativePath: string): Promise<ProjectTextFile> {
+    return this.readTextFileWithLimit(relativePath, maximumTextFileBytes);
+  }
+
+  async readTextFilePreview(relativePath: string): Promise<ProjectTextFile> {
+    const file = await this.readTextFileWithLimit(relativePath, maximumFullTextPreviewBytes);
+    if (file.size <= maximumTextFileBytes) return file;
+    return {
+      ...file,
+      content: truncateUtf8(file.content, maximumTextFileBytes),
+      truncated: true
+    };
+  }
+
+  async readFullTextPreview(relativePath: string): Promise<ProjectTextFile> {
+    return this.readTextFileWithLimit(relativePath, maximumFullTextPreviewBytes);
+  }
+
+  private async readTextFileWithLimit(relativePath: string, maximumBytes: number): Promise<ProjectTextFile> {
     const normalizedPath = this.normalizeRelativePath(relativePath);
     const absolutePath = await this.resolveExistingPath(normalizedPath);
     const fileStats = await stat(absolutePath);
     if (!fileStats.isFile()) {
       throw new BadRequestError(`Project path is not a file: ${normalizedPath}`, 'path_not_file');
     }
-    const content = await this.readUtf8(absolutePath, fileStats.size);
+    const content = await this.readUtf8(absolutePath, fileStats.size, maximumBytes);
     return {
       path: normalizedPath,
       content,
@@ -766,9 +785,12 @@ export class ProjectFileService {
     }
   }
 
-  private async readUtf8(absolutePath: string, size: number): Promise<string> {
-    if (size > maximumTextFileBytes) {
-      throw new UnsupportedFileError('File is too large to read as text.', 'file_too_large');
+  private async readUtf8(absolutePath: string, size: number, maximumBytes = maximumTextFileBytes): Promise<string> {
+    if (size > maximumBytes) {
+      throw new UnsupportedFileError(
+        `File is too large to preview. The maximum preview size is ${maximumBytes / (1024 * 1024)} MB.`,
+        'file_too_large'
+      );
     }
     const bytes = await readFile(absolutePath);
     let content: string;
@@ -782,6 +804,15 @@ export class ProjectFileService {
     }
     return content;
   }
+}
+
+function truncateUtf8(content: string, maximumBytes: number): string {
+  const bytes = Buffer.from(content, 'utf8');
+  if (bytes.length <= maximumBytes) return content;
+  return new TextDecoder('utf-8', { fatal: true }).decode(
+    bytes.subarray(0, maximumBytes),
+    { stream: true }
+  );
 }
 
 function isValidBase64(value: string): boolean {

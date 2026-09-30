@@ -118,13 +118,14 @@ export class ProjectAccessService {
 
   private persist(): Promise<void> {
     const snapshot = `${JSON.stringify(this.state, null, 2)}\n`;
-    this.writeQueue = this.writeQueue.then(async () => {
+    const operation = this.writeQueue.then(async () => {
       await mkdir(path.dirname(this.statePath), { recursive: true });
       const temporary = `${this.statePath}.tmp`;
       await writeFile(temporary, snapshot, 'utf8');
       await rename(temporary, this.statePath);
     });
-    return this.writeQueue;
+    this.writeQueue = operation.catch(() => undefined);
+    return operation;
   }
 }
 

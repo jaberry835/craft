@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import path from 'node:path';
 import test from 'node:test';
@@ -47,6 +47,28 @@ test('local mode remains unrestricted', async (t) => {
   const access = new ProjectAccessService('none', statePath);
   assert.equal(access.canAccess('any-project'), true);
   assert.equal(access.get('any-project').unrestricted, true);
+});
+
+test('access policy persistence recovers after a filesystem write failure', async (t) => {
+  const recoveryRoot = path.join(root, 'recovery');
+  const blockedParent = path.join(recoveryRoot, 'blocked');
+  const recoveryStatePath = path.join(blockedParent, 'project-access.json');
+  await rm(recoveryRoot, { recursive: true, force: true });
+  await mkdir(recoveryRoot, { recursive: true });
+  t.after(() => rm(recoveryRoot, { recursive: true, force: true }));
+  const access = new ProjectAccessService('entra', recoveryStatePath);
+
+  await writeFile(blockedParent, 'not a directory');
+  await assert.rejects(() => access.assignOwner('restricted', alice), { code: 'EEXIST' });
+
+  await rm(blockedParent);
+  await mkdir(blockedParent);
+  await access.update('restricted', alice, { userIds: ['bob'], roles: [] });
+
+  const stored = JSON.parse(await readFile(recoveryStatePath, 'utf8')) as {
+    projects: Record<string, { userIds: string[] }>;
+  };
+  assert.deepEqual(stored.projects.restricted?.userIds, ['alice', 'bob']);
 });
 
 test('project listings and project-scoped routes enforce Entra ACLs', async (t) => {

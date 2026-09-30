@@ -30,6 +30,9 @@ test('project API exposes configured metadata, sessions, messages, files, and tr
   await mkdir(path.join(projectRoot, '.vscode'), { recursive: true });
   await mkdir(clientDistPath, { recursive: true });
   await writeFile(path.join(projectRoot, 'README.md'), '# Assessed project\n', 'utf8');
+  const largeText = `${'x'.repeat(2 * 1024 * 1024)}\nComplete preview\n`;
+  await writeFile(path.join(projectRoot, 'large.txt'), largeText, 'utf8');
+  await writeFile(path.join(projectRoot, 'oversized.txt'), Buffer.alloc(10 * 1024 * 1024 + 1, 0x61));
   await writeFile(path.join(projectRoot, 'evidence.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
   await writeFile(path.join(templatePath, 'package-config.json'), '{"packageName":"Template"}\n', 'utf8');
   await writeFile(
@@ -164,6 +167,32 @@ test('project API exposes configured metadata, sessions, messages, files, and tr
   const fileResponse = await fetch(`${baseUrl}/files?path=${encodeURIComponent('README.md')}`);
   assert.equal(fileResponse.status, 200);
   assert.equal((await fileResponse.json() as { content: string }).content, '# Assessed project\n');
+
+  const largeFileResponse = await fetch(`${baseUrl}/files?path=${encodeURIComponent('large.txt')}`);
+  assert.equal(largeFileResponse.status, 200);
+  const largeFile = await largeFileResponse.json() as { content: string; size: number; truncated?: boolean };
+  assert.equal(largeFile.truncated, true);
+  assert.equal(Buffer.byteLength(largeFile.content, 'utf8'), 2 * 1024 * 1024);
+  assert.equal(largeFile.size, Buffer.byteLength(largeText, 'utf8'));
+
+  const fullPreviewResponse = await fetch(`${baseUrl}/files/preview?path=${encodeURIComponent('large.txt')}`);
+  assert.equal(fullPreviewResponse.status, 200);
+  assert.match(fullPreviewResponse.headers.get('content-type') ?? '', /^text\/plain/);
+  assert.equal(fullPreviewResponse.headers.get('x-content-type-options'), 'nosniff');
+  assert.match(fullPreviewResponse.headers.get('content-security-policy') ?? '', /default-src 'none'/);
+  assert.equal(await fullPreviewResponse.text(), largeText);
+
+  const oversizedPreviewResponse = await fetch(
+    `${baseUrl}/files/preview?path=${encodeURIComponent('oversized.txt')}`
+  );
+  assert.equal(oversizedPreviewResponse.status, 415);
+  assert.equal((await oversizedPreviewResponse.json() as { code: string }).code, 'file_too_large');
+
+  const previewTraversalResponse = await fetch(
+    `${baseUrl}/files/preview?path=${encodeURIComponent('../outside.txt')}`
+  );
+  assert.equal(previewTraversalResponse.status, 400);
+  assert.equal((await previewTraversalResponse.json() as { code: string }).code, 'path_outside_project');
 
   const traversalResponse = await fetch(`${baseUrl}/files?path=${encodeURIComponent('../outside.txt')}`);
   assert.equal(traversalResponse.status, 400);

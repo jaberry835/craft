@@ -67,6 +67,16 @@ import type { SignedInUser } from './authGate';
 import { contextEstimate, formatTokens, sessionUsage, sessionUsageTitle } from './usageMath';
 import { resolveUploadDestination } from './uploadDestination';
 import { evidenceCapturePath } from './evidenceLinks';
+import {
+  findDefaultFile,
+  flattenFiles,
+  flattenVisibleNodes,
+  formatFileSize,
+  formatRelativeTime,
+  initials,
+  isPreviewImage,
+  movedFilePath
+} from './appUtils';
 import type {
   ChatMessage,
   ChatMessageDisplayPart,
@@ -121,7 +131,7 @@ const starterPrompts = [
 const themeStorageKey = 'aaa-theme';
 const hiddenFilesStorageKey = 'aaa-show-hidden-files';
 const agentSelectionStorageKey = 'aaa-agent-selection';
-const previewImageExtensions = new Set(['.bmp', '.gif', '.jpeg', '.jpg', '.png', '.svg', '.webp']);
+const projectFileDragType = 'application/x-aaa-project-file';
 
 function getInitialAgentSelections(): Record<string, string> {
   try {
@@ -130,11 +140,6 @@ function getInitialAgentSelections(): Record<string, string> {
   } catch {
     return {};
   }
-}
-
-function isPreviewImage(filePath: string): boolean {
-  const extension = filePath.slice(filePath.lastIndexOf('.')).toLowerCase();
-  return previewImageExtensions.has(extension);
 }
 
 function JsonPreview({ content }: { content: string }) {
@@ -152,42 +157,6 @@ function JsonPreview({ content }: { content: string }) {
       </div>
     );
   }
-}
-
-function formatRelativeTime(value: string): string {
-  const elapsed = Date.now() - new Date(value).getTime();
-  const minutes = Math.max(0, Math.floor(elapsed / 60_000));
-  if (minutes < 1) return 'Just now';
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return days === 1 ? 'Yesterday' : `${days}d ago`;
-}
-
-function flattenVisibleNodes(
-  nodes: FileTreeNode[],
-  expanded: Set<string>,
-  depth = 0
-): Array<{ node: FileTreeNode; depth: number }> {
-  return nodes.flatMap((node) => [
-    { node, depth },
-    ...(node.type === 'directory' && expanded.has(node.path)
-      ? flattenVisibleNodes(node.children ?? [], expanded, depth + 1)
-      : [])
-  ]);
-}
-
-function findDefaultFile(nodes: FileTreeNode[]): FileTreeNode | undefined {
-  const allFiles = findAllFiles(nodes);
-  return allFiles.find((node) => node.name === 'validation-report.md')
-    ?? allFiles.find((node) => node.name === 'README.md')
-    ?? allFiles.find((node) => node.type === 'file' && node.name.endsWith('.md'))
-    ?? allFiles.find((node) => node.type === 'file');
-}
-
-function findAllFiles(nodes: FileTreeNode[]): FileTreeNode[] {
-  return nodes.flatMap((node) => node.type === 'file' ? [node] : findAllFiles(node.children ?? []));
 }
 
 function getInitialTheme(): Theme {
@@ -310,15 +279,6 @@ function MessageDetails({
   );
 }
 
-function flattenFiles(nodes: FileTreeNode[]): FileTreeNode[] {
-  return nodes.flatMap((node) => node.type === 'file' ? [node] : flattenFiles(node.children ?? []));
-}
-
-function initials(name: string): string {
-  const parts = name.split(/[\s@._-]+/).filter(Boolean);
-  return ((parts[0]?.[0] ?? '') + (parts.length > 1 ? parts.at(-1)![0] : '')).toUpperCase() || '?';
-}
-
 function App({ user }: { user?: SignedInUser } = {}) {
   const [leftWidth, setLeftWidth] = useState(268);
   const [rightWidth, setRightWidth] = useState(390);
@@ -350,6 +310,8 @@ function App({ user }: { user?: SignedInUser } = {}) {
   const [fileDialog, setFileDialog] = useState<FileDialogState | null>(null);
   const [uploadTargetPath, setUploadTargetPath] = useState('');
   const [dragTargetPath, setDragTargetPath] = useState<string | null>(null);
+  const [draggedFilePath, setDraggedFilePath] = useState('');
+  const [moveTargetPath, setMoveTargetPath] = useState<string | null>(null);
   const [isUploadingFiles, setIsUploadingFiles] = useState(false);
   const [showDiscardDialog, setShowDiscardDialog] = useState(false);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
@@ -421,7 +383,8 @@ function App({ user }: { user?: SignedInUser } = {}) {
   const isMarkdownSelected = selectedFile?.path.toLowerCase().endsWith('.md') ?? false;
   const isJsonSelected = selectedFile?.path.toLowerCase().endsWith('.json') ?? false;
   const selectedArtifactPath = selectedFile?.path ?? selectedImagePath;
-  const isFileDirty = selectedFile !== null && editorContent !== selectedFile.content;
+  const isFileTruncated = selectedFile?.truncated === true;
+  const isFileDirty = selectedFile !== null && !isFileTruncated && editorContent !== selectedFile.content;
   const publishedUrl = activeProjectId && selectedFile && isMarkdownSelected && publicationStatus?.reviewed
     ? aaaApi.publishedMarkdownUrl(activeProjectId, selectedFile.path)
     : '';
@@ -500,7 +463,7 @@ function App({ user }: { user?: SignedInUser } = {}) {
   }, [selectedFile?.content, selectedFile?.path]);
 
   useEffect(() => {
-    if (!activeProjectId || !selectedFile || !isMarkdownSelected) {
+    if (!activeProjectId || !selectedFile || !isMarkdownSelected || isFileTruncated) {
       setPublicationStatus(null);
       return;
     }
@@ -515,7 +478,7 @@ function App({ user }: { user?: SignedInUser } = {}) {
           : 'Could not load publication status.');
       });
     return () => { cancelled = true; };
-  }, [activeProjectId, isMarkdownSelected, selectedFile]);
+  }, [activeProjectId, isFileTruncated, isMarkdownSelected, selectedFile]);
 
   useEffect(() => {
     const warnOnUnsavedFile = (event: BeforeUnloadEvent) => {
@@ -1132,7 +1095,7 @@ function App({ user }: { user?: SignedInUser } = {}) {
   }, []);
 
   const saveSelectedFile = useCallback(async () => {
-    if (!activeProjectId || !selectedFile || !isFileDirty || isSavingFile) return;
+    if (!activeProjectId || !selectedFile || isFileTruncated || !isFileDirty || isSavingFile) return;
     setError('');
     setIsSavingFile(true);
     try {
@@ -1149,7 +1112,7 @@ function App({ user }: { user?: SignedInUser } = {}) {
     } finally {
       setIsSavingFile(false);
     }
-  }, [activeProjectId, editorContent, isFileDirty, isSavingFile, refreshFiles, selectedFile]);
+  }, [activeProjectId, editorContent, isFileDirty, isFileTruncated, isSavingFile, refreshFiles, selectedFile]);
 
   const createFile = useCallback(() => {
     if (!activeProjectId) return;
@@ -1201,6 +1164,41 @@ function App({ user }: { user?: SignedInUser } = {}) {
     setUploadTargetPath(destination);
     void uploadFiles(Array.from(event.dataTransfer.files), destination);
   }, [uploadFiles]);
+
+  const moveProjectFile = useCallback(async (sourcePath: string, destination: string) => {
+    if (!activeProjectId) return;
+    const newPath = movedFilePath(sourcePath, destination);
+    if (newPath === sourcePath) {
+      setMoveTargetPath(null);
+      setDraggedFilePath('');
+      return;
+    }
+    setError('');
+    try {
+      await aaaApi.renamePath(activeProjectId, { path: sourcePath, newPath });
+      setSelectedFile((current) => current?.path === sourcePath ? { ...current, path: newPath } : current);
+      setSelectedImagePath((current) => current === sourcePath ? newPath : current);
+      if (destination) {
+        setExpandedPaths((current) => new Set(current).add(destination));
+      }
+      await refreshFiles();
+    } catch (moveError) {
+      setError(moveError instanceof Error ? moveError.message : 'Could not move the file.');
+    } finally {
+      setMoveTargetPath(null);
+      setDraggedFilePath('');
+    }
+  }, [activeProjectId, refreshFiles]);
+
+  const handleProjectFileDrop = useCallback((
+    event: React.DragEvent<HTMLElement>,
+    destination: string
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const sourcePath = event.dataTransfer.getData(projectFileDragType) || draggedFilePath;
+    if (sourcePath) void moveProjectFile(sourcePath, destination);
+  }, [draggedFilePath, moveProjectFile]);
 
   const renameSelectedFile = useCallback(() => {
     if (!activeProjectId || !selectedArtifactPath) return;
@@ -1258,7 +1256,7 @@ function App({ user }: { user?: SignedInUser } = {}) {
   }, [activeProjectId, fileDialog, refreshFiles, selectedArtifactPath]);
 
   const markSelectedFileReviewed = useCallback(async () => {
-    if (!activeProjectId || !selectedFile || !isMarkdownSelected || isFileDirty || isReviewingFile) return;
+    if (!activeProjectId || !selectedFile || isFileTruncated || !isMarkdownSelected || isFileDirty || isReviewingFile) return;
     setError('');
     setIsReviewingFile(true);
     try {
@@ -1269,7 +1267,7 @@ function App({ user }: { user?: SignedInUser } = {}) {
     } finally {
       setIsReviewingFile(false);
     }
-  }, [activeProjectId, isFileDirty, isMarkdownSelected, isReviewingFile, selectedFile]);
+  }, [activeProjectId, isFileDirty, isFileTruncated, isMarkdownSelected, isReviewingFile, selectedFile]);
 
   const discardAndContinue = useCallback(() => {
     setEditorContent(selectedFile?.content ?? '');
@@ -1887,15 +1885,25 @@ function App({ user }: { user?: SignedInUser } = {}) {
 
             {artifactTab === 'files' && (
               <div
-               className={`file-tree ${dragTargetPath === '' ? 'drop-active' : ''}`}
+               className={[
+                 'file-tree',
+                 dragTargetPath === '' ? 'drop-active' : '',
+                 moveTargetPath === '' ? 'move-active' : ''
+               ].filter(Boolean).join(' ')}
                onDragEnter={(event) => {
-                 if (event.dataTransfer.types.includes('Files')) {
+                 if (event.dataTransfer.types.includes(projectFileDragType)) {
+                   event.preventDefault();
+                   setMoveTargetPath('');
+                 } else if (event.dataTransfer.types.includes('Files')) {
                    event.preventDefault();
                    setDragTargetPath('');
                  }
                }}
                onDragOver={(event) => {
-                 if (event.dataTransfer.types.includes('Files')) {
+                 if (event.dataTransfer.types.includes(projectFileDragType)) {
+                   event.preventDefault();
+                   event.dataTransfer.dropEffect = 'move';
+                 } else if (event.dataTransfer.types.includes('Files')) {
                    event.preventDefault();
                    event.dataTransfer.dropEffect = 'copy';
                  }
@@ -1903,9 +1911,16 @@ function App({ user }: { user?: SignedInUser } = {}) {
                onDragLeave={(event) => {
                  if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
                    setDragTargetPath(null);
+                   setMoveTargetPath(null);
                  }
                }}
-               onDrop={(event) => handleFileDrop(event, '')}
+               onDrop={(event) => {
+                 if (event.dataTransfer.types.includes(projectFileDragType)) {
+                   handleProjectFileDrop(event, '');
+                 } else {
+                   handleFileDrop(event, '');
+                 }
+               }}
               >
               <div className="tree-title">
                 <span>
@@ -1949,7 +1964,11 @@ function App({ user }: { user?: SignedInUser } = {}) {
               </div>
               <div className={`file-drop-hint ${isUploadingFiles ? 'uploading' : ''}`}>
                 <Upload size={14} />
-                {isUploadingFiles ? 'Uploading files…' : 'Drop files here (images go to evidence/screenshots), or onto a folder'}
+                {draggedFilePath
+                  ? `Drop here to move ${draggedFilePath.split('/').at(-1)} to the project root`
+                  : isUploadingFiles
+                    ? 'Uploading files…'
+                    : 'Drop files here (images go to evidence/screenshots), or onto a folder'}
               </div>
               {visibleFiles.map(({ node, depth }) => {
                 const isExpanded = node.type === 'directory' && expandedPaths.has(node.path);
@@ -1964,35 +1983,80 @@ function App({ user }: { user?: SignedInUser } = {}) {
                     className={[
                       'file-row',
                       isSelected ? 'selected' : '',
+                      draggedFilePath === node.path ? 'dragging' : '',
                       node.type === 'directory' && uploadTargetPath === node.path ? 'upload-target' : '',
-                      node.type === 'directory' && dragTargetPath === node.path ? 'drop-target' : ''
+                      node.type === 'directory' && dragTargetPath === node.path ? 'drop-target' : '',
+                      node.type === 'directory' && moveTargetPath === node.path ? 'move-target' : ''
                     ].filter(Boolean).join(' ')}
                     style={{ paddingLeft: `${12 + depth * 16}px` }}
+                    draggable={node.type === 'file'}
                     onClick={() => {
                       if (node.type === 'directory') setUploadTargetPath(node.path);
                       void openFile(node);
                     }}
+                    onDragStart={node.type === 'file'
+                      ? (event) => {
+                          event.dataTransfer.effectAllowed = 'move';
+                          event.dataTransfer.setData(projectFileDragType, node.path);
+                          setDraggedFilePath(node.path);
+                      }
+                      : undefined}
+                    onDragEnd={node.type === 'file'
+                      ? () => {
+                          setDraggedFilePath('');
+                          setMoveTargetPath(null);
+                        }
+                      : undefined}
                     onDragEnter={node.type === 'directory'
                       ? (event) => {
-                          if (event.dataTransfer.types.includes('Files')) {
+                          if (event.dataTransfer.types.includes(projectFileDragType)) {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            setMoveTargetPath(node.path);
+                          } else if (event.dataTransfer.types.includes('Files')) {
                             event.preventDefault();
                             event.stopPropagation();
                             setDragTargetPath(node.path);
                           }
                         }
-                      : undefined}
+                      : (event) => {
+                          if (event.dataTransfer.types.includes(projectFileDragType)) {
+                            event.stopPropagation();
+                            setMoveTargetPath(null);
+                          }
+                        }}
                     onDragOver={node.type === 'directory'
                       ? (event) => {
-                          if (event.dataTransfer.types.includes('Files')) {
+                          if (event.dataTransfer.types.includes(projectFileDragType)) {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            event.dataTransfer.dropEffect = 'move';
+                          } else if (event.dataTransfer.types.includes('Files')) {
                             event.preventDefault();
                             event.stopPropagation();
                             event.dataTransfer.dropEffect = 'copy';
                           }
                         }
-                      : undefined}
+                      : (event) => {
+                          if (event.dataTransfer.types.includes(projectFileDragType)) {
+                            event.stopPropagation();
+                          }
+                        }}
                     onDrop={node.type === 'directory'
-                      ? (event) => handleFileDrop(event, node.path)
-                      : undefined}
+                      ? (event) => {
+                          if (event.dataTransfer.types.includes(projectFileDragType)) {
+                            handleProjectFileDrop(event, node.path);
+                          } else {
+                            handleFileDrop(event, node.path);
+                          }
+                        }
+                      : (event) => {
+                          if (event.dataTransfer.types.includes(projectFileDragType)) {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            setMoveTargetPath(null);
+                          }
+                        }}
                   >
                     {node.type === 'directory'
                       ? (isExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />)
@@ -2030,7 +2094,7 @@ function App({ user }: { user?: SignedInUser } = {}) {
                   )}
                 </div>
                 <div className="file-actions">
-                  {isMarkdownSelected && !publicationStatus?.reviewed && (
+                  {isMarkdownSelected && !isFileTruncated && !publicationStatus?.reviewed && (
                     <button
                       className="review-button"
                       disabled={isFileDirty || isReviewingFile}
@@ -2042,7 +2106,17 @@ function App({ user }: { user?: SignedInUser } = {}) {
                   )}
                   <button className="icon-button small" onClick={() => void createFile()} aria-label="Create text file" title="Create text file"><FilePlus2 size={14} /></button>
                   <button className="icon-button small" disabled={!selectedArtifactPath} onClick={() => void renameSelectedFile()} aria-label="Rename selected file" title="Rename"><Pencil size={14} /></button>
-                  <button className="icon-button small" disabled={!isFileDirty || isSavingFile} onClick={() => void saveSelectedFile()} aria-label="Save selected file" title="Save"><Save size={14} /></button>
+                  <button className="icon-button small" disabled={isFileTruncated || !isFileDirty || isSavingFile} onClick={() => void saveSelectedFile()} aria-label="Save selected file" title="Save"><Save size={14} /></button>
+                  {selectedFile && isFileTruncated && (
+                    <a
+                      className="review-button"
+                      href={aaaApi.fullTextPreviewUrl(activeProjectId, selectedFile.path)}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      <ExternalLink size={13} /> Open full preview
+                    </a>
+                  )}
                   <button className="icon-button small danger-icon" disabled={!selectedArtifactPath} onClick={() => void deleteSelectedFile()} aria-label="Delete selected file" title="Delete"><Trash2 size={14} /></button>
                   <button className="icon-button small" onClick={() => setArtifactTab('files')} aria-label="Back to files" title="Files"><FolderOpen size={15} /></button>
                 </div>
@@ -2055,6 +2129,16 @@ function App({ user }: { user?: SignedInUser } = {}) {
                         <div className="image-preview">
                           <img src={imageUrl} alt={selectedImagePath.split('/').at(-1)} />
                           <small>{selectedImagePath}</small>
+                        </div>
+                      )
+                      : selectedFile && isFileTruncated
+                      ? (
+                        <div className="large-file-preview">
+                          <div className="large-file-notice">
+                            <strong>Showing the first 2 MB of this {formatFileSize(selectedFile.size)} file.</strong>
+                            <span>Open the full preview in a new window to view the complete file.</span>
+                          </div>
+                          <pre>{editorContent}</pre>
                         </div>
                       )
                       : selectedFile
@@ -2091,7 +2175,17 @@ function App({ user }: { user?: SignedInUser } = {}) {
                   </div>
                 )}
                 {artifactTab === 'source' && (
-                  selectedFile
+                  selectedFile && isFileTruncated
+                    ? (
+                      <div className="large-file-preview source-large-file-preview">
+                        <div className="large-file-notice">
+                          <strong>Showing the first 2 MB of this {formatFileSize(selectedFile.size)} file.</strong>
+                          <span>Large files are read-only here. Open the full preview in a new window to view the complete file.</span>
+                        </div>
+                        <pre>{editorContent}</pre>
+                      </div>
+                    )
+                    : selectedFile
                     ? (
                       <textarea
                         className="source-editor"

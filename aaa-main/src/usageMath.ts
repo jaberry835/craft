@@ -1,4 +1,4 @@
-import type { AgentRun, ChatSession, RunUsage, TokenUsage } from './types/api';
+import type { AgentRun, ChatSession, RunUsage, TokenUsage } from './types/api.js';
 
 export function formatTokens(value: number): string {
   if (value < 1000) return String(Math.round(value));
@@ -21,18 +21,18 @@ export function usageTitle(usage: TokenUsage & Partial<RunUsage>): string {
 }
 
 export function sessionUsage(runs: AgentRun[]): RunUsage | undefined {
-  const measured = runs.filter((run) => run.usage);
+  const measured = runs.flatMap((run) => run.usage ? [run.usage] : []);
   if (measured.length === 0) return undefined;
-  return measured.reduce<RunUsage>((total, run) => ({
-    inputTokens: total.inputTokens + run.usage!.inputTokens,
-    cachedInputTokens: total.cachedInputTokens + run.usage!.cachedInputTokens,
-    outputTokens: total.outputTokens + run.usage!.outputTokens,
-    reasoningTokens: total.reasoningTokens + run.usage!.reasoningTokens,
-    totalTokens: total.totalTokens + run.usage!.totalTokens,
-    requests: total.requests + run.usage!.requests,
+  return measured.reduce<RunUsage>((total, usage) => ({
+    inputTokens: total.inputTokens + usage.inputTokens,
+    cachedInputTokens: total.cachedInputTokens + usage.cachedInputTokens,
+    outputTokens: total.outputTokens + usage.outputTokens,
+    reasoningTokens: total.reasoningTokens + usage.reasoningTokens,
+    totalTokens: total.totalTokens + usage.totalTokens,
+    requests: total.requests + usage.requests,
     promptTokens: 0,
-    peakInputTokens: Math.max(total.peakInputTokens, run.usage!.peakInputTokens),
-    estimated: total.estimated || run.usage!.estimated
+    peakInputTokens: Math.max(total.peakInputTokens, usage.peakInputTokens),
+    estimated: total.estimated || usage.estimated
   }), {
     inputTokens: 0,
     cachedInputTokens: 0,

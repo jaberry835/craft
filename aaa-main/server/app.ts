@@ -272,7 +272,15 @@ export function createAaaApp({
   app.get('/api/projects/:projectId/tree', async (request, response) =>
     response.json(await fileService(request).listTree({ includeHidden: request.query.hidden === 'true' })));
   app.get('/api/projects/:projectId/files', async (request, response) =>
-    response.json(await fileService(request).readTextFile(String(request.query.path ?? ''))));
+    response.json(await fileService(request).readTextFilePreview(String(request.query.path ?? ''))));
+  app.get('/api/projects/:projectId/files/preview', async (request, response) => {
+    const file = await fileService(request).readFullTextPreview(String(request.query.path ?? ''));
+    response
+      .set('Content-Security-Policy', "default-src 'none'; sandbox")
+      .set('X-Content-Type-Options', 'nosniff')
+      .type('text/plain')
+      .send(file.content);
+  });
   app.put('/api/projects/:projectId/files', async (request, response) => {
     const body = (request.body ?? {}) as WriteTextFileRequest;
     response.json(await fileService(request).writeTextFile(body.path, body.content, body.updatedAt));

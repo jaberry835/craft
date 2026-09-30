@@ -263,6 +263,8 @@ export const aaaApi = {
     requestJson<FileTreeNode[]>(`${projectPath(projectId)}/tree${includeHidden ? '?hidden=true' : ''}`),
   readTextFile: (projectId: string, filePath: string) =>
     requestJson<ProjectTextFile>(`${projectPath(projectId)}/files?path=${encodeURIComponent(filePath)}`),
+  fullTextPreviewUrl: (projectId: string, filePath: string) =>
+    `${projectPath(projectId)}/files/preview?path=${encodeURIComponent(filePath)}`,
   writeTextFile: (projectId: string, request: WriteTextFileRequest) =>
     requestJson<ProjectTextFile>(`${projectPath(projectId)}/files`, {
       method: 'PUT',

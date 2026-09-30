@@ -38,7 +38,7 @@ Status meanings:
 | 10 | Continue adding regression and workflow tests | **Complete / ongoing practice** | `a6d55bf`, `db68670`, and focused tests across auth, project ACLs, MCP, Foundry agents, files, compaction, publication, browser capture, evidence links, and capability refresh. Current full-suite checkpoint: 137 server tests, 136 passing and one live-MCP test skipped without a real publisher. |
 | 11 | Add useful, error-focused logging | **Complete** | `29b4a1f`; structured redacted server and browser API failure logging with configurable level and format. |
 | 12 | Open a target knowledge-base site beside chat and fill forms/upload artifacts through Playwright | **Complete** | `e96c2ee`; the project-scoped visible Edge session can inspect visible form fields, fill explicitly reviewed values, and attach validated project artifacts. AAA never auto-submits the target form, so final submission remains a user action in Edge. |
-| 13 | Automate Word and Excel templates | **Deferred to a separate MCP server** | Intentionally excluded from AAA so Office automation remains independently deployable and replaceable. |
+| 13 | Automate Word and Excel templates | **Deferred to a separate MCP server** | The accepted [Office document automation decision](./docs/office-document-automation.md) keeps format-specific parsing/rendering in a local high-side MCP service while AAA owns canonical sources, knowledge provenance, safe binary handoff, review, and file lifecycle. |
 | 14 | Support an agent-led, multi-stage workflow that asks for scans and architecture inputs before CONOPS and control work | **Partial** | Persistent multi-turn sessions, project agents, instructions, skills, prompts, reasoning steps, and tool use exist. Explicit workflow state, stage gates, required-input tracking, resume semantics, and a dedicated progress view do not. |
 | 15 | Make browser capture launch visible Microsoft Edge by default and navigate to the requested site | **Complete** | `11ad28d` and browser-capture tests; visible Edge is the default, with URL launch/navigation controls and optional headless mode. |
 | 16 | Offer screenshot-evidence capture from HTTP links in project documentation | **Complete** | `b74ff13`; rendered project Markdown places a Capture action beside absolute HTTP(S) links. The action launches or navigates the project Edge session and prefills a safe timestamped path under `evidence/screenshots/`; capture remains a separate user-confirmed action. |
@@ -79,7 +79,12 @@ Status meanings:
 
 ## Intentionally separate work
 
-Word and Excel template generation remains assigned to a separate MCP server. AAA should consume its tools and returned files through the existing authenticated MCP/file-result pipeline rather than embedding Office automation in this repository.
+Word and Excel template generation remains assigned to a separate MCP server. The
+[Office document automation decision](./docs/office-document-automation.md) defines canonical
+Markdown/structured data, document manifests, knowledge references, the required binary-input
+broker, the initial MCP tool contract, security rules, controlled round-trip behavior, and phased
+delivery. AAA should consume its tools and returned files through the authenticated MCP/file-result
+pipeline rather than embedding Office automation in this repository.
 
 ## Autopilot update procedure
 

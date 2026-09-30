@@ -17,3 +17,9 @@ AAA does not execute scripts. A skill that needs to create files should copy the
 The reference template includes `capture-web-evidence` for the deterministic `browser_capture` tool and `create-architecture-diagram` for safe, evidence-grounded SVG documents. Rendered HTTP(S) links can prepare an Edge capture, and the Web tab can inspect/fill reviewed form values and attach validated project artifacts without submitting. Replace or tune those skills with the rest of the template for the high-side workflow.
 
 Set `AAA_PROJECT_TEMPLATE` to use a template folder outside this repository. Existing projects are not changed when the template changes.
+
+When transferring a newer template to an environment that already has high-side customizations,
+do not overwrite the target directory. Follow the
+[high-side template migration process](../docs/high-side-template-migration.md) to compare the
+previous baseline, current high-side template, and incoming baseline; preserve high-side knowledge;
+validate the rebuilt template; and produce a rollback-ready migration report.

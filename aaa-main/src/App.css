@@ -1532,6 +1532,12 @@
   background: var(--accent-soft);
 }
 
+.file-tree.move-active > .file-drop-hint {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
 .file-row {
   width: 100%;
   height: 25px;
@@ -1567,6 +1573,16 @@
   color: var(--accent);
   outline: 1px dashed var(--accent);
   background: var(--accent-soft);
+}
+
+.file-row.move-target {
+  color: var(--accent);
+  outline: 2px solid var(--accent);
+  background: var(--accent-soft);
+}
+
+.file-row.dragging {
+  opacity: .45;
 }
 
 .file-row svg:nth-of-type(2) {
@@ -1701,6 +1717,45 @@
   min-height: 0;
   flex: 1;
   overflow: auto;
+}
+
+.large-file-preview {
+  display: grid;
+  gap: 14px;
+}
+
+.large-file-notice {
+  display: grid;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-soft);
+  font: 10px/1.45 Inter, "Segoe UI", sans-serif;
+}
+
+.large-file-notice span {
+  color: var(--muted);
+}
+
+.large-file-preview pre {
+  max-width: 100%;
+  margin: 0;
+  overflow: auto;
+  font: 11px/1.65 "Cascadia Code", Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.source-large-file-preview {
+  min-height: 100%;
+  box-sizing: border-box;
+  padding: 18px 20px 32px;
+  background: #f8faf8;
+}
+
+.theme-dark .source-large-file-preview {
+  background: #19221c;
 }
 
 .markdown-preview {
@@ -2005,9 +2060,31 @@
 }
 
 .dialog-primary {
+  min-width: 72px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
   border-color: var(--accent) !important;
   color: #fff;
   background: var(--accent);
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.dialog-primary:hover:not(:disabled) {
+  filter: brightness(.96);
+}
+
+.dialog-primary:disabled {
+  cursor: not-allowed;
+  opacity: .55;
 }
 
 .dialog-danger {

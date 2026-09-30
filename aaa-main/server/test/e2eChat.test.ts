@@ -5,14 +5,13 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { setTimeout as wait } from 'node:timers/promises';
 import test from 'node:test';
-import { chromium, type Browser } from 'playwright-core';
 import { createAaaApp } from '../app.js';
 import { loadAppAuthConfig } from '../appAuth.js';
 import type { ModelChatClient } from '../modelTypes.js';
 import { ProjectRegistry } from '../projectRegistry.js';
 import { ModelConnectionConfig } from '../services/modelConnectionConfig.js';
+import { clientDist, closeServer, launchTestBrowser, listen } from './browserTestUtils.js';
 
-const clientDist = path.join(process.cwd(), 'dist', 'client');
 const root = path.join(process.cwd(), '.test-data', 'e2e-chat');
 
 /**
@@ -21,22 +20,8 @@ const root = path.join(process.cwd(), '.test-data', 'e2e-chat');
  * built client (`npm run build`) and Microsoft Edge; skipped otherwise.
  */
 test('first prompt renders immediately and the reply replaces the live view without duplicates', async (t) => {
-  if (!existsSync(path.join(clientDist, 'index.html'))) {
-    t.skip('Run npm run build to enable browser tests.');
-    return;
-  }
-  let browser: Browser;
-  try {
-    browser = await chromium.launch({
-      headless: true,
-      ...(process.env.AAA_EDGE_EXECUTABLE_PATH
-        ? { executablePath: process.env.AAA_EDGE_EXECUTABLE_PATH }
-        : { channel: process.env.AAA_EDGE_CHANNEL || 'msedge' })
-    });
-  } catch {
-    t.skip('Microsoft Edge is not available for browser tests.');
-    return;
-  }
+  const browser = await launchTestBrowser(t);
+  if (!browser) return;
 
   await rm(root, { recursive: true, force: true });
   const projectRoot = path.join(root, 'project');
@@ -78,17 +63,15 @@ test('first prompt renders immediately and the reply replaces the live view with
     modelConfig,
     modelClient
   }));
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = await listen(server);
   t.after(async () => {
     await browser.close();
-    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await closeServer(server);
     await rm(root, { recursive: true, force: true });
   });
-  const address = server.address();
-  assert.ok(address && typeof address !== 'string');
 
   const page = await browser.newPage();
-  await page.goto(`http://127.0.0.1:${address.port}/`);
+  await page.goto(base);
   const composer = page.locator('textarea');
   await composer.waitFor();
   await page.getByText('Test model ready').first().waitFor();
@@ -110,29 +93,17 @@ test('first prompt renders immediately and the reply replaces the live view with
 });
 
 test('folders can be deleted from the Files tree after confirming their contents', async (t) => {
-  if (!existsSync(path.join(clientDist, 'index.html'))) {
-    t.skip('Run npm run build to enable browser tests.');
-    return;
-  }
-  let browser: Browser;
-  try {
-    browser = await chromium.launch({
-      headless: true,
-      ...(process.env.AAA_EDGE_EXECUTABLE_PATH
-        ? { executablePath: process.env.AAA_EDGE_EXECUTABLE_PATH }
-        : { channel: process.env.AAA_EDGE_CHANNEL || 'msedge' })
-    });
-  } catch {
-    t.skip('Microsoft Edge is not available for browser tests.');
-    return;
-  }
+  const browser = await launchTestBrowser(t);
+  if (!browser) return;
   const treeRoot = path.join(process.cwd(), '.test-data', 'e2e-tree');
   await rm(treeRoot, { recursive: true, force: true });
   const projectRoot = path.join(treeRoot, 'project');
   await mkdir(path.join(projectRoot, 'drafts'), { recursive: true });
+  await mkdir(path.join(projectRoot, 'archive'), { recursive: true });
   await writeFile(path.join(projectRoot, 'drafts', 'one.md'), '# One\n');
   await writeFile(path.join(projectRoot, 'drafts', 'two.md'), '# Two\n');
   await writeFile(path.join(projectRoot, 'keep.md'), '# Keep\n');
+  await writeFile(path.join(projectRoot, 'large.txt'), `${'x'.repeat(2 * 1024 * 1024)}\nComplete preview\n`);
   await writeFile(path.join(treeRoot, 'projects.json'), JSON.stringify({
     activeProjectId: 'project',
     projects: [{ id: 'project', name: 'Tree Test Package', rootPath: projectRoot }]
@@ -142,17 +113,15 @@ test('folders can be deleted from the Files tree after confirming their contents
     dataRoot: path.join(treeRoot, 'data'),
     clientDistPath: clientDist
   }));
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = await listen(server);
   t.after(async () => {
     await browser.close();
-    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await closeServer(server);
     await rm(treeRoot, { recursive: true, force: true });
   });
-  const address = server.address();
-  assert.ok(address && typeof address !== 'string');
 
   const page = await browser.newPage();
-  await page.goto(`http://127.0.0.1:${address.port}/`);
+  await page.goto(base);
   const folderRow = page.locator('.file-row-wrap', { has: page.locator('.file-row', { hasText: 'drafts' }) });
   await folderRow.waitFor();
   await folderRow.hover();
@@ -164,25 +133,26 @@ test('folders can be deleted from the Files tree after confirming their contents
   await folderRow.waitFor({ state: 'detached' });
   assert.equal(existsSync(path.join(projectRoot, 'drafts')), false);
   assert.equal(existsSync(path.join(projectRoot, 'keep.md')), true);
+
+  const moveResponse = page.waitForResponse((response) =>
+    response.request().method() === 'PATCH' && response.url().includes('/api/projects/project/paths'));
+  await page.locator('.file-row', { hasText: 'keep.md' }).dragTo(
+    page.locator('.file-row', { hasText: 'archive' })
+  );
+  assert.equal((await moveResponse).status(), 200);
+  await page.locator('.file-row', { hasText: 'keep.md' }).waitFor();
+  assert.equal(existsSync(path.join(projectRoot, 'keep.md')), false);
+  assert.equal(existsSync(path.join(projectRoot, 'archive', 'keep.md')), true);
+
+  await page.locator('.file-row', { hasText: 'large.txt' }).click();
+  await page.getByText(/Showing the first 2 MB of this 2\.0 MB file/).waitFor();
+  const fullPreview = page.getByRole('link', { name: 'Open full preview' });
+  assert.match(await fullPreview.getAttribute('href') ?? '', /\/files\/preview\?path=large\.txt$/);
 });
 
 test('with Microsoft Entra sign-in on, the app shows a sign-in screen instead of the workbench', async (t) => {
-  if (!existsSync(path.join(clientDist, 'index.html'))) {
-    t.skip('Run npm run build to enable browser tests.');
-    return;
-  }
-  let browser: Browser;
-  try {
-    browser = await chromium.launch({
-      headless: true,
-      ...(process.env.AAA_EDGE_EXECUTABLE_PATH
-        ? { executablePath: process.env.AAA_EDGE_EXECUTABLE_PATH }
-        : { channel: process.env.AAA_EDGE_CHANNEL || 'msedge' })
-    });
-  } catch {
-    t.skip('Microsoft Edge is not available for browser tests.');
-    return;
-  }
+  const browser = await launchTestBrowser(t);
+  if (!browser) return;
   const gateRoot = path.join(process.cwd(), '.test-data', 'e2e-auth');
   await rm(gateRoot, { recursive: true, force: true });
   await mkdir(path.join(gateRoot, 'project'), { recursive: true });
@@ -203,21 +173,19 @@ test('with Microsoft Entra sign-in on, the app shows a sign-in screen instead of
       verifier: async () => { throw new Error('No tokens are issued in this test.'); }
     }
   }));
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = await listen(server);
   t.after(async () => {
     await browser.close();
-    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await closeServer(server);
     await rm(gateRoot, { recursive: true, force: true });
   });
-  const address = server.address();
-  assert.ok(address && typeof address !== 'string');
 
   const page = await browser.newPage();
   const apiStatuses: number[] = [];
   page.on('response', (response) => {
     if (response.url().includes('/api/projects')) apiStatuses.push(response.status());
   });
-  await page.goto(`http://127.0.0.1:${address.port}/`);
+  await page.goto(base);
   await page.getByRole('button', { name: 'Sign in with Microsoft' }).waitFor({ timeout: 10_000 });
   assert.equal(await page.locator('textarea').count(), 0);
   assert.equal(await page.getByText('Protected Package').count(), 0);

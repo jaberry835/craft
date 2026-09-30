@@ -88,6 +88,7 @@ test('entra mode protects the API, issues a GET-only cookie, enforces roles, and
   const idp = await startIdentityProvider();
   await rm(root, { recursive: true, force: true });
   await mkdir(path.join(root, 'project'), { recursive: true });
+  await writeFile(path.join(root, 'project', 'preview.txt'), 'Cookie-authorized preview\n', 'utf8');
   await writeFile(path.join(root, 'projects.json'), JSON.stringify({
     activeProjectId: 'project',
     projects: [{ id: 'project', name: 'Auth Package', rootPath: path.join(root, 'project') }]
@@ -137,6 +138,12 @@ test('entra mode protects the API, issues a GET-only cookie, enforces roles, and
   assert.match(cookie, /^aaa_session=[^;]+; HttpOnly; SameSite=Strict; Path=\/api; Max-Age=\d+$/);
   const sessionCookie = cookie.split(';')[0]!;
   assert.equal((await fetch(`${base}/api/projects`, { headers: { Cookie: sessionCookie } })).status, 200);
+  const preview = await fetch(
+    `${base}/api/projects/project/files/preview?path=${encodeURIComponent('preview.txt')}`,
+    { headers: { Cookie: sessionCookie } }
+  );
+  assert.equal(preview.status, 200);
+  assert.equal(await preview.text(), 'Cookie-authorized preview\n');
   assert.equal((await fetch(`${base}/api/projects/project/sessions`, {
     method: 'POST',
     headers: { Cookie: sessionCookie, 'Content-Type': 'application/json' },

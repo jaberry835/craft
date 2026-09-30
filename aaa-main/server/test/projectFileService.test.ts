@@ -49,6 +49,61 @@ test('file reading rejects invalid UTF-8', async () => {
   }
 });
 
+test('large text files return a bounded UTF-8 preview and a complete full preview', async () => {
+  const root = `${fixtureRoot}-large-preview`;
+  await rm(root, { recursive: true, force: true });
+  await mkdir(root, { recursive: true });
+  const exactLimitContent = 'b'.repeat(2 * 1024 * 1024);
+  const content = `${'a'.repeat(2 * 1024 * 1024 - 1)}✓complete`;
+  await writeFile(path.join(root, 'exact-limit.txt'), exactLimitContent, 'utf8');
+  await writeFile(path.join(root, 'large.txt'), content, 'utf8');
+  try {
+    const service = new ProjectFileService(root);
+    const exactLimit = await service.readTextFilePreview('exact-limit.txt');
+    assert.equal(exactLimit.content, exactLimitContent);
+    assert.equal(exactLimit.truncated, undefined);
+
+    const preview = await service.readTextFilePreview('large.txt');
+    assert.equal(preview.truncated, true);
+    assert.ok(Buffer.byteLength(preview.content, 'utf8') <= 2 * 1024 * 1024);
+    assert.doesNotMatch(preview.content, /\uFFFD/);
+    assert.equal(preview.size, Buffer.byteLength(content, 'utf8'));
+
+    const fullPreview = await service.readFullTextPreview('large.txt');
+    assert.equal(fullPreview.content, content);
+    assert.equal(fullPreview.truncated, undefined);
+    await assert.rejects(
+      () => service.readTextFile('large.txt'),
+      (error: unknown) => error instanceof UnsupportedFileError && error.code === 'file_too_large'
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('text previews reject files above the full-preview limit', async () => {
+  const root = `${fixtureRoot}-oversized-preview`;
+  await rm(root, { recursive: true, force: true });
+  await mkdir(root, { recursive: true });
+  await writeFile(path.join(root, 'oversized.txt'), Buffer.alloc(10 * 1024 * 1024 + 1, 0x61));
+  try {
+    const service = new ProjectFileService(root);
+    for (const read of [
+      () => service.readTextFilePreview('oversized.txt'),
+      () => service.readFullTextPreview('oversized.txt')
+    ]) {
+      await assert.rejects(
+        read,
+        (error: unknown) => error instanceof UnsupportedFileError
+          && error.code === 'file_too_large'
+          && /10 MB/.test(error.message)
+      );
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('text files can be created, conflict-protected, renamed, and deleted', async () => {
   const root = `${fixtureRoot}-lifecycle`;
   await rm(root, { recursive: true, force: true });

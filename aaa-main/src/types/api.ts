@@ -187,6 +187,7 @@ export interface ProjectTextFile {
   content: string;
   updatedAt: string;
   size: number;
+  truncated?: boolean;
 }
 
 export interface WriteTextFileRequest {

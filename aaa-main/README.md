@@ -2,6 +2,10 @@
 
 AAA is a local-first authorization workbench derived from the Junior Web architecture and tailored to security package workflows.
 
+## Documentation
+
+Start with [`docs/README.md`](docs/README.md) for the application purpose, intended users, workflow, and an evidence-based feature status.
+
 ## Run locally
 
 Install dependencies once:

@@ -54,3 +54,20 @@ test('session ids cannot traverse outside project persistence', async () => {
   const store = new JsonSessionStore(testRoot, 'project-a');
   await assert.rejects(() => store.get('../../outside'), /Invalid session id/);
 });
+
+test('concurrent session updates are serialized without losing messages', async () => {
+  const root = `${testRoot}-concurrent`;
+  await rm(root, { recursive: true, force: true });
+  const store = new JsonSessionStore(root, 'project-a');
+  try {
+    const session = await store.create();
+    const messages = Array.from({ length: 12 }, (_, index) => `Message ${index + 1}`);
+    await Promise.all(messages.map((content) => store.append(session.id, { role: 'user', content })));
+
+    const stored = await store.get(session.id);
+    assert.equal(stored.messageCount, messages.length);
+    assert.deepEqual(stored.messages.map((message) => message.content).sort(), messages.sort());
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

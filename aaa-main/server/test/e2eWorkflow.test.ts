@@ -4,13 +4,12 @@ import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import path from 'node:path';
 import test from 'node:test';
-import { chromium, type Browser } from 'playwright-core';
 import { createAaaApp } from '../app.js';
 import type { ModelChatClient, ModelChatMessage, ModelStreamChunk } from '../modelTypes.js';
 import { ProjectRegistry } from '../projectRegistry.js';
 import { ModelConnectionConfig } from '../services/modelConnectionConfig.js';
+import { clientDist, closeServer, launchTestBrowser, listen } from './browserTestUtils.js';
 
-const clientDist = path.join(process.cwd(), 'dist', 'client');
 const templateRoot = path.join(process.cwd(), 'templates', 'default-project');
 const root = path.join(process.cwd(), '.test-data', 'e2e-workflow');
 const responsePath = 'security-package/control-responses/AU-2.md';
@@ -86,22 +85,8 @@ function fakePublisher() {
 }
 
 test('create project, initialize, build, and publish a package through the browser', async (t) => {
-  if (!existsSync(path.join(clientDist, 'index.html'))) {
-    t.skip('Run npm run build to enable browser tests.');
-    return;
-  }
-  let browser: Browser;
-  try {
-    browser = await chromium.launch({
-      headless: true,
-      ...(process.env.AAA_EDGE_EXECUTABLE_PATH
-        ? { executablePath: process.env.AAA_EDGE_EXECUTABLE_PATH }
-        : { channel: process.env.AAA_EDGE_CHANNEL || 'msedge' })
-    });
-  } catch {
-    t.skip('Microsoft Edge is not available for browser tests.');
-    return;
-  }
+  const browser = await launchTestBrowser(t);
+  if (!browser) return;
 
   await rm(root, { recursive: true, force: true });
   await mkdir(root, { recursive: true });
@@ -124,15 +109,12 @@ test('create project, initialize, build, and publish a package through the brows
     modelClient: scriptedModel(),
     mcpFetch: publisher.fetchImpl
   }));
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = await listen(server);
   t.after(async () => {
     await browser.close();
-    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await closeServer(server);
     await rm(root, { recursive: true, force: true });
   });
-  const address = server.address();
-  assert.ok(address && typeof address !== 'string');
-  const base = `http://127.0.0.1:${address.port}`;
 
   const page = await browser.newPage();
   await page.goto(base);
