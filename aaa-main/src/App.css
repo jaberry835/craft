@@ -3554,6 +3554,12 @@
 }
 
 /* MCP tool parameters in connection test results */
+.capability-test-tools > strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 10px;
+}
+
 .capability-test-result ul {
   max-height: 320px;
 }

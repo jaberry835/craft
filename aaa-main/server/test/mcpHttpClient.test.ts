@@ -212,6 +212,34 @@ test('down MCP servers time out quickly in parallel and never block healthy serv
   assert.match(loaded.errors[0]!, /Continuing without its tools/);
 });
 
+test('agent loop starts after the MCP startup budget instead of waiting for the connection timeout', async (t) => {
+  resetMcpServerHealth();
+  t.mock.method(console, 'error', () => {});
+  let modelStartedAt = 0;
+  const client: ModelChatClient = {
+    async *stream() {
+      modelStartedAt = Date.now();
+      yield { type: 'assistant_text', text: 'Continued without MCP.' };
+      yield { type: 'completed' };
+    }
+  };
+  const started = Date.now();
+  const result = await new AaaAgentLoop(client, new ProjectFileService(process.cwd()), {
+    tools: [],
+    mcp: new McpToolbox([
+      new McpHttpClient({ name: 'down', url: 'http://10.255.255.1/mcp' }, blackhole, 120_000, 30_000)
+    ], 60_000, 40)
+  }).run(
+    { definition: {}, endpoint: '', deployment: '', apiVersion: '' } as ResolvedModelConnection,
+    [{ role: 'user', content: 'Continue even if MCP is unavailable.' }],
+    new AbortController().signal
+  );
+
+  assert.equal(result.content, 'Continued without MCP.');
+  assert.ok(modelStartedAt - started < 500, 'the model loop should not wait for the 30-second MCP connection timeout');
+  assert.match(result.toolEvents[0]?.detail ?? '', /did not connect within the 40 ms startup budget/);
+});
+
 test('a recently failed MCP server is skipped on the next run until it recovers or is tested', async (t) => {
   resetMcpServerHealth();
   t.mock.method(console, 'error', () => {});

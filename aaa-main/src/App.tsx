@@ -2568,26 +2568,29 @@ function App({ user }: { user?: SignedInUser } = {}) {
                                 <div className={`capability-test-result ${testResult.ok ? 'success' : 'failure'}`}>
                                   <span>{testResult.ok ? <Check size={12} /> : <X size={12} />}{testResult.summary}</span>
                                   {testResult.tools && testResult.tools.length > 0 && (
-                                    <ul>
-                                      {testResult.tools.map((tool) => (
-                                        <li key={tool.name}>
-                                          <code>{tool.name}</code>{tool.description && ` — ${tool.description}`}
-                                          {tool.parameters && tool.parameters.length > 0 && (
-                                            <table className="tool-parameters">
-                                              <tbody>
-                                                {tool.parameters.map((parameter) => (
-                                                  <tr key={parameter.name}>
-                                                    <td><code>{parameter.name}</code>{parameter.required && <em title="Required">*</em>}</td>
-                                                    <td>{parameter.type}</td>
-                                                    <td>{parameter.description}</td>
-                                                  </tr>
-                                                ))}
-                                              </tbody>
-                                            </table>
-                                          )}
-                                        </li>
-                                      ))}
-                                    </ul>
+                                    <div className="capability-test-tools">
+                                      <strong>Available tools</strong>
+                                      <ul>
+                                        {testResult.tools.map((tool) => (
+                                          <li key={tool.name}>
+                                            <code>{tool.name}</code>{tool.description && ` — ${tool.description}`}
+                                            {tool.parameters && tool.parameters.length > 0 && (
+                                              <table className="tool-parameters">
+                                                <tbody>
+                                                  {tool.parameters.map((parameter) => (
+                                                    <tr key={parameter.name}>
+                                                      <td><code>{parameter.name}</code>{parameter.required && <em title="Required">*</em>}</td>
+                                                      <td>{parameter.type}</td>
+                                                      <td>{parameter.description}</td>
+                                                    </tr>
+                                                  ))}
+                                                </tbody>
+                                              </table>
+                                            )}
+                                          </li>
+                                        ))}
+                                      </ul>
+                                    </div>
                                   )}
                                 </div>
                               )}

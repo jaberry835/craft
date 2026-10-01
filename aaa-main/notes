@@ -1,0 +1,27 @@
+It works better if you create your standard docs first 
+So I would say, Scan -> Docs -> Architecture diagrams  -> 
+Then after that we start answering our control set. 
+
+I want to be able to add question answer as part of the workflow this won't happen always, only when approriate.   --- ie like when we get options when using GH Copilot , do you want option 1, 2, 3 or provide another answer 
+
+I want to know if we are using SK or other orchestrator in here (how does GH Copilot do this, as we are clone of a GH Copilot tool that works in teh web agentically).   Are we missing this.   
+ 
+
+I am finding that I will have good templates for all documents here when moved high side.  This will be key in the workflow to first build out these documents in md and csv so we know what we are headed to 
+
+I plan to provide text versions of those documents and then we will use the mcp tool for doc creation to build those out. 
+
+
+I am adding mcp for doc transformation and creation -- so all document type work in excel and word will happen external 
+I am adding mcp for publisher, but it is lower priority --- it exists, but needs work 
+
+MCP for cloud scan is the most important, and will require testing from this harness --- it will be driven by specific requirements when we get high 
+
+Later I need to build lists of how I think we assesed this and what POAMs are likely.  
+
+I need to build a demo here low side (that will incongruent to high side) that shows how we might be a sercurity plan this way simply using the NIST Control set 
+
+
+
+
+

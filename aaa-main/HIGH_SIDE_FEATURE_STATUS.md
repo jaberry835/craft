@@ -61,9 +61,16 @@ Status meanings:
 
 2. **Guided multi-stage agent workflows**
    - Add persisted workflow state, stages, prerequisites, checkpoints, and resume behavior.
+   - Enforce the planned order: cloud scan → standard docs (Markdown/CSV canonical) → architecture diagrams → control-set responses → POA&M projection.
+   - Add interactive question/answer elicitation so an agent can offer numbered options (1 / 2 / 3 / other) at appropriate points.
    - Surface missing inputs and progress independently from free-form chat.
-3. **Security-package dashboard**
+3. **Cloud-scan MCP intake (highest-priority workflow input)**
+   - Build the harness-side client path to call a cloud-scan MCP server and ingest findings as project evidence/JSON that drive later stages.
+   - Add a fake-scan MCP fixture for low-side tests; the real scan server is high-side and requirement-driven, so live validation is deferred until the high-side move.
+4. **Security-package dashboard**
    - Detect package structure and show control families, responses, evidence coverage, validation state, and review/publication readiness.
+5. **Low-side NIST demo**
+   - Self-contained demo project/template exercising the full workflow against the public NIST control set, intentionally incongruent with the high-side package.
 
 ### Priority 2: broader punch-list items
 
@@ -74,8 +81,16 @@ Status meanings:
 - Per-project or per-session token budgets.
 - OpenTelemetry GenAI spans for Application Insights or an offline collector.
 - Dynamic interactive architecture diagrams from cloud-scan output.
+- Assessment rationale and POA&M projection after control responses.
+- Optional native Microsoft Foundry Agent Service runtime for prompt and hosted agents, isolated from the local loop until target-environment and parity tests pass.
+- Publisher MCP hardening and environment-specific live smoke test.
 - Final offline installation rehearsal on the actual high-side OS and architecture.
 - Decision and cleanup for tracked screenshots and stray assets listed in the punch list.
+
+The low-side planning notes that seed Priority 1 above are tracked as requirements R-A through R-I
+in section 11 of [`PUNCHLIST.md`](./PUNCHLIST.md). The orchestration evaluation keeps the current
+TypeScript loop for R-A/R-B compatibility and delivery, while retaining a contract-tested Microsoft
+Agent Framework sidecar as the preferred future evaluation path if multi-agent needs justify it.
 
 ## Intentionally separate work
 

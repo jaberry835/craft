@@ -426,17 +426,20 @@ export class McpToolbox {
 
   constructor(
     private readonly clients: McpHttpClient[],
-    private readonly retryAfterMs = envMilliseconds('AAA_MCP_RETRY_AFTER_MS', 60_000)
+    private readonly retryAfterMs = envMilliseconds('AAA_MCP_RETRY_AFTER_MS', 60_000),
+    private readonly startupBudgetMs = envMilliseconds('AAA_MCP_STARTUP_BUDGET_MS', 1_000)
   ) {}
 
   /**
-   * Lists every server's tools in parallel. A server that fails, times out, or failed
-   * recently is reported in `errors` and skipped; it never fails or blocks the run.
+   * Lists every server's tools in parallel within one bounded startup budget. A server
+   * that fails, times out, or failed recently is reported in `errors` and skipped.
    */
   async load(
     signal?: AbortSignal,
     filter?: (server: string, tool: string) => boolean
   ): Promise<{ definitions: ModelToolDefinition[]; errors: string[] }> {
+    const startupTimeout = AbortSignal.timeout(this.startupBudgetMs);
+    const discoverySignal = signal ? AbortSignal.any([signal, startupTimeout]) : startupTimeout;
     const listed = await Promise.all(this.clients.map(async (client) => {
       const key = healthKey(client.config);
       const known = unreachableServers.get(key);
@@ -445,12 +448,16 @@ export class McpToolbox {
         return { client, error: `${known.message} Skipped; AAA retries it in about ${seconds} s.` };
       }
       try {
-        const tools = await client.listTools(signal);
+        const tools = await client.listTools(discoverySignal);
         unreachableServers.delete(key);
         return { client, tools };
       } catch (error) {
         if (signal?.aborted) throw error;
-        const message = error instanceof Error ? error.message : `MCP server ${client.name} is unavailable.`;
+        const message = startupTimeout.aborted
+          ? `MCP server ${client.name} did not connect within the ${this.startupBudgetMs >= 1000
+            ? `${this.startupBudgetMs / 1000} s`
+            : `${this.startupBudgetMs} ms`} startup budget.`
+          : error instanceof Error ? error.message : `MCP server ${client.name} is unavailable.`;
         unreachableServers.set(key, { until: Date.now() + this.retryAfterMs, message });
         log.error('mcp', `${message} Continuing without its tools.`, { server: client.name });
         return { client, error: `${message} Continuing without its tools.` };

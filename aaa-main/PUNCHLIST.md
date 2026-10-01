@@ -236,3 +236,90 @@ MCP and harness
 - [x] Add structured, redacted console logging for key failures (startup, runs, model, MCP, tools, compaction, storage, API routes, process) with `AAA_LOG_LEVEL`/`AAA_LOG_FORMAT`, plus browser-console API failure logging.
 - [x] Add optional Microsoft Entra sign-in for the web app (`AAA_AUTH_MODE=entra`, off by default) with token validation, app-role checks, sovereign-cloud authority, and run attribution.
 - [x] Add a browser end-to-end test for create project → `/initialize-security-package` → `/build-security-package` → publish (`server/test/e2eWorkflow.test.ts`, scripted model and fake MCP publisher).
+
+## 11. Guided assessment workflow and scan-first intake
+
+Captured from low-side planning notes ahead of the high-side move. This section sequences the
+authorization workflow (cloud scan → standard documents → architecture diagrams → control-set
+responses) and the supporting capabilities that make it demonstrable low side. It extends the
+Priority 1 "Guided multi-stage agent workflows" item in [`HIGH_SIDE_FEATURE_STATUS.md`](./HIGH_SIDE_FEATURE_STATUS.md).
+
+**Target workflow order:** Scan → Docs (Markdown/CSV canonical) → Architecture diagrams → Control-set responses → POA&M projection.
+
+- [ ] **(R-A) Guided multi-stage workflow engine.** Add persisted workflow state with ordered stages (scan, standard docs, architecture, control responses), prerequisites, stage gates, checkpoints, and resume semantics. The agent must understand it is guiding the user through this sequence rather than free-form chat. *(Next up.)*
+- [ ] **(R-B) Interactive question/answer elicitation.** Let an agent pause mid-workflow to present numbered options (1 / 2 / 3 / provide another answer), capture the choice, and continue. Must be occasional and context-driven, not every turn. *(Next up; companion to R-A.)*
+- [ ] **(R-D) Canonical Markdown/CSV document templates.** Build the standard assessment documents as Markdown and CSV first so the target structure is explicit before any Office rendering. These feed the Office automation MCP as canonical sources (see the [Office document automation decision](./docs/office-document-automation.md)).
+- [ ] **(R-E) Cloud-scan MCP intake — highest priority.** First workflow stage. Add harness-side support to call a cloud-scan MCP server, ingest its findings as project evidence/JSON, and drive the rest of the workflow from them. The real scan server is high-side and requirement-driven; low side, build the client path plus a fake-scan MCP fixture for tests. *(Blocked on high-side server for live validation; buildable and testable low side now.)*
+- [ ] **(R-I) Low-side NIST demo.** Build a self-contained low-side demo project/template that walks the full workflow using the public NIST control set, intentionally incongruent with the high-side package, to show the end-to-end approach without high-side services. Exercises R-A, R-B, and R-D.
+- [ ] **(R-H) Assessment rationale and POA&M projection.** After control responses, generate how each control was assessed and the likely POA&Ms (plan of action and milestones). *(Later; depends on R-A control-response output.)*
+- [~] **(R-F) Publisher MCP hardening.** The HTTP MCP publisher integration exists (section 7); lower priority, still needs environment-specific work and a live smoke test (`AAA_MCP_LIVE_URL`).
+- [ ] **(R-G) Office document transformation/creation MCP.** Word/Excel creation stays in a separate local MCP server per the accepted [Office document automation decision](./docs/office-document-automation.md); AAA consumes it through the authenticated MCP/file pipeline.
+- [ ] **(R-J) Optional Microsoft Foundry Agent Service runtime.** AAA already delegates a selected agent to a full OpenAI-compatible Foundry Responses endpoint. As a nice-to-have, add an explicit adapter for supported Foundry Agent Service prompt-agent and hosted-agent invocation contracts instead of guessing custom payloads. Keep it opt-in per agent and disabled by default; selecting or failing a remote agent must not change or block the local `AaaAgentLoop`. Do not promote it beyond experimental until a real target/high-side agent passes authentication, multi-turn, streaming/event normalization, cancellation, usage, error-isolation, and persisted-run parity tests. Preserve the local runtime as the fallback throughout evaluation.
+
+### Current decision: preserve the harness contract; do not adopt Semantic Kernel yet
+
+AAA currently uses the TypeScript `AaaAgentLoop`, adapted from Junior Web's `JuniorAgentLoop`, as a
+bounded model/tool loop. The important compatibility surface is not the loop implementation itself:
+it is the existing model-client contract, VS Code/GitHub Copilot-compatible agents, skills, prompts,
+and instructions, enabled-tool behavior, MCP routing, NDJSON progress events, session/run records,
+usage accounting, cancellation, compaction, and changed-file reporting. Any orchestration runtime
+must preserve those observable contracts so AAA continues to behave like Junior and the GitHub
+Copilot workflow it is modeled after.
+
+**Decision as of 2026-10-01:** implement R-A and R-B as explicit TypeScript workflow state around
+the current loop. Do not replace the loop with Semantic Kernel now. This is a compatibility and
+delivery decision, not an attack-surface decision.
+
+#### Semantic Kernel benefits
+
+- Standard model connectors, function/plugin registration, filters/hooks, telemetry, and automatic
+	function calling could remove some custom infrastructure.
+- Sequential, concurrent, handoff, group-chat, and Magentic orchestration patterns could help if AAA
+	later coordinates several specialized agents.
+- The Process Framework's event-driven steps, auditability, and reusable processes resemble the
+	planned assessment stages.
+- A framework may reduce future bespoke work for agent handoff, provider adapters, and observability.
+
+#### Semantic Kernel costs and compatibility risks
+
+- Official Semantic Kernel SDKs support C#, Python, and Java, not TypeScript/Node. AAA would need a
+	sidecar or a server rewrite, adding a cross-process protocol and splitting cancellation, streaming,
+	credentials, logs, deployment, debugging, and persisted state across runtimes.
+- Semantic Kernel Agent Orchestration and Process Framework features relevant to R-A/R-B are marked
+	experimental. Adopting them would exchange stable local code for APIs expected to change.
+- Microsoft identifies Microsoft Agent Framework as the direct successor to Semantic Kernel and
+	publishes an SK migration guide. A new SK integration would likely incur another migration.
+- SK does not natively understand AAA's `.github` agents/skills/prompts/instructions, capability
+	toggles, `aaa-file:` MCP behavior, protected project writes, browser events, review boundary, or
+	session schema. Adapters would still be required, so it does not replace most AAA-specific code.
+- Replacing the loop could alter tool-call ordering, parallelism, tool-error recovery, streaming
+	event timing, context trimming, usage totals, or enabled-tool semantics and thereby diverge from
+	Junior/Copilot behavior.
+
+#### Microsoft Agent Framework implication
+
+Microsoft Agent Framework is the more appropriate framework to evaluate for new Microsoft-based
+orchestration because it succeeds SK and includes graph workflows, human-in-the-loop pause/resume,
+checkpoints, telemetry, MCP support, and a harness agent. It currently supports .NET and Python,
+with Go support emerging, but still has no official TypeScript SDK. It therefore has the same
+sidecar/rewrite problem for AAA today.
+
+#### Evaluation path and guardrails
+
+1. Keep `AaaAgentLoop` as the production runtime while implementing the scan → docs → diagrams →
+	 controls workflow as a deterministic persisted state machine. This workflow needs explicit order
+	 and checkpoints more than multi-agent autonomy.
+2. Extract an internal runtime interface only when a second implementation is ready; avoid adding
+	 an abstraction with one implementation solely in anticipation of a framework.
+3. If framework evaluation resumes, spike Microsoft Agent Framework before SK in an isolated
+	 sidecar. Run the same scripted model/tool scenarios against both runtimes.
+4. Require parity for streaming text/reasoning/events, cancellation, tool availability and ordering,
+	 MCP failure continuation, file protections, context/usage accounting, persisted run shape, and
+	 deterministic resume before allowing the optional runtime into a real workflow.
+5. Keep the current runtime available as a fallback until the alternate runtime passes the complete
+	 compatibility suite and demonstrates a measured reduction in code or operational complexity.
+
+**Revisit when:** AAA requires genuine multi-agent handoff/concurrency, the custom workflow engine
+becomes materially difficult to maintain, an official TypeScript SDK becomes available, or a
+framework sidecar demonstrates enough checkpointing/observability value to justify its operational
+cost. Framework adoption is not required for R-A or R-B.
