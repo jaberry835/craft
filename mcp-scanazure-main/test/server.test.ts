@@ -92,6 +92,86 @@ function createAuthenticatedTestApp(resolveRequest = false) {
 }
 
 describe("HTTP server", () => {
+  it("serves a landing page with MCP and REST connection details", async () => {
+    const response = await request(createTestApp()).get("/").expect(200);
+
+    expect(response.type).toBe("text/html");
+    expect(response.text).toContain("POST /mcp");
+    expect(response.text).toContain("POST /api/tools/{toolName}");
+    expect(response.text).toContain('href="/swagger/"');
+    expect(response.text).toContain("list_subscriptions");
+  });
+
+  it("serves Swagger UI and an OpenAPI operation for every tool", async () => {
+    const app = createTestApp();
+    const catalogResponse = await request(app).get("/api/tools").expect(200);
+    const openApiResponse = await request(app).get("/openapi.json").expect(200);
+    const swaggerResponse = await request(app).get("/swagger/").expect(200);
+
+    expect(catalogResponse.body.tools.length).toBeGreaterThan(10);
+    expect(openApiResponse.body.openapi).toBe("3.1.0");
+    for (const tool of catalogResponse.body.tools) {
+      expect(
+        openApiResponse.body.paths[`/api/tools/${tool.name}`].post.requestBody
+          .content["application/json"].schema
+      ).toEqual(tool.inputSchema);
+    }
+    expect(swaggerResponse.type).toBe("text/html");
+    expect(swaggerResponse.text).toContain("MCP Azure Scanner API");
+  });
+
+  it("calls the same tools through the REST API", async () => {
+    const response = await request(createTestApp())
+      .post("/api/tools/list_subscriptions")
+      .send({})
+      .expect(200);
+
+    expect(response.body).toMatchObject({
+      tool: "list_subscriptions",
+      tenantId: "tenant-1",
+      summary: { total: 1 }
+    });
+  });
+
+  it("returns a REST validation error for invalid tool arguments", async () => {
+    const response = await request(createTestApp())
+      .post("/api/tools/inventory_resources")
+      .send({})
+      .expect(400);
+
+    expect(response.body.error).toBe("InvalidToolArguments");
+  });
+
+  it("returns a client error for an unknown REST tool", async () => {
+    const response = await request(createTestApp())
+      .post("/api/tools/not_a_tool")
+      .send({})
+      .expect(400);
+
+    expect(response.body).toEqual({
+      error: "UnknownTool",
+      message: "Unknown tool: not_a_tool"
+    });
+  });
+
+  it("requires the same bearer authentication for REST tool calls", async () => {
+    await request(createAuthenticatedTestApp())
+      .post("/api/tools/list_subscriptions")
+      .send({})
+      .expect(401);
+
+    const response = await request(createAuthenticatedTestApp(true))
+      .post("/api/tools/list_subscriptions")
+      .set("Authorization", "******")
+      .send({})
+      .expect(200);
+
+    expect(response.body).toMatchObject({
+      tool: "list_subscriptions",
+      caller: { authMode: "obo" }
+    });
+  });
+
   it("reports health and cloud discovery", async () => {
     const response = await request(createTestApp()).get("/healthz").expect(200);
 

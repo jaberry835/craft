@@ -153,7 +153,11 @@ export function createApplication(dependencies: ApplicationDependencies): Expres
 
   app.use(
     "/swagger",
-    (_request, response, next) => {
+    (
+      _request: express.Request,
+      response: express.Response,
+      next: express.NextFunction
+    ) => {
       response.set(
         "Content-Security-Policy",
         "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'"
@@ -224,6 +228,14 @@ export function createApplication(dependencies: ApplicationDependencies): Expres
     }
 
     try {
+      const tools = await getToolCatalog();
+      if (!tools.some((tool) => tool.name === request.params.toolName)) {
+        response.status(400).json({
+          error: "UnknownTool",
+          message: `Unknown tool: ${request.params.toolName}`
+        });
+        return;
+      }
       const result = await callApiTool(
         createServer(requestContext),
         request.params.toolName,

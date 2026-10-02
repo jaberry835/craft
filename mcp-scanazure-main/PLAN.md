@@ -2,7 +2,10 @@
 
 ## 1. Goal
 
-An MCP server running over HTTP and hosted in Azure App Service. A **custom chat app that authenticates users with Entra ID** calls it. The server reads Azure **as the signed-in user** and returns **JSON** covering:
+An MCP and REST service running over HTTP and hosted in Azure App Service. A
+**custom chat app that authenticates users with Entra ID** can call MCP, while
+other integrations can invoke the same tools through REST. The server reads
+Azure **as the signed-in user** and returns **JSON** covering:
 
 - the subscriptions the user can access
 - a full inventory and configuration of every resource: PaaS, compute, network, Key Vault, VMs, data services, and so on
@@ -27,12 +30,14 @@ The server is **read-only**. It never changes Azure resources.
 - **Phase 8a — complete and live-verified:** best-effort Key Vault item metadata and Microsoft Graph identity posture, with independent partial/denied/unavailable semantics and directly applicable NIST evidence. Commercial validation returned three accessible Graph checks, explicit permission/service gaps for four checks, and per-vault Key Vault RBAC denials without retrieving values.
 - **Phase 9 — prepared:** AZD+Bicep deploys a hardened Node.js 24 App Service, user-assigned managed identity, Log Analytics, Application Insights, optional VNet integration, and air-gap build settings. Federated-credential automation and deployment documentation are included; Azure validation and deployment remain.
 - **Phase 10 — locally complete:** request rate limits, defensive HTTP headers, Azure Monitor OpenTelemetry, expanded integration/deployment documentation, and 80 automated tests.
+- **REST/API surface — complete:** every MCP tool is callable at `POST /api/tools/{toolName}` through the same authenticated handlers, with a generated OpenAPI 3.1 document, locally hosted Swagger UI, tool catalog, and landing page.
 - **Next:** complete interactive AZD authentication, rerun provisioning preview, and deploy only after Azure validation succeeds.
 
 ### Confirmed decisions
 | Topic | Decision |
 |---|---|
 | Client | Custom **browser SPA**, Entra-authenticated (MSAL.js + PKCE), calls `/mcp` cross-origin over HTTPS. The server must handle **CORS** (see §4.5) |
+| Public endpoints | MCP is hosted at `POST /mcp`; REST tools at `POST /api/tools/{toolName}`; Swagger at `GET /swagger/`; OpenAPI at `GET /openapi.json`; landing page at `GET /` |
 | Tenant | Single Entra tenant |
 | Test / prod | **Test in Azure Commercial**, production in the **air-gapped cloud**. The same build is used for both; only the cloud profile/config differs |
 | Build delivery | An **internal npm mirror** is available in the air gap. Build there with `npm ci` against the mirror |
@@ -354,6 +359,7 @@ These results also feed `build_nist_evidence`. When a check is unavailable, the 
 mcp-scanazure/
 ├─ src/
 │  ├─ server.ts                # Express, routes, startup guards
+│  ├─ api.ts                   # REST-to-MCP bridge, OpenAPI document, landing page
 │  ├─ config.ts                # zod-validated env
 │  ├─ cloud/                   # cloudProfile.ts (discovery + overrides), capabilities.ts (probe), apiVersions.ts
 │  ├─ links.ts                 # portal link builders
@@ -434,7 +440,7 @@ mcp-scanazure/
 | **8. Auth (OBO)** | JWT validation, `azp` allow-list, PRM endpoint, OBO + FIC (ARM, Key Vault, Graph tokens), app registration script | SPA works end-to-end in Commercial, and two users with different RBAC get different results |
 | **8a. Best-effort data** | `get_keyvault_item_metadata`, `get_identity_posture`, and feeding both into NIST evidence | Denied/unreachable/unavailable are reported per check, and nothing fails hard |
 | **9. Deploy** | Bicep + Azure CLI scripts (azd optional), UAMI + FIC, App Insights, HTTPS only, optional VNet integration (to reach private Key Vaults). Build from the internal npm mirror | Deployed and working in Commercial test, then in the air gap using `cloud-profiles/airgap.json` |
-| **10. Hardening & docs** | Rate limits, tests, README, custom-app integration guide | Tests pass and docs are complete |
+| **10. Hardening & docs** | Rate limits, tests, README, custom-app integration guide, REST parity for all MCP tools, OpenAPI/Swagger, and landing page | Tests pass, all tools appear in OpenAPI, and docs identify the MCP and REST endpoints |
 
 The `CredentialFactory` exists from Phase 1, so all collectors take a `TokenCredential` and OBO slots in without changes.
 

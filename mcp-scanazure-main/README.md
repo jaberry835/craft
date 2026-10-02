@@ -1,12 +1,38 @@
 # MCP Azure Scanner
 
-Read-only MCP server that inventories Azure and builds policy, security, and NIST evidence. It runs over MCP Streamable HTTP and returns structured JSON.
+Read-only MCP and REST service that inventories Azure and builds policy, security,
+and NIST evidence. MCP and REST use the same authenticated tool handlers and
+return the same structured JSON.
+
+## Service endpoints
+
+For a deployment at `https://scanner.example.com`, the public endpoints are:
+
+| Endpoint | Purpose |
+|---|---|
+| `POST https://scanner.example.com/mcp` | MCP Streamable HTTP endpoint |
+| `POST https://scanner.example.com/api/tools/{toolName}` | Invoke any MCP tool through REST using its arguments as the JSON request body |
+| `GET https://scanner.example.com/api/tools` | List tools and their input/output JSON schemas |
+| `GET https://scanner.example.com/swagger/` | Interactive Swagger UI for the REST API |
+| `GET https://scanner.example.com/openapi.json` | OpenAPI 3.1 document |
+| `GET https://scanner.example.com/` | Landing page with MCP connection details, REST documentation links, and available tools |
+| `GET https://scanner.example.com/healthz` | Service health and cloud capabilities |
+
+The MCP endpoint is always hosted at **`/mcp`** on the same origin as the app.
+Configure MCP clients with the full URL, such as
+`https://scanner.example.com/mcp`, and select the **Streamable HTTP** transport.
+In production, MCP and REST tool calls require the same Entra bearer token and
+enforce the same caller isolation. The landing page, tool catalog, OpenAPI
+document, Swagger UI, health check, and OAuth metadata are public documentation
+or discovery endpoints.
 
 The implementation covers **phases 1 through 8a**, with phase 9 deployment
 artifacts prepared and phase 10 local hardening in place:
 
 - Node 24 and TypeScript
 - stateless MCP Streamable HTTP at `POST /mcp`
+- REST access to every MCP tool at `POST /api/tools/{toolName}`
+- generated OpenAPI 3.1, locally hosted Swagger UI, and a service landing page
 - exact-origin CORS for a browser SPA
 - Commercial and air-gapped cloud profiles with endpoint discovery and overrides
 - `DefaultAzureCredential` test mode
@@ -82,6 +108,13 @@ Check health:
 Invoke-RestMethod http://127.0.0.1:3001/healthz
 ```
 
+Open the landing page and Swagger UI:
+
+```text
+http://127.0.0.1:3001/
+http://127.0.0.1:3001/swagger/
+```
+
 Use MCP Inspector:
 
 ```powershell
@@ -89,6 +122,37 @@ npx @modelcontextprotocol/inspector
 ```
 
 Connect the Inspector to `http://127.0.0.1:3001/mcp` using Streamable HTTP, then call `list_subscriptions`.
+
+Call the same tool through REST:
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:3001/api/tools/list_subscriptions `
+  -ContentType "application/json" `
+  -Body "{}"
+```
+
+For a tool with arguments:
+
+```powershell
+$body = @{
+  subscriptionId = "00000000-0000-0000-0000-000000000000"
+  resourceType = "Microsoft.Storage/storageAccounts"
+  pageSize = 200
+} | ConvertTo-Json
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:3001/api/tools/inventory_resources `
+  -ContentType "application/json" `
+  -Body $body
+```
+
+With `AUTH_MODE=obo` or `AUTH_MODE=arm-token`, add
+`-Headers @{ Authorization = "Bearer <access-token>" }`. Swagger's
+**Authorize** button accepts the same bearer token. Invalid tool arguments
+return HTTP `400`; downstream Azure tool failures return HTTP `502`.
 
 ## Implemented tools
 
@@ -115,7 +179,9 @@ Connect the Inspector to `http://127.0.0.1:3001/mcp` using Streamable HTTP, then
 | `get_scan_status` | `scanId` | Overall state, percentage, expiry, and status/errors for every scan section |
 | `get_scan_result` | `scanId`, `section`; optional collection/resource/finding/NIST filters and paging | Stable paged retrieval from a completed or partially completed section |
 
-Every tool is read-only and returns both MCP text content and `structuredContent` JSON. Large lists use `page.nextPageToken`; pass that value back as `pageToken` without modifying it.
+Every tool is read-only. MCP returns both text content and `structuredContent`;
+REST returns that `structuredContent` directly as JSON. Large lists use
+`page.nextPageToken`; pass that value back as `pageToken` without modifying it.
 
 ### Phase 8a permissions and failure semantics
 

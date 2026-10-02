@@ -52,6 +52,20 @@ export async function callApiTool(
     }) as CallToolResult;
 
     if (result.isError) {
+      const message = result.content.find(
+        (item): item is Extract<typeof item, { type: "text" }> =>
+          item.type === "text"
+      )?.text;
+      if (message?.includes("Invalid arguments for tool")) {
+        return {
+          statusCode: 400,
+          body: {
+            error: "InvalidToolArguments",
+            tool: toolName,
+            message
+          }
+        };
+      }
       return {
         statusCode: 502,
         body: {
