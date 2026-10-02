@@ -1,0 +1,13 @@
+name: mcp-scanazure
+metadata:
+  template: azd-init
+
+infra:
+  provider: bicep
+  path: ./infra
+
+services:
+  mcp:
+    project: .
+    language: ts
+    host: appservice

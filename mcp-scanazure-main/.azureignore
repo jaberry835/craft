@@ -1,0 +1,9 @@
+.azure
+.env
+.git
+.gitignore
+.npmrc
+coverage
+node_modules
+test
+*.log

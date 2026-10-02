@@ -1,0 +1,15 @@
+{
+  "name": "AirGap",
+  "resourceManagerEndpoint": "https://management.example.invalid",
+  "resourceManagerAudience": "https://management.example.invalid",
+  "authorityHost": "https://login.example.invalid",
+  "portalUrl": "https://portal.example.invalid",
+  "graphEndpoint": "https://graph.example.invalid",
+  "keyVaultAudience": "https://vault.example.invalid",
+  "dnsSuffixes": {
+    "keyVault": "vault.example.invalid",
+    "storage": "core.example.invalid",
+    "sqlServer": "database.example.invalid",
+    "webApp": "webapps.example.invalid"
+  }
+}

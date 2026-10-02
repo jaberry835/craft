@@ -1,0 +1,18 @@
+I would like to build an mcp server that will run over http 
+It can be in either python or node , with a slight preference to node, but decide based on best functionality from libraries. 
+
+What this mcp server does is it will be called from a chat client and will need to read everything from the azure subscription.  We will need to be able to auth as user that is logged in to the chat client.    SO the user can be auth via entra (token pass?), and then this application that will be hosted in an app service can scan what the user has access to.   Figure out the auth path while building, but make sure that we have the option to test it unautenticated with the environment.  
+
+They can get a list of subscriptions
+
+The can get a scan output of the subscription that will include details around configuration of services. 
+
+It will look at networks, and inventory networks endpoints, etc/ 
+
+It will inventory services 
+
+It should be able to read policies that are applied, and whether resources meet policy and compliance in the dashboard.  
+
+It is done this in the context of understanding the azure infrastructure so that we can put together a package that will answer to NIST questions.  
+
+one more thing, logging in the NIST standards is important so this should have checks on that too if it is currently not in scope.  That is my last requirement, and I will turn on yolo mode and let this thing rock and roll, make best decisions and continue as long as we can go for 

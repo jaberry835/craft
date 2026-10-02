@@ -1,0 +1,5 @@
+# Copy to .npmrc inside the air gap and replace with the internal npm mirror.
+registry=https://npm-mirror.example.invalid/
+replace-registry-host=always
+audit=false
+fund=false

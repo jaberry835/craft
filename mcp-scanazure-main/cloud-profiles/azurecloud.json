@@ -1,0 +1,15 @@
+{
+  "name": "AzureCloud",
+  "resourceManagerEndpoint": "https://management.azure.com",
+  "resourceManagerAudience": "https://management.azure.com",
+  "authorityHost": "https://login.microsoftonline.com",
+  "portalUrl": "https://portal.azure.com",
+  "graphEndpoint": "https://graph.microsoft.com",
+  "keyVaultAudience": "https://vault.azure.net",
+  "dnsSuffixes": {
+    "keyVault": "vault.azure.net",
+    "storage": "core.windows.net",
+    "sqlServer": "database.windows.net",
+    "webApp": "azurewebsites.net"
+  }
+}
