@@ -118,12 +118,19 @@ export class ProjectWorkflowService {
           instructions: parsed.body,
           tools: parsed.metadata.tools !== undefined ? toolNames(parsed.metadata.tools) : undefined,
           ...(parsed.metadata['foundry-endpoint-env'] ? {
-            foundry: {
-              endpointEnv: parsed.metadata['foundry-endpoint-env'],
-              authMode: parsed.metadata['foundry-auth'] === 'api-key' ? 'api-key' : 'entra',
-              ...(parsed.metadata['foundry-api-key-env'] ? { apiKeyEnv: parsed.metadata['foundry-api-key-env'] } : {}),
-              ...(parsed.metadata['foundry-credential-scope'] ? { credentialScope: parsed.metadata['foundry-credential-scope'] } : {})
-            }
+            foundry: parsed.metadata['foundry-runtime'] === 'agent-service'
+              ? {
+                runtime: 'agent-service',
+                endpointEnv: parsed.metadata['foundry-endpoint-env'],
+                authMode: 'entra',
+                agentName: parsed.metadata['foundry-agent-name'] ?? ''
+              }
+              : {
+                endpointEnv: parsed.metadata['foundry-endpoint-env'],
+                authMode: parsed.metadata['foundry-auth'] === 'api-key' ? 'api-key' : 'entra',
+                ...(parsed.metadata['foundry-api-key-env'] ? { apiKeyEnv: parsed.metadata['foundry-api-key-env'] } : {}),
+                ...(parsed.metadata['foundry-credential-scope'] ? { credentialScope: parsed.metadata['foundry-credential-scope'] } : {})
+              }
           } : {}),
           sourcePath: item.sourcePath
         });
@@ -238,7 +245,9 @@ export class ProjectWorkflowService {
           ok: status.ready,
           testedAt,
           summary: status.ready
-            ? `Foundry Responses endpoint and ${agent.foundry.authMode} authentication settings are resolved. Test chat invocation to verify remote access.`
+            ? agent.foundry.runtime === 'agent-service'
+              ? 'Foundry project endpoint, agent name, and Entra authentication settings are resolved. Test chat invocation to verify remote access.'
+              : `Foundry Responses endpoint and ${agent.foundry.authMode} authentication settings are resolved. Test chat invocation to verify remote access.`
             : `Foundry connection is missing: ${status.missing.join(', ')}.`
         };
       } catch (error) {

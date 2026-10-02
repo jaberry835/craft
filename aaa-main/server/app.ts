@@ -1,4 +1,5 @@
 import express from 'express';
+import type { TokenCredential } from '@azure/core-auth';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import { rm } from 'node:fs/promises';
@@ -21,6 +22,8 @@ import type {
   CreateTextFileRequest,
   ModelDiagnosticsReport,
   ProjectAccessPolicyRequest,
+  ConfigureProjectGitRequest,
+  PushProjectGitRequest,
   RenameProjectPathRequest,
   RenameSessionRequest,
   RunUsage,
@@ -49,6 +52,7 @@ import { createSessionPersistence } from './sessionStoreFactory.js';
 import type { StorageStatus } from './storageConfig.js';
 import { ProjectAccessService } from './projectAccessService.js';
 import { FoundryAgentClient } from './services/foundryAgentClient.js';
+import { ProjectGitService } from './projectGitService.js';
 
 export interface AaaAppDependencies {
   registry: ProjectRegistry;
@@ -64,6 +68,8 @@ export interface AaaAppDependencies {
   modelFetch?: typeof globalThis.fetch;
   /** Fetch implementation for remote Foundry agent endpoints; injectable for tests. */
   foundryFetch?: typeof globalThis.fetch;
+  /** Microsoft Entra credential for native Foundry Agent Service; injectable for tests. */
+  foundryCredential?: TokenCredential;
   /** Optional Microsoft Entra sign-in; off unless `config.mode` is `entra`. */
   auth?: { config: AppAuthConfig; verifier?: TokenVerifier };
   projectAccess?: ProjectAccessService;
@@ -83,6 +89,7 @@ export function createAaaApp({
   mcpFetch = globalThis.fetch,
   modelFetch,
   foundryFetch = globalThis.fetch,
+  foundryCredential,
   auth,
   projectAccess
 }: AaaAppDependencies): express.Express {
@@ -115,6 +122,7 @@ export function createAaaApp({
   };
   const sessionStore = (request: express.Request) => createSessionStore(projectId(request));
   const fileService = (request: express.Request) => new ProjectFileService(registry.root(projectId(request)));
+  const gitService = (request: express.Request) => new ProjectGitService(registry.root(projectId(request)));
 
   app.get('/api/projects', (request, response) => {
     const listed = registry.list();
@@ -167,6 +175,18 @@ export function createAaaApp({
       (request.body ?? {}) as ProjectAccessPolicyRequest
     ));
   });
+  app.get('/api/projects/:projectId/git', async (request, response) =>
+    response.json(await gitService(request).status()));
+  app.put('/api/projects/:projectId/git', async (request, response) =>
+    response.json(await gitService(request).configure(
+      (request.body ?? {}) as ConfigureProjectGitRequest
+    )));
+  app.post('/api/projects/:projectId/git/pull', async (request, response) =>
+    response.json(await gitService(request).pull()));
+  app.post('/api/projects/:projectId/git/push', async (request, response) =>
+    response.json(await gitService(request).commitAndPush(
+      (request.body ?? {}) as PushProjectGitRequest
+    )));
   app.get('/api/storage/status', (_request, response) => response.json(effectiveStorageStatus));
   app.get('/api/model/status', (_request, response) => {
     if (!modelConfig) {
@@ -499,7 +519,7 @@ export function createAaaApp({
     };
     try {
       const result = foundryConnection
-        ? await new FoundryAgentClient(process.env, foundryFetch).invoke(
+        ? await new FoundryAgentClient(process.env, foundryFetch, foundryCredential).invoke(
           foundryConnection,
           messages,
           abortController.signal,

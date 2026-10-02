@@ -204,13 +204,17 @@ The Files tab also accepts local uploads. Select a folder to make it the Upload-
 
 Use the project selector in the top bar to switch authorization packages or create a managed local project. New projects are stored under `data\workspaces\` and seeded by copying everything in the project template, `templates\default-project\` (its `.github` agents, skills, and prompts, and its `.vscode\mcp.json`). If the template has no `security-package\` folder, the skeleton bundled with its `initialize-security-package` skill is copied instead. Runtime project metadata and the active selection are stored in `data\projects.json`; both locations are excluded from Git.
 
+Project-file Git synchronization is an optional, separate path from session and cloud storage. Open the project selector and choose **Sync project with Git** to initialize a repository at that exact project root, configure an `origin` URL or local bare-repository path, inspect status, pull, or commit and push. AAA never treats an enclosing parent repository as the project's repository. Pull requires a clean working tree and uses fast-forward-only updates; **Commit & push** stages every changed project file and requires an explicit commit message. Synchronization never runs in the background.
+
+AAA does not store Git credentials and rejects credentials embedded in HTTP(S) remote URLs. Authentication is delegated to the server account's OS credential helper or SSH agent, with interactive terminal prompts disabled so a missing credential cannot block the application. Git stores the non-secret remote in the project's `.git/config`. This feature synchronizes project files only; chat sessions continue to use the independently configured local JSON or Cosmos DB session backend.
+
 The bundled template is a reference example. To use your own tuned agents, skills, and MCP configuration, replace the contents of `templates\default-project\`, or set `AAA_PROJECT_TEMPLATE` to another template folder. Existing projects keep their own copies; only newly created projects use the new template.
 
 `config\projects.json` can also register existing project folders by absolute path. A configured folder that does not exist on this machine is skipped with a warning. If no project is available at all, AAA creates a starter **Demo Project** from the template on first start.
 
 Open **Project customizations** from the left pane to inspect and configure the selected project's Agents, Skills, MCP Servers, Instructions, prompt files, and built-in Tools. Agent, Skill, Instruction, and prompt editors update their project Markdown files, MCP editors preserve the project's `.vscode\mcp.json` configuration, and capability availability is persisted in the project's hidden `.aaa\customizations.json` file. Built-in Tool definitions remain protected while their project availability can be changed. Hooks remain a disabled **Coming soon** surface until their execution and approval policy is defined.
 
-An Agent can use the AAA local loop or delegate chat directly to a Microsoft Foundry Agent. Choose **Microsoft Foundry agent** in Agent setup and provide environment-variable names for the full OpenAI-compatible Responses invocation endpoint and its API key, or use Microsoft Entra authentication (default scope `https://ai.azure.com/.default`). Endpoint URLs and secrets are never written to project Markdown. A remote agent receives the persisted conversation, and its response, usage, run attribution, and remote-invocation step are stored in the normal AAA session. Only the Responses protocol is supported; custom hosted-agent `invocations` payloads are not guessed. Use their separately documented contract or expose a Responses endpoint.
+An Agent can use the AAA local loop, delegate to a full OpenAI-compatible Responses endpoint, or invoke Microsoft Foundry Agent Service by project endpoint and agent name. Direct endpoints support API-key or Microsoft Entra authentication. Native Agent Service uses `DefaultAzureCredential` and the official `@azure/ai-projects` SDK; set the project endpoint through an environment variable such as `FOUNDRY_PROJECT_ENDPOINT`, then enter the active agent name in Agent setup. Endpoint URLs and secrets are never written to project Markdown. A remote agent receives the persisted AAA conversation, and its response, usage, run attribution, and remote-invocation step are stored in the normal AAA session. Native invocation supports the Responses agent-reference contract used by prompt agents and Responses-compatible hosted agents; custom `invocations` payloads are not guessed.
 
 ## Microsoft Edge evidence capture
 
@@ -262,7 +266,7 @@ npm run lint
 npm run build
 ```
 
-Current checkpoint: 137 server tests, 136 passing and one intentionally skipped live-MCP publisher test when `AAA_MCP_LIVE_URL` is not configured. Foundry-agent unit and chat-route tests use a deterministic fake Responses endpoint; a real high-side endpoint still needs a target-environment smoke test.
+Current checkpoint: 160 server tests, 159 passing and one intentionally skipped live-MCP publisher test when `AAA_MCP_LIVE_URL` is not configured. Foundry-agent unit and chat-route tests use deterministic fake direct and native Responses endpoints; real high-side prompt and hosted agents still need target-environment smoke tests.
 
 To check a running MCP publisher end to end, which sends every Markdown file in the bundled package template and publishes a site:
 

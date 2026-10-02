@@ -22,6 +22,6 @@ Later I need to build lists of how I think we assesed this and what POAMs are li
 I need to build a demo here low side (that will incongruent to high side) that shows how we might be a sercurity plan this way simply using the NIST Control set 
 
 
-
+New note:  I'd also like an option to take the files, instead of checking in to azure with cloud storage, perhaps we have the option for the project to sync to git (if that is not too heavy a lift)... keep that feature seperate, make sure to put it in punchlist before development 
 
 

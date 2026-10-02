@@ -20,6 +20,7 @@
     "preview": "npm run start"
   },
   "dependencies": {
+    "@azure/ai-projects": "^2.7.1",
     "@azure/cosmos": "^4.9.3",
     "@azure/identity": "^4.13.1",
     "@azure/msal-browser": "^5.23.0",

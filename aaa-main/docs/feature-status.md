@@ -1,6 +1,6 @@
 # Feature status
 
-**Checkpoint:** 2026-09-28  
+**Checkpoint:** 2026-10-01
 **Application version:** `0.1.0`
 
 This inventory is based on the repository implementation, API routes, user interface, automated tests, and the operational statements in the root [README](../README.md). A **Complete** label means the feature is implemented at this checkpoint; it does not by itself establish production readiness or successful operation against every external environment.
@@ -10,6 +10,7 @@ This inventory is based on the repository implementation, API routes, user inter
 | Area | Implemented capability | Evidence in the repository |
 | --- | --- | --- |
 | Project lifecycle | List, create, select, and delete managed projects; register existing project folders; initialize new projects from a configurable template. | Project API routes, project registry tests, and the end-to-end workflow test. |
+| Project Git synchronization | Optionally initialize and connect a repository rooted at the selected project, inspect local status, fast-forward pull a clean tree, and explicitly commit and push all project files without storing credentials or running background sync. | Project Git service, project-scoped API routes, project-menu dialog, real bare-repository tests, and responsive browser checks. |
 | Project access | Optional Microsoft Entra sign-in, token validation, role checks, per-project owner/user/role ACLs, and administrative access. Local mode remains intentionally unrestricted. | Authentication, project-access service, API routes, and related tests. |
 | File workbench | Browse project trees; show hidden files on demand; create, read, edit, upload, rename, and delete supported files and folders; protect project boundaries and reserved directories. | File APIs, file-service tests, upload tests, and browser regression coverage. |
 | Artifact preview | Render Markdown, format JSON, display supported images, expose source editing, and reject unsafe or mismatched upload content. | Preview UI, image/file routes, file-service validation, and tests. |

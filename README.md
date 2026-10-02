@@ -32,3 +32,4 @@ Curated Demo Code
 | 2026-10-01 17:37 UTC | aaa | main | +1, ~6 |
 | 2026-10-02 12:33 UTC | mcp-officeautomation | main | +35 |
 | 2026-10-02 12:33 UTC | mcp-scanazure | main | +82 |
+| 2026-10-02 12:34 UTC | aaa | main | +2, ~20 |

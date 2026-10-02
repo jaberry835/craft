@@ -1,32 +1,54 @@
+import { AIProjectClient } from '@azure/ai-projects';
 import { DefaultAzureCredential } from '@azure/identity';
+import type { TokenCredential } from '@azure/core-auth';
 import { randomUUID } from 'node:crypto';
 import type { AaaAgentProgressHandlers, AaaAgentRunResult } from '../aaaAgentLoop.js';
 import { AgentRunError } from '../httpErrors.js';
 import type { ModelChatMessage } from '../modelTypes.js';
 
-export interface FoundryAgentConnection {
+interface FoundryConnectionBase {
   endpointEnv: string;
+}
+
+export interface FoundryResponsesConnection extends FoundryConnectionBase {
+  runtime?: 'responses-endpoint';
   authMode: 'entra' | 'api-key';
   apiKeyEnv?: string;
   credentialScope?: string;
 }
 
-interface TokenCredentialLike {
-  getToken(scopes: string | string[]): Promise<{ token: string } | null>;
+export interface FoundryAgentServiceConnection extends FoundryConnectionBase {
+  runtime: 'agent-service';
+  authMode: 'entra';
+  agentName: string;
 }
+
+export type FoundryAgentConnection = FoundryResponsesConnection | FoundryAgentServiceConnection;
+
+interface NativeFoundryRequest {
+  endpoint: string;
+  agentName: string;
+  messages: ModelChatMessage[];
+  signal: AbortSignal;
+  fetchImpl: typeof globalThis.fetch;
+}
+
+type NativeFoundryInvoker = (request: NativeFoundryRequest, credential: TokenCredential) => Promise<unknown>;
 
 export class FoundryAgentClient {
   constructor(
     private readonly environment: NodeJS.ProcessEnv = process.env,
     private readonly fetchImpl: typeof globalThis.fetch = globalThis.fetch,
-    private readonly credential: TokenCredentialLike = new DefaultAzureCredential()
+    private readonly credential: TokenCredential = new DefaultAzureCredential(),
+    private readonly nativeInvoke: NativeFoundryInvoker = invokeProjectAgent
   ) {}
 
   status(connection: FoundryAgentConnection): { ready: boolean; endpoint?: string; missing: string[] } {
     const endpoint = this.environment[connection.endpointEnv]?.trim();
     const missing = [
       !endpoint && connection.endpointEnv,
-      connection.authMode === 'api-key' && !this.environment[connection.apiKeyEnv ?? '']?.trim()
+      connection.runtime === 'agent-service' && !connection.agentName.trim() ? 'Foundry agent name' : '',
+      connection.runtime !== 'agent-service' && connection.authMode === 'api-key' && !this.environment[connection.apiKeyEnv ?? '']?.trim()
         ? connection.apiKeyEnv || 'Foundry API key environment variable'
         : ''
     ].filter(Boolean) as string[];
@@ -43,6 +65,9 @@ export class FoundryAgentClient {
     const status = this.status(connection);
     if (!status.ready || !status.endpoint) {
       throw new AgentRunError(`Foundry agent connection is missing: ${status.missing.join(', ')}.`);
+    }
+    if (connection.runtime === 'agent-service') {
+      return this.invokeNative(connection, status.endpoint, messages, signal, handlers);
     }
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (connection.authMode === 'api-key') {
@@ -87,6 +112,58 @@ export class FoundryAgentClient {
     await handlers.onUsage?.(usage);
     return { content, reasoning: '', toolEvents: [event], changedFiles: [], usage };
   }
+
+  private async invokeNative(
+    connection: FoundryAgentServiceConnection,
+    endpoint: string,
+    messages: ModelChatMessage[],
+    signal: AbortSignal,
+    handlers: AaaAgentProgressHandlers
+  ): Promise<AaaAgentRunResult> {
+    const event = {
+      id: randomUUID(),
+      type: 'agent' as const,
+      label: 'Invoked Foundry Agent Service agent',
+      detail: `${connection.agentName} at ${new URL(endpoint).host}`,
+      createdAt: new Date().toISOString()
+    };
+    await handlers.onToolEvent?.(event);
+    let body: unknown;
+    try {
+      body = await this.nativeInvoke({
+        endpoint,
+        agentName: connection.agentName,
+        messages,
+        signal,
+        fetchImpl: this.fetchImpl
+      }, this.credential);
+    } catch (error) {
+      if (signal.aborted) throw signal.reason;
+      throw new AgentRunError(`Foundry Agent Service request failed: ${safeError(errorMessage(error))}.`);
+    }
+    const content = responseText(body);
+    if (!content) throw new AgentRunError('Foundry Agent Service completed without response text.');
+    await handlers.onAssistantText?.(content);
+    const usage = responseUsage(body);
+    await handlers.onUsage?.(usage);
+    return { content, reasoning: '', toolEvents: [event], changedFiles: [], usage };
+  }
+}
+
+async function invokeProjectAgent(request: NativeFoundryRequest, credential: TokenCredential): Promise<unknown> {
+  const project = new AIProjectClient(request.endpoint, credential);
+  const openAI = project.getOpenAIClient().withOptions({ fetch: request.fetchImpl });
+  return openAI.responses.create(
+    {
+      input: request.messages
+        .filter((message) => message.role !== 'tool')
+        .map((message) => ({ role: message.role, content: message.content })),
+      agent: { name: request.agentName, type: 'agent_reference' }
+    } as never,
+    {
+      signal: request.signal
+    }
+  );
 }
 
 function validateEndpoint(value: string): void {
@@ -149,4 +226,8 @@ const number = (value: unknown): number => typeof value === 'number' && Number.i
 
 function safeError(value: string): string {
   return value.replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]').replace(/\s+/g, ' ').trim().slice(0, 1000) || 'No error detail';
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

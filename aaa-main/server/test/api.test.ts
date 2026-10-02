@@ -145,6 +145,24 @@ test('project API exposes configured metadata, sessions, messages, files, and tr
     }
   });
 
+  const gitStatus = await fetch(`${baseUrl}/git`);
+  assert.equal(gitStatus.status, 200);
+  assert.deepEqual(await gitStatus.json(), {
+    available: true,
+    repository: false,
+    dirty: false,
+    changes: 0,
+    ahead: 0,
+    behind: 0
+  });
+  const unsafeGitRemote = await fetch(`${baseUrl}/git`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ remoteUrl: 'https://user:secret@example.test/package.git' })
+  });
+  assert.equal(unsafeGitRemote.status, 400);
+  assert.equal((await unsafeGitRemote.json() as { code: string }).code, 'git_credentials_not_allowed');
+
   const client = await fetch('http://127.0.0.1:' + address.port + '/');
   assert.equal(client.status, 200);
   assert.match(await client.text(), /AAA test client/);

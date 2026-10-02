@@ -282,6 +282,13 @@
   font-weight: 700;
 }
 
+.project-menu > button.project-menu-git {
+  min-height: 34px;
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 700;
+}
+
 .project-menu > button.project-menu-delete {
   color: var(--danger);
 }
@@ -2091,6 +2098,121 @@
   border-color: #b42318 !important;
   color: #fff;
   background: #b42318;
+}
+
+.git-sync-dialog {
+  width: min(460px, 100%);
+  max-height: calc(100vh - 40px);
+  overflow: auto;
+}
+
+.git-sync-title,
+.git-sync-title > span {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.git-sync-title > span {
+  display: grid;
+  gap: 2px;
+}
+
+.git-sync-title small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-sync-loading,
+.git-sync-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 7px;
+  font-size: 10px;
+}
+
+.git-sync-loading {
+  color: var(--muted);
+  background: var(--surface-soft);
+}
+
+.git-sync-error {
+  color: var(--danger);
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--line));
+  background: color-mix(in srgb, var(--danger) 7%, var(--surface));
+}
+
+.git-sync-configure {
+  display: grid;
+  gap: 14px;
+}
+
+.git-sync-configure label {
+  display: grid;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.git-sync-note {
+  padding: 9px 10px;
+  border-left: 3px solid var(--accent);
+  background: var(--surface-soft);
+}
+
+.git-sync-status {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.git-sync-status > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  padding: 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.git-sync-status > div:nth-child(odd) {
+  border-right: 1px solid var(--line);
+}
+
+.git-sync-status > div:nth-last-child(-n + 2) {
+  border-bottom: 0;
+}
+
+.git-sync-status span {
+  color: var(--muted);
+  font-size: 8px;
+  text-transform: uppercase;
+}
+
+.git-sync-status strong {
+  overflow: hidden;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-sync-secondary-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.git-sync-secondary-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
 }
 
 .customizations-backdrop {

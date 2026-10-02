@@ -18,6 +18,27 @@ export interface CreateProjectRequest {
   systemName?: string;
 }
 
+export interface ProjectGitStatus {
+  available: boolean;
+  repository: boolean;
+  branch?: string;
+  remote?: string;
+  upstream?: string;
+  dirty: boolean;
+  changes: number;
+  ahead: number;
+  behind: number;
+}
+
+export interface ConfigureProjectGitRequest {
+  remoteUrl: string;
+  branch?: string;
+}
+
+export interface PushProjectGitRequest {
+  message: string;
+}
+
 export interface ProjectAccessPolicy {
   projectId: string;
   ownerId: string;
@@ -89,6 +110,8 @@ export interface CustomizationEditor {
   argumentHint?: string;
   tools?: string;
   foundryEndpointEnv?: string;
+  foundryRuntime?: 'responses-endpoint' | 'agent-service';
+  foundryAgentName?: string;
   foundryAuthMode?: 'entra' | 'api-key';
   foundryApiKeyEnv?: string;
   foundryCredentialScope?: string;
@@ -111,6 +134,8 @@ export interface SaveCustomizationRequest {
   argumentHint?: string;
   tools?: string;
   foundryEndpointEnv?: string;
+  foundryRuntime?: 'responses-endpoint' | 'agent-service';
+  foundryAgentName?: string;
   foundryAuthMode?: 'entra' | 'api-key';
   foundryApiKeyEnv?: string;
   foundryCredentialScope?: string;

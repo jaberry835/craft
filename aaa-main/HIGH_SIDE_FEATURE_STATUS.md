@@ -45,7 +45,7 @@ Status meanings:
 | 17 | Delete a project | **Complete** | `31764b2`; confirmed deletion for AAA-managed projects, configured-root protection, final-project protection, active-project fallback, and local session/profile cleanup. |
 | 18 | Show projects only to identities authorized for them | **Complete** | `bcb9ac0`; Entra mode stores project ACLs outside agent-writable content, restricts new projects to their creator, filters project listings, enforces every project-scoped route, and supports owner/admin-managed user and role grants. Local mode remains unrestricted; ACL-less legacy projects remain readable during migration, but only administrators can establish their first ACL or delete them. |
 | 19 | Include an evidence directory in new project templates | **Complete** | `77feeca`; managed projects contain `evidence/` and `evidence/screenshots/` with provenance guidance. |
-| 20 | Connect to Microsoft Foundry agents from agent setup | **Complete** | `9ce5ec9`; Agent setup can select a Microsoft Foundry runtime, reference a full Responses endpoint and credentials through environment-variable names, validate readiness, and invoke the remote agent with Entra or API-key authentication. Remote text, usage, steps, and errors flow through normal AAA run persistence. Custom `invocations` contracts are not guessed. |
+| 20 | Connect to Microsoft Foundry agents from agent setup | **Complete** | `9ce5ec9` plus the native Agent Service adapter; Agent setup can reference either a full Responses endpoint or a Foundry project endpoint and agent name. Native invocation uses the official JavaScript SDK and Entra authentication; direct endpoints retain Entra or API-key support. Remote text, usage, steps, cancellation, and errors flow through normal AAA run persistence. Custom `invocations` contracts are not guessed. |
 | 21 | Default collected images to an evidence directory | **Complete** | `77feeca`; root image uploads and browser captures default to `evidence/screenshots/`, while explicit destination folders are respected. |
 
 ## Remaining high-side work
@@ -82,7 +82,7 @@ Status meanings:
 - OpenTelemetry GenAI spans for Application Insights or an offline collector.
 - Dynamic interactive architecture diagrams from cloud-scan output.
 - Assessment rationale and POA&M projection after control responses.
-- Optional native Microsoft Foundry Agent Service runtime for prompt and hosted agents, isolated from the local loop until target-environment and parity tests pass.
+- Target-environment smoke and parity testing for the experimental native Microsoft Foundry Agent Service adapter, including real prompt and hosted agents.
 - Publisher MCP hardening and environment-specific live smoke test.
 - Final offline installation rehearsal on the actual high-side OS and architecture.
 - Decision and cleanup for tracked screenshots and stray assets listed in the punch list.

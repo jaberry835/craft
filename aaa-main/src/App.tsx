@@ -23,6 +23,7 @@ import {
   Folder,
   FolderOpen,
   Gauge,
+  GitBranch,
   Globe2,
   Home,
   Image as ImageIcon,
@@ -92,6 +93,7 @@ import type {
   FileTreeNode,
   ModelConnectionStatus,
   ProjectSummary,
+  ProjectGitStatus,
   ProjectTextFile,
   ProjectWorkflowSummary,
   PublicationStatus,
@@ -317,6 +319,16 @@ function App({ user }: { user?: SignedInUser } = {}) {
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [showCreateProject, setShowCreateProject] = useState(false);
   const [showDeleteProject, setShowDeleteProject] = useState(false);
+  const [showGitSync, setShowGitSync] = useState(false);
+  const [showGitConfigure, setShowGitConfigure] = useState(false);
+  const [gitStatus, setGitStatus] = useState<ProjectGitStatus | null>(null);
+  const [gitBusy, setGitBusy] = useState('');
+  const [gitError, setGitError] = useState('');
+  const [gitDraft, setGitDraft] = useState({
+    remoteUrl: '',
+    branch: 'main',
+    message: 'Update authorization package'
+  });
   const [projectDraft, setProjectDraft] = useState({ name: '', systemName: '', description: '' });
   const [customizationsOpen, setCustomizationsOpen] = useState(false);
   const [customizationSection, setCustomizationSection] = useState<CustomizationSection>('overview');
@@ -736,6 +748,8 @@ function App({ user }: { user?: SignedInUser } = {}) {
             ...(kind === 'agent' ? {
               tools: '',
               foundryEndpointEnv: '',
+              foundryRuntime: 'responses-endpoint' as const,
+              foundryAgentName: '',
               foundryAuthMode: 'entra' as const,
               foundryApiKeyEnv: '',
               foundryCredentialScope: ''
@@ -768,6 +782,8 @@ function App({ user }: { user?: SignedInUser } = {}) {
         argumentHint: customizationDraft.argumentHint,
         tools: customizationDraft.tools,
         foundryEndpointEnv: customizationDraft.foundryEndpointEnv,
+        foundryRuntime: customizationDraft.foundryRuntime,
+        foundryAgentName: customizationDraft.foundryAgentName,
         foundryAuthMode: customizationDraft.foundryAuthMode,
         foundryApiKeyEnv: customizationDraft.foundryApiKeyEnv,
         foundryCredentialScope: customizationDraft.foundryCredentialScope,
@@ -906,6 +922,78 @@ function App({ user }: { user?: SignedInUser } = {}) {
       setError(refreshError instanceof Error ? refreshError.message : 'Could not refresh project files.');
     }
   }, [activeProjectId]);
+
+  const openGitSync = useCallback(async () => {
+    if (!activeProjectId) return;
+    setProjectMenuOpen(false);
+    setShowGitSync(true);
+    setGitError('');
+    setGitBusy('status');
+    try {
+      const status = await aaaApi.getProjectGitStatus(activeProjectId);
+      setGitStatus(status);
+      setShowGitConfigure(!status.repository || !status.remote);
+      setGitDraft((current) => ({
+        ...current,
+        branch: status.branch ?? current.branch,
+        message: `Update ${activeProject?.name ?? 'authorization package'}`
+      }));
+    } catch (statusError) {
+      setGitError(statusError instanceof Error ? statusError.message : 'Could not inspect Git synchronization.');
+    } finally {
+      setGitBusy('');
+    }
+  }, [activeProject?.name, activeProjectId]);
+
+  const configureGitSync = useCallback(async () => {
+    if (!activeProjectId || !gitDraft.remoteUrl.trim() || gitBusy) return;
+    setGitError('');
+    setGitBusy('configure');
+    try {
+      const status = await aaaApi.configureProjectGit(activeProjectId, {
+        remoteUrl: gitDraft.remoteUrl,
+        branch: gitDraft.branch
+      });
+      setGitStatus(status);
+      setShowGitConfigure(false);
+      setGitDraft((current) => ({ ...current, remoteUrl: '', branch: status.branch ?? current.branch }));
+    } catch (configureError) {
+      setGitError(configureError instanceof Error ? configureError.message : 'Could not configure Git synchronization.');
+    } finally {
+      setGitBusy('');
+    }
+  }, [activeProjectId, gitBusy, gitDraft.branch, gitDraft.remoteUrl]);
+
+  const synchronizeProjectGit = useCallback(async (action: 'pull' | 'push') => {
+    if (!activeProjectId || gitBusy) return;
+    if (isFileDirty) {
+      setGitError('Save or discard the open source-file changes before synchronizing.');
+      return;
+    }
+    setGitError('');
+    setGitBusy(action);
+    try {
+      const status = action === 'pull'
+        ? await aaaApi.pullProjectGit(activeProjectId)
+        : await aaaApi.pushProjectGit(activeProjectId, { message: gitDraft.message });
+      setGitStatus(status);
+      await refreshFiles();
+      if (action === 'pull' && selectedFile) {
+        try {
+          const refreshed = await aaaApi.readTextFile(activeProjectId, selectedFile.path);
+          setSelectedFile(refreshed);
+          setEditorContent(refreshed.content);
+        } catch {
+          setSelectedFile(null);
+          setEditorContent('');
+        }
+      }
+    } catch (syncError) {
+      setGitError(syncError instanceof Error ? syncError.message : `Git ${action} failed.`);
+    } finally {
+      setGitBusy('');
+    }
+  }, [activeProjectId, gitBusy, gitDraft.message, isFileDirty, refreshFiles, selectedFile]);
 
   const launchBrowser = useCallback(async () => {
     if (!activeProjectId || browserBusy) return;
@@ -1469,6 +1557,9 @@ function App({ user }: { user?: SignedInUser } = {}) {
               ))}
               <button className="project-menu-create" onClick={() => setShowCreateProject(true)}>
                 <Plus size={15} /> Create project
+              </button>
+              <button className="project-menu-git" onClick={() => void openGitSync()}>
+                <GitBranch size={15} /> Sync project with Git
               </button>
               {activeProject?.managed && projects.length > 1 && (
                 <button className="project-menu-delete" onClick={() => setShowDeleteProject(true)}>
@@ -2449,6 +2540,86 @@ function App({ user }: { user?: SignedInUser } = {}) {
         </div>
       )}
 
+      {showGitSync && activeProject && (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            className="file-dialog git-sync-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="git-sync-title"
+          >
+            <div>
+              <div className="git-sync-title">
+                <GitBranch size={18} />
+                <span><strong id="git-sync-title">Git synchronization</strong><small>{activeProject.name}</small></span>
+              </div>
+              <button type="button" className="icon-button small" onClick={() => setShowGitSync(false)} aria-label="Close Git synchronization"><X size={15} /></button>
+            </div>
+            <p>Synchronize this project directory independently of session or cloud storage. Actions run only when you request them.</p>
+
+            {gitBusy === 'status' && <div className="git-sync-loading"><RefreshCw size={15} /> Inspecting repository…</div>}
+            {gitStatus && !gitStatus.available && (
+              <div className="git-sync-error">Git is not installed or is not available on the server PATH.</div>
+            )}
+            {gitError && <div className="git-sync-error" role="alert">{gitError}</div>}
+
+            {gitStatus?.available && showGitConfigure && (
+              <form onSubmit={(event) => { event.preventDefault(); void configureGitSync(); }} className="git-sync-configure">
+                <label>
+                  Remote URL or local bare repository
+                  <input
+                    autoFocus
+                    required
+                    value={gitDraft.remoteUrl}
+                    onChange={(event) => setGitDraft((current) => ({ ...current, remoteUrl: event.target.value }))}
+                    placeholder="https://host/team/package.git or C:\\repos\\package.git"
+                  />
+                </label>
+                <label>
+                  Initial branch
+                  <input value={gitDraft.branch} onChange={(event) => setGitDraft((current) => ({ ...current, branch: event.target.value }))} />
+                </label>
+                <p className="git-sync-note">Credentials are never stored by AAA. HTTPS uses the OS credential helper; SSH uses your SSH agent.</p>
+                <div className="file-dialog-actions">
+                  {gitStatus.repository && gitStatus.remote && <button type="button" className="secondary-button" onClick={() => setShowGitConfigure(false)}>Cancel</button>}
+                  <button type="submit" className="dialog-primary" disabled={!gitDraft.remoteUrl.trim() || Boolean(gitBusy)}>
+                    {gitBusy === 'configure' ? 'Configuring…' : 'Configure Git'}
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {gitStatus?.available && gitStatus.repository && gitStatus.remote && !showGitConfigure && (
+              <>
+                <div className="git-sync-status">
+                  <div><span>Branch</span><strong>{gitStatus.branch ?? 'Detached'}</strong></div>
+                  <div><span>Remote</span><strong title={gitStatus.remote}>{gitStatus.remote}</strong></div>
+                  <div><span>Working tree</span><strong>{gitStatus.dirty ? `${gitStatus.changes} changed` : 'Clean'}</strong></div>
+                  <div><span>Tracking</span><strong>{gitStatus.upstream ? `${gitStatus.ahead} ahead · ${gitStatus.behind} behind` : 'Not pushed yet'}</strong></div>
+                </div>
+                <label>
+                  Commit message
+                  <input value={gitDraft.message} maxLength={200} onChange={(event) => setGitDraft((current) => ({ ...current, message: event.target.value }))} />
+                </label>
+                <p className="git-sync-note">Commit &amp; push stages every changed file in this project. Pull requires a clean working tree and accepts fast-forward updates only.</p>
+                <div className="git-sync-secondary-actions">
+                  <button type="button" className="secondary-button" disabled={Boolean(gitBusy)} onClick={() => setShowGitConfigure(true)}>Change remote</button>
+                  <button type="button" className="secondary-button" disabled={Boolean(gitBusy)} onClick={() => void openGitSync()}><RefreshCw size={13} /> Refresh</button>
+                </div>
+                <div className="file-dialog-actions">
+                  <button type="button" className="secondary-button" disabled={Boolean(gitBusy) || gitStatus.dirty} onClick={() => void synchronizeProjectGit('pull')}>
+                    {gitBusy === 'pull' ? 'Pulling…' : 'Pull'}
+                  </button>
+                  <button type="button" className="dialog-primary" disabled={Boolean(gitBusy) || !gitDraft.message.trim()} onClick={() => void synchronizeProjectGit('push')}>
+                    {gitBusy === 'push' ? 'Pushing…' : 'Commit & push'}
+                  </button>
+                </div>
+              </>
+            )}
+          </section>
+        </div>
+      )}
+
       {customizationsOpen && (
         <div className="customizations-backdrop" role="presentation">
           <section className="customizations-window" role="dialog" aria-modal="true" aria-labelledby="customizations-title">
@@ -2557,7 +2728,7 @@ function App({ user }: { user?: SignedInUser } = {}) {
                           const testResult = capabilityTests[item.id];
                           const testable = item.kind === 'mcp-server'
                             || item.kind === 'tool'
-                            || (item.kind === 'agent' && item.detail?.startsWith('Foundry Responses endpoint:'));
+                            || (item.kind === 'agent' && item.detail?.startsWith('Foundry '));
                           return (
                           <article key={item.id} className={testResult ? 'has-diagnostic' : ''}>
                             <div>
@@ -2774,6 +2945,7 @@ function App({ user }: { user?: SignedInUser } = {}) {
                               onClick={() => setCustomizationDraft((current) => current ? {
                                 ...current,
                                 foundryEndpointEnv: '',
+                                foundryAgentName: '',
                                 foundryApiKeyEnv: '',
                                 foundryCredentialScope: ''
                               } : current)}
@@ -2782,62 +2954,104 @@ function App({ user }: { user?: SignedInUser } = {}) {
                             </button>
                             <button
                               type="button"
-                              className={customizationDraft.foundryEndpointEnv ? 'active' : ''}
+                              className={customizationDraft.foundryEndpointEnv
+                                && customizationDraft.foundryRuntime !== 'agent-service' ? 'active' : ''}
                               onClick={() => setCustomizationDraft((current) => current ? {
                                 ...current,
-                                foundryEndpointEnv: current.foundryEndpointEnv || 'FOUNDRY_AGENT_ENDPOINT',
+                                foundryEndpointEnv: current.foundryRuntime !== 'agent-service'
+                                  ? current.foundryEndpointEnv || 'FOUNDRY_AGENT_ENDPOINT'
+                                  : 'FOUNDRY_AGENT_ENDPOINT',
+                                foundryRuntime: 'responses-endpoint',
+                                foundryAgentName: '',
                                 foundryAuthMode: current.foundryAuthMode || 'entra'
                               } : current)}
                             >
-                              <Cloud size={16} /><span><strong>Microsoft Foundry agent</strong><small>Delegate chat to a full Responses protocol endpoint.</small></span>
+                              <Link2 size={16} /><span><strong>Direct Responses endpoint</strong><small>Delegate chat to a complete invocation URL.</small></span>
+                            </button>
+                            <button
+                              type="button"
+                              className={customizationDraft.foundryEndpointEnv
+                                && customizationDraft.foundryRuntime === 'agent-service' ? 'active' : ''}
+                              onClick={() => setCustomizationDraft((current) => current ? {
+                                ...current,
+                                foundryEndpointEnv: current.foundryRuntime === 'agent-service'
+                                  ? current.foundryEndpointEnv || 'FOUNDRY_PROJECT_ENDPOINT'
+                                  : 'FOUNDRY_PROJECT_ENDPOINT',
+                                foundryRuntime: 'agent-service',
+                                foundryAuthMode: 'entra',
+                                foundryApiKeyEnv: '',
+                                foundryCredentialScope: ''
+                              } : current)}
+                            >
+                              <Cloud size={16} /><span><strong>Foundry Agent Service</strong><small>Invoke an agent by project endpoint and name.</small></span>
                             </button>
                           </fieldset>
                           {customizationDraft.foundryEndpointEnv && (
                             <>
                               <label>
-                                Full Responses endpoint environment variable
+                                {customizationDraft.foundryRuntime === 'agent-service'
+                                  ? 'Project endpoint environment variable'
+                                  : 'Full Responses endpoint environment variable'}
                                 <input
                                   value={customizationDraft.foundryEndpointEnv}
-                                  placeholder="FOUNDRY_AGENT_ENDPOINT"
+                                  placeholder={customizationDraft.foundryRuntime === 'agent-service'
+                                    ? 'FOUNDRY_PROJECT_ENDPOINT'
+                                    : 'FOUNDRY_AGENT_ENDPOINT'}
                                   onChange={(event) => setCustomizationDraft((current) =>
                                     current ? { ...current, foundryEndpointEnv: event.target.value } : current)}
                                 />
-                                <small>The environment variable must contain the complete HTTPS invocation URL. Secrets and endpoint values are not stored in the agent file.</small>
+                                <small>{customizationDraft.foundryRuntime === 'agent-service'
+                                  ? 'The environment variable must contain the Microsoft Foundry project endpoint.'
+                                  : 'The environment variable must contain the complete HTTPS invocation URL.'} Endpoint values are not stored in the agent file.</small>
                               </label>
-                              <label>
-                                Authentication
-                                <select
-                                  value={customizationDraft.foundryAuthMode ?? 'entra'}
-                                  onChange={(event) => setCustomizationDraft((current) => current ? {
-                                    ...current,
-                                    foundryAuthMode: event.target.value as 'entra' | 'api-key'
-                                  } : current)}
-                                >
-                                  <option value="entra">Microsoft Entra / managed identity</option>
-                                  <option value="api-key">API key</option>
-                                </select>
-                              </label>
-                              {customizationDraft.foundryAuthMode === 'api-key' && (
+                              {customizationDraft.foundryRuntime === 'agent-service' && (
                                 <label>
-                                  API-key environment variable
+                                  Agent name
                                   <input
-                                    value={customizationDraft.foundryApiKeyEnv ?? ''}
-                                    placeholder="FOUNDRY_AGENT_API_KEY"
+                                    value={customizationDraft.foundryAgentName ?? ''}
+                                    placeholder="security-assessor"
                                     onChange={(event) => setCustomizationDraft((current) =>
-                                      current ? { ...current, foundryApiKeyEnv: event.target.value } : current)}
+                                      current ? { ...current, foundryAgentName: event.target.value } : current)}
                                   />
                                 </label>
                               )}
-                              {customizationDraft.foundryAuthMode !== 'api-key' && (
-                                <label>
-                                  Token scope
-                                  <input
-                                    value={customizationDraft.foundryCredentialScope ?? ''}
-                                    placeholder="https://ai.azure.com/.default"
-                                    onChange={(event) => setCustomizationDraft((current) =>
-                                      current ? { ...current, foundryCredentialScope: event.target.value } : current)}
-                                  />
-                                </label>
+                              {customizationDraft.foundryRuntime !== 'agent-service' && (
+                                <>
+                                  <label>
+                                    Authentication
+                                    <select
+                                      value={customizationDraft.foundryAuthMode ?? 'entra'}
+                                      onChange={(event) => setCustomizationDraft((current) => current ? {
+                                        ...current,
+                                        foundryAuthMode: event.target.value as 'entra' | 'api-key'
+                                      } : current)}
+                                    >
+                                      <option value="entra">Microsoft Entra / managed identity</option>
+                                      <option value="api-key">API key</option>
+                                    </select>
+                                  </label>
+                                  {customizationDraft.foundryAuthMode === 'api-key' ? (
+                                    <label>
+                                      API-key environment variable
+                                      <input
+                                        value={customizationDraft.foundryApiKeyEnv ?? ''}
+                                        placeholder="FOUNDRY_AGENT_API_KEY"
+                                        onChange={(event) => setCustomizationDraft((current) =>
+                                          current ? { ...current, foundryApiKeyEnv: event.target.value } : current)}
+                                      />
+                                    </label>
+                                  ) : (
+                                    <label>
+                                      Token scope
+                                      <input
+                                        value={customizationDraft.foundryCredentialScope ?? ''}
+                                        placeholder="https://ai.azure.com/.default"
+                                        onChange={(event) => setCustomizationDraft((current) =>
+                                          current ? { ...current, foundryCredentialScope: event.target.value } : current)}
+                                      />
+                                    </label>
+                                  )}
+                                </>
                               )}
                             </>
                           )}

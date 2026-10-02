@@ -14,6 +14,7 @@ import type {
   ChatSessionSummary,
   CapabilityTestResult,
   CompactSessionRequest,
+  ConfigureProjectGitRequest,
   CustomizationItem,
   CustomizationEditor,
   CreateProjectRequest,
@@ -21,10 +22,12 @@ import type {
   CreateTextFileRequest,
   FileTreeNode,
   ProjectSummary,
+  ProjectGitStatus,
   ProjectsResponse,
   ProjectTextFile,
   ProjectPathResult,
   PublicationStatus,
+  PushProjectGitRequest,
   ModelConnectionStatus,
   ModelDiagnosticsReport,
   ProjectCustomizations,
@@ -216,6 +219,20 @@ export const aaaApi = {
     requestJson<ProjectSummary>('/api/projects/active', {
       method: 'PUT',
       body: JSON.stringify({ projectId })
+    }),
+  getProjectGitStatus: (projectId: string) =>
+    requestJson<ProjectGitStatus>(`${projectPath(projectId)}/git`),
+  configureProjectGit: (projectId: string, request: ConfigureProjectGitRequest) =>
+    requestJson<ProjectGitStatus>(`${projectPath(projectId)}/git`, {
+      method: 'PUT',
+      body: JSON.stringify(request)
+    }),
+  pullProjectGit: (projectId: string) =>
+    requestJson<ProjectGitStatus>(`${projectPath(projectId)}/git/pull`, { method: 'POST' }),
+  pushProjectGit: (projectId: string, request: PushProjectGitRequest) =>
+    requestJson<ProjectGitStatus>(`${projectPath(projectId)}/git/push`, {
+      method: 'POST',
+      body: JSON.stringify(request)
     }),
   getModelStatus: () => requestJson<ModelConnectionStatus>('/api/model/status'),
   runModelDiagnostics: (signal?: AbortSignal) =>

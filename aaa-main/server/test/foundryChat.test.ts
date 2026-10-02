@@ -76,3 +76,79 @@ Use the remote assessor.
   assert.deepEqual(events.map((event) => event.type), ['tool_event', 'assistant_text', 'usage', 'completed']);
   assert.equal(events.at(-1)?.response?.message.content, 'Remote control assessment complete.');
 });
+
+test('a selected native Foundry Agent Service agent runs without the local model connection', async (t) => {
+  const nativeRoot = `${root}-native`;
+  await rm(nativeRoot, { recursive: true, force: true });
+  const projectRoot = path.join(nativeRoot, 'project');
+  const clientRoot = path.join(nativeRoot, 'client');
+  await mkdir(path.join(projectRoot, '.github', 'agents'), { recursive: true });
+  await mkdir(clientRoot, { recursive: true });
+  await writeFile(path.join(clientRoot, 'index.html'), '<title>test</title>');
+  await writeFile(path.join(projectRoot, '.github', 'agents', 'native.agent.md'), `---
+name: "Native Assessor"
+description: "Managed Foundry assessor"
+foundry-endpoint-env: "AAA_TEST_FOUNDRY_PROJECT_ENDPOINT"
+foundry-runtime: "agent-service"
+foundry-agent-name: "security-assessor"
+foundry-auth: "entra"
+---
+
+Use the managed assessor.
+`);
+  const projectsPath = path.join(nativeRoot, 'projects.json');
+  await writeFile(projectsPath, JSON.stringify({
+    activeProjectId: 'project',
+    projects: [{ id: 'project', name: 'Project', rootPath: projectRoot }]
+  }));
+  const previousEndpoint = process.env.AAA_TEST_FOUNDRY_PROJECT_ENDPOINT;
+  process.env.AAA_TEST_FOUNDRY_PROJECT_ENDPOINT = 'https://account.services.ai.azure.com/api/projects/security';
+  t.after(() => {
+    if (previousEndpoint === undefined) delete process.env.AAA_TEST_FOUNDRY_PROJECT_ENDPOINT;
+    else process.env.AAA_TEST_FOUNDRY_PROJECT_ENDPOINT = previousEndpoint;
+  });
+  let foundryRequest: Request | undefined;
+  const registry = await ProjectRegistry.load(projectsPath);
+  const server = createServer(createAaaApp({
+    registry,
+    dataRoot: path.join(nativeRoot, 'data'),
+    clientDistPath: clientRoot,
+    foundryFetch: async (input, init) => {
+      foundryRequest = new Request(input, init);
+      return Response.json({
+        output_text: 'Native control assessment complete.',
+        usage: { input_tokens: 10, output_tokens: 5 }
+      });
+    },
+    foundryCredential: {
+      getToken: async () => ({ token: 'entra-token', expiresOnTimestamp: Date.now() + 60_000 })
+    }
+  }));
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(nativeRoot, { recursive: true, force: true });
+  });
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  const base = `http://127.0.0.1:${address.port}/api/projects/project`;
+  const session = await (await fetch(`${base}/sessions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}'
+  })).json() as { id: string };
+  const response = await fetch(`${base}/sessions/${session.id}/chat/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content: 'Assess AU-2', agentId: 'native' })
+  });
+  assert.equal(response.status, 200);
+  const events = (await response.text()).trim().split('\n').map((line) => JSON.parse(line) as {
+    type: string;
+    response?: { message: { content: string } };
+  });
+  assert.equal(foundryRequest?.url, 'https://account.services.ai.azure.com/api/projects/security/openai/v1/responses');
+  assert.equal(foundryRequest?.headers.get('authorization'), 'Bearer entra-token');
+  assert.deepEqual(events.map((event) => event.type), ['tool_event', 'assistant_text', 'usage', 'completed']);
+  assert.equal(events.at(-1)?.response?.message.content, 'Native control assessment complete.');
+});

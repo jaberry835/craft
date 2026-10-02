@@ -304,6 +304,36 @@ test('Foundry agent settings round-trip through agent setup and workflow loading
   });
 });
 
+test('native Foundry Agent Service settings round-trip through setup and workflow loading', async (t) => {
+  await freshProject();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const customizations = new ProjectCustomizationService('demo', root);
+  const editor = await customizations.create({
+    kind: 'agent',
+    name: 'Native Assessor',
+    description: 'Runs the managed Foundry assessor.',
+    enabled: true,
+    instructions: 'Delegate assessment requests to the managed agent.',
+    foundryEndpointEnv: 'FOUNDRY_PROJECT_ENDPOINT',
+    foundryRuntime: 'agent-service',
+    foundryAgentName: 'security-assessor',
+    foundryAuthMode: 'entra'
+  });
+  assert.equal(editor.foundryRuntime, 'agent-service');
+  assert.equal(editor.foundryAgentName, 'security-assessor');
+
+  const workflow = await new ProjectWorkflowService('demo', root, {
+    FOUNDRY_PROJECT_ENDPOINT: 'https://account.services.ai.azure.com/api/projects/security'
+  }).load();
+  const agent = workflow.agents.find((candidate) => candidate.id === 'native-assessor');
+  assert.deepEqual(agent?.foundry, {
+    runtime: 'agent-service',
+    endpointEnv: 'FOUNDRY_PROJECT_ENDPOINT',
+    authMode: 'entra',
+    agentName: 'security-assessor'
+  });
+});
+
 test('initialize skill runs through load_skill and copy_path without scripts', async (t) => {
   await freshProject();
   t.after(() => rm(root, { recursive: true, force: true }));
