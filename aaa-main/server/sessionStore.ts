@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { BadRequestError, NotFoundError } from './httpErrors.js';
-import type { ChatSessionStore } from './chatSessionStore.js';
+import { storedRuns, withRun, type ChatSessionStore } from './chatSessionStore.js';
 import type {
   AppendMessageRequest,
   AgentRun,
@@ -16,9 +16,22 @@ import { withCompaction } from './sessionCompaction.js';
 
 const sessionIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+/**
+ * Process-wide state keyed by absolute session file path. A store is created per request,
+ * so per-instance locks would not serialize concurrent requests for the same session.
+ */
+const sessionWriteQueues = new Map<string, Promise<void>>();
+/** Session summaries keyed by file path and validated against the file's mtime and size. */
+const summaryCache = new Map<string, { mtimeMs: number; size: number; summary: ChatSessionSummary }>();
+
+function toSummary({ messages, runs, compactions, ...summary }: ChatSession): ChatSessionSummary {
+  void runs;
+  void compactions;
+  return { ...summary, messageCount: messages.length };
+}
+
 export class JsonSessionStore implements ChatSessionStore {
   private readonly sessionsRoot: string;
-  private readonly sessionWriteQueues = new Map<string, Promise<void>>();
 
   constructor(dataRoot: string, private readonly projectId: string) {
     this.sessionsRoot = path.join(dataRoot, 'projects', projectId, 'sessions');
@@ -27,15 +40,22 @@ export class JsonSessionStore implements ChatSessionStore {
   async list(): Promise<ChatSessionSummary[]> {
     await this.ensureStore();
     const entries = await readdir(this.sessionsRoot, { withFileTypes: true });
-    const sessions = await Promise.all(entries
+    const summaries = await Promise.all(entries
       .filter((entry) => entry.isFile() && sessionIdPattern.test(entry.name.replace(/\.json$/, '')) && entry.name.endsWith('.json'))
-      .map((entry) => this.read(path.join(this.sessionsRoot, entry.name))));
-    return sessions.map(({ messages, runs, compactions, ...summary }) => {
-      void runs;
-      void compactions;
-      return { ...summary, messageCount: messages.length };
-    })
-      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+      .map((entry) => this.summary(path.join(this.sessionsRoot, entry.name))));
+    return summaries.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  }
+
+  /** Reads and parses a session file only when it changed since its summary was cached. */
+  private async summary(filePath: string): Promise<ChatSessionSummary> {
+    const fileStats = await stat(filePath);
+    const cached = summaryCache.get(filePath);
+    if (cached && cached.mtimeMs === fileStats.mtimeMs && cached.size === fileStats.size) {
+      return cached.summary;
+    }
+    const summary = toSummary(await this.read(filePath));
+    summaryCache.set(filePath, { mtimeMs: fileStats.mtimeMs, size: fileStats.size, summary });
+    return summary;
   }
 
   async create(request: CreateSessionRequest = {}): Promise<ChatSession> {
@@ -73,9 +93,7 @@ export class JsonSessionStore implements ChatSessionStore {
     }
     return this.withSessionLock(sessionId, async () => {
       const session = await this.get(sessionId);
-      const updated = { ...session, title: cleanTitle, updatedAt: new Date().toISOString() };
-      await this.save(updated);
-      return updated;
+      return this.save({ ...session, title: cleanTitle, updatedAt: new Date().toISOString() });
     });
   }
 
@@ -83,10 +101,15 @@ export class JsonSessionStore implements ChatSessionStore {
     await this.withSessionLock(sessionId, async () => {
       await this.get(sessionId);
       await rm(this.filePath(sessionId));
+      summaryCache.delete(this.filePath(sessionId));
     });
   }
 
-  async append(sessionId: string, request: AppendMessageRequest): Promise<ChatSession> {
+  async append(
+    sessionId: string,
+    request: AppendMessageRequest,
+    run?: (message: ChatMessage) => AgentRun
+  ): Promise<ChatSession> {
     if (!['user', 'assistant', 'system'].includes(request.role)) {
       throw new BadRequestError('role must be user, assistant, or system.', 'invalid_role');
     }
@@ -111,32 +134,27 @@ export class JsonSessionStore implements ChatSessionStore {
           : session.title,
         updatedAt: message.createdAt,
         messageCount: messages.length,
-        messages
+        messages,
+        ...(run ? { runs: withRun(session.runs, run(message)) } : {})
       };
-      await this.save(updated);
-      return updated;
+      return this.save(updated);
     });
   }
 
   async saveRun(sessionId: string, run: AgentRun): Promise<ChatSession> {
     return this.withSessionLock(sessionId, async () => {
       const session = await this.get(sessionId);
-      const runs = [...(session.runs ?? []).filter((candidate) => candidate.id !== run.id), run];
-      const updated = {
+      return this.save({
         ...session,
-        runs,
+        runs: withRun(session.runs, run),
         updatedAt: run.completedAt ?? run.startedAt
-      };
-      await this.save(updated);
-      return updated;
+      });
     });
   }
 
   async saveCompaction(sessionId: string, compaction: SessionCompaction): Promise<ChatSession> {
     return this.withSessionLock(sessionId, async () => {
-      const updated = withCompaction(await this.get(sessionId), compaction);
-      await this.save(updated);
-      return updated;
+      return this.save(withCompaction(await this.get(sessionId), compaction));
     });
   }
 
@@ -148,12 +166,18 @@ export class JsonSessionStore implements ChatSessionStore {
     return content.length > 60 ? `${content.slice(0, 57)}...` : content;
   }
 
-  private async save(session: ChatSession): Promise<void> {
+  /** Writes compact JSON atomically and returns the session exactly as stored. */
+  private async save(session: ChatSession): Promise<ChatSession> {
     await this.ensureStore();
-    const destination = this.filePath(session.id);
+    const stored: ChatSession = { ...session, runs: storedRuns(session.runs) };
+    const destination = this.filePath(stored.id);
     const temporary = `${destination}.${randomUUID()}.tmp`;
-    await writeFile(temporary, `${JSON.stringify(session, null, 2)}\n`, 'utf8');
+    await writeFile(temporary, `${JSON.stringify(stored)}\n`, 'utf8');
     await rename(temporary, destination);
+    // Refresh the summary here too, so filesystems with coarse mtimes never serve a stale one.
+    const fileStats = await stat(destination);
+    summaryCache.set(destination, { mtimeMs: fileStats.mtimeMs, size: fileStats.size, summary: toSummary(stored) });
+    return stored;
   }
 
   private async read(filePath: string): Promise<ChatSession> {
@@ -177,13 +201,14 @@ export class JsonSessionStore implements ChatSessionStore {
   }
 
   private withSessionLock<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
-    const previous = this.sessionWriteQueues.get(sessionId) ?? Promise.resolve();
+    const key = this.filePath(sessionId);
+    const previous = sessionWriteQueues.get(key) ?? Promise.resolve();
     const result = previous.then(operation);
     const tail = result.then(() => undefined, () => undefined);
-    this.sessionWriteQueues.set(sessionId, tail);
+    sessionWriteQueues.set(key, tail);
     return result.finally(() => {
-      if (this.sessionWriteQueues.get(sessionId) === tail) {
-        this.sessionWriteQueues.delete(sessionId);
+      if (sessionWriteQueues.get(key) === tail) {
+        sessionWriteQueues.delete(key);
       }
     });
   }

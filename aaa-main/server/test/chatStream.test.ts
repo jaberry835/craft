@@ -123,7 +123,9 @@ test('chat stream emits NDJSON and persists assistant only after successful comp
   assert.deepEqual(persisted.messages[1]?.display, [{ kind: 'reasoning', text: 'Reviewing' }]);
   assert.equal(persisted.runs.length, 1);
   assert.equal(persisted.runs[0]?.status, 'completed');
-  assert.equal(persisted.runs[0]?.reasoning, 'Reviewing');
+  // Completed runs do not duplicate the reasoning already stored on the assistant message.
+  assert.equal(persisted.runs[0]?.reasoning, '');
+  assert.equal('assistantText' in (persisted.runs[0] ?? {}), false);
   assert.equal(persisted.runs[0]?.assistantMessageId, completed.response.message.id);
 
   const failedResponse = await fetch(

@@ -10,6 +10,7 @@ import type {
   SessionCompaction
 } from '../src/types/api.js';
 import type { ChatSessionStore } from './chatSessionStore.js';
+import { storedRuns, withRun } from './chatSessionStore.js';
 import { withCompaction } from './sessionCompaction.js';
 import {
   CosmosSchemaMismatchError,
@@ -33,6 +34,15 @@ interface JuniorChatSessionDocument extends NativeChatSessionDocument {
 
 const legacyPartitionKey = new PartitionKeyBuilder().addNoneValue().build();
 
+/**
+ * Summary fields only. Listing sessions must not transfer every message and run, which
+ * dominate document size and RU cost.
+ */
+const summaryProjection = `SELECT c.id, c.projectId, c.title, c.createdAt, c.updatedAt, c.type,
+  c.ownerId, c.workspaceId, c.partitionKey, ARRAY_LENGTH(c.messages) AS messageCount FROM c`;
+
+type SessionSummaryDocument = Partial<JuniorChatSessionDocument> & Pick<ChatSession, 'id' | 'projectId'>;
+
 export class CosmosChatSessionStore implements ChatSessionStore {
   constructor(
     private readonly binding: CosmosContainerBinding,
@@ -45,8 +55,8 @@ export class CosmosChatSessionStore implements ChatSessionStore {
     return this.withCosmos('list sessions', async () => {
       if (this.schemaMode === 'native') {
         const { resources } =
-          await this.binding.container.items.query<NativeChatSessionDocument>({
-            query: `SELECT * FROM c
+          await this.binding.container.items.query<SessionSummaryDocument>({
+            query: `${summaryProjection}
               WHERE c.projectId = @projectId AND c.type = @type
               ORDER BY c.updatedAt DESC`,
             parameters: [
@@ -58,8 +68,8 @@ export class CosmosChatSessionStore implements ChatSessionStore {
       }
 
       const { resources } =
-        await this.binding.container.items.query<JuniorChatSessionDocument>({
-          query: `SELECT * FROM c
+        await this.binding.container.items.query<SessionSummaryDocument>({
+          query: `${summaryProjection}
             WHERE c.partitionKey = @partitionKey
               AND c.ownerId = @ownerId
               AND c.workspaceId = @projectId
@@ -78,8 +88,8 @@ export class CosmosChatSessionStore implements ChatSessionStore {
       }
 
       const { resources: legacyResources } =
-        await this.binding.container.items.query<NativeChatSessionDocument>({
-          query: `SELECT * FROM c
+        await this.binding.container.items.query<SessionSummaryDocument>({
+          query: `${summaryProjection}
             WHERE c.projectId = @projectId
               AND c.type = @type
               AND NOT IS_DEFINED(c.partitionKey)
@@ -176,7 +186,11 @@ export class CosmosChatSessionStore implements ChatSessionStore {
     }
   }
 
-  async append(sessionId: string, request: AppendMessageRequest): Promise<ChatSession> {
+  async append(
+    sessionId: string,
+    request: AppendMessageRequest,
+    run?: (message: ChatMessage) => AgentRun
+  ): Promise<ChatSession> {
     if (!['user', 'assistant', 'system'].includes(request.role)) {
       throw new BadRequestError('role must be user, assistant, or system.', 'invalid_role');
     }
@@ -193,54 +207,51 @@ export class CosmosChatSessionStore implements ChatSessionStore {
       ...(request.display?.length ? { display: request.display } : {})
     };
     const messages = [...session.messages, message];
-    const updated: ChatSession = {
+    return this.save({
       ...session,
       title: session.title === 'New session' && request.role === 'user'
         ? this.titleFromMessage(content)
         : session.title,
       updatedAt: message.createdAt,
       messageCount: messages.length,
-      messages
-    };
-    await this.save(updated);
-    return updated;
+      messages,
+      ...(run ? { runs: withRun(session.runs, run(message)) } : {})
+    });
   }
 
   async saveRun(sessionId: string, run: AgentRun): Promise<ChatSession> {
     const session = await this.get(sessionId);
-    const runs = [...(session.runs ?? []).filter((candidate) => candidate.id !== run.id), run];
-    const updated = {
+    return this.save({
       ...session,
-      runs,
+      runs: withRun(session.runs, run),
       updatedAt: run.completedAt ?? run.startedAt
-    };
-    await this.save(updated);
-    return updated;
+    });
   }
 
   async saveCompaction(sessionId: string, compaction: SessionCompaction): Promise<ChatSession> {
-    const updated = withCompaction(await this.get(sessionId), compaction);
-    await this.save(updated);
-    return updated;
+    return this.save(withCompaction(await this.get(sessionId), compaction));
   }
 
-  private async save(session: ChatSession): Promise<void> {
+  /** Upserts the session and returns it exactly as stored. */
+  private async save(session: ChatSession): Promise<ChatSession> {
+    const stored: ChatSession = { ...session, runs: storedRuns(session.runs) };
     await this.withCosmos('save session', async () => {
       if (this.schemaMode === 'native') {
         await this.binding.container.items.upsert<NativeChatSessionDocument>({
-          ...session,
+          ...stored,
           type: 'chatSession'
         });
         return;
       }
       await this.binding.container.items.upsert<JuniorChatSessionDocument>({
-        ...session,
+        ...stored,
         ownerId: this.ownerId,
         workspaceId: this.projectId,
         partitionKey: this.juniorPartitionKey,
         type: 'chatSession'
       });
     });
+    return stored;
   }
 
   private get itemPartitionKey(): string {
@@ -313,7 +324,7 @@ export class CosmosChatSessionStore implements ChatSessionStore {
       && junior.partitionKey === this.juniorPartitionKey;
   }
 
-  private isLegacyJuniorDocument(document: NativeChatSessionDocument): boolean {
+  private isLegacyJuniorDocument(document: SessionSummaryDocument): boolean {
     return document.projectId === this.projectId
       && document.type === 'chatSession'
       && !('partitionKey' in document)
@@ -338,14 +349,16 @@ export class CosmosChatSessionStore implements ChatSessionStore {
     return { ...session, runs: session.runs ?? [], messageCount: session.messages.length };
   }
 
-  private toSummary(
-    document: NativeChatSessionDocument | JuniorChatSessionDocument
-  ): ChatSessionSummary {
-    const { messages, runs, compactions, ...session } = this.fromDocument(document);
-    void messages;
-    void runs;
-    void compactions;
-    return session;
+  /** Accepts projected summary rows as well as full documents. */
+  private toSummary(document: SessionSummaryDocument): ChatSessionSummary {
+    return {
+      id: document.id,
+      projectId: document.projectId,
+      title: document.title ?? 'New session',
+      createdAt: document.createdAt ?? '',
+      updatedAt: document.updatedAt ?? '',
+      messageCount: document.messages?.length ?? document.messageCount ?? 0
+    };
   }
 
   private cleanTitle(value?: string): string {

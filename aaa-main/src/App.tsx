@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import ReactMarkdown from 'react-markdown';
+import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   Bot,
@@ -281,6 +281,93 @@ function MessageDetails({
   );
 }
 
+const markdownPlugins = [remarkGfm];
+const noMessages: ChatMessage[] = [];
+
+/**
+ * Markdown parsing is the most expensive rendering work in the app. Memoizing on the text
+ * means typing, streaming, and panel changes no longer re-parse every message.
+ */
+const Markdown = memo(function Markdown({ content, components }: { content: string; components?: Components }) {
+  return <ReactMarkdown remarkPlugins={markdownPlugins} components={components}>{content}</ReactMarkdown>;
+});
+
+const MessageList = memo(function MessageList({
+  messages,
+  usageByMessage,
+  compactionsByMessage
+}: {
+  messages: ChatMessage[];
+  usageByMessage: Map<string, RunUsage>;
+  compactionsByMessage: Map<string, NonNullable<ChatSession['compactions']>>;
+}) {
+  return (
+    <>
+      {messages.filter((message) => message.role !== 'system').map((message) => {
+        const usage = usageByMessage.get(message.id);
+        return (
+          <div className="message-group" key={message.id}>
+            <article className={`message ${message.role}`}>
+              <div className="message-avatar">
+                {message.role === 'assistant' ? <BrandMark compact /> : <UserRound size={17} />}
+              </div>
+              <div>
+                <strong>{message.role === 'assistant' ? 'AAA' : 'You'}</strong>
+                <Markdown content={message.content} />
+                {message.display?.length ? <MessageDetails parts={message.display} /> : null}
+                {usage && <UsageLine usage={usage} />}
+              </div>
+            </article>
+            {compactionsByMessage.get(message.id)?.map((compaction) => (
+              <CompactionDivider key={compaction.id} compaction={compaction} />
+            ))}
+          </div>
+        );
+      })}
+    </>
+  );
+});
+
+/** The in-progress response. Deferred values keep typing responsive while long text re-renders. */
+const StreamingMessage = memo(function StreamingMessage({
+  text,
+  reasoning,
+  toolEvents,
+  usage,
+  status
+}: {
+  text: string;
+  reasoning: string;
+  toolEvents: ToolEvent[];
+  usage: RunUsage | null;
+  status: string;
+}) {
+  const deferredText = useDeferredValue(text);
+  const deferredReasoning = useDeferredValue(reasoning);
+  return (
+    <article className="message assistant">
+      <div className="message-avatar"><BrandMark compact /></div>
+      <div>
+        <strong>AAA</strong>
+        {status && <div className="stream-status"><Layers size={12} /> {status}</div>}
+        {deferredText
+          ? <Markdown content={deferredText} />
+          : <div className="thinking"><i /><i /><i /></div>}
+        <MessageDetails
+          live
+          parts={[
+            { kind: 'reasoning', text: deferredReasoning },
+            ...(toolEvents.length > 0
+              ? [{ kind: 'working' as const, title: 'Agent steps', events: toolEvents }]
+              : [])
+          ]}
+        />
+        {usage && <UsageLine usage={usage} live />}
+      </div>
+    </article>
+  );
+});
+
 function App({ user }: { user?: SignedInUser } = {}) {
   const [leftWidth, setLeftWidth] = useState(268);
   const [rightWidth, setRightWidth] = useState(390);
@@ -377,7 +464,7 @@ function App({ user }: { user?: SignedInUser } = {}) {
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const customizationUpdatesRef = useRef(new Set<string>());
   const activeProject = projects.find((project) => project.id === activeProjectId);
-  const messages = activeSession?.messages ?? [];
+  const messages = activeSession?.messages ?? noMessages;
   const showConversation = messages.length > 0 || isThinking || pendingUserMessage !== null;
   const lastRun = activeSession?.runs.at(-1);
   const runUsageByMessage = useMemo(() => new Map((activeSession?.runs ?? [])
@@ -510,6 +597,29 @@ function App({ user }: { user?: SignedInUser } = {}) {
       }
     });
   }, []);
+
+  // Streamed text arrives in many small chunks; apply them at most once per frame.
+  const streamBufferRef = useRef({ text: '', reasoning: '', frame: 0 });
+  const flushStreamBuffer = useCallback(() => {
+    const buffer = streamBufferRef.current;
+    if (buffer.frame) window.cancelAnimationFrame(buffer.frame);
+    buffer.frame = 0;
+    const { text, reasoning } = buffer;
+    buffer.text = '';
+    buffer.reasoning = '';
+    if (text) setStreamingText((current) => current + text);
+    if (reasoning) setStreamingReasoning((current) => current + reasoning);
+  }, []);
+  const queueStreamFlush = useCallback(() => {
+    const buffer = streamBufferRef.current;
+    if (!buffer.frame) buffer.frame = window.requestAnimationFrame(flushStreamBuffer);
+  }, [flushStreamBuffer]);
+  const resetStreamBuffer = useCallback(() => {
+    const buffer = streamBufferRef.current;
+    if (buffer.frame) window.cancelAnimationFrame(buffer.frame);
+    streamBufferRef.current = { text: '', reasoning: '', frame: 0 };
+  }, []);
+  useEffect(() => resetStreamBuffer, [resetStreamBuffer]);
 
   useEffect(() => {
     if (!activeProjectId) return;
@@ -1115,6 +1225,33 @@ function App({ user }: { user?: SignedInUser } = {}) {
     }
   }, [activeProjectId, browserBusy, browserHeadless, browserStatus.active]);
 
+  // Stable link renderer for the Markdown preview, so the memoized preview is only
+  // re-parsed when the file text changes, while clicks still use the latest handler.
+  const prepareEvidenceCaptureRef = useRef(prepareEvidenceCapture);
+  useEffect(() => {
+    prepareEvidenceCaptureRef.current = prepareEvidenceCapture;
+  }, [prepareEvidenceCapture]);
+  const evidenceLinkComponents = useMemo<Components>(() => ({
+    a: ({ href, children }) => {
+      const capturable = Boolean(href && evidenceCapturePath(href));
+      return (
+        <span className="evidence-link">
+          <a href={href} target="_blank" rel="noreferrer">{children}</a>
+          {capturable && (
+            <button
+              type="button"
+              title="Open in Edge for screenshot evidence"
+              aria-label={`Capture screenshot evidence from ${href}`}
+              onClick={() => void prepareEvidenceCaptureRef.current(href!)}
+            >
+              <ImageIcon size={12} /> Capture
+            </button>
+          )}
+        </span>
+      );
+    }
+  }), []);
+
   const closeBrowser = useCallback(async () => {
     if (!activeProjectId || browserBusy) return;
     setBrowserBusy(true);
@@ -1414,6 +1551,7 @@ function App({ user }: { user?: SignedInUser } = {}) {
     // exists or the model answers; the persisted copy replaces it on completion.
     setPendingUserMessage({ id: 'pending-user', role: 'user', content: messageContent, createdAt: new Date().toISOString() });
     setDraft('');
+    resetStreamBuffer();
     setStreamingText('');
     setStreamingReasoning('');
     setStreamingToolEvents([]);
@@ -1421,6 +1559,7 @@ function App({ user }: { user?: SignedInUser } = {}) {
     setStreamingStatus('');
     scrollChatToEnd('auto');
     let requestSessionId = activeSession?.id;
+    let changedFiles: string[] = [];
     try {
       let session = activeSession;
       if (!session) {
@@ -1433,9 +1572,11 @@ function App({ user }: { user?: SignedInUser } = {}) {
       streamAbortRef.current = controller;
       await aaaApi.streamChat(activeProjectId, session.id, { content: messageContent, agentId: selectedAgent?.id ?? 'default' }, (event) => {
         if (event.type === 'assistant_text') {
-          setStreamingText((current) => current + event.text);
+          streamBufferRef.current.text += event.text;
+          queueStreamFlush();
         } else if (event.type === 'reasoning') {
-          setStreamingReasoning((current) => current + event.text);
+          streamBufferRef.current.reasoning += event.text;
+          queueStreamFlush();
         } else if (event.type === 'tool_event') {
           setStreamingToolEvents((current) => [...current, event.event]);
         } else if (event.type === 'usage') {
@@ -1448,6 +1589,8 @@ function App({ user }: { user?: SignedInUser } = {}) {
             ? { ...current, compactions: [...(current.compactions ?? []), event.compaction] }
             : current);
         } else if (event.type === 'completed') {
+          flushStreamBuffer();
+          changedFiles = event.changedFiles ?? [];
           setPendingUserMessage(null);
           setStreamDone(true);
           setActiveSession((current) => current
@@ -1471,13 +1614,18 @@ function App({ user }: { user?: SignedInUser } = {}) {
           throw new Error(event.message);
         }
       }, controller.signal);
-      setActiveSession(await aaaApi.getSession(activeProjectId, session.id));
-      setSessions(await aaaApi.listSessions(activeProjectId));
+      // Refresh in parallel, and only touch files when the run reported changes.
+      const reloadSelectedFile = Boolean(selectedFile && !isFileDirty && changedFiles.length > 0);
+      const [nextSession, nextSessions, , nextSelectedFile] = await Promise.all([
+        aaaApi.getSession(activeProjectId, session.id),
+        aaaApi.listSessions(activeProjectId),
+        changedFiles.length > 0 ? refreshFiles() : undefined,
+        reloadSelectedFile ? aaaApi.readTextFile(activeProjectId, selectedFile!.path) : undefined
+      ]);
+      setActiveSession(nextSession);
+      setSessions(nextSessions);
       setAttachedEvidence([]);
-      await refreshFiles();
-      if (selectedFile && !isFileDirty) {
-        setSelectedFile(await aaaApi.readTextFile(activeProjectId, selectedFile.path));
-      }
+      if (nextSelectedFile) setSelectedFile(nextSelectedFile);
     } catch (sendError) {
       if (activeProjectId && requestSessionId) {
         try {
@@ -1500,6 +1648,7 @@ function App({ user }: { user?: SignedInUser } = {}) {
       setError(message);
     } finally {
       streamAbortRef.current = null;
+      resetStreamBuffer();
       setPendingUserMessage(null);
       setStreamDone(false);
       setStreamingText('');
@@ -1509,7 +1658,7 @@ function App({ user }: { user?: SignedInUser } = {}) {
       setStreamingStatus('');
       setIsThinking(false);
     }
-  }, [activeProjectId, activeSession, attachedEvidence, compactConversation, draft, isCompacting, isCreatingSession, isFileDirty, isThinking, refreshFiles, scrollChatToEnd, selectedAgent?.id, selectedFile]);
+  }, [activeProjectId, activeSession, attachedEvidence, compactConversation, draft, flushStreamBuffer, isCompacting, isCreatingSession, isFileDirty, isThinking, queueStreamFlush, refreshFiles, resetStreamBuffer, scrollChatToEnd, selectedAgent?.id, selectedFile]);
 
   const stopResponse = useCallback(() => {
     streamAbortRef.current?.abort();
@@ -1710,54 +1859,28 @@ function App({ user }: { user?: SignedInUser } = {}) {
               </div>
             ) : (
               <div className="message-list">
-                {messages.filter((message) => message.role !== 'system').map((message: ChatMessage) => (
-                  <div className="message-group" key={message.id}>
-                    <article className={`message ${message.role}`}>
-                      <div className="message-avatar">
-                        {message.role === 'assistant' ? <BrandMark compact /> : <UserRound size={17} />}
-                      </div>
-                      <div>
-                        <strong>{message.role === 'assistant' ? 'AAA' : 'You'}</strong>
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
-                        {message.display?.length ? <MessageDetails parts={message.display} /> : null}
-                        {runUsageByMessage.get(message.id) && <UsageLine usage={runUsageByMessage.get(message.id)!} />}
-                      </div>
-                    </article>
-                    {compactionsByMessage.get(message.id)?.map((compaction) => (
-                      <CompactionDivider key={compaction.id} compaction={compaction} />
-                    ))}
-                  </div>
-                ))}
+                <MessageList
+                  messages={messages}
+                  usageByMessage={runUsageByMessage}
+                  compactionsByMessage={compactionsByMessage}
+                />
                 {pendingUserMessage && (
                   <article className="message user">
                     <div className="message-avatar"><UserRound size={17} /></div>
                     <div>
                       <strong>You</strong>
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{pendingUserMessage.content}</ReactMarkdown>
+                      <Markdown content={pendingUserMessage.content} />
                     </div>
                   </article>
                 )}
                 {isThinking && !streamDone && (
-                  <article className="message assistant">
-                    <div className="message-avatar"><BrandMark compact /></div>
-                    <div>
-                      <strong>AAA</strong>
-                      {streamingStatus && <div className="stream-status"><Layers size={12} /> {streamingStatus}</div>}
-                      {streamingText
-                        ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingText}</ReactMarkdown>
-                        : <div className="thinking"><i /><i /><i /></div>}
-                      <MessageDetails
-                        live
-                        parts={[
-                          { kind: 'reasoning', text: streamingReasoning },
-                          ...(streamingToolEvents.length > 0
-                            ? [{ kind: 'working' as const, title: 'Agent steps', events: streamingToolEvents }]
-                            : [])
-                        ]}
-                      />
-                      {streamingUsage && <UsageLine usage={streamingUsage} live />}
-                    </div>
-                  </article>
+                  <StreamingMessage
+                    text={streamingText}
+                    reasoning={streamingReasoning}
+                    toolEvents={streamingToolEvents}
+                    usage={streamingUsage}
+                    status={streamingStatus}
+                  />
                 )}
               </div>
             )}
@@ -2236,31 +2359,7 @@ function App({ user }: { user?: SignedInUser } = {}) {
                       ? isJsonSelected
                         ? <JsonPreview content={editorContent} />
                         : (
-                          <ReactMarkdown
-                            remarkPlugins={[remarkGfm]}
-                            components={{
-                              a: ({ href, children }) => {
-                                const capturable = Boolean(href && evidenceCapturePath(href));
-                                return (
-                                  <span className="evidence-link">
-                                    <a href={href} target="_blank" rel="noreferrer">{children}</a>
-                                    {capturable && (
-                                      <button
-                                        type="button"
-                                        title="Open in Edge for screenshot evidence"
-                                        aria-label={`Capture screenshot evidence from ${href}`}
-                                        onClick={() => void prepareEvidenceCapture(href!)}
-                                      >
-                                        <ImageIcon size={12} /> Capture
-                                      </button>
-                                    )}
-                                  </span>
-                                );
-                              }
-                            }}
-                          >
-                            {editorContent}
-                          </ReactMarkdown>
+                          <Markdown content={editorContent} components={evidenceLinkComponents} />
                         )
                       : <p>Select a Markdown file from Files to preview it.</p>}
                   </div>

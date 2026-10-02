@@ -25,15 +25,17 @@ function partitionName(partitionKey: PartitionKey | undefined): string {
 function createMockBinding() {
   const documents = new Map<string, StoredDocument>();
   const queryPartitions: string[] = [];
+  const queryTexts: string[] = [];
   const itemPartitions: string[] = [];
   const container = {
     items: {
       query: (
-        querySpec: { parameters?: Array<{ name: string; value: unknown }> },
+        querySpec: { query?: string; parameters?: Array<{ name: string; value: unknown }> },
         options: { partitionKey?: PartitionKey }
       ) => {
         const partition = partitionName(options.partitionKey);
         queryPartitions.push(partition);
+        queryTexts.push(querySpec.query ?? '');
         const parameters = Object.fromEntries(
           (querySpec.parameters ?? []).map(({ name, value }) => [name, value])
         );
@@ -91,8 +93,23 @@ function createMockBinding() {
       autoCreate: false
     }
   };
-  return { binding, documents, queryPartitions, itemPartitions };
+  return { binding, documents, queryPartitions, queryTexts, itemPartitions };
 }
+
+test('Cosmos session listing projects summary fields instead of reading whole documents', async () => {
+  const mock = createMockBinding();
+  const store = new CosmosChatSessionStore(mock.binding, 'project-a');
+  const created = await store.create();
+  await store.append(created.id, { role: 'user', content: 'Assess' });
+  const [summary] = await store.list();
+  assert.equal(summary?.messageCount, 1);
+  assert.equal('messages' in (summary ?? {}), false);
+  assert.ok(mock.queryTexts.length > 0);
+  for (const query of mock.queryTexts) {
+    assert.doesNotMatch(query, /SELECT\s+\*/i);
+    assert.match(query, /ARRAY_LENGTH\(c\.messages\) AS messageCount/);
+  }
+});
 
 function assertCompatibilityFieldsArePrivate(value: object): void {
   assert.equal('ownerId' in value, false);

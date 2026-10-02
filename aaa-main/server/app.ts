@@ -446,23 +446,25 @@ export function createAaaApp({
     }
     const connection = foundryConnection ? undefined : modelConfig!.resolve();
     const toolSelection = ProjectWorkflowService.selectTools(workflow, agent);
-    const session = await store.append(String(request.params.sessionId), { role: 'user', content });
+    let run!: AgentRun;
+    const session = await store.append(String(request.params.sessionId), { role: 'user', content }, (message) => {
+      run = {
+        id: randomUUID(),
+        status: 'running',
+        startedAt: new Date().toISOString(),
+        userMessageId: message.id,
+        modelConnectionId: foundryConnection ? `foundry:${agent!.id}` : connection!.definition.id,
+        reasoning: '',
+        toolEvents: [],
+        changedFiles: [],
+        ...(request.identity ? { requestedBy: { userId: request.identity.userId, displayName: request.identity.displayName } } : {})
+      };
+      return run;
+    });
     const userMessage = session.messages.at(-1);
     if (!userMessage) {
       throw new Error('The user message could not be persisted.');
     }
-    const run: AgentRun = {
-      id: randomUUID(),
-      status: 'running',
-      startedAt: new Date().toISOString(),
-      userMessageId: userMessage.id,
-      modelConnectionId: foundryConnection ? `foundry:${agent!.id}` : connection!.definition.id,
-      reasoning: '',
-      toolEvents: [],
-      changedFiles: [],
-      ...(request.identity ? { requestedBy: { userId: request.identity.userId, displayName: request.identity.displayName } } : {})
-    };
-    await store.saveRun(session.id, run);
     const systemPrompt = ProjectWorkflowService.systemPrompt({
       projectName: project.name,
       agent,
@@ -582,26 +584,27 @@ export function createAaaApp({
           ? [{ kind: 'working' as const, title: 'Agent steps', events: result.toolEvents }]
           : [])
       ];
+      // The run is saved with the assistant message in one write. Its reasoning and tool
+      // events live on the message's display parts and are not stored twice.
       const updated = await store.append(String(request.params.sessionId), {
         role: 'assistant',
         content: result.content,
         display
-      });
-      const message = updated.messages.at(-1);
-      if (!message) {
-        throw new Error('The assistant message could not be persisted.');
-      }
-      await store.saveRun(session.id, {
+      }, (assistantMessage) => ({
         ...run,
         status: 'completed',
         completedAt: new Date().toISOString(),
-        assistantMessageId: message.id,
+        assistantMessageId: assistantMessage.id,
         reasoning: result.reasoning,
         toolEvents: result.toolEvents,
         changedFiles: result.changedFiles,
         assistantText: result.content,
         usage: result.usage
-      });
+      }));
+      const message = updated.messages.at(-1);
+      if (!message) {
+        throw new Error('The assistant message could not be persisted.');
+      }
       writeJsonLine(response, {
         type: 'completed',
         response: { sessionId: session.id, message },
