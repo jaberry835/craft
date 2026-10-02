@@ -1,0 +1,50 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mcp-officeautomation"
+version = "0.1.0"
+description = "Deterministic Office document automation over REST and MCP"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.119,<1",
+    "mcp>=2.2,<3",
+    "pydantic-settings>=2.11,<3",
+    "uvicorn[standard]>=0.37,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "httpx>=0.28,<1",
+    "pytest>=8.4,<9",
+    "pytest-asyncio>=1.2,<2",
+    "ruff>=0.14,<1",
+]
+office = [
+    "markdown-it-py>=4,<5",
+    "mdit-py-plugins>=0.5,<1",
+    "openpyxl>=3.1,<4",
+    "pillow>=12,<13",
+    "python-docx>=1.2,<2",
+]
+azure = [
+    "azure-identity>=1.25,<2",
+    "azure-storage-blob>=12.27,<13",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/officeautomation"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

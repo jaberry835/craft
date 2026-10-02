@@ -30,3 +30,4 @@ Curated Demo Code
 | 2026-09-30 19:09 UTC | aaa | main | +11, ~20 |
 | 2026-09-30 19:09 UTC | SecureChatExtension | main | +15, ~25 |
 | 2026-10-01 17:37 UTC | aaa | main | +1, ~6 |
+| 2026-10-02 12:33 UTC | mcp-officeautomation | main | +35 |
