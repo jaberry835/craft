@@ -172,11 +172,12 @@ function getInitialTheme(): Theme {
 function BrandMark({ compact = false }: { compact?: boolean }) {
   return (
     <div className={compact ? 'brand-mark compact' : 'brand-mark'} aria-label="AAA">
-      <svg viewBox="0 0 96 64" aria-hidden="true">
-        <path className="brand-orbit" d="M10 36C10 19 25 8 47 8C68 8 82 17 83 31C84 47 69 57 47 57C25 57 10 48 10 36Z" />
-        <path className="brand-swoosh" d="M68 18C81 11 91 9 93 13C96 20 84 35 70 46" />
-        <path className="brand-tail" d="M15 49C7 56 5 61 11 62C17 63 25 60 31 57" />
-        <path className="brand-letters" d="M20 44L28 20L36 44M23 35H33M36 44L44 20L52 44M39 35H49M52 44L60 20L68 44M55 35H65" />
+      <svg viewBox="0 0 64 64" aria-hidden="true">
+        <g>
+          <path className="brand-prism-violet" d="M7 53L21 22L35 53Z" />
+          <path className="brand-prism-teal" d="M29 53L43 22L57 53Z" />
+          <path className="brand-prism-indigo" d="M17 53L32 11L47 53Z" />
+        </g>
       </svg>
     </div>
   );

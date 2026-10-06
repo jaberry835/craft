@@ -110,8 +110,9 @@
   font-size: 11px;
 }
 
+/* Prism mark: three overlapping A-forms. Overlaps multiply on light and screen on dark. */
 .brand-mark {
-  width: 44px;
+  width: 32px;
   height: 32px;
   display: grid;
   place-items: center;
@@ -124,61 +125,38 @@
   overflow: visible;
 }
 
+.brand-mark g {
+  isolation: isolate;
+}
+
 .brand-mark path {
-  fill: none;
-  stroke-linecap: round;
+  stroke-width: 5;
   stroke-linejoin: round;
+  opacity: .9;
+  mix-blend-mode: multiply;
 }
 
-.brand-orbit,
-.brand-letters {
-  stroke: #17231d;
+.theme-dark .brand-mark path {
+  mix-blend-mode: screen;
 }
 
-.brand-orbit {
-  stroke-width: 5.5;
-}
-
-.brand-letters {
-  stroke-width: 4.4;
-}
-
-.brand-swoosh,
-.brand-tail {
-  stroke: #34784c;
-}
-
-.brand-swoosh {
-  stroke-width: 5.5;
-}
-
-.brand-tail {
-  stroke-width: 3;
-}
-
-.theme-dark .brand-orbit,
-.theme-dark .brand-letters {
-  stroke: #f3f7f4;
-}
-
-.theme-dark .brand-swoosh,
-.theme-dark .brand-tail {
-  stroke: #9be0af;
-}
+.brand-prism-violet { fill: #8b5cf6; stroke: #8b5cf6; }
+.brand-prism-teal { fill: #14b8a6; stroke: #14b8a6; }
+.brand-prism-indigo { fill: #4f46e5; stroke: #4f46e5; }
 
 .brand-mark.compact {
-  width: 33px;
-  height: 23px;
+  width: 24px;
+  height: 24px;
 }
 
 .message-avatar .brand-mark.compact {
-  width: 27px;
+  width: 20px;
   height: 20px;
 }
 
 .welcome-mark .brand-mark {
-  width: 72px;
-  height: 48px;
+  width: 64px;
+  height: 64px;
 }
 
 .project-switcher {

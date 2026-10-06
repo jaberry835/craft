@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="32" height="32" fill="none">
+<defs><linearGradient id="scf-g" x1="0" y1="64" x2="64" y2="0" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#4338ca"/><stop offset="0.55" stop-color="#6350c5"/><stop offset="1" stop-color="#a78bfa"/></linearGradient></defs>
+      <path d="M32 4L55 12V30C55 45.5 45.5 55.5 32 61C18.5 55.5 9 45.5 9 30V12Z" fill="url(#scf-g)" stroke="url(#scf-g)" stroke-width="2" stroke-linejoin="round"/>
+      <path d="M21 46L32 17L43 46M25 36H39" fill="none" stroke="#fff" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

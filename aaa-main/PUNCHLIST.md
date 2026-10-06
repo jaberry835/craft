@@ -227,6 +227,11 @@ Packaging and offline install
 - [~] Rehearse an offline install on the target OS/architecture, including `esbuild`'s platform binary (rehearsed on Windows x64 with `npm ci --offline` from the local cache; repeat on the target machine).
 - [ ] Review tracked screenshots and stray files (`image.png`, `aaa-desktop.png`, `aaa-desktop-snapshot.yml`, `aaa-logo-update.png`, `background`) before transfer.
 
+Performance
+
+- [ ] Remove the Cosmos DB 2 MB item-size ceiling on chat sessions (future issue). Each session is one document holding every message and run, so long sessions eventually fail to save. Slimming completed runs roughly halved per-turn growth (about 75 → 150 turns before the limit at typical tool and reasoning output), but the real fix is to store messages and runs as separate items in the session's partition, with a summary/header document, and to keep Junior-compatible mode and legacy documents readable. Also surface a clear error if a save is rejected for size (HTTP 413).
+- [ ] Keep very long chats fast. Messages are now memoized, but every message is still mounted and `GET session` returns the full history. Page or virtualize the message list (load the latest N messages and fetch earlier ones on scroll), return only the recent messages plus precomputed usage totals from the server, and evaluate `content-visibility: auto` on message groups without breaking scroll-to-bottom anchoring.
+
 MCP and harness
 
 - [x] Support `stdio` MCP servers and `${input:...}` values, or keep them clearly marked unsupported (kept unsupported because AAA never launches processes; enabled servers that use them are reported as an agent step with the reason instead of being dropped).

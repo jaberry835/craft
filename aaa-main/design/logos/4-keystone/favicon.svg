@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="32" height="32" fill="none">
+<defs><linearGradient id="ksf-g" x1="0" y1="64" x2="64" y2="0" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#4338ca"/><stop offset="0.55" stop-color="#6350c5"/><stop offset="1" stop-color="#a78bfa"/></linearGradient>
+      <mask id="ksf-m" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64"><rect width="64" height="64" fill="#fff"/>
+        <circle cx="32" cy="29" r="6.5" fill="#000"/><path d="M28.8 32H35.2L37 42H27Z" fill="#000"/><path d="M23 62L32 48L41 62Z" fill="#000"/></mask></defs>
+      <path d="M32 5L59 56H5Z" fill="url(#ksf-g)" stroke="url(#ksf-g)" stroke-width="6" stroke-linejoin="round" mask="url(#ksf-m)"/>
+</svg>

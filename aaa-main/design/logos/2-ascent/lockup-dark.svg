@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 236 64" width="236" height="64" fill="none">
+<g><defs><linearGradient id="as-g" x1="0" y1="64" x2="64" y2="0" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#4338ca"/><stop offset="0.55" stop-color="#6350c5"/><stop offset="1" stop-color="#a78bfa"/></linearGradient></defs>
+      <rect width="64" height="64" rx="18" fill="url(#as-g)"/>
+      <g fill="none" stroke="#fff" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M24 22L32 14L40 22" opacity=".45"/>
+        <path d="M20 35L32 23L44 35" opacity=".72"/>
+        <path d="M16 50L32 34L48 50"/>
+      </g></g>
+<text x="80" y="31" font-family="'Segoe UI Variable Display','Segoe UI',system-ui,sans-serif" font-size="27" font-weight="700" letter-spacing=".5" fill="#ecebef">AAA</text>
+<text x="80" y="53" font-family="'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif" font-size="15" fill="#a6a3ad">A&amp;A Accelerator</text>
+</svg>

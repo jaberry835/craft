@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 236 64" width="236" height="64" fill="none">
+<g><defs><linearGradient id="ks-g" x1="0" y1="64" x2="64" y2="0" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#4338ca"/><stop offset="0.55" stop-color="#6350c5"/><stop offset="1" stop-color="#a78bfa"/></linearGradient>
+      <mask id="ks-m" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64"><rect width="64" height="64" fill="#fff"/>
+        <circle cx="32" cy="29" r="5.2" fill="#000"/><path d="M29.4 31.5H34.6L36 40H28Z" fill="#000"/><path d="M24 58L32 46.5L40 58Z" fill="#000"/></mask></defs>
+      <path d="M32 9L55 53H9Z" fill="url(#ks-g)" stroke="url(#ks-g)" stroke-width="6" stroke-linejoin="round" mask="url(#ks-m)"/></g>
+<text x="80" y="31" font-family="'Segoe UI Variable Display','Segoe UI',system-ui,sans-serif" font-size="27" font-weight="700" letter-spacing=".5" fill="#ecebef">AAA</text>
+<text x="80" y="53" font-family="'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif" font-size="15" fill="#a6a3ad">A&amp;A Accelerator</text>
+</svg>

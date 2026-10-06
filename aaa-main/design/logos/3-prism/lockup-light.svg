@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 236 64" width="236" height="64" fill="none">
+<g><g stroke-linejoin="round" stroke-width="5" style="isolation:isolate">
+        <path d="M7 53L21 22L35 53Z" fill="#8b5cf6" stroke="#8b5cf6" opacity=".9" style="mix-blend-mode:multiply"/>
+        <path d="M29 53L43 22L57 53Z" fill="#14b8a6" stroke="#14b8a6" opacity=".9" style="mix-blend-mode:multiply"/>
+        <path d="M17 53L32 11L47 53Z" fill="#4f46e5" stroke="#4f46e5" opacity=".9" style="mix-blend-mode:multiply"/>
+      </g></g>
+<text x="80" y="31" font-family="'Segoe UI Variable Display','Segoe UI',system-ui,sans-serif" font-size="27" font-weight="700" letter-spacing=".5" fill="#28252e">AAA</text>
+<text x="80" y="53" font-family="'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif" font-size="15" fill="#746f7b">A&amp;A Accelerator</text>
+</svg>

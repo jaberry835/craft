@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 236 64" width="236" height="64" fill="none">
+<g><defs><linearGradient id="sc-g" x1="0" y1="64" x2="64" y2="0" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#4338ca"/><stop offset="0.55" stop-color="#6350c5"/><stop offset="1" stop-color="#a78bfa"/></linearGradient>
+      <mask id="sc-m" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64">
+        <rect width="64" height="64" fill="#fff"/>
+        <circle cx="49" cy="47" r="11.5" fill="#000"/>
+      </mask></defs>
+      <path d="M30 5L50 12.5V29.5C50 44 41.5 53.5 30 59C18.5 53.5 10 44 10 29.5V12.5Z" fill="url(#sc-g)" stroke="url(#sc-g)" stroke-width="2" stroke-linejoin="round" mask="url(#sc-m)"/>
+      <path d="M20 44L30 18L40 44M23.6 35H36.4" fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" mask="url(#sc-m)"/>
+      <circle cx="49" cy="47" r="8.5" fill="#14b8a6"/>
+      <path d="M44.8 47.2L47.8 50L53.4 44.4" fill="none" stroke="#fff" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/></g>
+<text x="80" y="31" font-family="'Segoe UI Variable Display','Segoe UI',system-ui,sans-serif" font-size="27" font-weight="700" letter-spacing=".5" fill="#28252e">AAA</text>
+<text x="80" y="53" font-family="'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif" font-size="15" fill="#746f7b">A&amp;A Accelerator</text>
+</svg>

@@ -1,0 +1,1612 @@
+/*
+ * Copilot-style theme layer.
+ *
+ * Loaded after App.css and index.css (see main.tsx). It keeps every layout and class
+ * name, and only restyles: neutral surfaces, a single violet accent, Segoe UI Variable
+ * type at readable sizes, sentence-case labels, softer borders, and rounder controls.
+ * Remove the import in main.tsx to return to the previous look.
+ */
+
+:root {
+  --font-ui: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-display: "Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "Cascadia Code", "Cascadia Mono", Consolas, "SFMono-Regular", monospace;
+
+  --ink: #28252e;
+  --text: #4a4650;
+  --muted: #746f7b;
+  --faint: #9a96a0;
+  --line: #ebe9ee;
+  --line-strong: #dedce3;
+  --line-hover: #c7c1d7;
+  --surface: #ffffff;
+  --surface-soft: #f7f7f8;
+  --surface-muted: #ececef;
+  --surface-hover: #faf9fc;
+  --accent: #6350c5;
+  --accent-bright: #6f5cd6;
+  --accent-soft: #f1eefb;
+  --accent-ink: #4f3fb0;
+  --on-accent: #ffffff;
+  --focus: #5b4bc4;
+  --danger: #b42318;
+  --bubble: #f1eef7;
+  --avatar-bg: #f6f3ff;
+  --shadow-sm: 0 4px 16px rgba(36, 31, 54, .055);
+  --shadow: 0 16px 48px rgba(32, 27, 46, .14);
+  --shadow-dialog: 0 28px 90px rgba(24, 20, 36, .24);
+  --backdrop: rgba(26, 24, 31, .18);
+
+  font-family: var(--font-ui);
+  color: var(--ink);
+  background: var(--surface);
+}
+
+.app-shell.theme-dark {
+  --ink: #ecebef;
+  --text: #d2d0d7;
+  --muted: #a6a3ad;
+  --faint: #7f7c87;
+  --line: #2c2b31;
+  --line-strong: #3a3940;
+  --line-hover: #55506a;
+  --surface: #1b1a1e;
+  --surface-soft: #222126;
+  --surface-muted: #2d2c32;
+  --surface-hover: #26252b;
+  --accent: #a99bf3;
+  --accent-bright: #b9adf7;
+  --accent-soft: #2e2945;
+  --accent-ink: #cfc6fb;
+  --on-accent: #17151d;
+  --focus: #a99bf3;
+  --danger: #ff8f84;
+  --bubble: #2c2838;
+  --avatar-bg: #2b2740;
+  --shadow-sm: 0 4px 16px rgba(0, 0, 0, .28);
+  --shadow: 0 16px 48px rgba(0, 0, 0, .45);
+  --shadow-dialog: 0 28px 90px rgba(0, 0, 0, .55);
+  --backdrop: rgba(0, 0, 0, .45);
+}
+
+::selection {
+  background: #ddd7fa;
+}
+
+.theme-dark ::selection {
+  background: #4a3f7a;
+}
+
+.app-shell {
+  font-family: var(--font-ui);
+  color: var(--ink);
+  background: var(--surface);
+}
+
+.app-shell * {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+
+.app-shell :is(button, a, summary, [role="option"], [tabindex]):focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* ---------- Top bar ---------- */
+.app-shell .topbar {
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.app-shell .topbar-brand strong {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: .02em;
+}
+
+.app-shell .topbar-brand span {
+  font-size: 12px;
+}
+
+.app-shell .project-switcher {
+  height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  transition: background .15s ease, border-color .15s ease;
+}
+
+.app-shell .project-switcher:hover {
+  border-color: var(--line-strong);
+  background: var(--surface-hover);
+}
+
+.app-shell .project-icon {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+  font-size: 10px;
+}
+
+.app-shell .project-menu,
+.app-shell .user-menu {
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+
+.app-shell .project-menu > div:first-child strong { font-size: 13px; }
+.app-shell .project-menu > div:first-child small { font-size: 11px; }
+.app-shell .project-menu > button { border-radius: 8px; }
+.app-shell .project-menu > button:hover,
+.app-shell .project-menu > button.active { background: var(--surface-muted); }
+.app-shell .project-menu > button strong { font-size: 13px; }
+.app-shell .project-menu > button small { font-size: 11px; }
+.app-shell .project-menu-create,
+.app-shell .project-menu > button.project-menu-git { font-size: 12px; font-weight: 600; }
+.app-shell .project-menu-create { color: var(--accent-ink) !important; }
+
+.app-shell .environment-pill {
+  height: 30px;
+  border-color: var(--line);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.app-shell .environment-pill span,
+.app-shell .status-dot,
+.app-shell .online-dot {
+  box-shadow: none;
+}
+
+.app-shell .icon-button {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  color: var(--muted);
+}
+
+.app-shell .icon-button.small {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+}
+
+.app-shell .icon-button:hover {
+  color: var(--ink);
+  background: var(--surface-muted);
+}
+
+.app-shell .avatar {
+  color: #4e4569;
+  background: #ebe9f5;
+  font-size: 11px;
+}
+
+.app-shell.theme-dark .avatar {
+  color: #e4defa;
+  background: #3a3450;
+}
+
+.app-shell .user-menu > div { font-size: 13px; }
+.app-shell .user-menu small { font-size: 12px; }
+.app-shell .user-menu button { border-radius: 8px; font-size: 13px; }
+
+/* ---------- Sessions sidebar ---------- */
+.app-shell .sidebar {
+  padding: 14px 10px 10px;
+  border-right: 1px solid var(--line);
+  background: var(--surface-soft);
+}
+
+.app-shell .resize-handle {
+  background: transparent;
+}
+
+.app-shell .resize-handle:hover span {
+  background: var(--line-hover);
+}
+
+.app-shell .sidebar-heading {
+  padding: 0 4px 8px 10px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .02em;
+}
+
+.app-shell .search-box {
+  height: 38px;
+  gap: 11px;
+  margin: 0 0 14px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  color: var(--text);
+  background: transparent;
+  transition: background .15s ease, border-color .15s ease;
+}
+
+.app-shell .search-box:hover {
+  background: var(--surface-muted);
+}
+
+.app-shell .search-box:focus-within {
+  border-color: var(--line-strong);
+  background: var(--surface);
+}
+
+.app-shell .search-box input {
+  font-size: 14px;
+}
+
+.app-shell .search-box input::placeholder {
+  color: var(--text);
+}
+
+.app-shell .search-box kbd {
+  border-color: var(--line-strong);
+  color: var(--faint);
+  background: var(--surface);
+  font-size: 10px;
+}
+
+.app-shell .project-list {
+  gap: 1px;
+}
+
+/* Sessions read as a quiet history list: no icon tile, text only. */
+.app-shell .project-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 9px;
+  color: var(--text);
+}
+
+.app-shell .project-row .session-icon {
+  display: none;
+}
+
+.app-shell .project-row:hover,
+.app-shell .project-row.active {
+  background: var(--surface-muted);
+}
+
+.app-shell .project-row strong {
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.app-shell .project-row.active strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.app-shell .project-row small {
+  font-size: 11px;
+}
+
+.app-shell .empty-sidebar {
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
+.app-shell .sidebar-bottom {
+  border-top: 1px solid var(--line);
+}
+
+.app-shell .connection-card {
+  margin: 4px 0;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+}
+
+.app-shell .connection-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  color: #4e4569;
+  background: #ebe9f5;
+}
+
+.app-shell.theme-dark .connection-icon {
+  color: #e4defa;
+  background: #3a3450;
+}
+
+.app-shell .connection-card strong {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.app-shell .connection-card span {
+  font-size: 11px;
+}
+
+.app-shell .sidebar-settings {
+  min-height: 38px;
+  gap: 11px;
+  padding: 0 10px;
+  border-radius: 9px;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.app-shell .sidebar-settings:hover {
+  color: var(--ink);
+  background: var(--surface-muted);
+}
+
+/* ---------- Chat ---------- */
+.app-shell .panel-header {
+  height: 56px;
+  flex-basis: 56px;
+  padding: 0 14px;
+}
+
+.app-shell .chat-header {
+  border-bottom-color: transparent;
+}
+
+.app-shell .chat-header strong,
+.app-shell .artifact-header strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.app-shell .chat-header small {
+  font-size: 11px;
+}
+
+.app-shell .agent-avatar {
+  width: 31px;
+  height: 31px;
+  border-radius: 9px;
+  color: var(--accent);
+  background: var(--avatar-bg);
+}
+
+.app-shell .secondary-button {
+  height: 36px;
+  gap: 7px;
+  padding: 0 13px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  color: var(--ink);
+  background: var(--surface);
+  font-size: 13px;
+  font-weight: 550;
+}
+
+.app-shell .secondary-button:hover:not(:disabled) {
+  border-color: var(--line-hover);
+  background: var(--surface-hover);
+}
+
+.app-shell .app-error {
+  font-size: 12px;
+}
+
+.app-shell .welcome {
+  width: min(760px, calc(100% - 48px));
+  align-items: center;
+  text-align: center;
+}
+
+.app-shell .welcome-mark {
+  margin-bottom: 18px;
+}
+
+.app-shell .eyebrow {
+  margin-bottom: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .01em;
+  text-transform: none;
+}
+
+.app-shell .welcome h1 {
+  font-family: var(--font-display);
+  font-size: clamp(28px, 3vw, 33px);
+  font-weight: 500;
+  letter-spacing: -.035em;
+  line-height: 1.15;
+}
+
+.app-shell .welcome-copy {
+  margin: 10px auto 28px;
+  font-size: 14px;
+}
+
+.app-shell .starter-grid {
+  width: 100%;
+  gap: 10px;
+}
+
+.app-shell .starter-grid button {
+  min-height: 118px;
+  padding: 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  transition: border-color .15s ease, background .15s ease;
+}
+
+.app-shell .starter-grid button:hover {
+  border-color: var(--line-hover);
+  background: var(--surface-hover);
+  box-shadow: none;
+  transform: none;
+}
+
+.app-shell .starter-grid button > span {
+  width: 31px;
+  height: 31px;
+  border-radius: 9px;
+  color: var(--accent);
+  background: var(--avatar-bg);
+}
+
+.app-shell .starter-grid button > svg {
+  color: var(--faint);
+}
+
+.app-shell .starter-grid strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.app-shell .starter-grid small {
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.app-shell .message-list {
+  width: min(760px, calc(100% - 48px));
+  padding: 32px 0 24px;
+}
+
+.app-shell .message {
+  grid-template-columns: 31px minmax(0, 1fr);
+  margin-bottom: 32px;
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.app-shell .message-avatar {
+  width: 31px;
+  height: 31px;
+  border: 0;
+  border-radius: 9px;
+  color: var(--accent);
+  background: var(--avatar-bg);
+}
+
+.app-shell .message > div:last-child > strong {
+  margin: 4px 0 6px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* User turns are right-aligned bubbles without an avatar; the "You" label stays for screen readers. */
+.app-shell .message.user {
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: end;
+}
+
+.app-shell .message.user .message-avatar {
+  display: none;
+}
+
+.app-shell .message.user > div:last-child {
+  max-width: min(620px, 86%);
+  padding: 11px 16px;
+  border-radius: 19px 19px 4px 19px;
+  background: var(--bubble);
+}
+
+.app-shell .message.user > div:last-child > strong {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Rendered Markdown in chat */
+.app-shell .message :is(p, ul, ol, pre, table, blockquote) + :is(p, ul, ol, pre, table, blockquote, h1, h2, h3, h4) {
+  margin-top: 12px;
+}
+
+.app-shell .message :is(ul, ol) {
+  margin: 0;
+  padding-left: 22px;
+}
+
+.app-shell .message li + li {
+  margin-top: 3px;
+}
+
+.app-shell .message :is(h1, h2, h3, h4) {
+  margin: 18px 0 6px;
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.app-shell .message h1 { font-size: 20px; }
+.app-shell .message h2 { font-size: 17px; }
+.app-shell .message :is(h3, h4) { font-size: 15px; }
+
+.app-shell .message a {
+  color: var(--accent-ink);
+  text-underline-offset: 2px;
+}
+
+.app-shell .message code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--surface-muted);
+  font-family: var(--font-mono);
+  font-size: .88em;
+}
+
+.app-shell .message pre {
+  margin: 0;
+  padding: 12px 14px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-soft);
+  line-height: 1.55;
+}
+
+.app-shell .message pre code {
+  padding: 0;
+  background: none;
+  font-size: 12.5px;
+}
+
+.app-shell .message table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.app-shell .message :is(th, td) {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.app-shell .message th {
+  color: var(--ink);
+  font-weight: 600;
+  border-bottom-color: var(--line-strong);
+}
+
+.app-shell .message blockquote {
+  margin: 0;
+  padding: 2px 0 2px 14px;
+  border-left: 3px solid var(--line-strong);
+  color: var(--muted);
+}
+
+.app-shell .thinking i {
+  background: var(--faint);
+}
+
+.app-shell .stream-status,
+.app-shell .usage-line {
+  font-size: 12px;
+}
+
+.app-shell .usage-line em {
+  color: var(--accent-ink);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: none;
+}
+
+.app-shell .message-details {
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.app-shell .message-detail > summary {
+  gap: 7px;
+  padding: 7px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  color: var(--text);
+  background: var(--surface);
+  font-size: 12px;
+  font-weight: 500;
+  text-transform: none;
+  transition: border-color .15s ease, background .15s ease;
+}
+
+.app-shell .message-detail > summary:hover {
+  border-color: var(--line-hover);
+  background: var(--surface-hover);
+}
+
+.app-shell .message-detail > summary svg:first-child {
+  color: var(--accent);
+}
+
+.app-shell .message-detail > summary small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.app-shell .detail-panel {
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-soft);
+}
+
+.app-shell .detail-header {
+  padding: 9px 12px;
+}
+
+.app-shell .detail-header strong {
+  font-size: 12px !important;
+  font-weight: 600;
+  text-transform: none;
+}
+
+.app-shell .detail-header small {
+  font-size: 11px;
+}
+
+.app-shell .reasoning-body,
+.app-shell .working-events {
+  max-height: 220px;
+  padding: 10px 12px;
+  font-size: 12.5px;
+}
+
+.app-shell .working-event > svg {
+  color: var(--accent);
+}
+
+.app-shell .working-event small {
+  font-size: 11.5px;
+}
+
+.app-shell .compaction-divider > summary {
+  font-size: 12px;
+}
+
+.app-shell .compaction-summary {
+  border-radius: 12px;
+  font-size: 13px;
+}
+
+.app-shell .compaction-summary > small {
+  font-size: 11px;
+}
+
+/* ---------- Composer ---------- */
+.app-shell .composer-wrap {
+  width: min(760px, calc(100% - 40px));
+  padding-bottom: 12px;
+}
+
+.app-shell .composer {
+  border: 1px solid var(--line-strong);
+  border-radius: 24px;
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+
+.app-shell .composer:focus-within {
+  border-color: var(--line-hover);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent), var(--shadow-sm);
+}
+
+.app-shell .composer textarea {
+  min-height: 54px;
+  padding: 16px 20px 6px;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.app-shell .composer textarea::placeholder {
+  color: var(--faint);
+}
+
+.app-shell .composer-toolbar {
+  padding: 4px 10px 10px 12px;
+}
+
+.app-shell .composer-toolbar > div {
+  gap: 4px;
+}
+
+.app-shell .tool-button {
+  height: 32px;
+  gap: 6px;
+  padding: 0 10px;
+  border-radius: 9px;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.app-shell .tool-button:hover {
+  color: var(--ink);
+  background: var(--surface-muted);
+}
+
+.app-shell .tool-button.active,
+.app-shell .icon-button.small.active {
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+}
+
+.app-shell .attachment-count {
+  color: var(--on-accent);
+  font-size: 10px;
+}
+
+.app-shell .send-button {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  color: var(--on-accent);
+  background: var(--accent);
+  transition: filter .15s ease, background .15s ease;
+}
+
+.app-shell .send-button:hover:not(:disabled) {
+  background: var(--accent);
+  filter: brightness(.92);
+}
+
+.app-shell .send-button.stop,
+.app-shell .send-button.stop:hover {
+  color: var(--ink);
+  background: var(--surface-muted);
+  filter: none;
+}
+
+.app-shell .send-button:disabled {
+  color: #aaa5b2;
+  background: #ece9f2;
+}
+
+.app-shell.theme-dark .send-button:disabled {
+  color: var(--faint);
+  background: var(--surface-muted);
+}
+
+.app-shell .composer-meta {
+  padding: 8px 6px 0;
+  font-size: 11px;
+}
+
+.app-shell .composer-meta button {
+  font-size: 11.5px;
+}
+
+.app-shell .composer-meta .context-meter {
+  padding: 3px 9px;
+  border-color: var(--line);
+}
+
+.app-shell .composer-meta .context-meter:hover {
+  color: var(--ink);
+  border-color: var(--line-hover);
+}
+
+.app-shell :is(.command-menu, .agent-menu, .evidence-menu) {
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+}
+
+.app-shell :is(.command-menu, .agent-menu, .evidence-menu) > button {
+  padding: 8px 10px;
+  border-radius: 9px;
+}
+
+.app-shell :is(.command-menu, .agent-menu, .evidence-menu) > button:hover,
+.app-shell .agent-menu > button[aria-checked="true"],
+.app-shell .evidence-menu > button[aria-checked="true"] {
+  background: var(--surface-muted);
+}
+
+.app-shell :is(.command-menu, .agent-menu, .evidence-menu) strong { font-size: 13px; }
+.app-shell :is(.command-menu, .agent-menu, .evidence-menu) small { font-size: 12px; }
+.app-shell .command-menu-header { padding: 6px 10px 8px; font-size: 11px; }
+.app-shell .command-menu-header strong { font-size: 12px; }
+.app-shell .command-menu em { font-size: 10px; text-transform: none; }
+
+.app-shell .session-info-popover {
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+
+.app-shell .session-compact-button {
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+/* ---------- Artifacts panel ---------- */
+.app-shell .artifact-panel {
+  grid-template-rows: 56px 42px minmax(0, 1fr);
+}
+
+.app-shell .artifact-tabs {
+  gap: 4px;
+  padding: 6px 12px 0;
+}
+
+.app-shell .artifact-tabs button {
+  padding: 0 10px 9px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.app-shell .artifact-tabs button.active {
+  font-weight: 600;
+}
+
+.app-shell .artifact-tabs button.active::after {
+  background: var(--ink);
+}
+
+.app-shell .file-tree {
+  padding: 8px 8px 12px;
+  background: var(--surface);
+}
+
+.app-shell .tree-title {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .02em;
+}
+
+.app-shell .tree-title > span small {
+  color: var(--faint);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.app-shell .file-drop-hint {
+  margin: 4px 4px 10px;
+  border-color: var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface-soft);
+  font-size: 11px;
+}
+
+.app-shell .file-row {
+  height: 30px;
+  gap: 6px;
+  border-radius: 7px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.app-shell .file-row:hover,
+.app-shell .file-row.selected {
+  color: var(--ink);
+  background: var(--surface-muted);
+}
+
+.app-shell .file-row svg:nth-of-type(2) {
+  color: var(--faint);
+}
+
+.app-shell .file-row-delete {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+}
+
+.app-shell .file-row-delete:hover,
+.app-shell .file-row-delete:focus-visible {
+  color: var(--danger);
+}
+
+.app-shell .preview-toolbar {
+  height: 46px;
+  flex-basis: 46px;
+  padding: 0 12px 0 16px;
+}
+
+.app-shell .preview-file-title {
+  font-size: 12px;
+}
+
+.app-shell .dirty-indicator,
+.app-shell .publication-badge {
+  padding: 2px 8px;
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: none;
+}
+
+.app-shell .publication-badge.reviewed {
+  color: var(--accent-ink);
+}
+
+.app-shell .review-button {
+  height: 30px;
+  padding: 0 11px;
+  border-radius: 8px;
+  color: var(--accent-ink);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.app-shell .segmented-control {
+  padding: 3px;
+  border-color: var(--line);
+  border-radius: 9px;
+  background: var(--surface-muted);
+}
+
+.app-shell .segmented-control button {
+  height: 24px;
+  padding: 0 9px;
+  border-radius: 6px;
+  font-size: 11.5px;
+}
+
+.app-shell .segmented-control button.active {
+  box-shadow: 0 1px 3px rgba(32, 27, 46, .12);
+}
+
+.app-shell .markdown-preview {
+  padding: 26px 28px 40px;
+  font-family: var(--font-ui);
+  font-size: 13.5px;
+  line-height: 1.65;
+}
+
+.app-shell .markdown-preview h1,
+.app-shell .published-page h2 {
+  font-family: var(--font-display);
+  font-size: 24px;
+  font-weight: 600;
+}
+
+.app-shell .markdown-preview h2 {
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.app-shell .markdown-preview h3 {
+  font-family: var(--font-display);
+  font-size: 14px;
+}
+
+.app-shell .markdown-preview table {
+  font-family: var(--font-ui);
+  font-size: 12px;
+}
+
+.app-shell .markdown-preview :is(th, td) {
+  border-color: var(--line);
+}
+
+.app-shell .markdown-preview code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--surface-muted);
+  font-family: var(--font-mono);
+  font-size: .88em;
+}
+
+.app-shell .markdown-preview blockquote,
+.app-shell.theme-dark .markdown-preview blockquote {
+  border-left: 3px solid var(--line-strong);
+  color: var(--muted);
+  background: var(--surface-soft);
+}
+
+.app-shell .published-page {
+  font-family: var(--font-ui);
+}
+
+.app-shell .source-editor,
+.app-shell .source-large-file-preview {
+  color: var(--ink);
+  background: var(--surface-soft);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.app-shell .source-preview,
+.app-shell .json-preview,
+.app-shell .large-file-preview pre {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.app-shell .large-file-notice {
+  border-radius: 10px;
+  font-family: var(--font-ui);
+  font-size: 12px;
+}
+
+.app-shell .image-preview {
+  font-family: var(--font-ui);
+}
+
+.app-shell .image-preview img {
+  border-radius: 8px;
+}
+
+.app-shell .image-preview small {
+  font-size: 11px;
+}
+
+.app-shell .browser-preview {
+  background: var(--surface-soft);
+}
+
+/* ---------- Status bar ---------- */
+.app-shell .statusbar,
+.app-shell.theme-dark .statusbar {
+  height: 26px;
+  flex-basis: 26px;
+  padding: 0 14px;
+  border-top: 1px solid var(--line);
+  color: var(--faint);
+  background: var(--surface);
+  font-size: 11px;
+  letter-spacing: 0;
+}
+
+/* ---------- Dialogs ---------- */
+.app-shell :is(.modal-backdrop, .customizations-backdrop, .capability-editor-backdrop) {
+  background: var(--backdrop);
+  backdrop-filter: blur(2px);
+}
+
+.app-shell .file-dialog {
+  gap: 18px;
+  padding: 22px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: var(--shadow-dialog);
+}
+
+.app-shell .file-dialog > div:first-child strong {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.app-shell .file-dialog p {
+  font-size: 13px;
+}
+
+.app-shell .file-dialog label,
+.app-shell .git-sync-configure label {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.app-shell :is(.file-dialog, .capability-editor) :is(input, textarea),
+.app-shell .capability-editor .mcp-auth select {
+  padding: 9px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  font-size: 13px;
+}
+
+.app-shell .file-dialog input {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+.app-shell :is(.file-dialog, .capability-editor) textarea,
+.app-shell .capability-editor input,
+.app-shell .capability-editor .mcp-auth select {
+  font-family: var(--font-ui);
+}
+
+.app-shell .capability-instructions {
+  font-family: var(--font-mono) !important;
+  font-size: 12.5px !important;
+}
+
+.app-shell :is(.file-dialog, .capability-editor) :is(input, textarea):focus,
+.app-shell .capability-editor .mcp-auth select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.app-shell .file-dialog-actions {
+  gap: 8px;
+}
+
+.app-shell .file-dialog-actions button {
+  height: 36px;
+  padding: 0 14px;
+  border-color: var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.app-shell .file-dialog-actions button:hover:not(:disabled) {
+  border-color: var(--line-hover);
+  background: var(--surface-hover);
+}
+
+.app-shell .dialog-primary,
+.app-shell .file-dialog-actions .dialog-primary,
+.app-shell .customization-add {
+  height: 36px;
+  padding: 0 15px;
+  border: 1px solid var(--accent);
+  border-radius: 9px;
+  color: var(--on-accent);
+  background: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.app-shell .dialog-primary:hover:not(:disabled),
+.app-shell .file-dialog-actions .dialog-primary:hover:not(:disabled),
+.app-shell .customization-add:hover {
+  background: var(--accent);
+  filter: brightness(.92);
+}
+
+.app-shell .dialog-danger,
+.app-shell .file-dialog-actions .dialog-danger,
+.app-shell .file-dialog-actions .dialog-danger:hover:not(:disabled) {
+  border-color: var(--danger) !important;
+  color: #fff;
+  background: var(--danger);
+}
+
+.app-shell.theme-dark .dialog-danger {
+  color: #1b1a1e;
+}
+
+.app-shell :is(.git-sync-title small, .git-sync-loading, .git-sync-error) { font-size: 12px; }
+.app-shell .git-sync-status { border-radius: 10px; }
+.app-shell .git-sync-status span { font-size: 11px; text-transform: none; }
+.app-shell .git-sync-status strong { font-size: 13px; }
+
+/* Project customizations: same structure, settings-dialog styling */
+.app-shell .customizations-window {
+  grid-template-rows: 58px minmax(0, 1fr);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: var(--shadow-dialog);
+}
+
+.app-shell .customizations-window > header {
+  padding: 0 12px 0 20px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.app-shell .customizations-window > header strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.app-shell .customizations-window > header span {
+  font-size: 12px;
+}
+
+.app-shell .customizations-layout {
+  grid-template-columns: 210px minmax(0, 1fr);
+}
+
+.app-shell .customizations-layout > nav {
+  display: grid;
+  align-content: start;
+  gap: 2px;
+  padding: 16px 12px;
+  border-right: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.app-shell .customizations-layout > nav button {
+  height: 40px;
+  gap: 10px;
+  padding: 0 12px;
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.app-shell .customizations-layout > nav button:hover {
+  color: var(--ink);
+  background: var(--surface-muted);
+}
+
+.app-shell .customizations-layout > nav button.active {
+  color: var(--ink);
+  background: var(--surface-muted);
+  box-shadow: inset 3px 0 var(--ink);
+  font-weight: 600;
+}
+
+.app-shell .customizations-layout > nav button.coming-soon:hover {
+  background: transparent;
+}
+
+.app-shell .customizations-layout > nav button small {
+  color: var(--faint);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.app-shell .customizations-content {
+  padding: 30px 40px 36px;
+}
+
+.app-shell .customizations-heading {
+  margin-bottom: 22px;
+}
+
+.app-shell .customizations-heading h2 {
+  margin-bottom: 6px;
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -.015em;
+}
+
+.app-shell .customizations-heading p:not(.eyebrow) {
+  font-size: 13px;
+}
+
+.app-shell .customization-overview-grid {
+  gap: 12px;
+}
+
+.app-shell .customization-overview-grid button {
+  min-height: 112px;
+  gap: 6px 12px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  transition: border-color .15s ease, background .15s ease;
+}
+
+.app-shell .customization-overview-grid button:hover {
+  border-color: var(--line-hover);
+  background: var(--surface-hover);
+}
+
+.app-shell .customization-overview-grid button.coming-soon,
+.app-shell .customization-overview-grid button.coming-soon:hover {
+  border-color: var(--line);
+  background: var(--surface-soft);
+}
+
+.app-shell .customization-overview-grid button > span {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  color: var(--accent);
+  background: var(--avatar-bg);
+}
+
+.app-shell .customization-overview-grid strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.app-shell .customization-overview-grid small {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.app-shell .customization-overview-grid p {
+  font-size: 12.5px;
+}
+
+.app-shell .customization-search {
+  height: 38px;
+  padding: 0 12px;
+  border-color: var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.app-shell .customization-search:focus-within {
+  border-color: var(--line-hover);
+}
+
+.app-shell .customization-search input {
+  font-size: 13px;
+}
+
+.app-shell .customization-group-title {
+  padding: 20px 2px 8px;
+}
+
+.app-shell .customization-group-title strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.app-shell .customization-group-title span {
+  background: var(--surface-muted);
+  font-size: 11px;
+}
+
+.app-shell .customization-list {
+  border-radius: 12px;
+}
+
+.app-shell .customization-list article {
+  min-height: 66px;
+  padding: 12px 16px 12px 18px;
+}
+
+.app-shell .customization-list article strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.app-shell .customization-list article p {
+  font-size: 12.5px;
+}
+
+.app-shell .customization-list article small {
+  font-size: 11px;
+}
+
+.app-shell .customization-status {
+  padding: 3px 8px;
+  color: var(--accent-ink);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.app-shell .capability-test-button {
+  height: 30px;
+  gap: 5px;
+  padding: 0 10px;
+  border-color: var(--line-strong);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.app-shell .capability-test-button:hover:not(:disabled) {
+  border-color: var(--line-hover);
+  background: var(--surface-hover);
+}
+
+.app-shell .capability-test-result {
+  border-radius: 10px;
+  font-size: 12px;
+}
+
+.app-shell .capability-test-result.success > span {
+  color: var(--accent-ink);
+}
+
+.app-shell .capability-test-result code,
+.app-shell .tool-parameters {
+  font-size: 11px;
+}
+
+.app-shell .capability-test-tools > strong {
+  font-size: 12px;
+}
+
+.app-shell .toggle {
+  width: 34px;
+  height: 20px;
+  background: var(--line-strong);
+}
+
+.app-shell .toggle span {
+  width: 16px;
+  height: 16px;
+}
+
+.app-shell .toggle.on span {
+  transform: translateX(14px);
+}
+
+.app-shell .toggle.on {
+  background: var(--accent);
+}
+
+.app-shell .customization-empty {
+  font-size: 13px;
+}
+
+.app-shell .capability-editor {
+  grid-template-rows: 62px minmax(0, 1fr) 62px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: var(--shadow-dialog);
+}
+
+.app-shell .capability-editor > header,
+.app-shell .capability-editor > footer {
+  padding: 0 20px;
+  background: var(--surface);
+}
+
+.app-shell .capability-editor > header strong {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.app-shell .capability-editor > header small {
+  font-size: 12px;
+}
+
+.app-shell .capability-editor-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  color: var(--accent);
+  background: var(--avatar-bg);
+}
+
+.app-shell .capability-editor-body {
+  gap: 18px;
+  padding: 24px 28px 30px;
+}
+
+.app-shell .capability-editor-body > label,
+.app-shell .capability-form-grid > label,
+.app-shell .transport-picker legend,
+.app-shell .mcp-auth legend {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.app-shell .capability-editor-body label > small {
+  font-size: 11.5px;
+}
+
+.app-shell .capability-availability {
+  height: 40px;
+  border-radius: 9px;
+  font-size: 12px;
+}
+
+.app-shell .capability-availability > span {
+  width: 34px;
+  height: 20px;
+}
+
+.app-shell .capability-availability > span > span {
+  width: 16px;
+  height: 16px;
+}
+
+.app-shell .capability-availability.enabled > span > span {
+  transform: translateX(14px);
+}
+
+.app-shell .transport-picker button {
+  border-radius: 10px;
+}
+
+.app-shell .transport-picker button.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.app-shell .transport-picker button strong { font-size: 13px; }
+.app-shell .transport-picker button small { font-size: 12px; }
+
+.app-shell .capability-readonly-note {
+  border-radius: 10px;
+}
+
+.app-shell .capability-readonly-note strong { font-size: 13px; }
+.app-shell .capability-readonly-note p { font-size: 12px; }
+.app-shell .capability-editor-error { border-radius: 9px; font-size: 12px; }
+.app-shell .capability-editor-loading { font-size: 13px; }
+
+.app-shell .mcp-auth {
+  border-radius: 12px;
+}
+
+/* Field labels inside the MCP authentication fieldset had no rule and used the 16px default. */
+.app-shell .mcp-auth label {
+  display: grid;
+  gap: 6px;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.app-shell .mcp-auth label > small {
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 400;
+}
+
+.app-shell .model-settings,
+.app-shell .model-diagnostics-results > section {
+  border-radius: 12px;
+}
+
+.app-shell .model-settings > header,
+.app-shell .model-diagnostics-results > section > header { font-size: 13px; }
+.app-shell .model-settings dt { font-size: 11px; text-transform: none; }
+.app-shell .model-settings dd { font-size: 13px; }
+.app-shell .model-missing,
+.app-shell .model-diagnostics-results li { font-size: 12.5px; }
+.app-shell :is(.model-hint, .model-diagnostics-actions, .model-diagnostics-results li p) { font-size: 12px; }
+.app-shell .model-diagnostics-results li small,
+.app-shell .model-diagnostics-results header code { font-size: 11px; }
+.app-shell .model-diagnostics-results > section.success { border-left-color: var(--accent); }
+
+/* ---------- Sign-in screen (rendered outside the app shell) ---------- */
+.auth-screen {
+  background: var(--surface-soft);
+  color: var(--ink);
+  font-family: var(--font-ui);
+}
+
+.auth-screen section {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--surface);
+  box-shadow: var(--shadow-dialog);
+}
+
+.auth-screen svg {
+  color: var(--accent);
+}
+
+.auth-screen h1 {
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -.015em;
+}
+
+.auth-screen p {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.auth-screen .dialog-primary {
+  height: 40px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 9px;
+  color: var(--on-accent);
+  background: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+}

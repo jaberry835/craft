@@ -20,7 +20,7 @@ Start the complete development workbench:
 npm run dev
 ```
 
-Open `http://localhost:5173`. This command starts both the React client and the local API. Do not use `npm run dev:client` by itself unless an API is already running on port `8787`.
+Open `http://localhost:5190`. This command starts both the React client and the local API. Do not use `npm run dev:client` by itself unless an API is already running on port `8787`.
 
 ## Model connection
 
@@ -152,7 +152,7 @@ App sign-in is off by default (`AAA_AUTH_MODE=none`), and AAA then listens only 
 | `AAA_ENTRA_REDIRECT_URI` | no | Redirect URI registered for the SPA; defaults to the page origin. |
 | `AAA_HOST` | no | Listen address (default `127.0.0.1`). A non-loopback address is refused unless `AAA_AUTH_MODE=entra`. |
 
-App registration: add a **Single-page application** platform with the AAA URL as a redirect URI (for example `http://localhost:5173` and the deployed origin), **Expose an API** with the Application ID URI `api://<client-id>` and a delegated scope `access_as_user`, and optionally define app roles (for example `AAA.User`) and list them in `AAA_ENTRA_ALLOWED_ROLES`.
+App registration: add a **Single-page application** platform with the AAA URL as a redirect URI (for example `http://localhost:5190` and the deployed origin), **Expose an API** with the Application ID URI `api://<client-id>` and a delegated scope `access_as_user`, and optionally define app roles (for example `AAA.User`) and list them in `AAA_ENTRA_ALLOWED_ROLES`.
 
 How it works: the browser signs in with MSAL (loaded only when sign-in is on) and sends a bearer token with every API call; the server validates the signature against the tenant's published keys, the issuer, audience, expiry, and roles. Images, the published Web preview, and "open in new tab" cannot send headers, so the browser exchanges its token for an HttpOnly, `SameSite=Strict` session cookie scoped to `/api` that is accepted **only for GET/HEAD** requests; every state-changing request still requires the bearer token. Each run records who started it (`requestedBy`), and failed runs are logged with the user.
 
