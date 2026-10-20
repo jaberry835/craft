@@ -19,7 +19,9 @@ process.on('uncaughtException', (error) => {
 const repositoryRoot = process.env.AAA_ROOT
   ? path.resolve(process.env.AAA_ROOT)
   : process.cwd();
-const dataRoot = path.join(repositoryRoot, 'data');
+const dataRoot = process.env.AAA_DATA_ROOT
+  ? path.resolve(process.env.AAA_DATA_ROOT)
+  : path.join(repositoryRoot, 'data');
 const templateRoot = process.env.AAA_PROJECT_TEMPLATE
   ? path.resolve(process.env.AAA_PROJECT_TEMPLATE)
   : path.join(repositoryRoot, 'templates', 'default-project');
@@ -46,10 +48,9 @@ const authConfig = await startupStep('configure app sign-in (AAA_AUTH_MODE)', ()
 const host = process.env.AAA_HOST?.trim() || '127.0.0.1';
 const loopback = ['127.0.0.1', '::1', 'localhost'].includes(host);
 if (!loopback && authConfig.mode !== 'entra') {
-  log.error('startup', `Refusing to listen on ${host} without sign-in. Set AAA_AUTH_MODE=entra, or use AAA_HOST=127.0.0.1.`);
-  process.exit(1);
+  log.warn('startup', `App sign-in is disabled on ${host}. Anyone who can reach this server can access AAA. Use only in a trusted test environment, or set AAA_AUTH_MODE=entra.`);
 }
-log.info('startup', authConfig.mode === 'entra' ? 'Microsoft Entra sign-in is required.' : 'App sign-in is off (local mode).', {
+log.info('startup', authConfig.mode === 'entra' ? 'Microsoft Entra sign-in is required.' : 'App sign-in is off.', {
   ...(authConfig.mode === 'entra'
     ? { tenant: authConfig.tenantId, clientId: authConfig.clientId, authority: authConfig.authorityHost, roles: authConfig.allowedRoles.join(',') || 'any' }
     : {}),
@@ -94,7 +95,9 @@ const app = createAaaApp({
 const port = Number(process.env.PORT ?? 8787);
 
 const server = app.listen(port, host, () => {
-  console.log(`AAA local API listening on http://${host.includes(':') ? `[${host}]` : host}:${port}`);
+  const address = server.address();
+  const listeningPort = address && typeof address !== 'string' ? address.port : port;
+  console.log(`AAA local API listening on http://${host.includes(':') ? `[${host}]` : host}:${listeningPort}`);
 });
 server.on('error', (error) => {
   log.error('startup', `Could not listen on port ${port}.`, {

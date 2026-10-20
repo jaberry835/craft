@@ -136,7 +136,7 @@ An approval gate for higher-impact actions remains on the punch list.
 
 ## Optional Microsoft Entra sign-in
 
-App sign-in is off by default (`AAA_AUTH_MODE=none`), and AAA then listens only on `127.0.0.1`. Set `AAA_AUTH_MODE=entra` to require a Microsoft Entra account; turn it back off by removing the variable or setting it to `none`.
+App sign-in is off by default (`AAA_AUTH_MODE=none`). Set `AAA_AUTH_MODE=entra` to require a Microsoft Entra account; turn it back off by removing the variable or setting it to `none`. With sign-in off, `AAA_HOST=0.0.0.0` is allowed for container/high-side testing without an app registration. Startup emits a warning rather than blocking non-loopback hosts. Anyone who can reach the app can access it in this mode: restrict network access and use it only in a trusted test environment.
 
 | Variable | Required | Meaning |
 | --- | --- | --- |
@@ -150,7 +150,7 @@ App sign-in is off by default (`AAA_AUTH_MODE=none`), and AAA then listens only 
 | `AAA_PROJECT_ADMIN_ROLES` | no | Comma-separated app roles allowed to view and administer every project ACL. |
 | `AAA_ENTRA_ISSUERS` | no | Override accepted token issuers (defaults accept v2 `<authority>/<tenant>/v2.0` and v1 `https://sts.windows.net/<tenant>/`). |
 | `AAA_ENTRA_REDIRECT_URI` | no | Redirect URI registered for the SPA; defaults to the page origin. |
-| `AAA_HOST` | no | Listen address (default `127.0.0.1`). A non-loopback address is refused unless `AAA_AUTH_MODE=entra`. |
+| `AAA_HOST` | no | Listen address (default `127.0.0.1`). Use `0.0.0.0` in a container. With auth off, non-loopback hosts are allowed with a startup warning. |
 
 App registration: add a **Single-page application** platform with the AAA URL as a redirect URI (for example `http://localhost:5190` and the deployed origin), **Expose an API** with the Application ID URI `api://<client-id>` and a delegated scope `access_as_user`, and optionally define app roles (for example `AAA.User`) and list them in `AAA_ENTRA_ALLOWED_ROLES`.
 
@@ -218,7 +218,9 @@ An Agent can use the AAA local loop, delegate to a full OpenAI-compatible Respon
 
 ## Microsoft Edge evidence capture
 
-The Web tab can launch an installed Microsoft Edge through `playwright-core`. Edge is visible by default so the user can complete interactive authentication; **Headless** is optional. Each project gets a persistent browser profile under `data\browser-profiles\<project-id>\`, outside the assessed package. The Web tab shows session state, navigation and capture controls, and the most recent capture rather than embedding authenticated external sites.
+Browser automation is optional and disabled by default. Set `AAA_BROWSER_MODE=local` only when the AAA server runs interactively on a workstation where it may launch Edge. Set `AAA_BROWSER_MODE=bridge` for web deployments; the Web tab then checks whether the optional Node bridge is connected before enabling any Playwright controls. The bridge transport is introduced separately, so bridge mode currently reports that no bridge is available.
+
+In local mode, the Web tab can launch an installed Microsoft Edge through `playwright-core`. Edge is visible by default so the user can complete interactive authentication; **Headless** is optional. Each project gets a persistent browser profile under `data\browser-profiles\<project-id>\`, outside the assessed package. The Web tab shows whether automation is enabled, whether a bridge is available, session state, navigation and capture controls, and the most recent capture rather than embedding authenticated external sites.
 
 Navigation accepts user-entered absolute HTTP and HTTPS addresses and rejects other schemes. **Go** launches the project Edge session directly at the entered address when it is not already running, or navigates the existing session when it is active. Captures are PNG files under `evidence\screenshots\` by default. To avoid unwieldy long-page images, a capture always starts at the top of the page and is capped at two viewport heights. Every PNG has an adjacent JSON provenance record containing the source URL, capture time, Edge mode, viewport dimensions, captured height, and screenshot path. The `capture-web-evidence` skill guides the model, while the deterministic `browser_capture` tool owns launch, navigation, capture, and close behavior.
 
@@ -239,7 +241,7 @@ Open `http://127.0.0.1:8787`. The single local server hosts both the built clien
 
 AAA requires Node.js 22.12 or later (below 25) and npm 10 or later; `.nvmrc` records the validated version (24.15.0), and `.npmrc` sets `engine-strict=true` so an unsupported Node fails the install with a clear message. Use the same Node.js and npm versions on the staging and target machines.
 
-Dependencies are pinned by `package-lock.json`. On a connected staging machine, run `npm ci` and preserve either the resulting `node_modules` directory or npm's populated cache with the source bundle. `playwright-core` is included without a bundled Chromium download; install or stage the approved Microsoft Edge build separately. In the air-gapped environment, use the transferred `node_modules` directly or run:
+Dependencies are pinned by `package-lock.json`. Populate the approved npm cache before entering the air gap, then install and build on the Windows development VM:
 
 ```powershell
 npm ci --offline
@@ -247,18 +249,38 @@ npm run build
 npm start
 ```
 
-Build tooling (`vite`, `@vitejs/plugin-react`, TypeScript, `tsx`, ESLint) is in `devDependencies`. To run a prebuilt copy without build tools, build on the staging machine, transfer `dist\`, `config\`, `templates\`, `package.json`, `package-lock.json`, and `.npmrc`, then install only runtime packages and start:
+The full build creates `dist`, containing `index.js` (the bundled server), `client`, `config` (safe container configuration), `template`, and an ESM `package.json`. It contains no `node_modules`, Playwright package code, or browser binaries. To run the prebuilt artifact from the repository:
 
 ```powershell
-npm ci --omit=dev --offline
-npm start
+node dist\index.js
 ```
 
-`npm run dev` (hot reload) and `npm run build` need the full install.
+`npm run dev`, tests, and `npm run build` need the full development install. Local Playwright remains available there, but is loaded only when launching a browser in `AAA_BROWSER_MODE=local`. Disabled and bridge modes never load or call it. The packaged build always excludes Playwright regardless of the build machine's browser mode; requesting local automation from the packaged server returns an explicit unavailable error.
 
-`npm ci --offline` succeeds only when every package tarball referenced by the lock file is already present in the transferred npm cache. Build the cache or `node_modules` on the same OS and CPU architecture as the target, because native build tools such as `esbuild` install a platform-specific binary. The MCP client is implemented in this repository and adds no packages. Normal browser startup has been audited to request only the local AAA origin; configured model and Cosmos connections are made by the backend and remain optional for local JSON operation.
+The Dockerfile and image-push script default to `node:24-alpine`. The image copies `dist` to `/app/dist`, the generated `dist/config` to `/app/config`, and `dist/template` to `/app/template`, creates writable `logs` and `data` directories, exposes port 8080, and starts `node dist/index.js`. `AAA_PROJECT_TEMPLATE=/app/template` selects the copied template. Generated configuration avoids copying the development VM's Windows project paths. No npm install or browser installation happens in the image. Keep `AAA_BROWSER_MODE=disabled` (the Dockerfile default); bridge mode currently reports no connected bridge. `BASE_IMAGE` (or the push script's `-BaseImage`) can override the base.
+
+Every `npm run build` rejects bundled Playwright package code or unresolved runtime dependencies, then smoke-tests an isolated copy using the Docker directory layout without `node_modules`: startup, client serving, health, browser status, and launch rejection in disabled, bridge, and local modes. Run `npm run test:runtime` to repeat these checks against an existing build.
+
+`npm ci --offline` succeeds only when every package tarball referenced by the lock file is already present in the transferred npm cache. The build VM needs the Windows esbuild binary, but that binary and other development dependencies are not copied into `dist`. The MCP client is implemented in this repository and adds no runtime files. Configured model and Cosmos connections are made by the backend and remain optional for local JSON operation.
 
 ## Validate
+
+### Import env settings into App Service
+
+Use PowerShell 7.2+ and Azure CLI, signed in to the target cloud/subscription. The script merges settings from `.env` without changing unrelated settings or printing values:
+
+```powershell
+.\scripts\Set-AppServiceEnv.ps1 -SubscriptionId '<subscription-id>' -ResourceGroup '<resource-group>' -AppName '<app-name>' -WhatIf
+.\scripts\Set-AppServiceEnv.ps1 -SubscriptionId '<subscription-id>' -ResourceGroup '<resource-group>' -AppName '<app-name>'
+```
+
+Use `-EnvFile 'C:\path\to\.env'` for another file or `-Slot 'staging'` for a deployment slot. The parser accepts `KEY=value`, optional `export`, comments, single/double-quoted values, quoted multiline values, and empty values; it does not expand variable references or execute file content. Invalid syntax and duplicate keys fail before applying settings. Empty values are intentionally applied, so review the file for placeholders and workstation-only paths first. Updating app settings may restart the app.
+
+Values are passed through a permission-restricted temporary JSON file, removed afterward, not through command-line arguments. CLI output is suppressed to avoid exposing secrets. Prefer managed identity and Key Vault references for deployed secrets. For test deployments without an app registration, explicitly set `AAA_AUTH_MODE=none`, `AAA_HOST=0.0.0.0`, and `AAA_BROWSER_MODE=disabled` in the imported file; enforce network restrictions.
+
+Reference: [Azure CLI App Service app settings](https://learn.microsoft.com/cli/azure/webapp/config/appsettings#az-webapp-config-appsettings-set).
+
+### Build and tests
 
 ```powershell
 npm run test:server

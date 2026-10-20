@@ -44,6 +44,12 @@ export class StorageUnavailableError extends HttpError {
   }
 }
 
+export class BrowserAutomationUnavailableError extends HttpError {
+  constructor(message: string, code: 'browser_automation_disabled' | 'browser_bridge_unavailable') {
+    super(message, 503, code);
+  }
+}
+
 /** An agent-run failure whose message is credential-safe and actionable for the user. */
 export class AgentRunError extends Error {
   constructor(message: string) {

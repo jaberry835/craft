@@ -14,6 +14,46 @@ test('browser URL validation permits HTTP(S) and rejects other schemes', () => {
   assert.throws(() => normalizeBrowserUrl('not a url'), /valid absolute HTTP or HTTPS URL/);
 });
 
+test('disabled and bridge browser operations never call the local launcher', async () => {
+  let launches = 0;
+  const launcher = async (): Promise<BrowserContextLike> => {
+    launches++;
+    throw new Error('The local browser launcher must not be called.');
+  };
+  const disabled = new BrowserCaptureService(path.join(root, 'disabled'), {}, launcher);
+  assert.deepEqual(disabled.status('demo'), {
+    enabled: false,
+    mode: 'disabled',
+    bridgeAvailable: false,
+    active: false
+  });
+  await assert.rejects(() => disabled.launch('demo'), { code: 'browser_automation_disabled', statusCode: 503 });
+
+  const bridge = new BrowserCaptureService(path.join(root, 'bridge'), { AAA_BROWSER_MODE: 'bridge' }, launcher);
+  assert.deepEqual(bridge.status('demo'), {
+    enabled: true,
+    mode: 'bridge',
+    bridgeAvailable: false,
+    active: false
+  });
+  await assert.rejects(() => bridge.launch('demo'), { code: 'browser_bridge_unavailable', statusCode: 503 });
+  for (const [service, code] of [
+    [disabled, 'browser_automation_disabled'],
+    [bridge, 'browser_bridge_unavailable']
+  ] as const) {
+    await assert.rejects(() => service.navigate('demo', { url: 'https://example.test' }), { code, statusCode: 503 });
+    await assert.rejects(() => service.capture('demo', new ProjectFileService(root)), { code, statusCode: 503 });
+    await assert.rejects(() => service.inspectForm('demo'), { code, statusCode: 503 });
+    await assert.rejects(() => service.fillForm('demo', { values: {} }), { code, statusCode: 503 });
+    await assert.rejects(() => service.uploadFormFile('demo', new ProjectFileService(root), {
+      fieldId: 'field-artifact01',
+      projectPath: 'evidence/control.txt'
+    }), { code, statusCode: 503 });
+    assert.equal((await service.close('demo')).active, false);
+  }
+  assert.equal(launches, 0);
+});
+
 test('Edge capture session navigates and writes PNG evidence with provenance', async (t) => {
   await rm(root, { recursive: true, force: true });
   const projectRoot = path.join(root, 'project');
@@ -84,7 +124,11 @@ test('Edge capture session navigates and writes PNG evidence with provenance', a
       closeListener = listener;
     }
   };
-  const service = new BrowserCaptureService(path.join(root, 'data'), {}, async () => context);
+  const service = new BrowserCaptureService(
+    path.join(root, 'data'),
+    { AAA_BROWSER_MODE: 'local' },
+    async () => context
+  );
   const status = await service.launch('demo', { headless: true });
   assert.equal(status.active, true);
   assert.equal(status.headless, true);
@@ -144,5 +188,10 @@ test('Edge capture session navigates and writes PNG evidence with provenance', a
   });
   assert.equal(filledSelector, '[data-aaa-field-id="field-artifact01"]');
   assert.equal(attachedFileName, 'control.txt');
-  assert.deepEqual(await service.close('demo'), { active: false });
+  assert.deepEqual(await service.close('demo'), {
+    enabled: true,
+    mode: 'local',
+    bridgeAvailable: false,
+    active: false
+  });
 });

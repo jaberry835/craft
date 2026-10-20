@@ -1,6 +1,5 @@
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
-import { chromium } from 'playwright-core';
 import type {
   BrowserCaptureRequest,
   BrowserCaptureResult,
@@ -11,7 +10,8 @@ import type {
   BrowserNavigateRequest,
   BrowserSessionStatus
 } from '../../src/types/api.js';
-import { BadRequestError, ConflictError } from '../httpErrors.js';
+import { loadBrowserAutomationConfig } from '../browserAutomationConfig.js';
+import { BadRequestError, BrowserAutomationUnavailableError, ConflictError } from '../httpErrors.js';
 import { ProjectFileService } from '../projectFileService.js';
 
 interface BrowserSession {
@@ -65,6 +65,11 @@ export interface BrowserLaunchOptions {
 
 export type BrowserLauncher = (profilePath: string, options: BrowserLaunchOptions) => Promise<BrowserContextLike>;
 
+const launchLocalBrowser: BrowserLauncher = async (profilePath, options) => {
+  const { chromium } = await import('playwright-core');
+  return chromium.launchPersistentContext(profilePath, options);
+};
+
 export function normalizeBrowserUrl(value: string): URL {
   let parsed: URL;
   try {
@@ -87,21 +92,29 @@ function capturePath(requestedPath?: string): string {
 
 export class BrowserCaptureService {
   private readonly sessions = new Map<string, BrowserSession>();
+  private readonly automationConfig;
 
   constructor(
     private readonly dataRoot: string,
     private readonly environment: NodeJS.ProcessEnv = process.env,
-    private readonly launcher: BrowserLauncher = (profilePath, options) =>
-      chromium.launchPersistentContext(profilePath, options)
-  ) {}
+    private readonly launcher: BrowserLauncher = launchLocalBrowser
+  ) {
+    this.automationConfig = loadBrowserAutomationConfig(environment);
+  }
 
   status(projectId: string): BrowserSessionStatus {
+    const capability = {
+      enabled: this.automationConfig.enabled,
+      mode: this.automationConfig.mode,
+      bridgeAvailable: false
+    };
     const session = this.sessions.get(projectId);
     if (!session || session.context.pages().length === 0) {
       this.sessions.delete(projectId);
-      return { active: false };
+      return { ...capability, active: false };
     }
     return {
+      ...capability,
       active: true,
       headless: session.headless,
       currentUrl: session.page.url(),
@@ -110,6 +123,7 @@ export class BrowserCaptureService {
   }
 
   async launch(projectId: string, request: BrowserLaunchRequest = {}): Promise<BrowserSessionStatus> {
+    this.assertAvailable();
     if (this.status(projectId).active) {
       throw new ConflictError('An Edge capture session is already running for this project.', 'browser_session_active');
     }
@@ -316,16 +330,32 @@ export class BrowserCaptureService {
       await session.context.close();
     }
 
-    return { active: false };
+    return this.status(projectId);
   }
 
   private requireSession(projectId: string): BrowserSession {
+    this.assertAvailable();
     const session = this.sessions.get(projectId);
     if (!session || session.context.pages().length === 0) {
       this.sessions.delete(projectId);
       throw new BadRequestError('Launch an Edge capture session first.', 'browser_session_inactive');
     }
     return session;
+  }
+
+  private assertAvailable(): void {
+    if (!this.automationConfig.enabled) {
+      throw new BrowserAutomationUnavailableError(
+        'Browser automation is not enabled for this deployment.',
+        'browser_automation_disabled'
+      );
+    }
+    if (this.automationConfig.mode === 'bridge') {
+      throw new BrowserAutomationUnavailableError(
+        'No browser bridge is connected. Start and pair the Node bridge, then try again.',
+        'browser_bridge_unavailable'
+      );
+    }
   }
 }
 

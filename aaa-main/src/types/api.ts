@@ -251,6 +251,9 @@ export interface BrowserCaptureRequest {
 }
 
 export interface BrowserSessionStatus {
+  enabled: boolean;
+  mode: 'disabled' | 'local' | 'bridge';
+  bridgeAvailable: boolean;
   active: boolean;
   headless?: boolean;
   currentUrl?: string;

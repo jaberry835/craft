@@ -36,3 +36,4 @@ Curated Demo Code
 | 2026-10-02 14:39 UTC | aaa | main | ~8 |
 | 2026-10-02 14:39 UTC | mcp-scanazure | main | ~5 |
 | 2026-10-06 13:44 UTC | aaa | main | +29, ~7 |
+| 2026-10-20 13:50 UTC | aaa | main | +13, ~14 |

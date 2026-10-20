@@ -384,7 +384,12 @@ function App({ user }: { user?: SignedInUser } = {}) {
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
   const [selectedFile, setSelectedFile] = useState<ProjectTextFile | null>(null);
   const [selectedImagePath, setSelectedImagePath] = useState('');
-  const [browserStatus, setBrowserStatus] = useState<BrowserSessionStatus>({ active: false });
+  const [browserStatus, setBrowserStatus] = useState<BrowserSessionStatus>({
+    enabled: false,
+    mode: 'disabled',
+    bridgeAvailable: false,
+    active: false
+  });
   const [browserUrl, setBrowserUrl] = useState('https://');
   const [browserHeadless, setBrowserHeadless] = useState(false);
   const [browserOutputPath, setBrowserOutputPath] = useState('');
@@ -393,6 +398,10 @@ function App({ user }: { user?: SignedInUser } = {}) {
   const [browserFormValues, setBrowserFormValues] = useState<Record<string, string | boolean>>({});
   const [browserFormUploads, setBrowserFormUploads] = useState<Record<string, string>>({});
   const [browserBusy, setBrowserBusy] = useState(false);
+  const browserAvailable = browserStatus.mode === 'local' || browserStatus.bridgeAvailable;
+  const browserUnavailableMessage = !browserStatus.enabled
+    ? 'Browser automation is not enabled for this deployment.'
+    : 'The local browser bridge is not connected.';
   const [publicationStatus, setPublicationStatus] = useState<PublicationStatus | null>(null);
   const [isReviewingFile, setIsReviewingFile] = useState(false);
   const [editorContent, setEditorContent] = useState('');
@@ -1107,7 +1116,7 @@ function App({ user }: { user?: SignedInUser } = {}) {
   }, [activeProjectId, gitBusy, gitDraft.message, isFileDirty, refreshFiles, selectedFile]);
 
   const launchBrowser = useCallback(async () => {
-    if (!activeProjectId || browserBusy) return;
+    if (!activeProjectId || browserBusy || !browserAvailable) return;
     setBrowserBusy(true);
     setError('');
     try {
@@ -1117,10 +1126,10 @@ function App({ user }: { user?: SignedInUser } = {}) {
     } finally {
       setBrowserBusy(false);
     }
-  }, [activeProjectId, browserBusy, browserHeadless]);
+  }, [activeProjectId, browserAvailable, browserBusy, browserHeadless]);
 
   const navigateBrowser = useCallback(async () => {
-    if (!activeProjectId || browserBusy) return;
+    if (!activeProjectId || browserBusy || !browserAvailable) return;
     setBrowserBusy(true);
     setError('');
     try {
@@ -1135,7 +1144,7 @@ function App({ user }: { user?: SignedInUser } = {}) {
     } finally {
       setBrowserBusy(false);
     }
-  }, [activeProjectId, browserBusy, browserHeadless, browserStatus.active, browserUrl]);
+  }, [activeProjectId, browserAvailable, browserBusy, browserHeadless, browserStatus.active, browserUrl]);
 
   const inspectBrowserForm = useCallback(async () => {
     if (!activeProjectId || browserBusy) return;
@@ -1202,8 +1211,9 @@ function App({ user }: { user?: SignedInUser } = {}) {
 
   const prepareEvidenceCapture = useCallback(async (href: string) => {
     const outputPath = evidenceCapturePath(href);
-    if (!activeProjectId || browserBusy || !outputPath) {
+    if (!activeProjectId || browserBusy || !outputPath || !browserAvailable) {
       if (!outputPath) setError('Only absolute HTTP and HTTPS links can be captured as evidence.');
+      else if (!browserAvailable) setError(browserUnavailableMessage);
       return;
     }
     setBrowserBusy(true);
@@ -1224,7 +1234,7 @@ function App({ user }: { user?: SignedInUser } = {}) {
     } finally {
       setBrowserBusy(false);
     }
-  }, [activeProjectId, browserBusy, browserHeadless, browserStatus.active]);
+  }, [activeProjectId, browserAvailable, browserBusy, browserHeadless, browserStatus.active, browserUnavailableMessage]);
 
   // Stable link renderer for the Markdown preview, so the memoized preview is only
   // re-parsed when the file text changes, while clicks still use the latest handler.
@@ -2400,7 +2410,9 @@ function App({ user }: { user?: SignedInUser } = {}) {
                       <span /><span /><span />
                       <div>
                         <ShieldCheck size={13} />
-                        {browserStatus.active ? browserStatus.currentUrl ?? 'Edge session active' : 'Microsoft Edge capture is not running'}
+                        {browserStatus.active
+                          ? browserStatus.currentUrl ?? 'Edge session active'
+                          : browserAvailable ? 'Microsoft Edge capture is ready' : browserUnavailableMessage}
                       </div>
                     </div>
                     <div className="browser-capture-panel">
@@ -2409,13 +2421,17 @@ function App({ user }: { user?: SignedInUser } = {}) {
                           <strong>Authenticated web evidence</strong>
                           <span>{browserStatus.active
                             ? `${browserStatus.headless ? 'Headless' : 'Visible'} Edge · profile retained for this project`
-                            : 'Launch visible Edge, authenticate, navigate, then capture evidence.'}</span>
+                            : browserAvailable
+                              ? 'Launch visible Edge, authenticate, navigate, then capture evidence.'
+                              : browserStatus.mode === 'bridge'
+                                ? 'Start and pair the optional Node bridge on a permitted workstation.'
+                                : 'An administrator can enable local or bridged browser automation.'}</span>
                         </div>
                         <label className="browser-headless">
                           <input
                             type="checkbox"
                             checked={browserHeadless}
-                            disabled={browserStatus.active || browserBusy}
+                            disabled={!browserAvailable || browserStatus.active || browserBusy}
                             onChange={(event) => setBrowserHeadless(event.target.checked)}
                           />
                           Headless
@@ -2428,7 +2444,7 @@ function App({ user }: { user?: SignedInUser } = {}) {
                           onChange={(event) => setBrowserUrl(event.target.value)}
                           placeholder="https://portal.example"
                         />
-                        <button className="secondary-button" disabled={browserBusy || !browserUrl.trim()} onClick={() => void navigateBrowser()}>
+                        <button className="secondary-button" disabled={!browserAvailable || browserBusy || !browserUrl.trim()} onClick={() => void navigateBrowser()}>
                           <Globe2 size={14} /> Go
                         </button>
                       </div>
@@ -2445,9 +2461,11 @@ function App({ user }: { user?: SignedInUser } = {}) {
                       </div>
                       <div className="browser-actions">
                         {!browserStatus.active
-                          ? <button className="dialog-primary" disabled={browserBusy} onClick={() => void launchBrowser()}><ExternalLink size={14} /> Launch Edge</button>
+                          ? <button className="dialog-primary" disabled={!browserAvailable || browserBusy} onClick={() => void launchBrowser()}><ExternalLink size={14} /> Launch Edge</button>
                           : <button className="secondary-button" disabled={browserBusy} onClick={() => void closeBrowser()}><X size={14} /> Close Edge</button>}
-                        <small>HTTP and HTTPS addresses are allowed. Credentials remain in the project-scoped Edge profile and are never stored in package artifacts.</small>
+                        <small>{browserStatus.mode === 'bridge'
+                          ? 'The bridge runs Edge under the signed-in desktop user. Certificates and credentials remain on that workstation.'
+                          : 'HTTP and HTTPS addresses are allowed. Credentials remain in the project-scoped Edge profile and are never stored in package artifacts.'}</small>
                       </div>
                       {browserStatus.active && (
                         <div className="browser-form-assistant">

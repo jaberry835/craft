@@ -36,27 +36,44 @@ const sessionCookie = 'aaa_session';
 const sessionRefreshMs = 55 * 60_000;
 
 export function loadAppAuthConfig(environment: NodeJS.ProcessEnv = process.env): AppAuthConfig {
-  const raw = environment.AAA_AUTH_MODE?.trim().toLowerCase() || 'none';
+  const legacyMode = environment.JUNIOR_IDENTITY_MODE?.trim().toLowerCase();
+  const raw = environment.AAA_AUTH_MODE?.trim().toLowerCase()
+    || (legacyMode === 'entra-msal' || legacyMode === 'entra' ? 'entra' : legacyMode === 'local-fallback' ? 'none' : 'none');
   if (raw !== 'none' && raw !== 'entra') {
     throw new Error(`AAA_AUTH_MODE must be "none" or "entra"; received "${raw}".`);
   }
+  const firstDefined = (...names: string[]) => {
+    for (const name of names) {
+      const value = environment[name]?.trim();
+      if (value) return value;
+    }
+    return '';
+  };
   const list = (name: string) => (environment[name] ?? '').split(',').map((item) => item.trim()).filter(Boolean);
-  const tenantId = environment.AAA_ENTRA_TENANT_ID?.trim() ?? '';
-  const clientId = environment.AAA_ENTRA_CLIENT_ID?.trim() ?? '';
-  const authorityHost = (environment.AAA_ENTRA_AUTHORITY_HOST?.trim() || 'https://login.microsoftonline.com').replace(/\/+$/, '');
-  const audience = environment.AAA_ENTRA_API_AUDIENCE?.trim() || (clientId ? `api://${clientId}` : '');
+  const tenantId = firstDefined('AAA_ENTRA_TENANT_ID', 'JUNIOR_ENTRA_TENANT_ID');
+  const clientId = firstDefined('AAA_ENTRA_CLIENT_ID', 'JUNIOR_ENTRA_CLIENT_ID');
+  const rawAuthority = firstDefined('AAA_ENTRA_AUTHORITY_HOST', 'JUNIOR_ENTRA_AUTHORITY');
+  const authorityHost = (() => {
+    const trimmed = (rawAuthority || 'https://login.microsoftonline.com').replace(/\/+$/, '');
+    try {
+      return new URL(trimmed).origin;
+    } catch {
+      return trimmed;
+    }
+  })();
+  const audience = firstDefined('AAA_ENTRA_API_AUDIENCE', 'JUNIOR_ENTRA_API_AUDIENCE') || (clientId ? `api://${clientId}` : '');
   const config: AppAuthConfig = {
     mode: raw,
     tenantId,
     clientId,
     authorityHost,
     audiences: [...new Set([audience, clientId, clientId ? `api://${clientId}` : ''].filter(Boolean))],
-    scopes: list('AAA_ENTRA_SCOPES').length ? list('AAA_ENTRA_SCOPES') : (audience ? [`${audience}/access_as_user`] : []),
+    scopes: list('AAA_ENTRA_SCOPES').length ? list('AAA_ENTRA_SCOPES') : (list('JUNIOR_ENTRA_SCOPES').length ? list('JUNIOR_ENTRA_SCOPES') : (audience ? [`${audience}/access_as_user`] : [])),
     issuers: list('AAA_ENTRA_ISSUERS').length
       ? list('AAA_ENTRA_ISSUERS')
       : [`${authorityHost}/${tenantId}/v2.0`, `https://sts.windows.net/${tenantId}/`],
     allowedRoles: list('AAA_ENTRA_ALLOWED_ROLES'),
-    ...(environment.AAA_ENTRA_REDIRECT_URI?.trim() ? { redirectUri: environment.AAA_ENTRA_REDIRECT_URI.trim() } : {})
+    ...(firstDefined('AAA_ENTRA_REDIRECT_URI', 'JUNIOR_ENTRA_REDIRECT_URI') ? { redirectUri: firstDefined('AAA_ENTRA_REDIRECT_URI', 'JUNIOR_ENTRA_REDIRECT_URI') } : {})
   };
   if (config.mode === 'entra') {
     const missing = [!tenantId && 'AAA_ENTRA_TENANT_ID', !clientId && 'AAA_ENTRA_CLIENT_ID'].filter(Boolean);

@@ -68,6 +68,20 @@ test('sign-in is off by default and entra mode requires tenant and client ids', 
   assert.deepEqual(config.scopes, [`api://${clientId}/access_as_user`]);
   assert.deepEqual(config.issuers, [`https://login.microsoftonline.us/${tenant}/v2.0`, `https://sts.windows.net/${tenant}/`]);
   assert.deepEqual(config.allowedRoles, ['AAA.User', 'AAA.Admin']);
+  const legacyConfig = loadAppAuthConfig({
+    JUNIOR_IDENTITY_MODE: 'entra-msal',
+    JUNIOR_ENTRA_TENANT_ID: tenant,
+    JUNIOR_ENTRA_CLIENT_ID: clientId,
+    JUNIOR_ENTRA_AUTHORITY: `https://login.microsoftonline.com/${tenant}`,
+    JUNIOR_ENTRA_SCOPES: `api://${clientId}/Junior.Workbench.Access`,
+    JUNIOR_ENTRA_REDIRECT_URI: 'http://localhost:5173'
+  });
+  assert.equal(legacyConfig.mode, 'entra');
+  assert.equal(legacyConfig.tenantId, tenant);
+  assert.equal(legacyConfig.clientId, clientId);
+  assert.equal(legacyConfig.authorityHost, 'https://login.microsoftonline.com');
+  assert.equal(legacyConfig.redirectUri, 'http://localhost:5173');
+  assert.deepEqual(legacyConfig.scopes, [`api://${clientId}/Junior.Workbench.Access`]);
 });
 
 test('the Entra verifier accepts valid v1 and v2 tokens and rejects wrong audience or expired tokens', async (t) => {
