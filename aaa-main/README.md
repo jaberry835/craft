@@ -249,7 +249,7 @@ npm run build
 npm start
 ```
 
-The full build creates `dist`, containing `index.js` (the bundled server), `client`, `config` (safe container configuration), `template`, and an ESM `package.json`. It contains no `node_modules`, Playwright package code, or browser binaries. To run the prebuilt artifact from the repository:
+The full build creates `dist`, containing `index.js` (the compiled server), `client`, `config` (safe container configuration), `template`, an ESM `package.json`, and production `node_modules` copied from the installed dependency tree. It excludes development tools, Playwright package code, and browser binaries. To run the prebuilt artifact from the repository:
 
 ```powershell
 node dist\index.js
@@ -259,7 +259,7 @@ node dist\index.js
 
 The Dockerfile and image-push script default to `node:24-alpine`. The image copies `dist` to `/app/dist`, the generated `dist/config` to `/app/config`, and `dist/template` to `/app/template`, creates writable `logs` and `data` directories, exposes port 8080, and starts `node dist/index.js`. `AAA_PROJECT_TEMPLATE=/app/template` selects the copied template. Generated configuration avoids copying the development VM's Windows project paths. No npm install or browser installation happens in the image. Keep `AAA_BROWSER_MODE=disabled` (the Dockerfile default); bridge mode currently reports no connected bridge. `BASE_IMAGE` (or the push script's `-BaseImage`) can override the base.
 
-Every `npm run build` rejects bundled Playwright package code or unresolved runtime dependencies, then smoke-tests an isolated copy using the Docker directory layout without `node_modules`: startup, client serving, health, browser status, and launch rejection in disabled, bridge, and local modes. Run `npm run test:runtime` to repeat these checks against an existing build.
+Every `npm run build` rejects Playwright package code, native addons, or runtime dependencies resolving outside `dist/node_modules`, then smoke-tests an isolated copy using the Docker directory layout: startup, client serving, health, browser status, and launch rejection in disabled, bridge, and local modes. Run `npm run test:runtime` to repeat these checks against an existing build. The build copies already-installed production packages without downloading dependencies; Windows-native development tools are not shipped.
 
 `npm ci --offline` succeeds only when every package tarball referenced by the lock file is already present in the transferred npm cache. The build VM needs the Windows esbuild binary, but that binary and other development dependencies are not copied into `dist`. The MCP client is implemented in this repository and adds no runtime files. Configured model and Cosmos connections are made by the backend and remain optional for local JSON operation.
 
@@ -277,6 +277,8 @@ Use PowerShell 7.2+ and Azure CLI, signed in to the target cloud/subscription. T
 Use `-EnvFile 'C:\path\to\.env'` for another file or `-Slot 'staging'` for a deployment slot. The parser accepts `KEY=value`, optional `export`, comments, single/double-quoted values, quoted multiline values, and empty values; it does not expand variable references or execute file content. Invalid syntax and duplicate keys fail before applying settings. Empty values are intentionally applied, so review the file for placeholders and workstation-only paths first. Updating app settings may restart the app.
 
 Values are passed through a permission-restricted temporary JSON file, removed afterward, not through command-line arguments. CLI output is suppressed to avoid exposing secrets. Prefer managed identity and Key Vault references for deployed secrets. For test deployments without an app registration, explicitly set `AAA_AUTH_MODE=none`, `AAA_HOST=0.0.0.0`, and `AAA_BROWSER_MODE=disabled` in the imported file; enforce network restrictions.
+
+Run `npm run test:appservice-env` to validate parsing, slot targeting, dry-run behavior, secret suppression, and cleanup with a mocked Azure CLI. This does not change a real App Service.
 
 Reference: [Azure CLI App Service app settings](https://learn.microsoft.com/cli/azure/webapp/config/appsettings#az-webapp-config-appsettings-set).
 

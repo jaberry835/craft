@@ -23,7 +23,11 @@ for (const [mode, authMode] of [
     await mkdir(path.join(temporaryRoot, 'logs'));
     await mkdir(path.join(temporaryRoot, 'data'));
     const entries = await readdir(temporaryRoot, { recursive: true });
-    assert.ok(!entries.some((entry) => entry.split(path.sep).includes('node_modules')));
+    assert.ok(entries.includes(path.join('dist', 'node_modules', 'express', 'package.json')));
+    for (const excluded of ['playwright-core', 'esbuild', 'typescript', 'vite', 'tsx']) {
+      assert.ok(!entries.includes(path.join('dist', 'node_modules', excluded, 'package.json')));
+    }
+    assert.ok(!entries.some((entry) => entry.endsWith('.node') || path.basename(entry) === '.env'));
     assert.ok(!entries.some((entry) => /playwright/i.test(entry)));
 
     const environment = Object.fromEntries(Object.entries(process.env)

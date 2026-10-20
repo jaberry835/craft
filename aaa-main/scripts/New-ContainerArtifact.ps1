@@ -29,8 +29,8 @@ try {
     }
     Invoke-CheckedCommand npm run build
 
-    if (Get-ChildItem -LiteralPath $artifactRoot -Directory -Recurse -Filter 'node_modules') {
-        throw 'The self-contained runtime must not contain node_modules.'
+    if (-not (Test-Path -LiteralPath (Join-Path $artifactRoot 'node_modules') -PathType Container)) {
+        throw 'The runtime must contain production node_modules. Run npm run build first.'
     }
     Write-Host "Self-contained container runtime is ready at $artifactRoot"
 }

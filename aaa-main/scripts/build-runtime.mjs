@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import { cp, mkdir, rm, writeFile } from 'node:fs/promises';
-import { builtinModules } from 'node:module';
+import { cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { builtinModules, createRequire } from 'node:module';
 import path from 'node:path';
 import process from 'node:process';
 import { build } from 'esbuild';
@@ -28,10 +28,36 @@ const omitLocalPlaywright = {
   }
 };
 
-for (const directory of ['runtime', 'container', 'server', 'src', 'config', 'template']) {
+for (const directory of ['runtime', 'container', 'server', 'src', 'config', 'template', 'node_modules']) {
   await rm(path.join(distRoot, directory), { recursive: true, force: true });
 }
 await mkdir(path.join(distRoot, 'config'), { recursive: true });
+
+const dependencyPaths = execFileSync(
+  process.platform === 'win32' ? process.env.ComSpec || 'cmd.exe' : 'npm',
+  process.platform === 'win32'
+    ? ['/d', '/s', '/c', 'npm ls --omit=dev --all --parseable']
+    : ['ls', '--omit=dev', '--all', '--parseable'],
+  { cwd: repositoryRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }
+).trim().split(/\r?\n/).filter((entry) => path.resolve(entry) !== repositoryRoot);
+for (const source of new Set(dependencyPaths)) {
+  const relative = path.relative(repositoryRoot, source);
+  if (!relative.startsWith(`node_modules${path.sep}`)) {
+    throw new Error(`Runtime dependency must be installed inside node_modules: ${source}`);
+  }
+  const metadata = JSON.parse(await readFile(path.join(source, 'package.json'), 'utf8'));
+  if (/^(playwright(?:-core)?|@playwright\/)/.test(metadata.name)) {
+    throw new Error(`Playwright must remain a development-only dependency: ${metadata.name}`);
+  }
+  await cp(source, path.join(distRoot, relative), {
+    recursive: true,
+    filter: (entry) => !path.relative(source, entry).split(path.sep).includes('node_modules')
+  });
+}
+const stagedEntries = await readdir(path.join(distRoot, 'node_modules'), { recursive: true });
+if (stagedEntries.some((entry) => entry.endsWith('.node'))) {
+  throw new Error('Runtime dependencies contain native addons. Stage dependencies on the target container platform instead.');
+}
 
 const bundleResult = await build({
   entryPoints: [path.join(repositoryRoot, 'server', 'index.ts')],
@@ -40,7 +66,7 @@ const bundleResult = await build({
   platform: 'node',
   target: 'node22',
   format: 'esm',
-  packages: 'bundle',
+  packages: 'external',
   plugins: [omitLocalPlaywright],
   metafile: true,
   define: {
@@ -60,12 +86,16 @@ const playwrightInputs = Object.keys(bundleResult.metafile.inputs)
 if (playwrightInputs.length > 0) {
   throw new Error(`Container runtime must not bundle Playwright: ${playwrightInputs.join(', ')}`);
 }
-const unresolvedPackages = Object.values(bundleResult.metafile.outputs)
+const runtimeRequire = createRequire(path.join(distRoot, 'index.js'));
+const runtimePackages = Object.values(bundleResult.metafile.outputs)
   .flatMap((output) => output.imports)
   .filter((entry) => entry.external && !nodeBuiltins.has(entry.path))
   .map((entry) => entry.path);
-if (unresolvedPackages.length > 0) {
-  throw new Error(`Server bundle contains unresolved runtime packages: ${[...new Set(unresolvedPackages)].join(', ')}`);
+for (const specifier of new Set(runtimePackages)) {
+  const resolved = runtimeRequire.resolve(specifier);
+  if (!resolved.startsWith(path.join(distRoot, 'node_modules') + path.sep)) {
+    throw new Error(`Runtime package resolves outside the artifact: ${specifier}`);
+  }
 }
 
 await Promise.all([
