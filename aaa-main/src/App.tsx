@@ -12,6 +12,7 @@ import {
   Cloud,
   Code2,
   Database,
+  Download,
   ExternalLink,
   Eye,
   EyeOff,
@@ -412,6 +413,7 @@ function App({ user }: { user?: SignedInUser } = {}) {
   const [draggedFilePath, setDraggedFilePath] = useState('');
   const [moveTargetPath, setMoveTargetPath] = useState<string | null>(null);
   const [isUploadingFiles, setIsUploadingFiles] = useState(false);
+  const [isExportingProject, setIsExportingProject] = useState(false);
   const [showDiscardDialog, setShowDiscardDialog] = useState(false);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [showCreateProject, setShowCreateProject] = useState(false);
@@ -1391,6 +1393,32 @@ function App({ user }: { user?: SignedInUser } = {}) {
     }
   }, [activeProjectId, isUploadingFiles, refreshFiles]);
 
+  const downloadProjectZip = useCallback(async () => {
+    if (!activeProjectId || isExportingProject) return;
+    setError('');
+    setIsExportingProject(true);
+    try {
+      const { blob, filename } = await aaaApi.exportProjectZip(activeProjectId, {
+        includeHidden: showHiddenFilesRef.current
+      });
+      const url = URL.createObjectURL(blob);
+      try {
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    } catch (exportError) {
+      setError(exportError instanceof Error ? exportError.message : 'Could not export the project as a ZIP.');
+    } finally {
+      setIsExportingProject(false);
+    }
+  }, [activeProjectId, isExportingProject]);
+
   const handleFileDrop = useCallback((
     event: React.DragEvent<HTMLElement>,
     destination: string
@@ -2185,6 +2213,15 @@ function App({ user }: { user?: SignedInUser } = {}) {
                     {showHiddenFiles ? <Eye size={14} /> : <EyeOff size={14} />}
                   </button>
                   <button className="icon-button small" onClick={() => void refreshFiles()} aria-label="Refresh files" title="Refresh files"><RefreshCw size={14} /></button>
+                  <button
+                    className="icon-button small"
+                    disabled={isExportingProject}
+                    onClick={() => void downloadProjectZip()}
+                    aria-label="Download project as ZIP"
+                    title="Download project as ZIP"
+                  >
+                    <Download size={14} />
+                  </button>
                 </div>
               </div>
               <div className={`file-drop-hint ${isUploadingFiles ? 'uploading' : ''}`}>

@@ -150,6 +150,7 @@ App sign-in is off by default (`AAA_AUTH_MODE=none`). Set `AAA_AUTH_MODE=entra` 
 | `AAA_PROJECT_ADMIN_ROLES` | no | Comma-separated app roles allowed to view and administer every project ACL. |
 | `AAA_ENTRA_ISSUERS` | no | Override accepted token issuers (defaults accept v2 `<authority>/<tenant>/v2.0` and v1 `https://sts.windows.net/<tenant>/`). |
 | `AAA_ENTRA_REDIRECT_URI` | no | Redirect URI registered for the SPA; defaults to the page origin. |
+| `AAA_ENTRA_JWKS_CA_FILE` | no | Server-side PEM CA bundle for HTTPS signing-key retrieval; falls back to `NODE_EXTRA_CA_CERTS`. When set, jose v6 uses its `[customFetch]` hook with a CA-backed Node HTTPS agent. The bundle must trust the JWKS endpoint's certificate chain; TLS certificate and hostname verification remain enabled. Unreadable files fail verifier initialization. |
 | `AAA_HOST` | no | Listen address (default `127.0.0.1`). Use `0.0.0.0` in a container. With auth off, non-loopback hosts are allowed with a startup warning. |
 
 App registration: add a **Single-page application** platform with the AAA URL as a redirect URI (for example `http://localhost:5190` and the deployed origin), **Expose an API** with the Application ID URI `api://<client-id>` and a delegated scope `access_as_user`, and optionally define app roles (for example `AAA.User`) and list them in `AAA_ENTRA_ALLOWED_ROLES`.

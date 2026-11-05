@@ -3,6 +3,7 @@ import { copyFile, cp, lstat, mkdir, readFile, readdir, realpath, rename, rm, st
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as wait } from 'node:timers/promises';
 import path from 'node:path';
+import archiver, { type Archiver } from 'archiver';
 import { BadRequestError, ConflictError, NotFoundError, PathBoundaryError, UnsupportedFileError } from './httpErrors.js';
 import type {
   FileTreeNode,
@@ -183,6 +184,44 @@ export class ProjectFileService {
   async listTree(options: { includeHidden?: boolean; path?: string } = {}): Promise<FileTreeNode[]> {
     const relativePath = options.path ? this.normalizeRelativePath(options.path) : '';
     return this.readDirectory(relativePath, options.includeHidden ?? false);
+  }
+
+  /**
+   * Streams a project directory (defaulting to the whole project) as a ZIP archive,
+   * honoring the same hidden-file and excluded-directory rules as the file tree.
+   */
+  async createZipArchive(
+    options: { path?: string; includeHidden?: boolean } = {}
+  ): Promise<{ archive: Archiver; filename: string }> {
+    const relativePath = options.path ? this.normalizeRelativePath(options.path) : '';
+    const absolutePath = relativePath ? await this.resolveExistingPath(relativePath) : this.rootPath;
+    const directoryStats = await stat(absolutePath);
+    if (!directoryStats.isDirectory()) {
+      throw new BadRequestError(`Project path is not a directory: ${relativePath}`, 'path_not_directory');
+    }
+    const includeHidden = options.includeHidden ?? false;
+    const nodes = await this.readDirectory(relativePath, includeHidden);
+    const archive = archiver('zip', { zlib: { level: 9 } });
+    const prefixLength = relativePath ? relativePath.length + 1 : 0;
+    const addNodes = (entries: FileTreeNode[]) => {
+      for (const entry of entries) {
+        const entryName = entry.path.slice(prefixLength);
+        if (entry.type === 'directory') {
+          const children = entry.children ?? [];
+          if (children.length === 0) {
+            archive.append(Buffer.alloc(0), { name: `${entryName}/` });
+          } else {
+            addNodes(children);
+          }
+        } else {
+          archive.file(path.join(this.rootPath, entry.path), { name: entryName });
+        }
+      }
+    };
+    addNodes(nodes);
+    void archive.finalize();
+    const filename = `${relativePath ? path.posix.basename(relativePath) : path.basename(this.rootPath)}.zip`;
+    return { archive, filename };
   }
 
   /** Case-insensitive text search across supported text files under an optional project subdirectory. */

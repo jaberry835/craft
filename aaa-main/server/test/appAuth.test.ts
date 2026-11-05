@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
 import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import test from 'node:test';
@@ -16,6 +18,8 @@ import type { ChatSession } from '../../src/types/api.js';
 const tenant = '11111111-2222-3333-4444-555555555555';
 const clientId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 const root = path.join(process.cwd(), '.test-data', 'app-auth');
+const tlsCertFile = path.join(process.cwd(), 'server', 'test', 'fixtures', 'jwks-tls', 'localhost-cert.pem');
+const tlsKeyFile = path.join(process.cwd(), 'server', 'test', 'fixtures', 'jwks-tls', 'localhost-key.pem');
 
 async function listen(server: Server): Promise<string> {
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -23,13 +27,15 @@ async function listen(server: Server): Promise<string> {
 }
 
 /** A local stand-in for the Entra discovery keys endpoint plus a token factory. */
-async function startIdentityProvider() {
+async function startIdentityProvider(tls = false) {
   const { publicKey, privateKey } = await generateKeyPair('RS256');
   const jwk: JWK = { ...await exportJWK(publicKey), kid: 'test-key', alg: 'RS256', use: 'sig' };
   const app = express();
   app.get(`/${tenant}/discovery/v2.0/keys`, (_request, response) => response.json({ keys: [jwk] }));
-  const server = createServer(app);
-  const authorityHost = await listen(server);
+  const server = tls
+    ? createHttpsServer({ cert: readFileSync(tlsCertFile), key: readFileSync(tlsKeyFile) }, app)
+    : createServer(app);
+  const authorityHost = (await listen(server)).replace(/^http:/, tls ? 'https:' : 'http:');
   const sign = (claims: Record<string, unknown>, options: { issuer?: string; audience?: string; expiresIn?: string } = {}) =>
     new SignJWT({ oid: 'user-1', tid: tenant, name: 'Ada Analyst', preferred_username: 'ada@agency.gov', ...claims })
       .setProtectedHeader({ alg: 'RS256', kid: 'test-key' })
@@ -82,6 +88,12 @@ test('sign-in is off by default and entra mode requires tenant and client ids', 
   assert.equal(legacyConfig.authorityHost, 'https://login.microsoftonline.com');
   assert.equal(legacyConfig.redirectUri, 'http://localhost:5173');
   assert.deepEqual(legacyConfig.scopes, [`api://${clientId}/Junior.Workbench.Access`]);
+  assert.equal(loadAppAuthConfig({ NODE_EXTRA_CA_CERTS: 'extra.pem' }).jwksCaFile, 'extra.pem');
+  assert.equal(loadAppAuthConfig({
+    NODE_EXTRA_CA_CERTS: 'extra.pem',
+    AAA_ENTRA_JWKS_CA_FILE: 'agency.pem'
+  }).jwksCaFile, 'agency.pem');
+  assert.equal(loadAppAuthConfig({}).jwksCaFile, undefined);
 });
 
 test('the Entra verifier accepts valid v1 and v2 tokens and rejects wrong audience or expired tokens', async (t) => {
@@ -94,8 +106,34 @@ test('the Entra verifier accepts valid v1 and v2 tokens and rejects wrong audien
   assert.equal((await verify(await idp.sign({}, { issuer: `https://sts.windows.net/${tenant}/`, audience: clientId }))).identity.userId, 'user-1');
   t.mock.method(console, 'log', () => {});
   await assert.rejects(async () => verify(await idp.sign({}, { audience: 'api://someone-else' })), /invalid or expired/);
+  await assert.rejects(async () => verify(await idp.sign({}, { issuer: 'https://wrong-issuer.example' })), /invalid or expired/);
   await assert.rejects(async () => verify(await idp.sign({}, { expiresIn: '-1m' })), /invalid or expired/);
   await assert.rejects(async () => verify('not-a-jwt'), /invalid or expired/);
+});
+
+test('the Entra verifier uses the CA-backed jose customFetch hook without relaxing token validation', async (t) => {
+  const idp = await startIdentityProvider(true);
+  t.after(idp.close);
+  const token = await idp.sign({});
+  await assert.rejects(createEntraTokenVerifier(idp.config())(token), /invalid or expired/);
+
+  const defaultFetch = t.mock.method(globalThis, 'fetch', () => {
+    throw new Error('JWKS must use node:https, not the default fetch');
+  });
+  for (const environment of [
+    { AAA_ENTRA_JWKS_CA_FILE: tlsCertFile },
+    { NODE_EXTRA_CA_CERTS: tlsCertFile }
+  ]) {
+    const { jwksCaFile } = loadAppAuthConfig(environment);
+    const verify = createEntraTokenVerifier(idp.config({ jwksCaFile }));
+    assert.equal((await verify(token)).identity.userId, 'user-1');
+    assert.equal((await verify(await idp.sign({}, { issuer: `https://sts.windows.net/${tenant}/`, audience: clientId }))).identity.userId, 'user-1');
+    await assert.rejects(verify(await idp.sign({}, { issuer: 'https://wrong-issuer.example' })), /invalid or expired/);
+    await assert.rejects(verify(await idp.sign({}, { audience: 'wrong-audience' })), /invalid or expired/);
+    await assert.rejects(verify(await idp.sign({}, { expiresIn: '-1m' })), /invalid or expired/);
+  }
+  assert.equal(defaultFetch.mock.callCount(), 0);
+  assert.throws(() => createEntraTokenVerifier(idp.config({ jwksCaFile: `${tlsCertFile}.missing` })), /ENOENT/);
 });
 
 test('entra mode protects the API, issues a GET-only cookie, enforces roles, and records who ran the agent', async (t) => {

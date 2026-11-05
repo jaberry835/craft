@@ -336,7 +336,56 @@ test('supported images use fixed content types and unsafe SVG is rejected', asyn
   }
 });
 
-test('concurrent review marking keeps every review and publishes only reviewed bytes', async () => {
+test('ZIP export streams filtered directories, supports scoping to a subfolder, and rejects invalid paths', async () => {
+  const root = `${fixtureRoot}-zip`;
+  const outside = `${outsideRoot}-zip`;
+  await rm(root, { recursive: true, force: true });
+  await rm(outside, { recursive: true, force: true });
+  await mkdir(path.join(root, 'docs'), { recursive: true });
+  await mkdir(path.join(root, 'node_modules'), { recursive: true });
+  await mkdir(path.join(root, '.hidden'), { recursive: true });
+  await mkdir(outside, { recursive: true });
+  await writeFile(path.join(root, 'docs', 'scope.md'), '# Scope\n', 'utf8');
+  await writeFile(path.join(root, 'node_modules', 'ignored.js'), 'ignored', 'utf8');
+  await writeFile(path.join(root, '.hidden', 'secret.txt'), 'hidden', 'utf8');
+  await writeFile(path.join(outside, 'outside.txt'), 'outside', 'utf8');
+
+  const readArchive = async (archive: { [Symbol.asyncIterator](): AsyncIterator<unknown> }): Promise<Buffer> => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of archive) chunks.push(chunk as Buffer);
+    return Buffer.concat(chunks);
+  };
+
+  try {
+    const service = new ProjectFileService(root);
+
+    const whole = await service.createZipArchive();
+    assert.equal(whole.filename, `${path.basename(root)}.zip`);
+    const wholeBytes = await readArchive(whole.archive);
+    assert.ok(wholeBytes.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04])), 'starts with a ZIP signature');
+    const wholeText = wholeBytes.toString('latin1');
+    assert.ok(wholeText.includes('docs/scope.md'));
+    assert.ok(!wholeText.includes('node_modules'));
+    assert.ok(!wholeText.includes('.hidden'));
+
+    const hidden = await service.createZipArchive({ includeHidden: true });
+    const hiddenText = (await readArchive(hidden.archive)).toString('latin1');
+    assert.ok(hiddenText.includes('.hidden/secret.txt'));
+
+    const scoped = await service.createZipArchive({ path: 'docs' });
+    assert.equal(scoped.filename, 'docs.zip');
+    const scopedText = (await readArchive(scoped.archive)).toString('latin1');
+    assert.ok(scopedText.includes('scope.md'));
+    assert.ok(!scopedText.includes('docs/scope.md'));
+
+    await assert.rejects(() => service.createZipArchive({ path: '../outside' }), PathBoundaryError);
+    await assert.rejects(() => service.createZipArchive({ path: 'docs/scope.md' }), BadRequestError);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
   const root = `${fixtureRoot}-review-race`;
   await rm(root, { recursive: true, force: true });
   await mkdir(root, { recursive: true });

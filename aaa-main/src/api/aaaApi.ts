@@ -308,6 +308,32 @@ export const aaaApi = {
     }),
   imageUrl: (projectId: string, filePath: string) =>
     `${projectPath(projectId)}/images?path=${encodeURIComponent(filePath)}`,
+  exportProjectZip: async (
+    projectId: string,
+    options: { path?: string; includeHidden?: boolean } = {}
+  ): Promise<{ blob: Blob; filename: string }> => {
+    const params = new URLSearchParams();
+    if (options.path) params.set('path', options.path);
+    if (options.includeHidden) params.set('hidden', 'true');
+    const query = params.toString();
+    const url = `${projectPath(projectId)}/export${query ? `?${query}` : ''}`;
+    const response = await authorizedFetch(url);
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({ error: response.statusText, code: 'request_failed' })) as {
+        error?: string;
+        code?: string;
+      };
+      logApiFailure('GET', url, `HTTP ${response.status} ${payload.code ?? ''} ${payload.error ?? response.statusText}`.trim());
+      throw new ApiRequestError(response.status, payload.code ?? 'request_failed', payload.error ?? response.statusText);
+    }
+    const disposition = response.headers.get('content-disposition') ?? '';
+    const encodedMatch = /filename\*=UTF-8''([^;]+)/.exec(disposition);
+    const quotedMatch = /filename="([^"]*)"/.exec(disposition);
+    const filename = encodedMatch
+      ? decodeURIComponent(encodedMatch[1]!)
+      : quotedMatch?.[1] ?? 'project.zip';
+    return { blob: await response.blob(), filename };
+  },
   getPublicationStatus: (projectId: string, filePath: string) =>
     requestJson<PublicationStatus>(
       `${projectPath(projectId)}/publication-status?path=${encodeURIComponent(filePath)}`

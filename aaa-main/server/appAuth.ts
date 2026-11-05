@@ -1,6 +1,8 @@
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { Agent, request } from 'node:https';
 import type express from 'express';
-import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
+import { createRemoteJWKSet, customFetch, jwtVerify, type FetchImplementation, type JWTPayload } from 'jose';
 import { AuthenticationError, AuthorizationError } from './httpErrors.js';
 import { log } from './logger.js';
 import type { AuthConfigResponse, AuthIdentity } from '../src/types/api.js';
@@ -28,6 +30,7 @@ export interface AppAuthConfig {
   issuers: string[];
   allowedRoles: string[];
   redirectUri?: string;
+  jwksCaFile?: string;
 }
 
 export type TokenVerifier = (token: string) => Promise<{ identity: AuthIdentity; expiresAt: number }>;
@@ -73,6 +76,7 @@ export function loadAppAuthConfig(environment: NodeJS.ProcessEnv = process.env):
       ? list('AAA_ENTRA_ISSUERS')
       : [`${authorityHost}/${tenantId}/v2.0`, `https://sts.windows.net/${tenantId}/`],
     allowedRoles: list('AAA_ENTRA_ALLOWED_ROLES'),
+    ...(firstDefined('AAA_ENTRA_JWKS_CA_FILE', 'NODE_EXTRA_CA_CERTS') ? { jwksCaFile: firstDefined('AAA_ENTRA_JWKS_CA_FILE', 'NODE_EXTRA_CA_CERTS') } : {}),
     ...(firstDefined('AAA_ENTRA_REDIRECT_URI', 'JUNIOR_ENTRA_REDIRECT_URI') ? { redirectUri: firstDefined('AAA_ENTRA_REDIRECT_URI', 'JUNIOR_ENTRA_REDIRECT_URI') } : {})
   };
   if (config.mode === 'entra') {
@@ -110,7 +114,9 @@ interface EntraClaims extends JWTPayload {
 }
 
 export function createEntraTokenVerifier(config: AppAuthConfig): TokenVerifier {
-  const jwks = createRemoteJWKSet(new URL(`${config.authorityHost}/${config.tenantId}/discovery/v2.0/keys`));
+  const jwks = createRemoteJWKSet(new URL(`${config.authorityHost}/${config.tenantId}/discovery/v2.0/keys`), {
+    ...(config.jwksCaFile ? { [customFetch]: createJwksFetch(config.jwksCaFile) } : {})
+  });
   return async (token) => {
     let payload: EntraClaims;
     try {
@@ -121,6 +127,40 @@ export function createEntraTokenVerifier(config: AppAuthConfig): TokenVerifier {
     }
     return { identity: identityFromClaims(payload), expiresAt: (payload.exp ?? 0) * 1000 };
   };
+}
+
+function createJwksFetch(caFile: string): FetchImplementation {
+  const agent = new Agent({ ca: readFileSync(caFile, 'utf8'), keepAlive: true });
+  return (url, options) => new Promise<Response>((resolve, reject) => {
+    const req = request(url, {
+      agent,
+      method: options.method,
+      headers: Object.fromEntries(options.headers),
+      signal: options.signal
+    }, (response) => {
+      const headers = new Headers();
+      for (let i = 0; i < response.rawHeaders.length; i += 2) {
+        headers.append(response.rawHeaders[i], response.rawHeaders[i + 1]);
+      }
+      const chunks: Buffer[] = [];
+      response.on('data', (chunk: Buffer) => chunks.push(chunk));
+      response.on('error', reject);
+      response.on('end', () => {
+        try {
+          const status = response.statusCode;
+          if (status === undefined) throw new Error('JWKS HTTPS response has no status code.');
+          resolve(new Response([204, 205, 304].includes(status) ? null : Buffer.concat(chunks).toString('utf8'), {
+            status,
+            headers
+          }));
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+    req.on('error', reject);
+    req.end();
+  });
 }
 
 export function identityFromClaims(claims: EntraClaims): AuthIdentity {

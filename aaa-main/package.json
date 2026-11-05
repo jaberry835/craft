@@ -28,6 +28,7 @@
     "@azure/cosmos": "^4.9.3",
     "@azure/identity": "^4.13.1",
     "@azure/msal-browser": "^5.23.0",
+    "archiver": "^7.0.1",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
     "jose": "^6.2.12",
@@ -39,6 +40,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.36.0",
+    "@types/archiver": "^6.0.4",
     "@types/express": "^5.0.6",
     "@types/node": "^24.10.1",
     "@types/react": "^19.1.16",

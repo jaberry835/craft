@@ -327,6 +327,21 @@ export function createAaaApp({
       .type(image.contentType)
       .send(image.content);
   });
+  app.get('/api/projects/:projectId/export', async (request, response) => {
+    const { archive, filename } = await fileService(request).createZipArchive({
+      path: request.query.path ? String(request.query.path) : undefined,
+      includeHidden: request.query.hidden === 'true'
+    });
+    archive.on('error', (error) => {
+      log.error('api', `${request.method} ${request.path} failed while streaming a ZIP archive.`, { error });
+      response.destroy(error);
+    });
+    response
+      .set('Content-Type', 'application/zip')
+      .set('Content-Disposition', `attachment; filename="${filename.replace(/"/g, '')}"; filename*=UTF-8''${encodeURIComponent(filename)}`)
+      .set('X-Content-Type-Options', 'nosniff');
+    archive.pipe(response);
+  });
   app.get('/api/projects/:projectId/publication-status', async (request, response) =>
     response.json(await fileService(request).publicationStatus(String(request.query.path ?? ''))));
   app.put('/api/projects/:projectId/publication-status', async (request, response) =>

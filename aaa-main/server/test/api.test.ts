@@ -223,6 +223,20 @@ test('project API exposes configured metadata, sessions, messages, files, and tr
   assert.match(imageResponse.headers.get('content-security-policy') ?? '', /default-src 'none'/);
   assert.deepEqual(Buffer.from(await imageResponse.arrayBuffer()), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
 
+  const exportResponse = await fetch(`${baseUrl}/export`);
+  assert.equal(exportResponse.status, 200);
+  assert.equal(exportResponse.headers.get('content-type'), 'application/zip');
+  assert.match(
+    exportResponse.headers.get('content-disposition') ?? '',
+    /attachment; filename="assessed-project\.zip"; filename\*=UTF-8''assessed-project\.zip/
+  );
+  const exportBytes = Buffer.from(await exportResponse.arrayBuffer());
+  assert.ok(exportBytes.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04])), 'response starts with a ZIP signature');
+
+  const exportTraversalResponse = await fetch(`${baseUrl}/export?path=${encodeURIComponent('../outside')}`);
+  assert.equal(exportTraversalResponse.status, 400);
+  assert.equal((await exportTraversalResponse.json() as { code: string }).code, 'path_outside_project');
+
   const file = await (await fetch(`${baseUrl}/files?path=README.md`)).json() as { updatedAt: string };
   const saveResponse = await fetch(`${baseUrl}/files`, {
     method: 'PUT',
